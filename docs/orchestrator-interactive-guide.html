@@ -1,0 +1,1787 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'none'; font-src 'none'; media-src 'none'; worker-src 'none'; connect-src 'none'; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Orchestratory 互動操作導覽</title>
+<style>:root{color-scheme:light dark;background:light-dark(rgb(255 255 255), rgb(24 24 24))}html,body{margin:0}body{box-sizing:border-box;padding:1rem;background:inherit}iframe{display:block;width:100%;max-width:736px;height:calc(100vh - 2rem);margin:0 auto;border:0}</style>
+</head>
+<body>
+<iframe sandbox="allow-scripts" referrerpolicy="no-referrer" title="Orchestratory 互動操作導覽" srcdoc="&lt;!doctype html&gt;
+&lt;html lang=&quot;zh-Hant&quot;&gt;
+&lt;head&gt;
+&lt;meta charset=&quot;utf-8&quot;&gt;
+&lt;meta name=&quot;viewport&quot; content=&quot;width=device-width, initial-scale=1&quot;&gt;
+&lt;meta name=&quot;referrer&quot; content=&quot;no-referrer&quot;&gt;
+&lt;meta http-equiv=&quot;Content-Security-Policy&quot; content=&quot;default-src &#x27;none&#x27;; script-src &#x27;unsafe-inline&#x27;; style-src &#x27;unsafe-inline&#x27;; img-src &#x27;none&#x27;; font-src &#x27;none&#x27;; media-src &#x27;none&#x27;; worker-src &#x27;none&#x27;; connect-src &#x27;none&#x27;; frame-src &#x27;none&#x27;; object-src &#x27;none&#x27;; base-uri &#x27;none&#x27;; form-action &#x27;none&#x27;&quot;&gt;
+&lt;title&gt;Orchestratory 互動操作導覽&lt;/title&gt;
+&lt;style&gt;:root {
+  color-scheme: light dark;
+  background-color: var(--background) !important;
+
+  /* Agent-facing contract; keep in sync with SKILL.md. */
+  --background: light-dark(rgb(255 255 255), rgb(24 24 24));
+  --foreground: light-dark(rgb(26 28 31), rgb(255 255 255));
+  --card: color-mix(in oklab, var(--foreground) 5%, transparent);
+  --card-foreground: var(--foreground);
+  --popover: light-dark(rgb(255 255 255), rgb(45 45 45));
+  --popover-foreground: var(--foreground);
+  --primary: light-dark(rgb(51 156 255), rgb(131 195 255));
+  --primary-foreground: light-dark(rgb(255 255 255), rgb(13 13 13));
+  --secondary: light-dark(rgb(255 255 255 / 96%), rgb(54 54 54 / 96%));
+  --secondary-foreground: var(--foreground);
+  --muted: color-mix(in srgb, var(--foreground) 10%, transparent);
+  --muted-foreground: light-dark(
+    rgb(26 28 31 / 49.4%),
+    rgb(255 255 255 / 49.8%)
+  );
+  --accent: light-dark(rgb(229 242 255), rgb(13 39 63));
+  --accent-foreground: var(--primary);
+  --destructive: light-dark(rgb(226 85 7), rgb(255 133 73));
+  --border: light-dark(rgb(26 28 31 / 8%), rgb(255 255 255 / 8.2%));
+  --input: light-dark(
+    rgb(26 28 31 / 11.8%),
+    color-mix(in oklab, rgb(0 0 0) 10%, transparent)
+  );
+  --ring: light-dark(rgb(51 156 255), rgb(131 195 255 / 76%));
+  --font-size-base: 14px;
+  --viz-series-1: var(--primary);
+  --viz-series-2: light-dark(rgb(243 136 59), rgb(245 154 86));
+  --viz-series-3: light-dark(rgb(93 201 119), rgb(116 213 139));
+  --viz-series-4: light-dark(rgb(235 119 177), rgb(240 143 192));
+  --viz-series-5: light-dark(rgb(155 121 236), rgb(170 145 239));
+  --viz-series-6: light-dark(rgb(58 185 177), rgb(90 203 194));
+
+  /* Internal implementation variables; not part of the agent contract. */
+  --font-sans: -apple-system, system-ui, &quot;Segoe UI&quot;, sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, &quot;SF Mono&quot;, Menlo, Consolas, &quot;Liberation Mono&quot;,
+    monospace;
+  --font-size-normal: max(11px, var(--font-size-base));
+  --font-size-tooltip: calc(var(--font-size-base) - 1px);
+  --font-size-small: max(11px, calc(var(--font-size-base) - 2px));
+  --font-size-h1: calc(var(--font-size-normal) * 1.7142857143);
+  --font-size-h2: calc(var(--font-size-normal) * 1.4285714286);
+  --font-size-h3: calc(var(--font-size-normal) * 1.2857142857);
+  --font-weight-normal: 430;
+  --font-weight-medium: 500;
+  --line-height-normal: calc(var(--font-size-normal) * 1.5);
+  --line-height-tooltip: calc(var(--font-size-tooltip) * 1.4285714286);
+  --line-height-small: calc(var(--font-size-small) + 4px);
+  --radius: 12.5px;
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-2xl: calc(var(--radius) * 1.6);
+  --radius-full: 9999px;
+  --shadow-sm: 0 1px 2px -1px rgb(0 0 0 / 8%);
+  --checkmark-image: url(&quot;data:image/svg+xml,%3Csvg xmlns=&#x27;http://www.w3.org/2000/svg&#x27; viewBox=&#x27;0 0 17 17&#x27;%3E%3Cpath d=&#x27;M12.8961 3.64101C13.1297 3.41418 13.4984 3.37523 13.7779 3.56581C14.0571 3.75635 14.1554 4.11331 14.0299 4.41347L13.9615 4.53847L7.71151 13.7045C7.59411 13.8767 7.4063 13.9877 7.19881 14.0072C6.99136 14.0267 6.78564 13.9533 6.63826 13.806L2.88826 10.056L2.79842 9.9457C2.6192 9.67407 2.64927 9.30496 2.88826 9.06581C3.12738 8.82669 3.49647 8.79676 3.76815 8.97597L3.8785 9.06581L7.03084 12.2182L12.8053 3.74941L12.8961 3.64101Z&#x27;/%3E%3C/svg%3E&quot;);
+
+  /* Legacy aliases; not part of the current agent contract. */
+  --viz-bg: transparent;
+  --viz-panel: var(--card);
+  --viz-border: var(--border);
+  --viz-text: var(--foreground);
+  --viz-muted: var(--muted-foreground);
+  --viz-accent: var(--primary);
+  --viz-accent-text: var(--primary-foreground);
+  --viz-accent-bg: var(--accent);
+  --viz-font-size: var(--font-size-base);
+  --viz-warning: var(--destructive);
+  --color-background-primary: var(--background);
+  --color-text-primary: var(--foreground);
+  --color-border-secondary: var(--border);
+}
+
+:root[data-theme=&quot;light&quot;] {
+  color-scheme: light;
+}
+
+:root[data-theme=&quot;dark&quot;] {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html &gt; body {
+  margin: 0;
+  padding: 5px;
+  color: var(--foreground);
+  background: transparent !important;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-normal);
+  font-weight: var(--font-weight-normal);
+  line-height: var(--line-height-normal);
+}
+
+a {
+  color: color-mix(in srgb, var(--viz-accent) 80%, var(--viz-text) 20%);
+  cursor: pointer;
+  font-weight: var(--viz-font-weight-medium);
+  text-decoration: none;
+  text-underline-offset: 2px;
+}
+
+a:is(:hover, :focus-visible) {
+  text-decoration-line: underline;
+  text-decoration-style: dashed;
+  text-decoration-thickness: 0.5px;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+p {
+  margin-block: 0;
+}
+
+h1 {
+  font-size: var(--font-size-h1);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.25;
+}
+
+h2 {
+  font-size: var(--font-size-h2);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.25;
+}
+
+h3,
+h4,
+h5,
+h6 {
+  font-size: var(--font-size-h3);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.3;
+}
+
+b,
+strong,
+th {
+  font-weight: var(--font-weight-medium);
+}
+
+code:not(pre code) {
+  display: inline;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  corner-shape: superellipse(1.5);
+  background: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  overflow-wrap: anywhere;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  word-break: break-word;
+}
+
+#widget {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  padding: 0;
+  background: transparent !important;
+}
+
+.card {
+  min-width: 0;
+  padding: 12px;
+  overflow: hidden;
+  overflow-wrap: break-word;
+  border-radius: var(--radius-2xl);
+  corner-shape: superellipse(1.5);
+  color: var(--card-foreground);
+  background: var(--card);
+}
+
+#widget &gt; :not(.card) {
+  width: 100% !important;
+  max-width: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.tooltip {
+  position: fixed;
+  z-index: 50;
+  top: 0;
+  left: 0;
+  width: max-content;
+  max-width: min(
+    20rem,
+    var(--tooltip-available-width, calc(100vw - 10px)),
+    calc(100vw - 10px)
+  );
+  max-height: min(
+    var(--tooltip-available-height, calc(100vh - 10px)),
+    calc(100vh - 10px)
+  );
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  corner-shape: superellipse(1.5);
+  color: var(--popover-foreground);
+  background: var(--popover);
+  box-shadow: none;
+  font-size: var(--font-size-tooltip);
+  line-height: var(--line-height-tooltip);
+  overflow-wrap: break-word;
+  white-space: normal;
+  pointer-events: none;
+  user-select: none;
+}
+
+.viz-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(max(180px, 24%), 1fr));
+  gap: 10px;
+}
+
+.viz-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.viz-stat-value {
+  font-size: var(--font-size-h2);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.25;
+}
+
+.viz-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.viz-badge {
+  padding: 3px 8px;
+  border-radius: var(--radius-full);
+  color: var(--accent-foreground);
+  background: var(--accent);
+  font-weight: var(--font-weight-medium);
+}
+
+small,
+.text-small,
+.viz-badge {
+  font-size: var(--font-size-small);
+  line-height: var(--line-height-small);
+}
+
+.text-muted {
+  color: var(--muted-foreground);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.viz-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.viz-controls &gt; .form-label {
+  display: grid;
+  min-width: min(100%, 260px);
+  flex: 1 1 280px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 2px 12px;
+  margin-bottom: 0;
+}
+
+.viz-controls &gt; .form-label &gt; :is(.form-control, .form-range, .form-select) {
+  grid-column: 1 / -1;
+}
+
+.btn,
+.form-check-input,
+.form-control,
+.form-range,
+.form-select {
+  font: inherit;
+}
+
+.btn {
+  appearance: button;
+  display: inline-flex;
+  inline-size: fit-content;
+  max-inline-size: 100%;
+  min-height: 28px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  margin: 0;
+  padding: 0 8px;
+  -webkit-app-region: no-drag;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-lg);
+  corner-shape: superellipse(1.5);
+  color: var(--secondary-foreground);
+  background: var(--secondary);
+  cursor: var(--cursor-interaction, pointer);
+  text-align: center;
+  text-decoration: none;
+  white-space: nowrap;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+.btn:is(.btn-block, .viz-tile) {
+  inline-size: 100%;
+}
+
+.btn.viz-tile {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+a.btn {
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.btn:not(:disabled):hover {
+  background: color-mix(in srgb, var(--foreground) 6%, var(--secondary));
+}
+
+.btn-primary {
+  border-color: transparent;
+  color: var(--primary-foreground);
+  background: var(--foreground);
+  background-clip: padding-box;
+}
+
+.btn-primary .text-muted {
+  color: color-mix(in srgb, var(--primary-foreground) 50%, transparent);
+}
+
+.btn-primary:not(:disabled):hover {
+  background: color-mix(in srgb, var(--foreground) 80%, transparent);
+  background-clip: padding-box;
+}
+
+.btn-ghost {
+  border-color: transparent;
+  color: var(--muted-foreground);
+  background: transparent;
+}
+
+.btn-ghost:not(:disabled):hover {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 6%, var(--secondary));
+}
+
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+[data-lucide] {
+  stroke-width: 1.6;
+}
+
+.form-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--foreground);
+}
+
+.form-control {
+  display: block;
+  width: 100%;
+  min-height: 28px;
+  padding: 0 8px;
+  outline: none;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-lg);
+  corner-shape: superellipse(1.5);
+  color: var(--foreground);
+  background: var(--secondary);
+}
+
+.form-control::placeholder {
+  color: var(--muted-foreground);
+}
+
+.form-control[type=&quot;file&quot;] {
+  padding: 0;
+  overflow: hidden;
+  cursor: var(--cursor-interaction, pointer);
+}
+
+.form-control[type=&quot;file&quot;]::file-selector-button {
+  min-height: 26px;
+  margin-right: 8px;
+  padding: 0 8px;
+  border: 0;
+  border-right: 1px solid var(--input);
+  color: var(--secondary-foreground);
+  background: var(--secondary);
+  cursor: inherit;
+  font: inherit;
+}
+
+.form-control[type=&quot;file&quot;]:not(:disabled):hover::file-selector-button {
+  background: color-mix(in srgb, var(--foreground) 6%, var(--secondary));
+}
+
+.form-control-color[type=&quot;color&quot;] {
+  width: 40px;
+  height: 28px;
+  padding: 3px;
+  cursor: var(--cursor-interaction, pointer);
+}
+
+.form-control-color[type=&quot;color&quot;]::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.form-control-color[type=&quot;color&quot;]::-webkit-color-swatch {
+  border: 0;
+  border-radius: calc(var(--radius-lg) - 4px);
+  corner-shape: superellipse(1.5);
+}
+
+textarea.form-control {
+  height: auto;
+  min-height: 72px;
+  padding: 8px 10px;
+  resize: vertical;
+}
+
+.form-control:focus-visible {
+  border-color: var(--ring);
+  box-shadow: inset 0 0 0 1px var(--ring);
+}
+
+.form-control:disabled,
+.form-select:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.form-select {
+  appearance: none;
+  display: block;
+  width: 100%;
+  min-height: 28px;
+  margin: 0;
+  padding: 0 32px 0 8px;
+  outline: none;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-lg);
+  corner-shape: superellipse(1.5);
+  color: var(--foreground);
+  background-color: var(--secondary);
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--muted-foreground) 50%),
+    linear-gradient(135deg, var(--muted-foreground) 50%, transparent 50%);
+  background-position:
+    calc(100% - 14px) 50%,
+    calc(100% - 10px) 50%;
+  background-repeat: no-repeat;
+  background-size: 4px 4px;
+  cursor: var(--cursor-interaction, default);
+}
+
+.form-select:not(:disabled):hover {
+  background-color: color-mix(in srgb, var(--foreground) 6%, var(--secondary));
+}
+
+.form-select:focus-visible {
+  border-color: var(--ring);
+  box-shadow: inset 0 0 0 1px var(--ring);
+}
+
+.form-check {
+  display: flex;
+  min-height: 20px;
+  align-items: center;
+  gap: 6px;
+}
+
+.form-check-input {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  margin: 0;
+  border: 1px solid var(--input);
+  color: var(--primary-foreground);
+  background-color: transparent;
+  cursor: var(--cursor-interaction, default);
+  transition:
+    background-color 150ms,
+    border-color 150ms,
+    box-shadow 150ms;
+}
+
+.form-check:not(.form-switch) .form-check-input[type=&quot;checkbox&quot;] {
+  border-color: var(--input);
+  border-radius: var(--radius-sm);
+  corner-shape: superellipse(1.5);
+  background-color: var(--secondary);
+  box-shadow: var(--shadow-sm);
+}
+
+.form-check:not(.form-switch)
+  .form-check-input:not(:disabled):not(:checked):hover {
+  background-color: var(--card);
+}
+
+.form-check:not(.form-switch) .form-check-input[type=&quot;checkbox&quot;]:checked {
+  border-color: var(--primary);
+  background-color: var(--primary);
+}
+
+.form-check:not(.form-switch)
+  .form-check-input[type=&quot;checkbox&quot;]:checked::before {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--primary-foreground);
+  content: &quot;&quot;;
+  mask: var(--checkmark-image) center / 12px 12px no-repeat;
+}
+
+.form-check-input[type=&quot;radio&quot;] {
+  width: 14px;
+  height: 14px;
+  border-radius: var(--radius-full);
+}
+
+.form-check-input[type=&quot;radio&quot;]:checked {
+  border: 2px solid var(--primary);
+  background:
+    radial-gradient(circle, var(--primary-foreground) 0 2.5px, transparent 3px),
+    var(--primary);
+}
+
+.form-check:not(.form-switch) .form-check-input:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.form-check:not(.form-switch) .form-check-input:disabled {
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.form-check:not(.form-switch) .form-check-input:disabled + .form-check-label {
+  cursor: not-allowed;
+}
+
+.form-switch .form-check-input:disabled,
+.form-switch .form-check-input:disabled + .form-check-label {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.form-check-label {
+  color: var(--foreground);
+  cursor: var(--cursor-interaction, default);
+}
+
+.form-switch .form-check-input {
+  position: relative;
+  width: 32px;
+  height: 20px;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--muted);
+  box-shadow: none;
+  transition: background-color 200ms cubic-bezier(0, 0, 0.2, 1);
+}
+
+.form-switch .form-check-input::before {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 16px;
+  height: 16px;
+  box-sizing: border-box;
+  border: 1px solid light-dark(var(--primary-foreground), var(--foreground));
+  border-radius: var(--radius-full);
+  background: light-dark(var(--primary-foreground), var(--foreground));
+  box-shadow: var(--shadow-sm);
+  content: &quot;&quot;;
+  transform: translate(2px, -50%);
+  transition: transform 200ms cubic-bezier(0, 0, 0.2, 1);
+}
+
+.form-switch .form-check-input:checked {
+  background: var(--primary);
+}
+
+.form-switch .form-check-input:checked::before {
+  transform: translate(14px, -50%);
+}
+
+.form-switch .form-check-input:focus-visible {
+  box-shadow: 0 0 0 2px var(--ring);
+}
+
+.form-range {
+  appearance: none;
+  display: block;
+  width: 100%;
+  height: 28px;
+  flex: 1;
+  margin: 0;
+  padding: 0;
+  outline: none;
+  border: 0;
+  accent-color: var(--primary);
+  background: linear-gradient(
+      color-mix(in srgb, var(--foreground) 7%, transparent),
+      color-mix(in srgb, var(--foreground) 7%, transparent)
+    )
+    center / 100% 2px no-repeat;
+}
+
+.form-range::-webkit-slider-runnable-track {
+  height: 28px;
+  background: transparent;
+}
+
+.form-range::-webkit-slider-thumb {
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  margin-top: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: light-dark(var(--primary-foreground), var(--foreground));
+}
+
+.form-range:focus-visible::-webkit-slider-thumb {
+  border-color: var(--ring);
+  box-shadow: inset 0 0 0 1px var(--ring);
+}
+
+.form-range::-moz-range-track {
+  height: 28px;
+  background: transparent;
+}
+
+.form-range::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: light-dark(var(--primary-foreground), var(--foreground));
+}
+
+.form-range:focus-visible::-moz-range-thumb {
+  border-color: var(--ring);
+  box-shadow: inset 0 0 0 1px var(--ring);
+}
+
+.form-range:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.btn:not(.btn-primary, .viz-tile):is(
+    [aria-pressed=&quot;true&quot;],
+    [aria-selected=&quot;true&quot;],
+    .is-selected
+  ) {
+  border-color: var(--primary);
+  color: var(--primary-foreground);
+  background: var(--primary);
+}
+
+.btn.viz-tile:is([aria-pressed=&quot;true&quot;], [aria-selected=&quot;true&quot;], .is-selected) {
+  border-color: var(--primary);
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.btn:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+#widget &gt; svg {
+  width: 100%;
+}
+
+.text-warning,
+.text-destructive {
+  color: var(--destructive);
+}
+
+html&gt;body{padding:0}&lt;/style&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;div id=&quot;orchestrator-guide&quot;&gt;
+  &lt;style&gt;
+    #orchestrator-guide { --guide-gap: 1rem; color: var(--foreground); }
+    #orchestrator-guide * { box-sizing: border-box; }
+    #orchestrator-guide .guide-head, #orchestrator-guide .guide-footer, #orchestrator-guide .step-head,
+    #orchestrator-guide .flow, #orchestrator-guide .agent-flow, #orchestrator-guide .check-row,
+    #orchestrator-guide .ledger-head { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; }
+    #orchestrator-guide .guide-head { justify-content: space-between; }
+    #orchestrator-guide .guide-title { margin: 0; }
+    #orchestrator-guide .guide-subtitle { margin: .35rem 0 0; color: var(--muted-foreground); }
+    #orchestrator-guide .progress-track { height: 6px; background: var(--muted); overflow: hidden; margin: 1rem 0; }
+    #orchestrator-guide .progress-fill { height: 100%; width: 14.28%; background: var(--viz-series-1); transition: width .24s ease; }
+    #orchestrator-guide .step-nav { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: .4rem; margin-bottom: 1rem; }
+    #orchestrator-guide .step-nav .btn { width: 100%; justify-content: center; }
+    #orchestrator-guide .step-panel { display: none; }
+    #orchestrator-guide .step-panel.is-active { display: block; }
+    #orchestrator-guide .step-head { justify-content: space-between; margin-bottom: 1rem; }
+    #orchestrator-guide .step-head h2 { margin: 0; }
+    #orchestrator-guide .content-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--guide-gap); }
+    #orchestrator-guide .wide { grid-column: 1 / -1; }
+    #orchestrator-guide .card h3 { margin-top: 0; }
+    #orchestrator-guide .card p:last-child { margin-bottom: 0; }
+    #orchestrator-guide .muted { color: var(--muted-foreground); }
+    #orchestrator-guide .check-list { display: grid; gap: .7rem; }
+    #orchestrator-guide .check-row { justify-content: space-between; }
+    #orchestrator-guide .check-row &gt; span:first-child { flex: 1; min-width: 12rem; }
+    #orchestrator-guide .status-dot { display: inline-block; width: .7rem; height: .7rem; margin-right: .35rem; border-radius: 50%; background: var(--muted-foreground); }
+    #orchestrator-guide .is-ready .status-dot { background: var(--viz-series-1); }
+    #orchestrator-guide pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--muted); color: var(--foreground); padding: .8rem; margin: .6rem 0; }
+    #orchestrator-guide code { overflow-wrap: anywhere; }
+    #orchestrator-guide .copy-note { min-height: 1.2em; color: var(--muted-foreground); }
+    #orchestrator-guide .screen { display: grid; grid-template-columns: minmax(10rem, .65fr) minmax(0, 1.35fr); min-height: 19rem; }
+    #orchestrator-guide .screen-side, #orchestrator-guide .screen-main { padding: 1rem; }
+    #orchestrator-guide .screen-side { border-right: 1px solid var(--border); }
+    #orchestrator-guide .screen-side label { display: block; margin-bottom: .8rem; }
+    #orchestrator-guide .screen-main { display: flex; flex-direction: column; gap: .8rem; }
+    #orchestrator-guide .chat-bubble { max-width: 88%; }
+    #orchestrator-guide .chat-bubble.user { margin-left: auto; }
+    #orchestrator-guide .agent-flow { justify-content: center; padding: .9rem 0; }
+    #orchestrator-guide .agent-node { min-width: 7.2rem; text-align: center; opacity: .48; transition: opacity .2s ease, transform .2s ease; }
+    #orchestrator-guide .agent-node.is-called { opacity: 1; transform: translateY(-2px); }
+    #orchestrator-guide .agent-node.is-write { opacity: 1; text-decoration: underline; text-decoration-color: var(--viz-series-2); text-decoration-thickness: 2px; }
+    #orchestrator-guide .arrow { color: var(--muted-foreground); }
+    #orchestrator-guide .intent-detail { min-height: 2.8rem; text-align: center; }
+    #orchestrator-guide .mention-demo, #orchestrator-guide .ledger { display: grid; gap: .6rem; }
+    #orchestrator-guide .ledger { padding: .75rem 0; }
+    #orchestrator-guide .ledger-item { display: grid; grid-template-columns: auto 1fr; gap: .65rem; padding: .65rem 0; border-bottom: 1px solid var(--border); }
+    #orchestrator-guide .ledger-id { color: var(--muted-foreground); }
+    #orchestrator-guide .ledger-item mark { background: color-mix(in srgb, var(--viz-series-1) 20%, transparent); color: var(--foreground); }
+    #orchestrator-guide .quote-demo { margin: .65rem 0 0; padding-left: .75rem; border-left: 2px solid var(--border); color: var(--muted-foreground); }
+    #orchestrator-guide .stat-list { display: grid; gap: .55rem; }
+    #orchestrator-guide .stat-line { display: flex; justify-content: space-between; gap: .75rem; border-bottom: 1px solid var(--border); padding-bottom: .45rem; }
+    #orchestrator-guide .office-demo { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(12rem, .8fr); gap: .75rem; }
+    #orchestrator-guide .office-toolbar { display: flex; align-items: end; gap: .5rem; flex-wrap: wrap; margin-bottom: .65rem; }
+    #orchestrator-guide .office-toolbar .form-label { flex: 1 1 10rem; margin: 0; }
+    #orchestrator-guide .office-stage { position: relative; min-height: 420px; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-lg); background: linear-gradient(150deg, color-mix(in srgb, var(--viz-series-2) 28%, var(--card)) 0 50%, color-mix(in srgb, var(--viz-series-2) 18%, var(--card)) 50% 100%); transition: filter .2s ease; }
+    #orchestrator-guide .office-stage::before { position: absolute; inset: 0; background: repeating-linear-gradient(90deg, transparent 0 54px, color-mix(in srgb, var(--foreground) 6%, transparent) 55px 56px), repeating-linear-gradient(0deg, transparent 0 54px, color-mix(in srgb, var(--foreground) 6%, transparent) 55px 56px); content: &quot;&quot;; pointer-events: none; transform: skewY(-1deg); }
+    #orchestrator-guide .office-stage.is-night { filter: brightness(.68) saturate(.84); }
+    #orchestrator-guide .office-sign { position: absolute; top: .6rem; left: 50%; z-index: 2; padding: .25rem .6rem; border: 1px solid var(--border); border-radius: var(--radius-full); background: var(--popover); transform: translateX(-50%); font-family: var(--font-mono); font-size: var(--font-size-small); }
+    #orchestrator-guide .office-rug { position: absolute; inset: 25% 27% 14%; border-radius: 42% 42% 25% 25%; background: color-mix(in srgb, var(--viz-series-6) 20%, transparent); transform: perspective(200px) rotateX(12deg); }
+    #orchestrator-guide .office-desk { position: absolute; z-index: 3; width: 7.4rem; min-height: 5.2rem; padding: .45rem .35rem; border: 1px solid color-mix(in srgb, var(--viz-series-2) 48%, var(--border)); border-radius: var(--radius-md); color: var(--foreground); background: color-mix(in srgb, var(--viz-series-2) 22%, var(--popover)); box-shadow: 0 .5rem 0 color-mix(in srgb, var(--viz-series-2) 20%, transparent); text-align: center; touch-action: none; user-select: none; cursor: grab; }
+    #orchestrator-guide .office-desk:active { cursor: grabbing; }
+    #orchestrator-guide .office-desk[aria-pressed=&quot;true&quot;] { outline: 2px solid var(--ring); outline-offset: 2px; }
+    #orchestrator-guide .office-desk.is-extra { border-style: dashed; }
+    #orchestrator-guide .office-desk[hidden] { display: none; }
+    #orchestrator-guide .office-avatar { display: block; font-size: 1.65rem; line-height: 1.15; filter: drop-shadow(0 2px 1px rgb(0 0 0 / 18%)); }
+    #orchestrator-guide .office-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--font-size-small); }
+    #orchestrator-guide .office-state { display: inline-block; margin-top: .2rem; padding: 0 .35rem; border-radius: var(--radius-full); background: var(--muted); color: var(--muted-foreground); font-size: var(--font-size-small); }
+    #orchestrator-guide .office-desk.is-busy .office-state { color: var(--foreground); background: color-mix(in srgb, var(--viz-series-2) 26%, var(--muted)); }
+    #orchestrator-guide .office-pet { position: absolute; z-index: 2; bottom: 9%; left: 10%; font-size: 1.45rem; animation: office-patrol 10s ease-in-out infinite alternate; }
+    #orchestrator-guide .office-pet.dino { bottom: 24%; left: 73%; animation-duration: 13s; animation-direction: alternate-reverse; }
+    #orchestrator-guide .office-panel { display: flex; min-height: 420px; flex-direction: column; gap: .6rem; }
+    #orchestrator-guide .office-selection { min-height: 5rem; padding: .65rem; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--muted); }
+    #orchestrator-guide .office-chat { display: grid; align-content: start; gap: .45rem; min-height: 9rem; max-height: 12rem; overflow: auto; padding: .55rem; border: 1px solid var(--border); border-radius: var(--radius-md); }
+    #orchestrator-guide .office-msg { padding: .4rem .55rem; border-radius: var(--radius-md); background: var(--muted); }
+    #orchestrator-guide .office-msg.you { margin-left: 1.2rem; background: color-mix(in srgb, var(--viz-series-1) 15%, var(--muted)); }
+    #orchestrator-guide .office-warning { padding: .65rem; border-left: 3px solid var(--viz-series-2); background: color-mix(in srgb, var(--viz-series-2) 10%, transparent); }
+    #orchestrator-guide .delivery-flow { display: grid; grid-template-columns: repeat(7, minmax(5.5rem, 1fr)); gap: .35rem; margin: .8rem 0; overflow-x: auto; }
+    #orchestrator-guide .delivery-node { padding: .55rem .35rem; border-top: 3px solid var(--border); color: var(--muted-foreground); text-align: center; white-space: nowrap; }
+    #orchestrator-guide .delivery-node.is-current { border-color: var(--viz-series-1); color: var(--foreground); background: color-mix(in srgb, var(--viz-series-1) 10%, transparent); }
+    #orchestrator-guide .delivery-node.is-done { border-color: var(--viz-series-2); color: var(--foreground); }
+    #orchestrator-guide .lease-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .7rem; }
+    #orchestrator-guide .lease-result { min-height: 7rem; padding: .75rem; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--muted); }
+    @keyframes office-patrol { 0% { transform: translate(0, 0) rotate(-4deg); } 45% { transform: translate(7rem, -1.2rem) rotate(4deg); } 100% { transform: translate(13rem, .8rem) rotate(-3deg); } }
+    #orchestrator-guide .pipeline { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: .4rem; margin: 1rem 0; }
+    #orchestrator-guide .pipe-node { padding: .8rem .45rem; border-top: 3px solid var(--border); color: var(--muted-foreground); text-align: center; }
+    #orchestrator-guide .pipe-node.is-current { border-color: var(--viz-series-1); color: var(--foreground); background: color-mix(in srgb, var(--viz-series-1) 10%, transparent); }
+    #orchestrator-guide .pipe-node.is-done { border-color: var(--viz-series-2); color: var(--foreground); }
+    #orchestrator-guide .gate-label { display: block; margin-top: .35rem; color: var(--muted-foreground); }
+    #orchestrator-guide .safety-stack { display: grid; gap: .55rem; }
+    #orchestrator-guide .safety-line { display: grid; grid-template-columns: 7rem 1fr; gap: .7rem; padding-bottom: .55rem; border-bottom: 1px solid var(--border); }
+    #orchestrator-guide .trouble-table { width: 100%; border-collapse: collapse; }
+    #orchestrator-guide .trouble-table th, #orchestrator-guide .trouble-table td { text-align: left; vertical-align: top; padding: .65rem .45rem; border-bottom: 1px solid var(--border); }
+    #orchestrator-guide .guide-footer { justify-content: space-between; margin-top: 1rem; }
+    @media (max-width: 640px) {
+      #orchestrator-guide .step-nav { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      #orchestrator-guide .content-grid { grid-template-columns: 1fr; }
+      #orchestrator-guide .wide { grid-column: auto; }
+      #orchestrator-guide .screen { grid-template-columns: 1fr; }
+      #orchestrator-guide .screen-side { border-right: 0; border-bottom: 1px solid var(--border); }
+      #orchestrator-guide .pipeline { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      #orchestrator-guide .lease-grid { grid-template-columns: 1fr; }
+      #orchestrator-guide .office-demo { grid-template-columns: 1fr; }
+      #orchestrator-guide .office-stage { min-height: 470px; }
+      #orchestrator-guide .office-panel { min-height: 0; }
+      #orchestrator-guide .safety-line { grid-template-columns: 1fr; gap: .2rem; }
+      #orchestrator-guide .trouble-table, #orchestrator-guide .trouble-table tbody, #orchestrator-guide .trouble-table tr, #orchestrator-guide .trouble-table td { display: block; }
+      #orchestrator-guide .trouble-table thead { display: none; }
+      #orchestrator-guide .trouble-table td:first-child { font-weight: 500; border-bottom: 0; padding-bottom: 0; }
+    }
+    @media (prefers-reduced-motion: reduce) { #orchestrator-guide .progress-fill, #orchestrator-guide .agent-node { transition: none; } #orchestrator-guide .office-pet { animation: none; } }
+  &lt;/style&gt;
+
+  &lt;header class=&quot;guide-head&quot;&gt;
+    &lt;div&gt;&lt;h1 class=&quot;guide-title&quot;&gt;Orchestratory 操作導覽&lt;/h1&gt;&lt;p class=&quot;guide-subtitle&quot;&gt;從選擇專案、自然語言協作、2.5D 辦公室，到安全寫入與 Room 歷史。&lt;/p&gt;&lt;/div&gt;
+    &lt;span class=&quot;viz-badge&quot; id=&quot;guide-progress-label&quot;&gt;第 1／7 章&lt;/span&gt;
+  &lt;/header&gt;
+  &lt;div class=&quot;progress-track&quot; aria-hidden=&quot;true&quot;&gt;&lt;div class=&quot;progress-fill&quot; id=&quot;guide-progress&quot;&gt;&lt;/div&gt;&lt;/div&gt;
+  &lt;nav class=&quot;step-nav&quot; aria-label=&quot;教程章節&quot;&gt;
+    &lt;button class=&quot;btn btn-primary&quot; type=&quot;button&quot; data-step=&quot;0&quot; aria-pressed=&quot;true&quot;&gt;1 開始&lt;/button&gt;
+    &lt;button class=&quot;btn&quot; type=&quot;button&quot; data-step=&quot;1&quot; aria-pressed=&quot;false&quot;&gt;2 GUI&lt;/button&gt;
+    &lt;button class=&quot;btn&quot; type=&quot;button&quot; data-step=&quot;2&quot; aria-pressed=&quot;false&quot;&gt;3 Agents&lt;/button&gt;
+    &lt;button class=&quot;btn&quot; type=&quot;button&quot; data-step=&quot;3&quot; aria-pressed=&quot;false&quot;&gt;4 Room&lt;/button&gt;
+    &lt;button class=&quot;btn&quot; type=&quot;button&quot; data-step=&quot;4&quot; aria-pressed=&quot;false&quot;&gt;5 辦公室&lt;/button&gt;
+    &lt;button class=&quot;btn&quot; type=&quot;button&quot; data-step=&quot;5&quot; aria-pressed=&quot;false&quot;&gt;6 寫程式&lt;/button&gt;
+    &lt;button class=&quot;btn&quot; type=&quot;button&quot; data-step=&quot;6&quot; aria-pressed=&quot;false&quot;&gt;7 安全&lt;/button&gt;
+  &lt;/nav&gt;
+
+  &lt;section class=&quot;step-panel is-active&quot; data-panel=&quot;0&quot;&gt;
+    &lt;div class=&quot;step-head&quot;&gt;&lt;h2&gt;安裝與首次設定&lt;/h2&gt;&lt;span class=&quot;text-muted&quot;&gt;先安全安裝，再讓 GUI 與 Agents 連上&lt;/span&gt;&lt;/div&gt;
+    &lt;div class=&quot;content-grid&quot;&gt;
+      &lt;div class=&quot;card wide&quot;&gt;
+        &lt;h3&gt;0. 安裝 Orchestratory&lt;/h3&gt;
+        &lt;p&gt;目前尚未公開發布，請從你拿到的本機 source folder 安裝。可以自己在終端機執行，也可以把完整限制交給 Agent 執行。&lt;/p&gt;
+        &lt;div class=&quot;viz-controls&quot; aria-label=&quot;選擇安裝方式&quot;&gt;
+          &lt;button class=&quot;btn btn-primary install-mode&quot; type=&quot;button&quot; data-install-mode=&quot;terminal&quot; aria-pressed=&quot;true&quot;&gt;我在終端機安裝&lt;/button&gt;
+          &lt;button class=&quot;btn install-mode&quot; type=&quot;button&quot; data-install-mode=&quot;agent&quot; aria-pressed=&quot;false&quot;&gt;請 Agent 安裝&lt;/button&gt;
+        &lt;/div&gt;
+        &lt;pre&gt;&lt;code id=&quot;install-code&quot;&gt;cd &quot;/path/to/orchestratory&quot;
+node --version
+npm ci --ignore-scripts
+npm run check
+npm_config_ignore_scripts=true npm_config_prefix=&quot;$HOME/.local&quot; npm link
+&quot;$HOME/.local/bin/orchestrator&quot; --help
+&quot;$HOME/.local/bin/orchestrator&quot; doctor&lt;/code&gt;&lt;/pre&gt;
+        &lt;div class=&quot;viz-row&quot;&gt;&lt;button class=&quot;btn&quot; type=&quot;button&quot; data-copy=&quot;install-code&quot;&gt;複製安裝內容&lt;/button&gt;&lt;span class=&quot;copy-note text-small&quot; aria-live=&quot;polite&quot;&gt;&lt;/span&gt;&lt;/div&gt;
+        &lt;p class=&quot;text-muted&quot; id=&quot;install-note&quot;&gt;需要 Node.js 22.20 以上。不要使用 sudo；若一般的 &lt;code&gt;orchestrator&lt;/code&gt; 顯示 command not found，先使用上方的完整路徑驗證，不要自行放寬系統權限。&lt;/p&gt;
+      &lt;/div&gt;
+      &lt;div class=&quot;card&quot;&gt;
+        &lt;h3&gt;1. 準備狀態&lt;/h3&gt;
+        &lt;div class=&quot;check-list&quot; id=&quot;prereq-list&quot;&gt;
+          &lt;div class=&quot;check-row&quot;&gt;&lt;span&gt;&lt;i class=&quot;status-dot&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;Orchestratory 已安裝&lt;/span&gt;&lt;button class=&quot;btn btn-ghost prereq&quot; type=&quot;button&quot;&gt;標記完成&lt;/button&gt;&lt;/div&gt;
+          &lt;div class=&quot;check-row&quot;&gt;&lt;span&gt;&lt;i class=&quot;status-dot&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;準備使用的官方 Agent CLI 已登入&lt;/span&gt;&lt;button class=&quot;btn btn-ghost prereq&quot; type=&quot;button&quot;&gt;標記完成&lt;/button&gt;&lt;/div&gt;
+          &lt;div class=&quot;check-row&quot;&gt;&lt;span&gt;&lt;i class=&quot;status-dot&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;專案已加入 allowlist&lt;/span&gt;&lt;button class=&quot;btn btn-ghost prereq&quot; type=&quot;button&quot;&gt;標記完成&lt;/button&gt;&lt;/div&gt;
+          &lt;div class=&quot;check-row&quot;&gt;&lt;span&gt;&lt;i class=&quot;status-dot&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;Agent 已註冊 Orchestratory MCP&lt;/span&gt;&lt;button class=&quot;btn btn-ghost prereq&quot; type=&quot;button&quot;&gt;標記完成&lt;/button&gt;&lt;/div&gt;
+          &lt;div class=&quot;check-row&quot;&gt;&lt;span&gt;&lt;i class=&quot;status-dot&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;GUI daemon 正在執行&lt;/span&gt;&lt;button class=&quot;btn btn-ghost prereq&quot; type=&quot;button&quot;&gt;標記完成&lt;/button&gt;&lt;/div&gt;
+        &lt;/div&gt;
+        &lt;p class=&quot;text-muted&quot;&gt;這份導覽只做畫面演示，不會啟動模型、消耗額度或修改檔案。&lt;/p&gt;
+      &lt;/div&gt;
+      &lt;div class=&quot;card&quot;&gt;
+        &lt;h3&gt;2. 授權專案並啟動 GUI&lt;/h3&gt;&lt;p class=&quot;muted&quot;&gt;在一般終端機執行；把路徑換成你的專案。&lt;/p&gt;
+        &lt;pre&gt;&lt;code id=&quot;setup-code&quot;&gt;orchestrator doctor
+orchestrator workspaces allow &quot;/path/to/project&quot; --label &quot;My Project&quot;
+orchestrator daemon install&lt;/code&gt;&lt;/pre&gt;
+        &lt;div class=&quot;viz-row&quot;&gt;&lt;button class=&quot;btn&quot; type=&quot;button&quot; data-copy=&quot;setup-code&quot;&gt;複製指令&lt;/button&gt;&lt;span class=&quot;copy-note text-small&quot; aria-live=&quot;polite&quot;&gt;&lt;/span&gt;&lt;/div&gt;
+        &lt;p&gt;之後瀏覽器開啟：&lt;code&gt;http://127.0.0.1:4317/&lt;/code&gt;&lt;/p&gt;
+      &lt;/div&gt;
+      &lt;div class=&quot;card wide&quot;&gt;
+        &lt;h3&gt;3. 讓 Agent 取得 Orchestratory MCP 工具&lt;/h3&gt;
+        &lt;p&gt;每個你要當作主控介面的 Agent 都要註冊一次。選擇 Agent 後，在一般終端機執行顯示的指令。&lt;/p&gt;
+        &lt;div class=&quot;viz-controls&quot; aria-label=&quot;選擇要設定 MCP 的 Agent&quot;&gt;
+          &lt;button class=&quot;btn btn-primary mcp-host&quot; type=&quot;button&quot; data-mcp-host=&quot;claude&quot; aria-pressed=&quot;true&quot;&gt;Claude Code&lt;/button&gt;
+          &lt;button class=&quot;btn mcp-host&quot; type=&quot;button&quot; data-mcp-host=&quot;codex&quot; aria-pressed=&quot;false&quot;&gt;Codex&lt;/button&gt;
+          &lt;button class=&quot;btn mcp-host&quot; type=&quot;button&quot; data-mcp-host=&quot;grok&quot; aria-pressed=&quot;false&quot;&gt;Grok&lt;/button&gt;
+        &lt;/div&gt;
+        &lt;pre&gt;&lt;code id=&quot;mcp-code&quot;&gt;claude mcp add --scope user orchestrator -- orchestrator mcp --actor claude
+claude mcp list&lt;/code&gt;&lt;/pre&gt;
+        &lt;div class=&quot;viz-row&quot;&gt;&lt;button class=&quot;btn&quot; type=&quot;button&quot; data-copy=&quot;mcp-code&quot;&gt;複製 MCP 指令&lt;/button&gt;&lt;span class=&quot;copy-note text-small&quot; aria-live=&quot;polite&quot;&gt;&lt;/span&gt;&lt;/div&gt;
+        &lt;p class=&quot;text-muted&quot; id=&quot;mcp-note&quot;&gt;重新開啟 Claude Code session 後，它會看到 Room 與多模型工具；room_join_request 會等待 GUI 核准並開始第一段值班，之後精確核准的外接席位可使用 room_wait、room_ack、room_reply、room_fail。&lt;/p&gt;
+      &lt;/div&gt;
+      &lt;div class=&quot;card wide&quot;&gt;
+        &lt;h3&gt;「跑過的專案」代表什麼？&lt;/h3&gt;
+        &lt;div class=&quot;flow&quot; aria-label=&quot;專案出現在 GUI 並供 Agent 協作的條件&quot;&gt;&lt;span class=&quot;viz-badge&quot;&gt;專案在本機&lt;/span&gt;&lt;span class=&quot;arrow&quot;&gt;→&lt;/span&gt;&lt;span class=&quot;viz-badge&quot;&gt;加入 allowlist&lt;/span&gt;&lt;span class=&quot;arrow&quot;&gt;→&lt;/span&gt;&lt;span class=&quot;viz-badge&quot;&gt;Agent 註冊 MCP&lt;/span&gt;&lt;span class=&quot;arrow&quot;&gt;→&lt;/span&gt;&lt;span class=&quot;viz-badge&quot;&gt;GUI／Room 可用&lt;/span&gt;&lt;/div&gt;
+        &lt;p class=&quot;muted&quot;&gt;一般唯讀聊天不要求 Git 乾淨；要讓 Agent 寫程式時，才會檢查 Git repository、初始 commit、工作目錄狀態與 worktree 核准。&lt;/p&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/section&gt;
+
+  &lt;section class=&quot;step-panel&quot; data-panel=&quot;1&quot;&gt;
+    &lt;div class=&quot;step-head&quot;&gt;&lt;h2&gt;GUI 就是控制台&lt;/h2&gt;&lt;span class=&quot;text-muted&quot;&gt;背景仍由官方 CLI／TUI 實際工作&lt;/span&gt;&lt;/div&gt;
+    &lt;div class=&quot;screen&quot; aria-label=&quot;Orchestratory GUI 互動示意&quot;&gt;
+      &lt;aside class=&quot;screen-side&quot;&gt;
+        &lt;strong&gt;Orchestratory&lt;/strong&gt;
+        &lt;label class=&quot;form-label&quot; for=&quot;demo-project&quot;&gt;專案&lt;select class=&quot;form-select&quot; id=&quot;demo-project&quot;&gt;&lt;option&gt;My App&lt;/option&gt;&lt;option&gt;Website&lt;/option&gt;&lt;option&gt;API Server&lt;/option&gt;&lt;/select&gt;&lt;/label&gt;
+        &lt;label class=&quot;form-label&quot; for=&quot;demo-provider&quot;&gt;主代理&lt;select class=&quot;form-select&quot; id=&quot;demo-provider&quot;&gt;&lt;option&gt;Codex&lt;/option&gt;&lt;option&gt;Claude&lt;/option&gt;&lt;option&gt;Grok&lt;/option&gt;&lt;/select&gt;&lt;/label&gt;
+        &lt;label class=&quot;form-label&quot; for=&quot;demo-second-provider&quot;&gt;第二意見代理&lt;select class=&quot;form-select&quot; id=&quot;demo-second-provider&quot;&gt;&lt;option&gt;Claude&lt;/option&gt;&lt;option&gt;Grok&lt;/option&gt;&lt;/select&gt;&lt;/label&gt;
+        &lt;p class=&quot;text-small text-muted&quot;&gt;主代理切換時，第二意見會自動避開同一個 Agent。&lt;/p&gt;
+        &lt;div class=&quot;viz-row&quot;&gt;&lt;span class=&quot;viz-badge&quot;&gt;Room 即時協作&lt;/span&gt;&lt;span class=&quot;viz-badge&quot;&gt;歷史紀錄&lt;/span&gt;&lt;/div&gt;
+      &lt;/aside&gt;
+      &lt;div class=&quot;screen-main&quot;&gt;
+        &lt;div class=&quot;card chat-bubble&quot;&gt;直接輸入需求就開始。一般對話不會修改檔案。&lt;/div&gt;
+        &lt;div class=&quot;card chat-bubble user&quot; id=&quot;demo-user-message&quot;&gt;請先讀取專案並解釋架構。&lt;/div&gt;
+        &lt;div class=&quot;card chat-bubble&quot; id=&quot;demo-agent-message&quot;&gt;目前選定的主代理會以受限方式讀取必要檔案，再用自然語言回答。&lt;/div&gt;
+        &lt;label class=&quot;form-label&quot; for=&quot;demo-chat&quot;&gt;試著輸入一句需求&lt;textarea class=&quot;form-control&quot; id=&quot;demo-chat&quot; rows=&quot;2&quot;&gt;請讓 Claude 和 Grok 一起審查這個架構。&lt;/textarea&gt;&lt;/label&gt;
+        &lt;button class=&quot;btn btn-primary&quot; id=&quot;demo-send&quot; type=&quot;button&quot;&gt;模擬送出&lt;/button&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+    &lt;p class=&quot;text-muted&quot;&gt;GUI 負責選專案、輸入任務、顯示結果與核准；daemon 負責安全政策、記錄與調度；Codex／Claude／Grok CLI 才是真正推理的程序。&lt;/p&gt;
+    &lt;div class=&quot;card&quot;&gt;&lt;h3&gt;新增專案：選資料夾或輸入路徑&lt;/h3&gt;&lt;p&gt;點「新增專案」後可使用 macOS 資料夾選擇器，也可直接貼上路徑。GUI 先顯示 canonical path、Git root、owner、權限與敏感範圍的安全預覽；確認內容正確後輸入畫面要求的精確 &lt;code&gt;ALLOW &amp;lt;專案名&amp;gt;&lt;/code&gt;。預覽短效且只能使用一次，確認時還會重新檢查，不能用聊天讓 Agent 自動擴大 workspace。&lt;/p&gt;&lt;/div&gt;
+  &lt;/section&gt;
+
+  &lt;section class=&quot;step-panel&quot; data-panel=&quot;2&quot;&gt;
+    &lt;div class=&quot;step-head&quot;&gt;&lt;h2&gt;誰會被調用？&lt;/h2&gt;&lt;span class=&quot;text-muted&quot;&gt;不是每句話都同時喚醒所有模型&lt;/span&gt;&lt;/div&gt;
+    &lt;div class=&quot;card&quot;&gt;
+      &lt;div class=&quot;viz-controls&quot; aria-label=&quot;選擇需求類型&quot;&gt;
+        &lt;button class=&quot;btn btn-primary intent&quot; type=&quot;button&quot; data-intent=&quot;chat&quot; aria-pressed=&quot;true&quot;&gt;一般問題&lt;/button&gt;
+        &lt;button class=&quot;btn intent&quot; type=&quot;button&quot; data-intent=&quot;second&quot; aria-pressed=&quot;false&quot;&gt;第二意見&lt;/button&gt;
+        &lt;button class=&quot;btn intent&quot; type=&quot;button&quot; data-intent=&quot;compare&quot; aria-pressed=&quot;false&quot;&gt;多模型比稿&lt;/button&gt;
+        &lt;button class=&quot;btn intent&quot; type=&quot;button&quot; data-intent=&quot;write&quot; aria-pressed=&quot;false&quot;&gt;修改程式&lt;/button&gt;
+      &lt;/div&gt;
+      &lt;div class=&quot;agent-flow&quot; role=&quot;img&quot; aria-label=&quot;使用者、Orchestrator 與各 Agent 的調度關係&quot;&gt;
+        &lt;div class=&quot;agent-node is-called&quot; data-agent=&quot;user&quot;&gt;&lt;strong&gt;你&lt;/strong&gt;&lt;br&gt;&lt;span class=&quot;text-small&quot;&gt;自然語言&lt;/span&gt;&lt;/div&gt;&lt;span class=&quot;arrow&quot;&gt;→&lt;/span&gt;
+        &lt;div class=&quot;agent-node is-called&quot; data-agent=&quot;orchestrator&quot;&gt;&lt;strong&gt;Orchestrator&lt;/strong&gt;&lt;br&gt;&lt;span class=&quot;text-small&quot;&gt;判斷與限制&lt;/span&gt;&lt;/div&gt;&lt;span class=&quot;arrow&quot;&gt;→&lt;/span&gt;
+        &lt;div class=&quot;agent-node is-called&quot; data-agent=&quot;codex&quot;&gt;&lt;strong&gt;Codex&lt;/strong&gt;&lt;br&gt;&lt;span class=&quot;text-small&quot;&gt;主代理&lt;/span&gt;&lt;/div&gt;
+        &lt;div class=&quot;agent-node&quot; data-agent=&quot;claude&quot;&gt;&lt;strong&gt;Claude&lt;/strong&gt;&lt;br&gt;&lt;span class=&quot;text-small&quot;&gt;第二意見／審查&lt;/span&gt;&lt;/div&gt;
+        &lt;div class=&quot;agent-node&quot; data-agent=&quot;grok&quot;&gt;&lt;strong&gt;Grok&lt;/strong&gt;&lt;br&gt;&lt;span class=&quot;text-small&quot;&gt;替代觀點&lt;/span&gt;&lt;/div&gt;
+      &lt;/div&gt;
+      &lt;p class=&quot;intent-detail&quot; id=&quot;intent-detail&quot; aria-live=&quot;polite&quot;&gt;一般問題由目前選定的主代理回答；主代理依啟動設定或工作流程指定，只計一次模型呼叫。&lt;/p&gt;
+    &lt;/div&gt;
+    &lt;div class=&quot;content-grid&quot;&gt;
+      &lt;div class=&quot;card&quot;&gt;&lt;h3&gt;明確指定&lt;/h3&gt;&lt;pre&gt;&lt;code&gt;@claude 請找出這個方案的風險
+@codex @grok 分別提出重構建議&lt;/code&gt;&lt;/pre&gt;&lt;p class=&quot;muted&quot;&gt;單一 &lt;code&gt;@&lt;/code&gt; 交給指定模型；多個 &lt;code&gt;@&lt;/code&gt; 會並排比稿，每個模型各算一次呼叫。&lt;/p&gt;&lt;/div&gt;
+      &lt;div class=&quot;card&quot;&gt;&lt;h3&gt;第二意見可選&lt;/h3&gt;&lt;p&gt;GUI 側欄可從訂閱 Agent 中選擇第二意見及模型。主代理切換後若發生重複，介面會自動換成另一個 Agent。&lt;/p&gt;&lt;p class=&quot;muted&quot;&gt;主代理可以讀取受限檔案、詢問第二意見，或提出 coding workflow；提出 workflow 不等於允許寫檔。&lt;/p&gt;&lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/section&gt;
+
+  &lt;section class=&quot;step-panel&quot; data-panel=&quot;3&quot;&gt;
+    &lt;div class=&quot;step-head&quot;&gt;&lt;h2&gt;Room：Agents 共用的編號對話帳本&lt;/h2&gt;&lt;span class=&quot;text-muted&quot;&gt;睡著的 Agent 之後仍能按編號回看&lt;/span&gt;&lt;/div&gt;
+    &lt;div class=&quot;content-grid&quot;&gt;
+      &lt;div class=&quot;card wide&quot;&gt;
+        &lt;h3&gt;建議每個專案使用一個主要房間&lt;/h3&gt;
+        &lt;p&gt;日常使用時，Orchestratory 會建立或重用已授權 workspace 的主要 Room；資料層仍允許同一 workspace 明確建立其他 Room。每個 Room 都有自己的帳本、辦公桌配置與加入席位。在左側選單切換房間時，對話、Agents 與 2.5D 辦公室會一起切換，不會把不同 repository 的上下文混在一起。&lt;/p&gt;
+        &lt;p class=&quot;text-muted&quot;&gt;&lt;strong&gt;you&lt;/strong&gt; 永遠代表本機的你；Codex、Claude、Grok、You 是每個房間的常駐工作站。額外加入的終端或受控即時 Agent 才會新增自己的桌位。&lt;/p&gt;
+      &lt;/div&gt;
+      &lt;div class=&quot;card wide&quot;&gt;
+        &lt;h3&gt;GUI、TUI、MCP 寫進同一個正確 Room Ledger&lt;/h3&gt;
+        &lt;div class=&quot;flow&quot; aria-label=&quot;三種入口共用精確房間帳本&quot;&gt;&lt;span class=&quot;viz-badge&quot;&gt;GUI 發言&lt;/span&gt;&lt;span&gt;＋&lt;/span&gt;&lt;span class=&quot;viz-badge&quot;&gt;自然語言 TUI&lt;/span&gt;&lt;span&gt;＋&lt;/span&gt;&lt;span class=&quot;viz-badge&quot;&gt;MCP 工具&lt;/span&gt;&lt;span&gt;→&lt;/span&gt;&lt;strong&gt;所選 Room 的同一條編號 hash chain&lt;/strong&gt;&lt;/div&gt;
+        &lt;p&gt;TUI 啟動時先綁定精確 workspace：沒有 Room 會建立 deterministic Room；只有一個就直接重用；同一專案有多個 Room 時，TUI 會列出房名、訊息數與錄製狀態，要求你明確選擇這次要寫入哪一本帳本，絕不默默挑最舊或第一個 Room。跨 workspace 的房名也會被拒絕。&lt;/p&gt;
+        &lt;p class=&quot;text-muted&quot;&gt;TUI 內你的輸入以 &lt;code&gt;you&lt;/code&gt; 入帳；驗證後的單模型回答用實際 provider 名稱入帳，多模型比較則每個回答各自記為 Codex／Claude／Grok。路由到 coding team 的建議與失敗原因記為 system。結束 TUI 只清除 RAM 對話上下文，Room Ledger 仍保留。&lt;/p&gt;
+      &lt;/div&gt;
+      &lt;div class=&quot;card wide&quot;&gt;
+        &lt;h3&gt;在 Claude Code／Codex／Grok 直接用自然語言開房&lt;/h3&gt;
+        &lt;div class=&quot;viz-controls&quot; aria-label=&quot;選擇 Room 自然語言範例&quot;&gt;
+          &lt;button class=&quot;btn btn-primary room-prompt&quot; type=&quot;button&quot; data-room-prompt=&quot;open&quot; aria-pressed=&quot;true&quot;&gt;只建立房間&lt;/button&gt;
+          &lt;button class=&quot;btn room-prompt&quot; type=&quot;button&quot; data-room-prompt=&quot;team&quot; aria-pressed=&quot;false&quot;&gt;三個 Agents 討論&lt;/button&gt;
+          &lt;button class=&quot;btn room-prompt&quot; type=&quot;button&quot; data-room-prompt=&quot;continue&quot; aria-pressed=&quot;false&quot;&gt;延續既有討論&lt;/button&gt;
+        &lt;/div&gt;
+        &lt;label class=&quot;form-label&quot; for=&quot;room-natural-prompt&quot;&gt;把這句直接貼給 Agent
+          &lt;textarea class=&quot;form-control&quot; id=&quot;room-natural-prompt&quot; rows=&quot;4&quot;&gt;請使用 Orchestratory MCP，在目前專案建立或重用一個 Room。把我的需求寫入房間，然後告訴我房間名稱與最新訊息編號。&lt;/textarea&gt;
+        &lt;/label&gt;
+        &lt;div class=&quot;viz-row&quot;&gt;&lt;button class=&quot;btn&quot; type=&quot;button&quot; data-copy=&quot;room-natural-prompt&quot;&gt;複製自然語言指令&lt;/button&gt;&lt;span class=&quot;copy-note text-small&quot; aria-live=&quot;polite&quot;&gt;&lt;/span&gt;&lt;/div&gt;
+        &lt;p class=&quot;text-muted&quot;&gt;Agent 會自行呼叫 &lt;code&gt;room_init&lt;/code&gt; 與 &lt;code&gt;room_post&lt;/code&gt;。若要求喚醒常駐模型，會使用 &lt;code&gt;room_mention&lt;/code&gt;；每喚醒一個模型會消耗一次對應的訂閱呼叫。外接終端是精確席位：&lt;code&gt;room_join_request&lt;/code&gt; 在 GUI 核准後直接開始第一段值班，後續以 &lt;code&gt;room_wait&lt;/code&gt; 維持；休班時 GUI 交辦只會安全排隊。&lt;/p&gt;
+      &lt;/div&gt;
+      &lt;div class=&quot;card wide&quot;&gt;
+        &lt;div class=&quot;ledger-head&quot;&gt;&lt;span class=&quot;viz-badge&quot;&gt;Room: my-app&lt;/span&gt;&lt;span class=&quot;text-muted&quot;&gt;append-only · 已遮蔽敏感內容&lt;/span&gt;&lt;/div&gt;
+        &lt;div class=&quot;ledger&quot; id=&quot;demo-ledger&quot; aria-live=&quot;polite&quot;&gt;
+          &lt;div class=&quot;ledger-item&quot;&gt;&lt;span class=&quot;ledger-id&quot;&gt;#101&lt;/span&gt;&lt;div&gt;&lt;strong&gt;你&lt;/strong&gt;&lt;br&gt;請比較登入流程的兩種做法。&lt;/div&gt;&lt;/div&gt;
+          &lt;div class=&quot;ledger-item&quot;&gt;&lt;span class=&quot;ledger-id&quot;&gt;#102&lt;/span&gt;&lt;div&gt;&lt;strong&gt;codex&lt;/strong&gt;&lt;br&gt;方案 A 的變更較小，但需要補上 token rotation 測試。&lt;/div&gt;&lt;/div&gt;
+          &lt;div class=&quot;ledger-item&quot;&gt;&lt;span class=&quot;ledger-id&quot;&gt;#103&lt;/span&gt;&lt;div&gt;&lt;strong&gt;claude&lt;/strong&gt;&lt;br&gt;同意 &lt;button class=&quot;btn btn-ghost quote-ref&quot; type=&quot;button&quot; aria-expanded=&quot;false&quot; aria-controls=&quot;quote-102&quot;&gt;#102&lt;/button&gt;，另外要檢查登出後的 session revocation。&lt;blockquote class=&quot;quote-demo&quot; id=&quot;quote-102&quot; hidden&gt;&lt;strong&gt;#102 codex&lt;/strong&gt;&lt;br&gt;方案 A 的變更較小，但需要補上 token rotation 測試。&lt;/blockquote&gt;&lt;/div&gt;&lt;/div&gt;
+        &lt;/div&gt;
+        &lt;div class=&quot;mention-demo&quot;&gt;&lt;label class=&quot;form-label&quot; for=&quot;room-demo-input&quot;&gt;模擬發言或 @喚醒&lt;input class=&quot;form-control&quot; id=&quot;room-demo-input&quot; value=&quot;@grok 請針對 #102 提出反方意見&quot;&gt;&lt;/label&gt;&lt;button class=&quot;btn btn-primary&quot; id=&quot;room-demo-post&quot; type=&quot;button&quot;&gt;加入示意帳本&lt;/button&gt;&lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class=&quot;card&quot;&gt;
+        &lt;h3&gt;發言統計與 #引用&lt;/h3&gt;
+        &lt;div class=&quot;stat-list&quot; aria-label=&quot;示意發言統計&quot;&gt;
+          &lt;div class=&quot;stat-line&quot;&gt;&lt;strong&gt;you&lt;/strong&gt;&lt;span id=&quot;stat-you&quot;&gt;1 則 · 16 字&lt;/span&gt;&lt;/div&gt;
+          &lt;div class=&quot;stat-line&quot;&gt;&lt;strong&gt;codex&lt;/strong&gt;&lt;span&gt;1 則 · 39 字&lt;/span&gt;&lt;/div&gt;
+          &lt;div class=&quot;stat-line&quot;&gt;&lt;strong&gt;claude&lt;/strong&gt;&lt;span&gt;1 則 · 42 字&lt;/span&gt;&lt;/div&gt;
+        &lt;/div&gt;
+        &lt;p&gt;右欄依 Agent 顯示則數與字數；訊息中的 &lt;code&gt;#12&lt;/code&gt; 或 &lt;code&gt;#40-#45&lt;/code&gt; 可點擊展開被引用段落。試著點上方 #102。&lt;/p&gt;
+      &lt;/div&gt;
+      &lt;div class=&quot;card&quot;&gt;
+        &lt;h3&gt;🧾 房間摘要&lt;/h3&gt;
+        &lt;p&gt;按摘要前會確認；它呼叫一次 Codex 訂閱模型，最多讀取房間尾段 60 則，引用關鍵 #編號後把摘要寫回帳本。&lt;/p&gt;
+        &lt;button class=&quot;btn btn-primary&quot; id=&quot;summary-demo&quot; type=&quot;button&quot;&gt;模擬摘要&lt;/button&gt;
+        &lt;p class=&quot;text-muted&quot; id=&quot;summary-demo-result&quot; hidden&gt;【摘要】#101 要求比較方案；#102 建議方案 A 並補 token rotation 測試；#103 補充 session revocation。&lt;/p&gt;
+      &lt;/div&gt;
+      &lt;div class=&quot;card&quot;&gt;
+        &lt;h3&gt;Room 即時協作&lt;/h3&gt;&lt;p&gt;顯示新訊息、搜尋內容與直接發言。&lt;code&gt;@codex&lt;/code&gt;、&lt;code&gt;@claude&lt;/code&gt;、&lt;code&gt;@grok&lt;/code&gt; 可喚醒常駐模型；受控即時 Agent 也可由 GUI 立即喚醒。外接 MCP 終端不接受未經請求的鍵盤注入：只有該精確席位仍在核准後等待或正在 &lt;code&gt;room_wait&lt;/code&gt; 值班時才會即時取得工作，否則工作安全留在 &lt;code&gt;queued&lt;/code&gt;。&lt;/p&gt;
+      &lt;/div&gt;
+      &lt;div class=&quot;card&quot;&gt;
+        &lt;h3&gt;歷史紀錄&lt;/h3&gt;&lt;p&gt;從最新訊息開始，每次向前載入最多 100 則。純翻閱不會呼叫模型或消耗額度。&lt;/p&gt;
+      &lt;/div&gt;
+      &lt;div class=&quot;card wide&quot;&gt;
+        &lt;h3&gt;核准後的終端 hooks 自動入帳&lt;/h3&gt;
+        &lt;p&gt;先在專案建立 Room、讓終端提出 &lt;code&gt;room_join_request&lt;/code&gt;，再由 GUI 核准該精確 session。支援的 structured hooks 只會替已加入且仍在線的終端同步有限欄位；未加入的終端不記錄。Hook 是否能完整擷取輸入取決於各官方 CLI 的事件支援，不能把混合 PTY 畫面當成乾淨的 Agent turn。&lt;/p&gt;
+        &lt;pre&gt;&lt;code id=&quot;hooks-code&quot;&gt;cd &quot;/path/to/project&quot;
+orchestrator room init
+# 先預覽你實際使用的 provider
+orchestrator room hooks --provider codex
+# 確認後只安裝該 provider
+orchestrator room hooks --provider codex --install&lt;/code&gt;&lt;/pre&gt;
+        &lt;div class=&quot;viz-row&quot;&gt;&lt;button class=&quot;btn&quot; type=&quot;button&quot; data-copy=&quot;hooks-code&quot;&gt;複製 hooks 指令&lt;/button&gt;&lt;span class=&quot;copy-note text-small&quot; aria-live=&quot;polite&quot;&gt;&lt;/span&gt;&lt;/div&gt;
+        &lt;p class=&quot;text-muted&quot;&gt;把範例中的 &lt;code&gt;codex&lt;/code&gt; 換成實際使用的 &lt;code&gt;claude&lt;/code&gt; 或 &lt;code&gt;grok&lt;/code&gt; 即可。省略 &lt;code&gt;--install&lt;/code&gt; 只預覽；安裝會先備份既有設定，重複執行不會重複加入，通常需重新開啟對應 CLI session 才生效。Codex 還會要求你在 &lt;code&gt;/hooks&lt;/code&gt; 畫面審查命令。只有 GUI 已核准加入的終端才會同步。&lt;/p&gt;
+      &lt;/div&gt;
+      &lt;div class=&quot;card wide office-warning&quot;&gt;
+        &lt;h3&gt;外接終端精確收件匣（已實作）&lt;/h3&gt;
+        &lt;p&gt;GUI 先把交辦寫入 Room Ledger，再為被 @ 的精確外接席位建立收件紀錄。試著走過完整狀態；外接終端依序使用 &lt;code&gt;room_wait&lt;/code&gt;、&lt;code&gt;room_ack(read)&lt;/code&gt;、&lt;code&gt;room_ack(working)&lt;/code&gt;，最後以 &lt;code&gt;room_reply&lt;/code&gt; 或 &lt;code&gt;room_fail&lt;/code&gt; 收尾。&lt;/p&gt;
+        &lt;div class=&quot;delivery-flow&quot; id=&quot;delivery-flow&quot; aria-label=&quot;外接終端收件匣七種狀態&quot;&gt;
+          &lt;div class=&quot;delivery-node is-current&quot; data-delivery-state=&quot;queued&quot;&gt;queued&lt;br&gt;已排隊&lt;/div&gt;&lt;div class=&quot;delivery-node&quot; data-delivery-state=&quot;delivered&quot;&gt;delivered&lt;br&gt;已送達&lt;/div&gt;&lt;div class=&quot;delivery-node&quot; data-delivery-state=&quot;read&quot;&gt;read&lt;br&gt;已讀取&lt;/div&gt;&lt;div class=&quot;delivery-node&quot; data-delivery-state=&quot;working&quot;&gt;working&lt;br&gt;處理中&lt;/div&gt;&lt;div class=&quot;delivery-node&quot; data-delivery-state=&quot;replied&quot;&gt;replied&lt;br&gt;已回覆&lt;/div&gt;&lt;div class=&quot;delivery-node&quot; data-delivery-state=&quot;failed&quot;&gt;failed&lt;br&gt;失敗&lt;/div&gt;&lt;div class=&quot;delivery-node&quot; data-delivery-state=&quot;cancelled&quot;&gt;cancelled&lt;br&gt;已取消&lt;/div&gt;
+        &lt;/div&gt;
+        &lt;div aria-live=&quot;polite&quot;&gt;&lt;strong id=&quot;delivery-demo-title&quot;&gt;queued · 已排隊&lt;/strong&gt;&lt;p id=&quot;delivery-demo-detail&quot;&gt;訊息已在帳本，工作只屬於被指定席位；若沒有 active room_wait 就留在隊列，不會改派常駐模型。&lt;/p&gt;&lt;/div&gt;
+        &lt;div class=&quot;viz-row&quot;&gt;&lt;button class=&quot;btn btn-primary&quot; id=&quot;delivery-next&quot; type=&quot;button&quot;&gt;下一狀態&lt;/button&gt;&lt;button class=&quot;btn&quot; id=&quot;delivery-fail&quot; type=&quot;button&quot;&gt;模擬失敗&lt;/button&gt;&lt;button class=&quot;btn&quot; id=&quot;delivery-cancel&quot; type=&quot;button&quot;&gt;取消&lt;/button&gt;&lt;button class=&quot;btn btn-ghost&quot; id=&quot;delivery-retry&quot; type=&quot;button&quot; disabled&gt;重送&lt;/button&gt;&lt;/div&gt;
+        &lt;p class=&quot;text-muted&quot;&gt;席位離線、租約逾時且嘗試耗盡，或主動 &lt;code&gt;room_fail&lt;/code&gt; 都會 fail closed；不會 fallback 到同名常駐模型。只有 &lt;code&gt;failed&lt;/code&gt;／&lt;code&gt;cancelled&lt;/code&gt; 可重送，重用原帳本訊息與精確目標，不重複對話。相同輸入的 &lt;code&gt;room_reply&lt;/code&gt; 重試具冪等性；私密 lease token 不會寫入帳本或顯示在 GUI。&lt;/p&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/section&gt;
+
+  &lt;section class=&quot;step-panel&quot; data-panel=&quot;4&quot;&gt;
+    &lt;div class=&quot;step-head&quot;&gt;&lt;h2&gt;2.5D 辦公室：Room 的可視化控制面&lt;/h2&gt;&lt;span class=&quot;text-muted&quot;&gt;點人物自動 @、看狀態、拖桌位與擴編&lt;/span&gt;&lt;/div&gt;
+    &lt;div class=&quot;card&quot;&gt;
+      &lt;div class=&quot;office-toolbar&quot;&gt;
+        &lt;label class=&quot;form-label&quot; for=&quot;office-room&quot;&gt;目前房間／專案&lt;select class=&quot;form-select&quot; id=&quot;office-room&quot;&gt;&lt;option value=&quot;orchestratory&quot;&gt;orchestratory · 本專案&lt;/option&gt;&lt;option value=&quot;website&quot;&gt;website · 官網&lt;/option&gt;&lt;option value=&quot;api&quot;&gt;api-server · 後端服務&lt;/option&gt;&lt;/select&gt;&lt;/label&gt;
+        &lt;button class=&quot;btn&quot; id=&quot;office-night&quot; type=&quot;button&quot; aria-pressed=&quot;false&quot;&gt;☾ 夜間&lt;/button&gt;
+        &lt;button class=&quot;btn&quot; id=&quot;office-quiet&quot; type=&quot;button&quot; aria-pressed=&quot;false&quot;&gt;🔕 安靜&lt;/button&gt;
+        &lt;button class=&quot;btn&quot; id=&quot;office-leisure&quot; type=&quot;button&quot; aria-pressed=&quot;false&quot;&gt;🧘 休閒&lt;/button&gt;
+        &lt;button class=&quot;btn btn-primary&quot; id=&quot;office-expand&quot; type=&quot;button&quot; aria-pressed=&quot;false&quot;&gt;＋ 擴編一席&lt;/button&gt;
+      &lt;/div&gt;
+      &lt;div class=&quot;office-demo&quot;&gt;
+        &lt;div class=&quot;office-stage&quot; id=&quot;office-stage&quot; aria-label=&quot;可操作的 2.5D 辦公室示意；人物桌位可拖曳&quot;&gt;
+          &lt;span class=&quot;office-sign&quot; id=&quot;office-sign&quot;&gt;ROOM · ORCHESTRATORY&lt;/span&gt;&lt;span class=&quot;office-rug&quot; aria-hidden=&quot;true&quot;&gt;&lt;/span&gt;
+          &lt;button class=&quot;office-desk&quot; type=&quot;button&quot; style=&quot;left:5%;top:18%&quot; data-office-name=&quot;you&quot; data-office-kind=&quot;owner&quot; data-office-mention=&quot;&quot; data-office-detail=&quot;本機的你；所有終端共用唯一 you 身分。&quot; aria-pressed=&quot;false&quot;&gt;&lt;span class=&quot;office-avatar&quot;&gt;🧑‍💻&lt;/span&gt;&lt;strong class=&quot;office-name&quot;&gt;YOU&lt;/strong&gt;&lt;span class=&quot;office-state&quot;&gt;可對話&lt;/span&gt;&lt;/button&gt;
+          &lt;button class=&quot;office-desk is-busy&quot; type=&quot;button&quot; style=&quot;left:38%;top:14%&quot; data-office-name=&quot;codex&quot; data-office-kind=&quot;permanent&quot; data-office-mention=&quot;@codex &quot; data-office-detail=&quot;常駐模型；GUI 可直接喚醒。現在 DND：正在審查登入流程。&quot; aria-pressed=&quot;false&quot;&gt;&lt;span class=&quot;office-avatar&quot;&gt;🤖&lt;/span&gt;&lt;strong class=&quot;office-name&quot;&gt;CODEX&lt;/strong&gt;&lt;span class=&quot;office-state&quot;&gt;⛔ 審查中&lt;/span&gt;&lt;/button&gt;
+          &lt;button class=&quot;office-desk&quot; type=&quot;button&quot; style=&quot;left:70%;top:18%&quot; data-office-name=&quot;claude&quot; data-office-kind=&quot;permanent&quot; data-office-mention=&quot;@claude &quot; data-office-detail=&quot;常駐模型；GUI 可直接喚醒，亦可在核准流程中擔任 Writer。&quot; aria-pressed=&quot;false&quot;&gt;&lt;span class=&quot;office-avatar&quot;&gt;🟩&lt;/span&gt;&lt;strong class=&quot;office-name&quot;&gt;CLAUDE&lt;/strong&gt;&lt;span class=&quot;office-state&quot;&gt;待命&lt;/span&gt;&lt;/button&gt;
+          &lt;button class=&quot;office-desk&quot; type=&quot;button&quot; style=&quot;left:8%;top:66%&quot; data-office-name=&quot;grok&quot; data-office-kind=&quot;permanent&quot; data-office-mention=&quot;@grok &quot; data-office-detail=&quot;常駐模型；適合唯讀替代觀點，Writer 目前停用。&quot; aria-pressed=&quot;false&quot;&gt;&lt;span class=&quot;office-avatar&quot;&gt;🟨&lt;/span&gt;&lt;strong class=&quot;office-name&quot;&gt;GROK&lt;/strong&gt;&lt;span class=&quot;office-state&quot;&gt;待命&lt;/span&gt;&lt;/button&gt;
+          &lt;button class=&quot;office-desk is-extra&quot; type=&quot;button&quot; style=&quot;left:40%;top:64%&quot; data-office-name=&quot;codex（前端）&quot; data-office-kind=&quot;external&quot; data-office-mention=&quot;@codex（前端） &quot; data-office-detail=&quot;外接 MCP 終端；保留原 CLI 上下文與原終端權限。正在 room_wait 值班時可精確收件，否則工作保持 queued。&quot; aria-pressed=&quot;false&quot;&gt;&lt;span class=&quot;office-avatar&quot;&gt;🔵&lt;/span&gt;&lt;strong class=&quot;office-name&quot;&gt;CODEX（前端）&lt;/strong&gt;&lt;span class=&quot;office-state&quot;&gt;值班 · room_wait&lt;/span&gt;&lt;/button&gt;
+          &lt;button class=&quot;office-desk is-extra&quot; type=&quot;button&quot; style=&quot;left:71%;top:64%&quot; data-office-name=&quot;claude（審查）&quot; data-office-kind=&quot;managed&quot; data-office-mention=&quot;@claude（審查） &quot; data-office-detail=&quot;Orchestratory 受控即時 Agent；GUI 可立即喚醒、可重複對話，也可在 owner 授予 Writer Lease 後於隔離 worktree 執行。&quot; aria-pressed=&quot;false&quot; hidden&gt;&lt;span class=&quot;office-avatar&quot;&gt;🟣&lt;/span&gt;&lt;strong class=&quot;office-name&quot;&gt;CLAUDE（審查）&lt;/strong&gt;&lt;span class=&quot;office-state&quot;&gt;受控即時 · 待命&lt;/span&gt;&lt;/button&gt;
+          &lt;span class=&quot;office-pet cat&quot; aria-label=&quot;辦公室貓 Miso&quot;&gt;🐈&lt;/span&gt;&lt;span class=&quot;office-pet dino&quot; aria-label=&quot;辦公室恐龍 Byte&quot;&gt;🦖&lt;/span&gt;
+        &lt;/div&gt;
+        &lt;aside class=&quot;office-panel&quot; aria-label=&quot;示意即時對話側欄&quot;&gt;
+          &lt;div class=&quot;office-selection&quot; id=&quot;office-selection&quot;&gt;&lt;strong&gt;先點一位 Agent&lt;/strong&gt;&lt;br&gt;&lt;span class=&quot;text-muted&quot;&gt;會顯示席位種類、狀態，並自動把精確 @名稱填進輸入框。桌位也可以拖曳。&lt;/span&gt;&lt;/div&gt;
+          &lt;div class=&quot;office-chat&quot; id=&quot;office-chat&quot; aria-live=&quot;polite&quot;&gt;&lt;div class=&quot;office-msg&quot;&gt;&lt;strong&gt;system&lt;/strong&gt;&lt;br&gt;已進入 orchestratory 房間。&lt;/div&gt;&lt;/div&gt;
+          &lt;label class=&quot;form-label&quot; for=&quot;office-chat-input&quot;&gt;側邊即時對話&lt;textarea class=&quot;form-control&quot; id=&quot;office-chat-input&quot; rows=&quot;3&quot; placeholder=&quot;點人物，或直接輸入訊息…&quot;&gt;&lt;/textarea&gt;&lt;/label&gt;
+          &lt;button class=&quot;btn btn-primary&quot; id=&quot;office-chat-send&quot; type=&quot;button&quot;&gt;送出示意訊息&lt;/button&gt;
+          &lt;p class=&quot;text-muted text-small&quot; id=&quot;office-delivery-note&quot;&gt;本導覽只做本機 DOM 模擬，不會真的呼叫模型或寫入帳本。&lt;/p&gt;
+        &lt;/aside&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+    &lt;div class=&quot;content-grid&quot;&gt;
+      &lt;div class=&quot;card&quot;&gt;&lt;h3&gt;三層架構，一眼看懂&lt;/h3&gt;&lt;ol&gt;&lt;li&gt;&lt;strong&gt;房間層&lt;/strong&gt;：每個專案建議使用一個主要 Room；切換房間就切換完整協作上下文。&lt;/li&gt;&lt;li&gt;&lt;strong&gt;帳本層&lt;/strong&gt;：所有核准成員共讀編號訊息，直播與歷史使用同一份 Room Ledger。&lt;/li&gt;&lt;li&gt;&lt;strong&gt;辦公室層&lt;/strong&gt;：把成員、DND、工作內容、任務與通知投影成可視化控制面；畫面本身不會增加權限。&lt;/li&gt;&lt;/ol&gt;&lt;/div&gt;
+      &lt;div class=&quot;card&quot;&gt;&lt;h3&gt;新增 Agents 有兩條路&lt;/h3&gt;&lt;p&gt;&lt;strong&gt;外接 MCP 終端&lt;/strong&gt;：終端先用自然語言要求加入 → 呼叫 &lt;code&gt;room_join_request&lt;/code&gt; → GUI「新增 Agents」核准並命名 → 立即開始第一段值班並出現桌位；後續需用 &lt;code&gt;room_wait&lt;/code&gt; 維持，終端離線後人物移除。&lt;/p&gt;&lt;p&gt;&lt;strong&gt;受控即時 Agent&lt;/strong&gt;：在 GUI 選模型來源與任務名稱後建立；立即有獨立桌位，可由 GUI 重複喚醒，同一席位同時只處理一個回覆。&lt;/p&gt;&lt;/div&gt;
+      &lt;div class=&quot;card wide&quot;&gt;&lt;h3&gt;席位與權限比較&lt;/h3&gt;&lt;table class=&quot;trouble-table&quot;&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;席位&lt;/th&gt;&lt;th&gt;GUI @ 行為&lt;/th&gt;&lt;th&gt;能力與限制&lt;/th&gt;&lt;/tr&gt;&lt;/thead&gt;&lt;tbody&gt;&lt;tr&gt;&lt;td&gt;You&lt;/td&gt;&lt;td&gt;代表本機使用者，不喚醒模型&lt;/td&gt;&lt;td&gt;每個房間唯一，不會因多開終端而複製&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;常駐 Codex／Claude／Grok&lt;/td&gt;&lt;td&gt;立即建立受限制的 provider 回合&lt;/td&gt;&lt;td&gt;依角色與 quota；寫檔仍要 Writer Lease 核准&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;外接 MCP 終端&lt;/td&gt;&lt;td&gt;建立精確收件匣工作；值班中立即取得，未值班則 queued&lt;/td&gt;&lt;td&gt;核准後會開始第一段值班；完全 idle 的既有 MCP host 不能由 server 發起新 turn。加入 Room 不升權也不降權，工作不會改派同名常駐模型&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;受控即時 Agent&lt;/td&gt;&lt;td&gt;GUI 可立即喚醒精確席位&lt;/td&gt;&lt;td&gt;獨立名稱、可取消、共用 quota；不冒充外接終端，可被 owner 選為 Writer 或子執行者，實際寫入仍受 lease 與 worktree 限制&lt;/td&gt;&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;/div&gt;
+      &lt;div class=&quot;card&quot;&gt;&lt;h3&gt;人物狀態與工作內容&lt;/h3&gt;&lt;p&gt;DND／⛔ 表示正在工作；卡片顯示目前角色與任務摘要。完成、失敗、待命、通知與未讀數量都來自既有事件或帳本，不是額外批准。點人物只會選取與預填 @，仍要按「送出」。&lt;/p&gt;&lt;/div&gt;
+      &lt;div class=&quot;card&quot;&gt;&lt;h3&gt;桌位、休閒與夥伴&lt;/h3&gt;&lt;p&gt;加入成員時辦公室可擴編；桌位可拖曳重新排列。閒置人物會伸展、看文件、喝水或休息；Miso 貓與 Byte 恐龍會在地板巡邏並有腳步／表情動畫。這些都只在瀏覽器 DOM／CSS 執行，不讀帳本、不呼叫 provider。&lt;/p&gt;&lt;/div&gt;
+      &lt;div class=&quot;card wide&quot;&gt;&lt;h3&gt;任務、通知與「交給 Writer」&lt;/h3&gt;&lt;p&gt;右側任務與通知可查看等待、執行、完成或失敗狀態。「交給 Writer」只建立待核准提案，workspace 由目前房間反查；它不會立即寫檔。owner 可在 GUI 選常駐、管理型或外接席位擔任 Writer，也可指定子執行者；按 &lt;code&gt;RUN&lt;/code&gt; 且通過安全檢查後，才授予單一 Writer Lease 並進入隔離 worktree。&lt;/p&gt;&lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/section&gt;
+
+  &lt;section class=&quot;step-panel&quot; data-panel=&quot;5&quot;&gt;
+    &lt;div class=&quot;step-head&quot;&gt;&lt;h2&gt;寫程式時的安全流程&lt;/h2&gt;&lt;span class=&quot;text-muted&quot;&gt;點「下一階段」走一次完整演練&lt;/span&gt;&lt;/div&gt;
+    &lt;div class=&quot;card&quot;&gt;
+      &lt;div class=&quot;pipeline&quot; id=&quot;write-pipeline&quot; role=&quot;img&quot; aria-label=&quot;安全寫入 workflow 六階段&quot;&gt;
+        &lt;div class=&quot;pipe-node is-current&quot; data-pipe=&quot;0&quot;&gt;1 需求&lt;span class=&quot;gate-label&quot;&gt;自然語言&lt;/span&gt;&lt;/div&gt;&lt;div class=&quot;pipe-node&quot; data-pipe=&quot;1&quot;&gt;2 提案&lt;span class=&quot;gate-label&quot;&gt;只顯示範圍&lt;/span&gt;&lt;/div&gt;&lt;div class=&quot;pipe-node&quot; data-pipe=&quot;2&quot;&gt;3 RUN&lt;span class=&quot;gate-label&quot;&gt;人類核准&lt;/span&gt;&lt;/div&gt;&lt;div class=&quot;pipe-node&quot; data-pipe=&quot;3&quot;&gt;4 Worktree&lt;span class=&quot;gate-label&quot;&gt;隔離寫入&lt;/span&gt;&lt;/div&gt;&lt;div class=&quot;pipe-node&quot; data-pipe=&quot;4&quot;&gt;5 Review&lt;span class=&quot;gate-label&quot;&gt;完成待審&lt;/span&gt;&lt;/div&gt;&lt;div class=&quot;pipe-node&quot; data-pipe=&quot;5&quot;&gt;6 APPLY&lt;span class=&quot;gate-label&quot;&gt;精確文字核准&lt;/span&gt;&lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div aria-live=&quot;polite&quot;&gt;&lt;strong id=&quot;pipe-title&quot;&gt;需求已收到，但尚未寫檔&lt;/strong&gt;&lt;p id=&quot;pipe-detail&quot;&gt;你可以先討論、讀檔與要求方案。這個階段不需要 Git 乾淨，也不會建立 worktree。&lt;/p&gt;&lt;/div&gt;
+      &lt;div class=&quot;viz-row&quot;&gt;&lt;button class=&quot;btn&quot; id=&quot;pipe-back&quot; type=&quot;button&quot; disabled&gt;上一步&lt;/button&gt;&lt;button class=&quot;btn btn-primary&quot; id=&quot;pipe-next&quot; type=&quot;button&quot;&gt;下一階段&lt;/button&gt;&lt;button class=&quot;btn btn-ghost&quot; id=&quot;pipe-reset&quot; type=&quot;button&quot;&gt;重新演練&lt;/button&gt;&lt;/div&gt;
+    &lt;/div&gt;
+    &lt;div class=&quot;content-grid&quot;&gt;
+      &lt;div class=&quot;card wide&quot;&gt;
+        &lt;h3&gt;Writer Lease：由 owner 選擇，沒有自動 fallback&lt;/h3&gt;
+        &lt;div class=&quot;lease-grid&quot;&gt;
+          &lt;div&gt;&lt;label class=&quot;form-label&quot; for=&quot;writer-task-id&quot;&gt;任務識別&lt;input class=&quot;form-control&quot; id=&quot;writer-task-id&quot; value=&quot;demo-task-17&quot;&gt;&lt;/label&gt;&lt;label class=&quot;form-label&quot; for=&quot;writer-origin&quot;&gt;Writer 候選&lt;select class=&quot;form-select&quot; id=&quot;writer-origin&quot;&gt;&lt;option value=&quot;resident&quot;&gt;常駐 Codex&lt;/option&gt;&lt;option value=&quot;managed&quot;&gt;管理型 Codex（前端）&lt;/option&gt;&lt;option value=&quot;external&quot;&gt;外接 Codex（前端終端）&lt;/option&gt;&lt;/select&gt;&lt;/label&gt;&lt;label class=&quot;form-label&quot; for=&quot;writer-child-provider&quot;&gt;子執行者 provider&lt;select class=&quot;form-select&quot; id=&quot;writer-child-provider&quot;&gt;&lt;option value=&quot;codex&quot;&gt;Codex（同 provider）&lt;/option&gt;&lt;option value=&quot;claude&quot;&gt;Claude（跨 provider）&lt;/option&gt;&lt;option value=&quot;grok&quot;&gt;Grok（跨模型唯讀）&lt;/option&gt;&lt;/select&gt;&lt;/label&gt;&lt;div class=&quot;viz-row&quot;&gt;&lt;button class=&quot;btn btn-primary&quot; id=&quot;writer-grant&quot; type=&quot;button&quot;&gt;授予 Lease&lt;/button&gt;&lt;button class=&quot;btn&quot; id=&quot;writer-switch&quot; type=&quot;button&quot;&gt;切換 Writer&lt;/button&gt;&lt;button class=&quot;btn&quot; id=&quot;writer-child&quot; type=&quot;button&quot;&gt;建立子執行者&lt;/button&gt;&lt;button class=&quot;btn btn-ghost&quot; id=&quot;writer-complete&quot; type=&quot;button&quot;&gt;完成並檢視風險&lt;/button&gt;&lt;/div&gt;&lt;/div&gt;
+          &lt;div class=&quot;lease-result&quot; id=&quot;writer-result&quot; aria-live=&quot;polite&quot;&gt;&lt;strong&gt;尚未授予 Writer Lease&lt;/strong&gt;&lt;br&gt;GUI 的選擇只是候選；仍需 RUN、workspace 驗證與隔離 worktree。&lt;/div&gt;
+        &lt;/div&gt;
+        &lt;p class=&quot;text-muted&quot;&gt;每個 task 同時只有一份 active lease，綁定 room、workspace、task worktree、epoch 與短效 capability。切換必須帶目前 epoch 與 checkpoint；舊能力和所有子委派立即撤銷。候選離線、移除或完成也會撤銷，不會偷偷改派。&lt;/p&gt;
+        &lt;div class=&quot;lease-result&quot; id=&quot;writer-review&quot; hidden&gt;
+          &lt;strong id=&quot;writer-review-title&quot;&gt;寫作完成 · 尚未回寫主專案&lt;/strong&gt;
+          &lt;p&gt;&lt;strong&gt;自然語言風險：</strong&gt;低風險；示意變更限制在兩個既有前端檔案，沒有刪除。套用前仍會重新驗證 source、preview、逐檔 hash 與範圍。&lt;/p&gt;
+          &lt;ul&gt;&lt;li&gt;寫入 · &lt;code&gt;public/room.js&lt;/code&gt; · 2.4 KiB&lt;/li&gt;&lt;li&gt;寫入 · &lt;code&gt;public/styles.css&lt;/code&gt; · 1.1 KiB&lt;/li&gt;&lt;/ul&gt;
+          &lt;label class=&quot;form-label&quot; for=&quot;writer-apply-confirm&quot;&gt;完整輸入確認文字&lt;input class=&quot;form-control&quot; id=&quot;writer-apply-confirm&quot; autocomplete=&quot;off&quot; placeholder=&quot;APPLY WRITER &amp;lt;taskId&amp;gt; TO PROJECT&quot;&gt;&lt;/label&gt;
+          &lt;div class=&quot;viz-row&quot;&gt;&lt;button class=&quot;btn btn-primary&quot; id=&quot;writer-apply&quot; type=&quot;button&quot;&gt;回寫主專案&lt;/button&gt;&lt;span class=&quot;text-small text-muted&quot; id=&quot;writer-apply-status&quot; aria-live=&quot;polite&quot;&gt;目前只有 retained task worktree 被改動。&lt;/span&gt;&lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class=&quot;card&quot;&gt;&lt;h3&gt;外接 Writer 的雙重身分&lt;/h3&gt;&lt;p&gt;外接終端保留自己的名稱與任務上下文（&lt;code&gt;onBehalfOf&lt;/code&gt;），但不直接取得 Workspace MCP 寫入 token；受管 &lt;strong&gt;Writer Companion&lt;/strong&gt; 在隔離 worktree 代為執行（&lt;code&gt;executedBy&lt;/code&gt;）。帳本與 audit 同時記住「代表誰」和「實際由誰執行」。&lt;/p&gt;&lt;/div&gt;
+      &lt;div class=&quot;card&quot;&gt;&lt;h3&gt;子執行者與 Reviewer&lt;/h3&gt;&lt;p&gt;同 provider 子 Agent 與父 Writer 共用同一個 task worktree，取得 fenced write capability；SQLite task run lock 搭配 5 秒 heartbeat，會跨 GUI 程序序列化父 Writer、同 provider 子 Agent 與 sibling。跨 provider Codex／Claude 透過可撤銷的唯讀 Workspace MCP 檢查同一 worktree；Grok 完全不接觸 worktree，也沒有 Read／Glob／Grep 或其他 filesystem tools，只接收控制面產生的 bounded Git snapshot，並在空白 scratch 內審查。敏感或過大的 untracked 內容會 fail closed。子 Agent 不能再委派；父 lease 切換、完成、撤銷或席位移除時，子委派全部失效。&lt;/p&gt;&lt;/div&gt;
+      &lt;div class=&quot;card wide office-warning&quot;&gt;&lt;h3&gt;Writer 完成 ≠ 主專案已修改&lt;/h3&gt;&lt;p&gt;「完成」只把 lease 標成 completed、撤銷能力，並保留 task worktree 供 owner 審核。GUI 會先用自然語言說明風險，再列出每個寫入／刪除檔案與 bytes；只有完整輸入 &lt;code&gt;APPLY WRITER &amp;lt;taskId&amp;gt; TO PROJECT&lt;/code&gt;，且重新驗證仍一致，task 才會先持久化為 &lt;code&gt;applying&lt;/code&gt; 再回寫來源專案。套用成功後標記為 &lt;code&gt;applied&lt;/code&gt;；若在套用後、標記前中斷，任務維持 fail-closed applying，不能重新授予 Writer。&lt;/p&gt;&lt;/div&gt;
+      &lt;div class=&quot;card wide&quot;&gt;&lt;h3&gt;不會偷偷發生的事&lt;/h3&gt;&lt;div class=&quot;viz-row&quot;&gt;&lt;span class=&quot;viz-badge&quot;&gt;不自動 merge&lt;/span&gt;&lt;span class=&quot;viz-badge&quot;&gt;不自動 commit&lt;/span&gt;&lt;span class=&quot;viz-badge&quot;&gt;不自動 push&lt;/span&gt;&lt;span class=&quot;viz-badge&quot;&gt;不自動刪 worktree&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/section&gt;
+
+  &lt;section class=&quot;step-panel&quot; data-panel=&quot;6&quot;&gt;
+    &lt;div class=&quot;step-head&quot;&gt;&lt;h2&gt;安全邊界與常見問題&lt;/h2&gt;&lt;span class=&quot;text-muted&quot;&gt;訂閱模式降低金鑰風險，但不是無風險&lt;/span&gt;&lt;/div&gt;
+    &lt;div class=&quot;content-grid&quot;&gt;
+      &lt;div class=&quot;card&quot;&gt;
+        &lt;h3&gt;核心保護&lt;/h3&gt;
+        &lt;div class=&quot;safety-stack&quot;&gt;
+          &lt;div class=&quot;safety-line&quot;&gt;&lt;strong&gt;訂閱登入&lt;/strong&gt;&lt;span&gt;由官方 CLI 管理；Orchestratory 不讀取或複製 session token。&lt;/span&gt;&lt;/div&gt;
+          &lt;div class=&quot;safety-line&quot;&gt;&lt;strong&gt;本機 GUI&lt;/strong&gt;&lt;span&gt;只監聽 &lt;code&gt;127.0.0.1&lt;/code&gt;，不應暴露到公開網路。&lt;/span&gt;&lt;/div&gt;
+          &lt;div class=&quot;safety-line&quot;&gt;&lt;strong&gt;硬上限&lt;/strong&gt;&lt;span&gt;輪數、呼叫、時間、併發與連續失敗仍有限制。&lt;/span&gt;&lt;/div&gt;
+          &lt;div class=&quot;safety-line&quot;&gt;&lt;strong&gt;緊急停止&lt;/strong&gt;&lt;span&gt;中止進行中的呼叫，後續 provider／tester 邊界不再繼續。&lt;/span&gt;&lt;/div&gt;
+          &lt;div class=&quot;safety-line&quot;&gt;&lt;strong&gt;模型輸出&lt;/strong&gt;&lt;span&gt;只是建議，不等於核准；寫檔與外部發布仍由人類決定。&lt;/span&gt;&lt;/div&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+      &lt;div class=&quot;card&quot;&gt;&lt;h3&gt;日常使用最短路徑&lt;/h3&gt;&lt;ol&gt;&lt;li&gt;開啟 &lt;code&gt;http://127.0.0.1:4317/&lt;/code&gt;。&lt;/li&gt;&lt;li&gt;選擇已授權專案與主代理。&lt;/li&gt;&lt;li&gt;直接用自然語言提出需求；TUI 若看到多個 Room，先明確選擇帳本。&lt;/li&gt;&lt;li&gt;需要多人討論時進 Room 或使用多個 &lt;code&gt;@&lt;/code&gt;。&lt;/li&gt;&lt;li&gt;看到寫檔提案時先確認範圍，再按 RUN。&lt;/li&gt;&lt;li&gt;Writer 完成後檢查自然語言風險與逐檔清單；確認才輸入 &lt;code&gt;APPLY WRITER &amp;lt;taskId&amp;gt; TO PROJECT&lt;/code&gt;。&lt;/li&gt;&lt;/ol&gt;&lt;/div&gt;
+      &lt;div class=&quot;card wide&quot;&gt;
+        &lt;h3&gt;常見問題&lt;/h3&gt;
+        &lt;table class=&quot;trouble-table&quot;&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;畫面／訊息&lt;/th&gt;&lt;th&gt;代表什麼&lt;/th&gt;&lt;th&gt;處理方式&lt;/th&gt;&lt;/tr&gt;&lt;/thead&gt;&lt;tbody&gt;
+          &lt;tr&gt;&lt;td&gt;GUI 沒有專案&lt;/td&gt;&lt;td&gt;workspace 尚未授權&lt;/td&gt;&lt;td&gt;執行 &lt;code&gt;orchestrator workspaces allow &quot;/path/to/project&quot; --label &quot;Project&quot;&lt;/code&gt;&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;Agent 沒有回覆&lt;/td&gt;&lt;td&gt;CLI 未登入、額度不足或程序失敗&lt;/td&gt;&lt;td&gt;先執行 &lt;code&gt;orchestrator doctor&lt;/code&gt;，再確認各官方 CLI 狀態&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;不能開始 Writer&lt;/td&gt;&lt;td&gt;沒有初始 commit、目錄不乾淨、gate 未開或尚未 RUN&lt;/td&gt;&lt;td&gt;先看 GUI 顯示的精確阻擋原因，不要跳過安全檢查&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;Writer 顯示完成但主專案沒變&lt;/td&gt;&lt;td&gt;完成只代表 retained task worktree 已待審，還沒有 apply-back&lt;/td&gt;&lt;td&gt;檢查自然語言風險與逐檔清單；確認後完整輸入 &lt;code&gt;APPLY WRITER &amp;lt;taskId&amp;gt; TO PROJECT&lt;/code&gt;&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;同一 taskId 無法再授予 Writer&lt;/td&gt;&lt;td&gt;該任務已成功 applied，是不可復活的終態&lt;/td&gt;&lt;td&gt;為新工作建立新的 taskId；不要嘗試重用舊 capability 或 epoch&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;只看到 Room 歷史&lt;/td&gt;&lt;td&gt;目前在歷史模式&lt;/td&gt;&lt;td&gt;點「Room 即時協作」回到直播與發言模式&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;@外接終端沒有立即回覆&lt;/td&gt;&lt;td&gt;工作可能仍是 queued、核准後第一段等待已結束、席位未呼叫 &lt;code&gt;room_wait&lt;/code&gt;、已離線，或處理失敗&lt;/td&gt;&lt;td&gt;看 GUI 的「值班中／線上但休班」精確狀態；讓該席位值班，或改用受控即時 Agent。系統不會冒充或改派同名常駐模型&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;需要立刻停止&lt;/td&gt;&lt;td&gt;可能有錯誤調度或異常消耗&lt;/td&gt;&lt;td&gt;在 Room 控制室按「緊急停止」&lt;/td&gt;&lt;/tr&gt;
+        &lt;/tbody&gt;&lt;/table&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/section&gt;
+
+  &lt;footer class=&quot;guide-footer&quot;&gt;&lt;button class=&quot;btn&quot; id=&quot;prev-step&quot; type=&quot;button&quot; disabled&gt;← 上一章&lt;/button&gt;&lt;span class=&quot;text-muted&quot; id=&quot;chapter-name&quot;&gt;開始與授權&lt;/span&gt;&lt;button class=&quot;btn btn-primary&quot; id=&quot;next-step&quot; type=&quot;button&quot;&gt;下一章 →&lt;/button&gt;&lt;/footer&gt;
+
+  &lt;script&gt;
+    (() =&gt; {
+      const root = document.getElementById(&quot;orchestrator-guide&quot;);
+      const panels = [...root.querySelectorAll(&quot;[data-panel]&quot;)];
+      const navButtons = [...root.querySelectorAll(&quot;[data-step]&quot;)];
+      const progress = root.querySelector(&quot;#guide-progress&quot;);
+      const progressLabel = root.querySelector(&quot;#guide-progress-label&quot;);
+      const chapterName = root.querySelector(&quot;#chapter-name&quot;);
+      const previous = root.querySelector(&quot;#prev-step&quot;);
+      const next = root.querySelector(&quot;#next-step&quot;);
+      const chapters = [&quot;開始與授權&quot;, &quot;GUI 控制台&quot;, &quot;Agent 調度&quot;, &quot;Room 帳本&quot;, &quot;2.5D 辦公室&quot;, &quot;安全寫入&quot;, &quot;安全與排錯&quot;];
+      let currentStep = 0;
+      function showStep(index) {
+        currentStep = Math.max(0, Math.min(panels.length - 1, index));
+        panels.forEach((panel, i) =&gt; panel.classList.toggle(&quot;is-active&quot;, i === currentStep));
+        navButtons.forEach((button, i) =&gt; { const active = i === currentStep; button.classList.toggle(&quot;btn-primary&quot;, active); button.setAttribute(&quot;aria-pressed&quot;, String(active)); });
+        progress.style.width = `${((currentStep + 1) / panels.length) * 100}%`;
+        progressLabel.textContent = `第 ${currentStep + 1}／${panels.length} 章`;
+        chapterName.textContent = chapters[currentStep];
+        previous.disabled = currentStep === 0;
+        next.disabled = currentStep === panels.length - 1;
+        next.textContent = currentStep === panels.length - 2 ? &quot;完成導覽 →&quot; : &quot;下一章 →&quot;;
+      }
+      navButtons.forEach((button) =&gt; button.addEventListener(&quot;click&quot;, () =&gt; showStep(Number(button.dataset.step))));
+      previous.addEventListener(&quot;click&quot;, () =&gt; showStep(currentStep - 1));
+      next.addEventListener(&quot;click&quot;, () =&gt; showStep(currentStep + 1));
+      root.querySelectorAll(&quot;.prereq&quot;).forEach((button) =&gt; button.addEventListener(&quot;click&quot;, () =&gt; { const row = button.closest(&quot;.check-row&quot;); const ready = row.classList.toggle(&quot;is-ready&quot;); button.textContent = ready ? &quot;已完成&quot; : &quot;標記完成&quot;; button.setAttribute(&quot;aria-pressed&quot;, String(ready)); }));
+      root.querySelectorAll(&quot;[data-copy]&quot;).forEach((button) =&gt; button.addEventListener(&quot;click&quot;, async () =&gt; {
+        const target = root.querySelector(`#${button.dataset.copy}`); const note = button.parentElement.querySelector(&quot;.copy-note&quot;); const value = &quot;value&quot; in target ? target.value : target.textContent;
+        try { if (navigator.clipboard &amp;&amp; navigator.clipboard.writeText) { await navigator.clipboard.writeText(value); } else { const area = document.createElement(&quot;textarea&quot;); area.value = value; area.style.position = &quot;absolute&quot;; area.style.left = &quot;-9999px&quot;; root.append(area); area.select(); document.execCommand(&quot;copy&quot;); area.remove(); } note.textContent = &quot;已複製&quot;; } catch { note.textContent = &quot;請手動選取上方指令&quot;; }
+      }));
+      const installModes = [...root.querySelectorAll(&quot;.install-mode&quot;)];
+      const installContent = {
+        terminal: {
+          code: &quot;cd \&quot;/path/to/orchestratory\&quot;\nnode --version\nnpm ci --ignore-scripts\nnpm run check\nnpm_config_ignore_scripts=true npm_config_prefix=\&quot;$HOME/.local\&quot; npm link\n\&quot;$HOME/.local/bin/orchestrator\&quot; --help\n\&quot;$HOME/.local/bin/orchestrator\&quot; doctor&quot;,
+          note: &quot;需要 Node.js 22.20 以上。不要使用 sudo；若一般的 orchestrator 顯示 command not found，先使用上方完整路徑驗證，不要自行放寬系統權限。&quot;
+        },
+        agent: {
+          code: &quot;請在本機安全安裝目前這個 Orchestratory 專案。先確認 Node.js 版本至少為 22.20；只使用 repository 內既有的 package-lock，執行 npm ci --ignore-scripts 與 npm run check。不得使用 sudo、不得修改系統目錄、不得修改 shell profile，也不得放寬檔案權限。驗證通過後，使用 npm_config_ignore_scripts=true npm_config_prefix=\&quot;$HOME/.local\&quot; npm link。最後只執行 \&quot;$HOME/.local/bin/orchestrator\&quot; --help 與 \&quot;$HOME/.local/bin/orchestrator\&quot; doctor 驗證；不要啟動模型或消耗訂閱額度。遇到 PATH、權限、測試或依賴問題時停止並回報，不要自行繞過。&quot;,
+          note: &quot;把這整段貼給 Claude Code、Codex 或 Grok。它只授權安裝與唯讀驗證，不授權修改 shell profile、公開 repository 或啟動模型。&quot;
+        }
+      };
+      function showInstallMode(mode) {
+        const state = installContent[mode];
+        installModes.forEach((button) =&gt; { const active = button.dataset.installMode === mode; button.classList.toggle(&quot;btn-primary&quot;, active); button.setAttribute(&quot;aria-pressed&quot;, String(active)); });
+        root.querySelector(&quot;#install-code&quot;).textContent = state.code;
+        root.querySelector(&quot;#install-note&quot;).textContent = state.note;
+      }
+      installModes.forEach((button) =&gt; button.addEventListener(&quot;click&quot;, () =&gt; showInstallMode(button.dataset.installMode)));
+      const mcpHosts = [...root.querySelectorAll(&quot;.mcp-host&quot;)];
+      const mcpCommands = {
+        claude: { code: &quot;claude mcp add --scope user orchestrator -- orchestrator mcp --actor claude\nclaude mcp list&quot;, note: &quot;重新開啟 Claude Code session 後，它會看到 Room 與多模型協作工具。&quot; },
+        codex: { code: &quot;codex mcp add orchestrator -- orchestrator mcp --actor codex\ncodex mcp list&quot;, note: &quot;重新開啟 Codex session 後，actor 身分會固定為 codex，不能由對話內容冒名修改。&quot; },
+        grok: { code: &quot;grok mcp add orchestrator -- orchestrator mcp --actor grok\ngrok mcp list&quot;, note: &quot;重新開啟 Grok session 後，actor 身分會固定為 grok；workspace 仍必須在 allowlist。&quot; }
+      };
+      function showMcpHost(host) {
+        const state = mcpCommands[host];
+        mcpHosts.forEach((button) =&gt; { const active = button.dataset.mcpHost === host; button.classList.toggle(&quot;btn-primary&quot;, active); button.setAttribute(&quot;aria-pressed&quot;, String(active)); });
+        root.querySelector(&quot;#mcp-code&quot;).textContent = state.code;
+        root.querySelector(&quot;#mcp-note&quot;).textContent = state.note;
+      }
+      mcpHosts.forEach((button) =&gt; button.addEventListener(&quot;click&quot;, () =&gt; showMcpHost(button.dataset.mcpHost)));
+
+      const roomPrompts = {
+        open: &quot;請使用 Orchestratory MCP，在目前專案建立或重用一個 Room。把我的需求寫入房間，然後告訴我房間名稱與最新訊息編號。&quot;,
+        team: &quot;請使用 Orchestratory MCP，在目前專案打開 Room。先把這項任務寫入房間，再分別喚醒 Codex、Claude、Grok 提出方案；請引用每段回覆的 #編號，最後整理共識、分歧與建議下一步。&quot;,
+        continue: &quot;請使用 Orchestratory MCP 讀取目前專案的 Room，從我指定的 #編號開始補齊上下文。只在有新問題需要回答時喚醒相關 Agent，並把新的結論寫回 Room。&quot;
+      };
+      root.querySelectorAll(&quot;.room-prompt&quot;).forEach((button) =&gt; button.addEventListener(&quot;click&quot;, () =&gt; {
+        root.querySelectorAll(&quot;.room-prompt&quot;).forEach((candidate) =&gt; { const active = candidate === button; candidate.classList.toggle(&quot;btn-primary&quot;, active); candidate.setAttribute(&quot;aria-pressed&quot;, String(active)); });
+        root.querySelector(&quot;#room-natural-prompt&quot;).value = roomPrompts[button.dataset.roomPrompt];
+      }));
+      const demoMainProvider = root.querySelector(&quot;#demo-provider&quot;);
+      const demoSecondProvider = root.querySelector(&quot;#demo-second-provider&quot;);
+      const demoProviders = [&quot;Codex&quot;, &quot;Claude&quot;, &quot;Grok&quot;];
+      function syncDemoSecondProvider() {
+        const previousValue = demoSecondProvider.value;
+        const allowed = demoProviders.filter((provider) =&gt; provider !== demoMainProvider.value);
+        demoSecondProvider.textContent = &quot;&quot;;
+        allowed.forEach((provider) =&gt; demoSecondProvider.append(new Option(provider, provider)));
+        demoSecondProvider.value = allowed.includes(previousValue) ? previousValue : allowed[0];
+      }
+      demoMainProvider.addEventListener(&quot;change&quot;, () =&gt; { syncDemoSecondProvider(); showIntent(&quot;chat&quot;); });
+      demoSecondProvider.addEventListener(&quot;change&quot;, () =&gt; showIntent(&quot;second&quot;));
+      root.querySelector(&quot;#demo-send&quot;).addEventListener(&quot;click&quot;, () =&gt; {
+        const message = root.querySelector(&quot;#demo-chat&quot;).value.trim() || &quot;請先解釋這個專案。&quot;; const provider = root.querySelector(&quot;#demo-provider&quot;).value;
+        root.querySelector(&quot;#demo-user-message&quot;).textContent = message;
+        root.querySelector(&quot;#demo-agent-message&quot;).textContent = message.includes(&quot;Claude&quot;) || message.includes(&quot;Grok&quot;) ? `${provider} 收到需求，會把指定模型的受限回答整理後顯示。` : `${provider} 收到需求；若只需唯讀回答，不會啟動寫檔 workflow。`;
+      });
+      const intentButtons = [...root.querySelectorAll(&quot;.intent&quot;)]; const intentDetail = root.querySelector(&quot;#intent-detail&quot;);
+      const intentMap = {
+        chat: { mode: &quot;main&quot;, text: &quot;一般問題由目前選定的主代理回答；主代理依啟動設定或工作流程指定，只計一次模型呼叫。&quot; },
+        second: { mode: &quot;second&quot;, text: &quot;主代理先處理，再向 GUI 選定的第二意見 Agent 取得唯讀觀點；兩次 provider 呼叫都受上限控制。&quot; },
+        compare: { agents: [&quot;user&quot;, &quot;orchestrator&quot;, &quot;codex&quot;, &quot;claude&quot;, &quot;grok&quot;], text: &quot;同一題交給最多三個模型並排回答，再由你或主代理比較；每個模型都算一次呼叫。&quot; },
+        write: { agents: [&quot;user&quot;, &quot;orchestrator&quot;, &quot;codex&quot;, &quot;claude&quot;], write: true, text: &quot;Orchestrator 先建立待核准提案。你按 RUN 後才建立 worktree；Writer 寫入，Reviewer 唯讀審查。&quot; }
+      };
+      function showIntent(intent) {
+        const state = intentMap[intent];
+        const main = demoMainProvider.value.toLowerCase();
+        const second = demoSecondProvider.value.toLowerCase();
+        const agents = state.mode === &quot;main&quot;
+          ? [&quot;user&quot;, &quot;orchestrator&quot;, main]
+          : state.mode === &quot;second&quot;
+            ? [&quot;user&quot;, &quot;orchestrator&quot;, main, second]
+            : state.agents;
+        intentButtons.forEach((button) =&gt; { const active = button.dataset.intent === intent; button.classList.toggle(&quot;btn-primary&quot;, active); button.setAttribute(&quot;aria-pressed&quot;, String(active)); });
+        root.querySelectorAll(&quot;[data-agent]&quot;).forEach((node) =&gt; { node.classList.toggle(&quot;is-called&quot;, agents.includes(node.dataset.agent)); node.classList.toggle(&quot;is-write&quot;, Boolean(state.write &amp;&amp; [&quot;codex&quot;, &quot;claude&quot;].includes(node.dataset.agent))); });
+        intentDetail.textContent = state.text;
+      }
+      intentButtons.forEach((button) =&gt; button.addEventListener(&quot;click&quot;, () =&gt; showIntent(button.dataset.intent)));
+      root.querySelector(&quot;.quote-ref&quot;).addEventListener(&quot;click&quot;, (event) =&gt; {
+        const button = event.currentTarget;
+        const quote = root.querySelector(`#${button.getAttribute(&quot;aria-controls&quot;)}`);
+        quote.hidden = !quote.hidden;
+        button.setAttribute(&quot;aria-expanded&quot;, String(!quote.hidden));
+      });
+      root.querySelector(&quot;#summary-demo&quot;).addEventListener(&quot;click&quot;, () =&gt; {
+        const result = root.querySelector(&quot;#summary-demo-result&quot;);
+        result.hidden = false;
+        root.querySelector(&quot;#summary-demo&quot;).disabled = true;
+        root.querySelector(&quot;#summary-demo&quot;).textContent = &quot;摘要已示意入帳&quot;;
+      });
+      let ledgerNumber = 104;
+      root.querySelector(&quot;#room-demo-post&quot;).addEventListener(&quot;click&quot;, () =&gt; {
+        const input = root.querySelector(&quot;#room-demo-input&quot;); const value = input.value.trim(); if (!value) return;
+        const item = document.createElement(&quot;div&quot;); item.className = &quot;ledger-item&quot;; const id = document.createElement(&quot;span&quot;); id.className = &quot;ledger-id&quot;; id.textContent = `#${ledgerNumber++}`;
+        const content = document.createElement(&quot;div&quot;); const author = document.createElement(&quot;strong&quot;); author.textContent = &quot;你（示意）&quot;; content.append(author, document.createElement(&quot;br&quot;), document.createTextNode(value)); item.append(id, content); root.querySelector(&quot;#demo-ledger&quot;).append(item); input.value = &quot;&quot;;
+        root.querySelector(&quot;#stat-you&quot;).textContent = &quot;2 則 · 示意更新&quot;;
+      });
+      const deliveryNodes = [...root.querySelectorAll(&quot;[data-delivery-state]&quot;)];
+      const deliveryTitle = root.querySelector(&quot;#delivery-demo-title&quot;);
+      const deliveryDetail = root.querySelector(&quot;#delivery-demo-detail&quot;);
+      const deliveryNext = root.querySelector(&quot;#delivery-next&quot;);
+      const deliveryRetry = root.querySelector(&quot;#delivery-retry&quot;);
+      const deliveryOrder = [&quot;queued&quot;, &quot;delivered&quot;, &quot;read&quot;, &quot;working&quot;, &quot;replied&quot;];
+      const deliveryCopy = {
+        queued: [&quot;queued · 已排隊&quot;, &quot;訊息已在帳本，工作只屬於被指定席位；若沒有 active room_wait 就留在隊列，不會改派常駐模型。&quot;],
+        delivered: [&quot;delivered · 已送達終端&quot;, &quot;精確席位的 room_wait 已領取工作並取得私密 lease token；GUI 只顯示狀態，不顯示 token。&quot;],
+        read: [&quot;read · 已讀取&quot;, &quot;終端已呼叫 room_ack(read)，表示內容已交給正確席位。&quot;],
+        working: [&quot;working · 處理中&quot;, &quot;終端已呼叫 room_ack(working)。此時 owner 取消會成為合作式 cancel request，不會把工作偷交給別人。&quot;],
+        replied: [&quot;replied · 已回覆&quot;, &quot;room_reply 已把精確席位的回答冪等寫回 Room Ledger；相同輸入重試不會重複發言。&quot;],
+        failed: [&quot;failed · 失敗&quot;, &quot;room_fail、席位離線或嘗試耗盡會 fail closed。只有 owner 明確重送才回到 queued。&quot;],
+        cancelled: [&quot;cancelled · 已取消&quot;, &quot;未開始的工作立即取消；working 工作以 cancelRequested 合作終止。之後可由 owner 明確重送。&quot;]
+      };
+      let deliveryState = &quot;queued&quot;;
+      function renderDelivery(state) {
+        deliveryState = state;
+        const progressIndex = deliveryOrder.indexOf(state);
+        deliveryNodes.forEach((node) =&gt; {
+          const index = deliveryOrder.indexOf(node.dataset.deliveryState);
+          node.classList.toggle(&quot;is-current&quot;, node.dataset.deliveryState === state);
+          node.classList.toggle(&quot;is-done&quot;, progressIndex &gt;= 0 &amp;&amp; index &gt;= 0 &amp;&amp; index &lt; progressIndex);
+        });
+        deliveryTitle.textContent = deliveryCopy[state][0];
+        deliveryDetail.textContent = deliveryCopy[state][1];
+        deliveryNext.disabled = !deliveryOrder.includes(state) || state === &quot;replied&quot;;
+        deliveryRetry.disabled = ![&quot;failed&quot;, &quot;cancelled&quot;].includes(state);
+      }
+      function resetDelivery() { renderDelivery(&quot;queued&quot;); }
+      deliveryNext.addEventListener(&quot;click&quot;, () =&gt; { const index = deliveryOrder.indexOf(deliveryState); renderDelivery(deliveryOrder[Math.min(index + 1, deliveryOrder.length - 1)]); });
+      root.querySelector(&quot;#delivery-fail&quot;).addEventListener(&quot;click&quot;, () =&gt; renderDelivery(&quot;failed&quot;));
+      root.querySelector(&quot;#delivery-cancel&quot;).addEventListener(&quot;click&quot;, () =&gt; renderDelivery(&quot;cancelled&quot;));
+      deliveryRetry.addEventListener(&quot;click&quot;, resetDelivery);
+      const officeStage = root.querySelector(&quot;#office-stage&quot;);
+      const officeDesks = [...root.querySelectorAll(&quot;.office-desk&quot;)];
+      const officeInput = root.querySelector(&quot;#office-chat-input&quot;);
+      const officeSelection = root.querySelector(&quot;#office-selection&quot;);
+      const officeChat = root.querySelector(&quot;#office-chat&quot;);
+      const officeDelivery = root.querySelector(&quot;#office-delivery-note&quot;);
+      let selectedOfficeDesk = null;
+      let officeDrag = null;
+      function addOfficeMessage(author, text, isYou = false) {
+        const item = document.createElement(&quot;div&quot;);
+        item.className = `office-msg${isYou ? &quot; you&quot; : &quot;&quot;}`;
+        const strong = document.createElement(&quot;strong&quot;);
+        strong.textContent = author;
+        item.append(strong, document.createElement(&quot;br&quot;), document.createTextNode(text));
+        officeChat.append(item);
+        officeChat.scrollTop = officeChat.scrollHeight;
+      }
+      function selectOfficeDesk(desk) {
+        selectedOfficeDesk = desk;
+        officeDesks.forEach((candidate) =&gt; candidate.setAttribute(&quot;aria-pressed&quot;, String(candidate === desk)));
+        const strong = document.createElement(&quot;strong&quot;);
+        strong.textContent = `${desk.dataset.officeName} · ${desk.dataset.officeKind}`;
+        officeSelection.textContent = &quot;&quot;;
+        officeSelection.append(strong, document.createElement(&quot;br&quot;), document.createTextNode(desk.dataset.officeDetail));
+        officeInput.value = desk.dataset.officeMention;
+        officeInput.focus();
+      }
+      officeDesks.forEach((desk) =&gt; {
+        desk.addEventListener(&quot;click&quot;, () =&gt; selectOfficeDesk(desk));
+        desk.addEventListener(&quot;pointerdown&quot;, (event) =&gt; {
+          if (event.button !== 0) return;
+          const stageRect = officeStage.getBoundingClientRect();
+          const deskRect = desk.getBoundingClientRect();
+          officeDrag = { desk, offsetX: event.clientX - deskRect.left, offsetY: event.clientY - deskRect.top, stageRect };
+          desk.style.left = `${deskRect.left - stageRect.left}px`;
+          desk.style.top = `${deskRect.top - stageRect.top}px`;
+          desk.setPointerCapture(event.pointerId);
+        });
+        desk.addEventListener(&quot;pointermove&quot;, (event) =&gt; {
+          if (!officeDrag || officeDrag.desk !== desk || !desk.hasPointerCapture(event.pointerId)) return;
+          const x = Math.max(0, Math.min(officeDrag.stageRect.width - desk.offsetWidth, event.clientX - officeDrag.stageRect.left - officeDrag.offsetX));
+          const y = Math.max(0, Math.min(officeDrag.stageRect.height - desk.offsetHeight, event.clientY - officeDrag.stageRect.top - officeDrag.offsetY));
+          desk.style.left = `${x}px`;
+          desk.style.top = `${y}px`;
+        });
+        const stopDrag = (event) =&gt; { if (officeDrag &amp;&amp; officeDrag.desk === desk) { if (desk.hasPointerCapture(event.pointerId)) desk.releasePointerCapture(event.pointerId); officeDrag = null; } };
+        desk.addEventListener(&quot;pointerup&quot;, stopDrag);
+        desk.addEventListener(&quot;pointercancel&quot;, stopDrag);
+      });
+      root.querySelector(&quot;#office-room&quot;).addEventListener(&quot;change&quot;, (event) =&gt; {
+        const label = event.target.selectedOptions[0].textContent;
+        root.querySelector(&quot;#office-sign&quot;).textContent = `ROOM · ${event.target.value.toUpperCase()}`;
+        officeDesks.forEach((desk) =&gt; { desk.setAttribute(&quot;aria-pressed&quot;, &quot;false&quot;); });
+        root.querySelector('[data-office-kind=&quot;external&quot;]').hidden = event.target.value !== &quot;orchestratory&quot;;
+        root.querySelector('[data-office-kind=&quot;managed&quot;]').hidden = true;
+        const expand = root.querySelector(&quot;#office-expand&quot;);
+        expand.setAttribute(&quot;aria-pressed&quot;, &quot;false&quot;);
+        expand.textContent = &quot;＋ 擴編一席&quot;;
+        selectedOfficeDesk = null;
+        officeInput.value = &quot;&quot;;
+        officeSelection.innerHTML = &quot;&lt;strong&gt;尚未選擇 Agent&lt;/strong&gt;&lt;br&gt;&lt;span class=&#x27;text-muted&#x27;&gt;已清除上一個房間的席位選取；請重新點選目前房間的人物。&lt;/span&gt;&quot;;
+        officeChat.textContent = &quot;&quot;;
+        officeDelivery.textContent = &quot;已重設席位與對話示意；不同 Room 不共用外接席位或選取狀態。&quot;;
+        addOfficeMessage(&quot;system&quot;, `已切換到 ${label} 示意；正式 GUI 會載入該 Room 自己的帳本與額外席位。`);
+      });
+      root.querySelector(&quot;#office-night&quot;).addEventListener(&quot;click&quot;, (event) =&gt; {
+        const enabled = officeStage.classList.toggle(&quot;is-night&quot;);
+        event.currentTarget.setAttribute(&quot;aria-pressed&quot;, String(enabled));
+        event.currentTarget.textContent = enabled ? &quot;☀ 日間&quot; : &quot;☾ 夜間&quot;;
+      });
+      root.querySelector(&quot;#office-quiet&quot;).addEventListener(&quot;click&quot;, (event) =&gt; {
+        const enabled = event.currentTarget.getAttribute(&quot;aria-pressed&quot;) !== &quot;true&quot;;
+        event.currentTarget.setAttribute(&quot;aria-pressed&quot;, String(enabled));
+        event.currentTarget.textContent = enabled ? &quot;🔔 取消安靜&quot; : &quot;🔕 安靜&quot;;
+        root.querySelectorAll(&quot;.office-pet&quot;).forEach((pet) =&gt; { pet.style.animationPlayState = enabled ? &quot;paused&quot; : &quot;running&quot;; });
+      });
+      root.querySelector(&quot;#office-leisure&quot;).addEventListener(&quot;click&quot;, (event) =&gt; {
+        const enabled = event.currentTarget.getAttribute(&quot;aria-pressed&quot;) !== &quot;true&quot;;
+        event.currentTarget.setAttribute(&quot;aria-pressed&quot;, String(enabled));
+        event.currentTarget.textContent = enabled ? &quot;💼 回到工作&quot; : &quot;🧘 休閒&quot;;
+        officeDesks.forEach((desk) =&gt; {
+          const state = desk.querySelector(&quot;.office-state&quot;);
+          if (!state.dataset.original) state.dataset.original = state.textContent;
+          if (!desk.classList.contains(&quot;is-busy&quot;)) state.textContent = enabled ? &quot;☕ 休閒中&quot; : state.dataset.original;
+        });
+      });
+      root.querySelector(&quot;#office-expand&quot;).addEventListener(&quot;click&quot;, (event) =&gt; {
+        const extra = root.querySelector('[data-office-kind=&quot;managed&quot;]');
+        extra.hidden = !extra.hidden;
+        const enabled = !extra.hidden;
+        event.currentTarget.setAttribute(&quot;aria-pressed&quot;, String(enabled));
+        event.currentTarget.textContent = enabled ? &quot;－ 收回示意席位&quot; : &quot;＋ 擴編一席&quot;;
+        addOfficeMessage(&quot;system&quot;, enabled ? &quot;已示意建立管理型 claude（審查）席位與桌位。&quot; : &quot;已收回示意席位。&quot;);
+      });
+      root.querySelector(&quot;#office-chat-send&quot;).addEventListener(&quot;click&quot;, () =&gt; {
+        const text = officeInput.value.trim();
+        if (!text) return;
+        addOfficeMessage(&quot;you（示意）&quot;, text, true);
+        const kind = selectedOfficeDesk?.dataset.officeKind;
+        if (kind === &quot;external&quot;) {
+          officeDelivery.textContent = &quot;外接終端：已建立精確收件工作；本席位正在 room_wait 值班，正式系統會顯示 queued → delivered → read → working → replied。&quot;;
+          resetDelivery();
+        } else if (kind === &quot;permanent&quot; || kind === &quot;managed&quot;) {
+          officeDelivery.textContent = &quot;常駐／管理型席位：正式 GUI 會建立受 quota 控制的模型回合；這裡只顯示模擬。&quot;;
+          addOfficeMessage(selectedOfficeDesk.dataset.officeName, &quot;（示意）已收到；正式系統的回答會寫回編號帳本。&quot;);
+        } else {
+          officeDelivery.textContent = &quot;未選模型席位：正式 GUI 會把一般發言寫入目前 Room 帳本。&quot;;
+        }
+        officeInput.value = selectedOfficeDesk?.dataset.officeMention || &quot;&quot;;
+      });
+      const pipeNodes = [...root.querySelectorAll(&quot;[data-pipe]&quot;)]; const pipeTitle = root.querySelector(&quot;#pipe-title&quot;); const pipeDetail = root.querySelector(&quot;#pipe-detail&quot;); const pipeBack = root.querySelector(&quot;#pipe-back&quot;); const pipeNext = root.querySelector(&quot;#pipe-next&quot;); const pipeReset = root.querySelector(&quot;#pipe-reset&quot;);
+      const pipeStates = [
+        [&quot;需求已收到，但尚未寫檔&quot;, &quot;你可以先討論、讀檔與要求方案。這個階段不需要 Git 乾淨，也不會建立 worktree。&quot;],
+        [&quot;顯示 bounded workflow 提案&quot;, &quot;畫面列出專案、Writer、Reviewer、限制與預計範圍。提案本身不是批准。&quot;],
+        [&quot;等待你輸入 RUN&quot;, &quot;必須由人類確認這一次的精確範圍。取消或逾時都會 fail closed，不會寫入。&quot;],
+        [&quot;建立隔離 worktree&quot;, &quot;一次只有一個 Writer；來源專案保持不動，模型不能取得任意 shell 或專案外路徑。&quot;],
+        [&quot;Writer 完成，成果等待 owner 審核&quot;, &quot;完成只撤銷 lease 並保留 task worktree。GUI 顯示自然語言風險、逐檔操作與大小；主專案尚未改動。&quot;],
+        [&quot;輸入 APPLY WRITER &lt;taskId&gt; TO PROJECT&quot;, &quot;套用前重新驗證 source、preview 與逐檔 hash。核准只用一次；成功後 task 永久標記 applied，不可復活。&quot;]
+      ];
+      let pipeStep = 0;
+      function renderPipe() { pipeNodes.forEach((node, i) =&gt; { node.classList.toggle(&quot;is-current&quot;, i === pipeStep); node.classList.toggle(&quot;is-done&quot;, i &lt; pipeStep); }); pipeTitle.textContent = pipeStates[pipeStep][0]; pipeDetail.textContent = pipeStates[pipeStep][1]; pipeBack.disabled = pipeStep === 0; pipeNext.disabled = pipeStep === pipeStates.length - 1; pipeNext.textContent = pipeStep === 1 ? &quot;模擬 RUN 核准&quot; : &quot;下一階段&quot;; }
+      pipeBack.addEventListener(&quot;click&quot;, () =&gt; { pipeStep = Math.max(0, pipeStep - 1); renderPipe(); });
+      pipeNext.addEventListener(&quot;click&quot;, () =&gt; { pipeStep = Math.min(pipeStates.length - 1, pipeStep + 1); renderPipe(); });
+      pipeReset.addEventListener(&quot;click&quot;, () =&gt; { pipeStep = 0; renderPipe(); });
+      const writerOrigin = root.querySelector(&quot;#writer-origin&quot;);
+      const writerChildProvider = root.querySelector(&quot;#writer-child-provider&quot;);
+      const writerTaskInput = root.querySelector(&quot;#writer-task-id&quot;);
+      const writerResult = root.querySelector(&quot;#writer-result&quot;);
+      const writerReview = root.querySelector(&quot;#writer-review&quot;);
+      const writerApplyConfirm = root.querySelector(&quot;#writer-apply-confirm&quot;);
+      const writerApplyStatus = root.querySelector(&quot;#writer-apply-status&quot;);
+      let writerEpoch = 0;
+      let activeWriter = null;
+      let activeWriterTask = null;
+      let reviewWriterTask = null;
+      const appliedWriterTasks = new Set();
+      const writerLabels = { resident: &quot;常駐 Codex&quot;, managed: &quot;管理型 Codex（前端）&quot;, external: &quot;外接 Codex（前端終端）&quot; };
+      function showWriter(title, detail) {
+        writerResult.textContent = &quot;&quot;;
+        const strong = document.createElement(&quot;strong&quot;);
+        strong.textContent = title;
+        writerResult.append(strong, document.createElement(&quot;br&quot;), document.createTextNode(detail));
+      }
+      function grantWriter(isSwitch = false) {
+        const selected = writerOrigin.value;
+        const requestedTask = writerTaskInput.value.trim();
+        if (!requestedTask) { showWriter(&quot;缺少 taskId&quot;, &quot;請先輸入任務識別。&quot;); return; }
+        if (appliedWriterTasks.has(requestedTask)) {
+          showWriter(`任務 ${requestedTask} 已 applied`, &quot;已回寫的 task 是終態；不能以同一 taskId 再授予、交接或復活 Writer。請建立新的 taskId。&quot;);
+          return;
+        }
+        if (activeWriter &amp;&amp; !isSwitch) {
+          showWriter(`Lease #${writerEpoch} 仍在使用`, &quot;每個 task 只允許一位 active Writer；要換人請使用「切換 Writer」並留下 checkpoint。&quot;);
+          return;
+        }
+        writerEpoch += 1;
+        activeWriter = selected;
+        activeWriterTask = isSwitch ? activeWriterTask : requestedTask;
+        const identity = selected === &quot;external&quot;
+          ? &quot;onBehalfOf = 外接 Codex（前端終端）；executedBy = Writer Companion。外接席位保留任務人格，寫入由受管 companion 在隔離 worktree 執行。&quot;
+          : `executedBy = ${writerLabels[selected]}；此席位直接在核准的隔離 worktree 執行。`;
+        showWriter(`${isSwitch ? &quot;已切換&quot; : &quot;已授予&quot;} Lease · ${activeWriterTask} · epoch ${writerEpoch}`, `${identity} capability 只對此 task、workspace、共享 task worktree 與 epoch 有效。`);
+      }
+      root.querySelector(&quot;#writer-grant&quot;).addEventListener(&quot;click&quot;, () =&gt; grantWriter(false));
+      root.querySelector(&quot;#writer-switch&quot;).addEventListener(&quot;click&quot;, () =&gt; {
+        if (!activeWriter) { showWriter(&quot;目前沒有 active lease&quot;, reviewWriterTask ? `任務 ${reviewWriterTask} 已完成待審，不能交接；請先決定是否 APPLY。` : &quot;先授予 Writer Lease；切換時正式系統還會要求目前 epoch 與 checkpoint。&quot;); return; }
+        grantWriter(true);
+      });
+      root.querySelector(&quot;#writer-child&quot;).addEventListener(&quot;click&quot;, () =&gt; {
+        if (!activeWriter) { showWriter(&quot;無法建立子執行者&quot;, &quot;子委派必須綁定一份 active 父 Writer Lease。&quot;); return; }
+        const childProvider = writerChildProvider.value;
+        const sameProvider = childProvider === &quot;codex&quot;;
+        showWriter(sameProvider ? &quot;同 provider 子 Agent · write&quot; : &quot;跨 provider 子 Agent · read-only&quot;, sameProvider
+          ? `父 Lease epoch ${writerEpoch} 下取得 fenced write capability，與父 Writer 共用 ${activeWriterTask} 的 task worktree；父、子與 sibling 由控制面序列執行，且子 Agent 不能再次委派。`
+          : childProvider === &quot;grok&quot;
+            ? `Grok 不接觸父 Writer worktree，也沒有 Read、Glob、Grep、Workspace MCP 或 capability token；它只在空白 scratch 讀取控制面產生的 bounded Git snapshot，敏感或過大內容會 fail closed。`
+            : `Claude 只讀父 Writer 的 task worktree，不取得 capability token；父 Lease 切換或撤銷時立即失效。`);
+      });
+      root.querySelector(&quot;#writer-complete&quot;).addEventListener(&quot;click&quot;, () =&gt; {
+        if (!activeWriter) { showWriter(reviewWriterTask ? &quot;成果仍在等待審核&quot; : &quot;沒有可完成的 Lease&quot;, reviewWriterTask ? `主專案尚未改動；請檢視逐檔清單並輸入 APPLY WRITER ${reviewWriterTask} TO PROJECT。` : &quot;目前沒有 active Writer 或子委派。&quot;); return; }
+        reviewWriterTask = activeWriterTask;
+        activeWriter = null;
+        activeWriterTask = null;
+        writerReview.hidden = false;
+        root.querySelector(&quot;#writer-review-title&quot;).textContent = &quot;寫作完成 · 尚未回寫主專案&quot;;
+        writerApplyConfirm.value = &quot;&quot;;
+        writerApplyConfirm.placeholder = `APPLY WRITER ${reviewWriterTask} TO PROJECT`;
+        writerApplyStatus.textContent = &quot;目前只有 retained task worktree 被改動；主專案尚未改動。&quot;;
+        root.querySelector(&quot;#writer-apply&quot;).disabled = false;
+        showWriter(`Lease epoch ${writerEpoch} 已完成 · 待 owner 審核`, `任務 ${reviewWriterTask} 的 capability 與所有子委派均已撤銷；GUI 已顯示自然語言風險與逐檔清單。`);
+      });
+      root.querySelector(&quot;#writer-apply&quot;).addEventListener(&quot;click&quot;, () =&gt; {
+        if (!reviewWriterTask) { writerApplyStatus.textContent = &quot;目前沒有待回寫的 Writer 任務。&quot;; return; }
+        const expected = `APPLY WRITER ${reviewWriterTask} TO PROJECT`;
+        if (writerApplyConfirm.value !== expected) {
+          writerApplyStatus.textContent = `確認文字不符；沒有修改主專案。請完整輸入：${expected}`;
+          return;
+        }
+        const appliedTask = reviewWriterTask;
+        appliedWriterTasks.add(appliedTask);
+        reviewWriterTask = null;
+        root.querySelector(&quot;#writer-review-title&quot;).textContent = &quot;已回寫主專案 · applied 終態&quot;;
+        writerApplyStatus.textContent = `任務 ${appliedTask} 已回寫並標記 applied；同一 taskId 永久不可復活。`;
+        root.querySelector(&quot;#writer-apply&quot;).disabled = true;
+        showWriter(`任務 ${appliedTask} 已 applied`, &quot;示意回寫完成；之後若有新工作，必須使用新的 taskId 建立新 lease。&quot;);
+      });
+      syncDemoSecondProvider(); showStep(0); showIntent(&quot;chat&quot;); renderPipe(); resetDelivery();
+    })();
+  &lt;/script&gt;
+&lt;/div&gt;
+
+&lt;script&gt;
+(() =&gt; {
+  if (window.FloatingUIDOM == null) {
+    return;
+  }
+  const { autoUpdate, computePosition, flip, offset, shift, size } =
+    window.FloatingUIDOM;
+  const tooltipPlacements = new Set([&quot;top&quot;, &quot;right&quot;, &quot;bottom&quot;, &quot;left&quot;]);
+  const tooltipId = `codex-visualization-tooltip-${
+    window.crypto?.randomUUID?.() ?? Date.now().toString(36)
+  }`;
+  const tooltipGap = 5;
+  const hoverDelay = 700;
+  const skipDelay = 300;
+  let activeTrigger = null;
+  let pendingTrigger = null;
+  let tooltip = null;
+  let openTimeout = null;
+  let autoUpdateCleanup = null;
+  let positionRequest = 0;
+  let skipDelayUntil = 0;
+
+  const getTrigger = (target) =&gt;
+    target?.nodeType === Node.ELEMENT_NODE
+      ? target.closest(&quot;[data-tooltip]&quot;)
+      : null;
+  const containsTarget = (trigger, target) =&gt;
+    target?.nodeType != null &amp;&amp; trigger.contains(target);
+  const getContent = (trigger) =&gt;
+    trigger.getAttribute(&quot;data-tooltip&quot;)?.trim() ?? &quot;&quot;;
+  const getPlacement = (trigger) =&gt; {
+    const placement = trigger.getAttribute(&quot;data-tooltip-placement&quot;);
+    return tooltipPlacements.has(placement) ? placement : &quot;top&quot;;
+  };
+  const getTooltip = () =&gt; {
+    if (tooltip == null) {
+      tooltip = document.createElement(&quot;div&quot;);
+      tooltip.id = tooltipId;
+      tooltip.className = &quot;tooltip&quot;;
+      tooltip.setAttribute(&quot;role&quot;, &quot;tooltip&quot;);
+    }
+    return tooltip;
+  };
+  const setDescribedBy = (trigger, described) =&gt; {
+    const ids = new Set(
+      (trigger.getAttribute(&quot;aria-describedby&quot;) ?? &quot;&quot;)
+        .split(/\s+/)
+        .filter(Boolean),
+    );
+    if (described) {
+      ids.add(tooltipId);
+    } else {
+      ids.delete(tooltipId);
+    }
+    if (ids.size === 0) {
+      trigger.removeAttribute(&quot;aria-describedby&quot;);
+    } else {
+      trigger.setAttribute(&quot;aria-describedby&quot;, [...ids].join(&quot; &quot;));
+    }
+  };
+  const clearOpenTimeout = () =&gt; {
+    if (openTimeout != null) {
+      window.clearTimeout(openTimeout);
+      openTimeout = null;
+    }
+    pendingTrigger = null;
+  };
+  const closeTooltip = (activateSkipDelay = true) =&gt; {
+    clearOpenTimeout();
+    positionRequest += 1;
+    autoUpdateCleanup?.();
+    autoUpdateCleanup = null;
+    if (activeTrigger == null) {
+      return;
+    }
+    setDescribedBy(activeTrigger, false);
+    activeTrigger = null;
+    tooltip?.remove();
+    if (activateSkipDelay) {
+      skipDelayUntil = Date.now() + skipDelay;
+    }
+  };
+  const updatePosition = (trigger, floating) =&gt; {
+    const request = ++positionRequest;
+    void computePosition(trigger, floating, {
+      middleware: [
+        offset(tooltipGap),
+        flip({ padding: tooltipGap }),
+        shift({ padding: tooltipGap }),
+        size({
+          padding: tooltipGap,
+          apply({ availableHeight, availableWidth, elements }) {
+            elements.floating.style.setProperty(
+              &quot;--tooltip-available-width&quot;,
+              `${Math.max(0, availableWidth)}px`,
+            );
+            elements.floating.style.setProperty(
+              &quot;--tooltip-available-height&quot;,
+              `${Math.max(0, availableHeight)}px`,
+            );
+          },
+        }),
+      ],
+      placement: getPlacement(trigger),
+      strategy: &quot;fixed&quot;,
+    })
+      .then(({ x, y }) =&gt; {
+        if (activeTrigger !== trigger || request !== positionRequest) {
+          return;
+        }
+        const scale = window.devicePixelRatio || 1;
+        floating.style.transform = `translate(${Math.round(x * scale) / scale}px, ${Math.round(y * scale) / scale}px)`;
+        floating.style.visibility = &quot;visible&quot;;
+      })
+      .catch(() =&gt; {
+        if (activeTrigger === trigger &amp;&amp; request === positionRequest) {
+          closeTooltip(false);
+        }
+      });
+  };
+  const openTooltip = (trigger) =&gt; {
+    const content = getContent(trigger);
+    if (!trigger.isConnected || content.length === 0) {
+      return;
+    }
+    clearOpenTimeout();
+    if (activeTrigger === trigger) {
+      return;
+    }
+    closeTooltip();
+    const floating = getTooltip();
+    floating.textContent = content;
+    floating.style.visibility = &quot;hidden&quot;;
+    floating.style.transform = &quot;translate(0, 0)&quot;;
+    document.body.appendChild(floating);
+    activeTrigger = trigger;
+    setDescribedBy(trigger, true);
+    autoUpdateCleanup = autoUpdate(trigger, floating, () =&gt; {
+      updatePosition(trigger, floating);
+    });
+  };
+  const requestOpen = (trigger, immediate = false) =&gt; {
+    if (
+      getContent(trigger).length === 0 ||
+      activeTrigger === trigger ||
+      pendingTrigger === trigger
+    ) {
+      return;
+    }
+    clearOpenTimeout();
+    pendingTrigger = trigger;
+    const delay =
+      immediate || activeTrigger != null || Date.now() &lt; skipDelayUntil
+        ? 0
+        : hoverDelay;
+    if (delay === 0) {
+      openTooltip(trigger);
+      return;
+    }
+    openTimeout = window.setTimeout(() =&gt; {
+      openTimeout = null;
+      pendingTrigger = null;
+      openTooltip(trigger);
+    }, delay);
+  };
+  const handlePointerOpen = (event) =&gt; {
+    if (event.pointerType === &quot;touch&quot;) {
+      return;
+    }
+    const trigger = getTrigger(event.target);
+    if (trigger == null || containsTarget(trigger, event.relatedTarget)) {
+      return;
+    }
+    requestOpen(trigger);
+  };
+  const handleLeave = (event) =&gt; {
+    const trigger = getTrigger(event.target);
+    if (trigger == null || containsTarget(trigger, event.relatedTarget)) {
+      return;
+    }
+    if (activeTrigger === trigger || pendingTrigger === trigger) {
+      closeTooltip();
+    }
+  };
+  const handleFocusIn = (event) =&gt; {
+    const trigger = getTrigger(event.target);
+    if (trigger?.matches(&quot;:focus-visible&quot;)) {
+      requestOpen(trigger, true);
+    }
+  };
+  const handleKeyDown = (event) =&gt; {
+    if (event.key === &quot;Escape&quot;) {
+      closeTooltip();
+    }
+  };
+  const handleContextMenu = (event) =&gt; {
+    const trigger = getTrigger(event.target);
+    if (activeTrigger === trigger || pendingTrigger === trigger) {
+      closeTooltip();
+    }
+  };
+  const destroy = () =&gt; {
+    closeTooltip(false);
+    document.removeEventListener(&quot;pointerover&quot;, handlePointerOpen);
+    document.removeEventListener(&quot;pointerout&quot;, handleLeave);
+    document.removeEventListener(&quot;focusin&quot;, handleFocusIn);
+    document.removeEventListener(&quot;focusout&quot;, handleLeave);
+    document.removeEventListener(&quot;keydown&quot;, handleKeyDown);
+    document.removeEventListener(&quot;contextmenu&quot;, handleContextMenu);
+    tooltip = null;
+  };
+
+  document.addEventListener(&quot;pointerover&quot;, handlePointerOpen);
+  document.addEventListener(&quot;pointerout&quot;, handleLeave);
+  document.addEventListener(&quot;focusin&quot;, handleFocusIn);
+  document.addEventListener(&quot;focusout&quot;, handleLeave);
+  document.addEventListener(&quot;keydown&quot;, handleKeyDown);
+  document.addEventListener(&quot;contextmenu&quot;, handleContextMenu);
+  window.addEventListener(&quot;pagehide&quot;, destroy, { once: true });
+})();
+&lt;/script&gt;
+&lt;script&gt;
+(() =&gt; {
+  const initialize = () =&gt; {
+    globalThis.lucide?.createIcons({ attrs: { width: 16, height: 16 } });
+  };
+  if (globalThis.lucide != null) {
+    initialize();
+    return;
+  }
+  document
+    .getElementById(&quot;codex-visualization-lucide&quot;)
+    ?.addEventListener(&quot;load&quot;, initialize, { once: true });
+})();
+&lt;/script&gt;
+
+&lt;/body&gt;
+&lt;/html&gt;
+"></iframe>
+</body>
+</html>

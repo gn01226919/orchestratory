@@ -1,0 +1,9 @@
+[
+  {
+    "provider": "codex",
+    "model": "replace-with-current-model-id",
+    "inputUsdPerMillionTokens": 1,
+    "outputUsdPerMillionTokens": 1,
+    "maxOutputTokens": 4096
+  }
+]

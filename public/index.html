@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Orchestratory</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <div class="app">
+      <aside class="side" aria-label="工作區設定">
+        <div class="brand">
+          <span class="brand-dot" aria-hidden="true"></span>
+          <b>Orchestratory</b>
+          <small>local · security-first</small>
+        </div>
+
+        <nav class="side-nav" aria-label="主要功能">
+          <a class="nav-card" href="/room">
+            <b>Room 即時協作</b>
+            <small>查看 agents 對話並直接發言</small>
+          </a>
+          <a class="nav-card" href="/room?mode=history">
+            <b>歷史紀錄</b>
+            <small>按編號翻閱 Room 帳本</small>
+          </a>
+        </nav>
+
+        <label class="field" for="chat-workspace">專案
+          <select id="chat-workspace"><option value="">載入中…</option></select>
+        </label>
+        <button id="request-workspace" class="workspace-add-button" type="button">＋ 新增專案</button>
+        <label class="field" for="chat-provider">主代理（隨時可換，歷史保留）
+          <select id="chat-provider"><option value="codex">Codex</option></select>
+        </label>
+        <label class="field" for="chat-model">模型
+          <select id="chat-model"><option value="gpt-5.6-sol">gpt-5.6-sol</option></select>
+        </label>
+        <label class="field" for="second-provider">第二意見代理
+          <select id="second-provider"></select>
+        </label>
+        <label class="field" for="second-model">第二意見模型
+          <select id="second-model"></select>
+        </label>
+
+        <div class="rail" aria-label="已註冊 agents">
+          <div class="rail-row"><i class="dot on"></i><span><b id="main-agent-name">codex</b><small id="main-agent-model">gpt-5.6-sol · 主代理 · 可讀專案檔案</small></span></div>
+          <div class="rail-row"><i class="dot"></i><span><b>claude</b><small>第二意見 · 唯讀</small></span></div>
+          <div class="rail-row"><i class="dot"></i><span><b>coding team</b><small>寫檔前一定再確認</small></span></div>
+        </div>
+
+        <div class="side-foot">
+          <div id="chat-usage" class="usage mono">0 輪 · 0 呼叫</div>
+          <button id="new-chat" type="button">新對話</button>
+          <div id="connection" class="conn">連線中…</div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <div id="chat-messages" class="stream" aria-live="polite">
+          <div class="welcome">
+            <b>直接輸入需求就開始</b>
+            <p>問問題、讀程式碼、要求修改都在這一條對話裡完成。@codex、@claude、@grok 可單輪指定模型，多個 @ 並排比稿。要動到檔案時會先給你一張提案卡，按下 RUN 才會執行，變更只進安全分支。</p>
+          </div>
+        </div>
+        <form id="chat-form" class="composer">
+          <textarea id="chat-input" rows="3" maxlength="20000" placeholder="例如：先讀 src/ 說明這個專案的架構，再建議下一步。" required></textarea>
+          <div class="composer-foot">
+            <span>Enter 送出 · Shift+Enter 換行 · @模型 指定／比稿 · 使用訂閱額度</span>
+            <button id="chat-send" class="primary" type="submit">送出</button>
+          </div>
+        </form>
+      </main>
+    </div>
+    <section id="workspace-onboarding" class="workspace-onboarding" hidden role="dialog" aria-modal="true" aria-labelledby="workspace-onboarding-title">
+      <div class="workspace-onboarding-card">
+        <header>
+          <span><small>SAFE WORKSPACE ONBOARDING</small><b id="workspace-onboarding-title">新增專案</b></span>
+          <button id="workspace-onboarding-close" type="button" aria-label="關閉新增專案">×</button>
+        </header>
+        <div id="workspace-onboarding-start" class="workspace-onboarding-start">
+          <p>選擇 Git 專案資料夾，或直接貼上完整路徑。系統會先檢查，確認前不會變更授權。</p>
+          <button id="workspace-pick" class="workspace-pick" type="button"><b>📁 選擇資料夾</b><small>開啟 macOS 原生選擇器</small></button>
+          <div class="workspace-divider"><span>或輸入路徑</span></div>
+          <form id="workspace-path-form">
+            <label for="workspace-path">專案路徑</label>
+            <div><input id="workspace-path" type="text" maxlength="4096" autocomplete="off" spellcheck="false" placeholder="~/Projects/my-app" required><button type="submit">檢查</button></div>
+          </form>
+          <small class="workspace-boundary-note">不接受 Home、系統根目錄、憑證目錄、外接／網路磁碟或非 Git 根目錄。</small>
+        </div>
+        <div id="workspace-onboarding-preview" class="workspace-onboarding-preview" hidden>
+          <div class="workspace-preview-title"><span><small>準備加入</small><b id="workspace-preview-label">PROJECT</b></span><em id="workspace-preview-state">檢查完成</em></div>
+          <code id="workspace-preview-path"></code>
+          <div id="workspace-preview-checks" class="workspace-preview-checks"></div>
+          <div id="workspace-confirm-area">
+            <label for="workspace-confirmation">輸入 <code id="workspace-confirmation-phrase"></code> 確認授權</label>
+            <input id="workspace-confirmation" type="text" maxlength="160" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="workspace-onboarding-actions">
+            <button id="workspace-preview-back" type="button">返回</button>
+            <button id="workspace-confirm" class="primary" type="button">確認加入專案</button>
+          </div>
+        </div>
+        <div id="workspace-onboarding-success" class="workspace-onboarding-success" hidden>
+          <i>✓</i><b>專案已安全加入</b><p id="workspace-success-path"></p><button id="workspace-success-done" class="primary" type="button">開始使用</button>
+        </div>
+        <p id="workspace-onboarding-status" class="workspace-onboarding-status" aria-live="polite"></p>
+      </div>
+    </section>
+  </body>
+</html>

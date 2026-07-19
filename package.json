@@ -1,0 +1,36 @@
+{
+  "name": "orchestratory",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Security-first local orchestrator for subscription coding CLIs",
+  "type": "module",
+  "engines": {
+    "node": ">=22.20.0"
+  },
+  "packageManager": "npm@10.9.3",
+  "bin": {
+    "orchestrator": "./bin/orchestrator.mjs"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "doctor": "node src/main.ts doctor",
+    "web": "node src/main.ts web",
+    "test": "node --test",
+    "test:fuzz": "node --test test/fuzz-smoke.test.ts",
+    "test:coverage": "node --experimental-test-coverage --test --test-coverage-exclude=**/tui.ts --test-coverage-lines=90 --test-coverage-branches=85 --test-coverage-functions=90",
+    "check:syntax": "node --check src/main.ts && node --check src/help.ts && node --check src/cli-entry.ts && node --check src/core/provider-call-governor.ts && node --check src/core/room-pty.ts && node --check src/core/session.ts && node --check src/core/workspace-onboarding.ts && node --check src/security/transcript.ts && node --check src/ui/tui.ts && node --check src/ui/terminal-dashboard.ts && node --check src/mcp/workspace-server.ts && node --check bin/orchestrator.mjs && node --check bin/workspace-mcp.mjs && node --check public/app.js && node --check public/room.js && node --check scripts/security-scan.mjs && node --check scripts/history-scan.mjs && node --check scripts/scan-rules.mjs && node --check scripts/sbom.mjs && node --check scripts/repro-smoke.mjs",
+    "audit:local": "node scripts/security-scan.mjs",
+    "audit:history": "node scripts/history-scan.mjs",
+    "sbom:write": "node scripts/sbom.mjs --write",
+    "sbom:check": "node scripts/sbom.mjs --check",
+    "repro:smoke": "node scripts/repro-smoke.mjs",
+    "check": "npm run check:syntax && npm run typecheck && npm run test:coverage && npm run test:fuzz && npm run sbom:check && npm run audit:local && npm run audit:history",
+    "check:release": "npm run check && npm audit && npm run repro:smoke && npm pack --dry-run --ignore-scripts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.30",
+    "typescript": "5.8.3"
+  },
+  "license": "Apache-2.0"
+}

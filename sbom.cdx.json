@@ -1,0 +1,120 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "version": 1,
+  "metadata": {
+    "component": {
+      "type": "application",
+      "bom-ref": "pkg:npm/orchestratory@0.0.1",
+      "name": "orchestratory",
+      "version": "0.0.1",
+      "purl": "pkg:npm/orchestratory@0.0.1"
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40types%2Fnode@22.15.30",
+      "name": "@types/node",
+      "version": "22.15.30",
+      "scope": "excluded",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "E90EE5AF4E9B1077657E9954E9845B806D52141765B1F342E3F957F92921893B347292643849665A5B3C3F10C5BF8C98FF129BF18E923B43A6497E3082A4D96C"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/%40types%2Fnode@22.15.30",
+      "properties": [
+        {
+          "name": "orchestratory:npm:development",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/typescript@5.8.3",
+      "name": "typescript",
+      "version": "5.8.3",
+      "scope": "excluded",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "A757625BA4EA2FD2F4EE7371BD130CEE130CC387395CEA3FD626CBE1A0081A6480B7DB254C4D57830E4A5AEA1FDAE4CEBC283D058ED9462F86685FBBB1F80F79"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "purl": "pkg:npm/typescript@5.8.3",
+      "properties": [
+        {
+          "name": "orchestratory:npm:development",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/undici-types@6.21.0",
+      "name": "undici-types",
+      "version": "6.21.0",
+      "scope": "excluded",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "8B00D9AA0D10006AE0F516AFE47E27D0CEB87379A4479F5C27AC10A7EEC2E2723482C984C5A79D6982CD3B8E1E4F802D041C236D38863CC96DD8C7744FD1FD25"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "purl": "pkg:npm/undici-types@6.21.0",
+      "properties": [
+        {
+          "name": "orchestratory:npm:development",
+          "value": "true"
+        }
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "pkg:npm/%40types%2Fnode@22.15.30",
+      "dependsOn": [
+        "pkg:npm/undici-types@6.21.0"
+      ]
+    },
+    {
+      "ref": "pkg:npm/orchestratory@0.0.1",
+      "dependsOn": [
+        "pkg:npm/%40types%2Fnode@22.15.30",
+        "pkg:npm/typescript@5.8.3"
+      ]
+    },
+    {
+      "ref": "pkg:npm/typescript@5.8.3",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/undici-types@6.21.0",
+      "dependsOn": []
+    }
+  ]
+}
