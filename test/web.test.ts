@@ -1080,6 +1080,8 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomHtml, /id="agent-request-count"/u);
   assert.match(roomHtml, /id="agent-requests-panel"/u);
   assert.match(roomHtml, /room_join_request/u);
+  assert.match(roomHtml, /Enter 兩次送出/u);
+  assert.match(roomHtml, /⌘ Enter 立即送出/u);
   assert.match(roomHtml, /id="managed-agent-create"/u);
   assert.match(roomHtml, /受控即時 Agent/u);
   assert.match(roomHtml, /核准後會等待第一則 GUI 任務/u);
@@ -1095,6 +1097,10 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomScript, /function refreshOfficeControlPlane\(/u);
   assert.match(roomScript, /function refreshRoomCatalog\(/u);
   assert.match(roomScript, /function mentionLifecycle\(/u);
+  assert.match(roomScript, /function installMacComposerKeyboard\(/u);
+  assert.match(roomScript, /event\.isComposing/u);
+  assert.match(roomScript, /event\.metaKey/u);
+  assert.match(roomScript, /DOUBLE_ENTER_WINDOW_MS/u);
   assert.match(roomScript, /回應處理中/u);
   assert.match(roomScript, /件申請/u);
   assert.match(roomScript, /有申請/u);

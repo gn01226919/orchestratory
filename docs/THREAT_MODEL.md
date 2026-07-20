@@ -64,6 +64,7 @@
 | T30 | GUI 將新 provider call 冒充成既有外接終端、把只在線的席位誤報成可喚醒，把普通 `@provider` 帳本文字誤報成永久執行中，或受控即時 Agent 藉對話擴權寫檔 | 外接終端與 managed-subagent 使用分離 endpoint/seat ID；`room_join_request` 保持至 GUI 核准並開始第一段 bounded wait，之後只由原終端的 active `room_wait` 收件；API/UI 明示 `active-tool-pull`、`wakeable` 與休班 queued 狀態；常駐 provider 等待只由 `room_mention` 的 start/outcome lifecycle event 驅動，不由文字推測；直接 managed wake 固定唯讀。外接 Writer 另標示 via Writer Companion，HMAC audit 保存雙重身份；寫入只經 Writer Lease | 受控即時 Agent 每次直接喚醒不是 provider 原生持續 session；MCP 無法替完全 idle 的外部 host 發起新 turn；Writer Companion 代表執行而非原生終端程序，UI 與文件不得模糊三者 |
 | T31 | GUI 訊息投遞給錯誤 Codex/Claude 視窗，或離線後 fallback 到同名常駐 Agent | per-process presence UUID、room/workspace exact binding、owner join、target presence id、delivery lease token、完整 receipt state、無 fallback、離線 fail、idempotent reply | 終端未持續呼叫 `room_wait` 時只能排隊或明確失敗，無法保證原生 CLI 被動接收 unsolicited input |
 | T32 | Writer 交接後舊 Writer／子 Agent 繼續寫，或技術 executor 冒充顯示身份 | monotonic lease epoch、RAM capability、每次 Workspace MCP mutation 重驗、父 lease 撤銷連帶 child、same-provider-only child write、HMAC dual-identity audit | daemon crash 後 RAM capability 遺失，active lease 必須由 owner 重新建立或交接；本機 owner 完全失陷不在邊界內 |
+| T33 | 雙 Enter 送出與中文 IME、換行、長按或異步送出衝突，造成未預期訊息／provider call | 只接受 1.6 秒內、內容／selection 完全不變的第二次無修飾 Enter；IME `isComposing`/229 連 keyup 壓制、repeat 拒絕、modifier/blur/其他鍵清除、disabled submit 不重送；Shift/Option 換行、Command+Enter 為明確快速送出 | 瀏覽器／輸入法對 composition event 的上游行為可能改變；可視鍵盤與 assistive technology 仍可使用可見送出按鈕 |
 
 ## 5. STRIDE 摘要
 

@@ -830,6 +830,65 @@ function offlineExternalMention(text) {
   return text.match(/^@((?:codex|claude|grok)(?:[1-9][0-9]*|（[^）\r\n]{1,24}）))\s/u)?.[1];
 }
 
+const DOUBLE_ENTER_WINDOW_MS = 1600;
+const composerEnterState = new WeakMap();
+const suppressComposerEnterKeyup = new WeakSet();
+
+function installMacComposerKeyboard(input, form, submitButton) {
+  input.addEventListener("keydown", (event) => {
+    if (event.isComposing || event.keyCode === 229) {
+      composerEnterState.delete(input);
+      suppressComposerEnterKeyup.add(input);
+      return;
+    }
+    if (event.key !== "Enter") {
+      composerEnterState.delete(input);
+      return;
+    }
+    const commandSend = event.metaKey && !event.shiftKey && !event.altKey && !event.ctrlKey;
+    if (commandSend) {
+      event.preventDefault();
+      composerEnterState.delete(input);
+      suppressComposerEnterKeyup.add(input);
+      if (!submitButton.disabled) form.requestSubmit();
+      return;
+    }
+    if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey || event.repeat) {
+      composerEnterState.delete(input);
+      return;
+    }
+    const armed = composerEnterState.get(input);
+    const unchanged = armed && input.value === armed.value &&
+      input.selectionStart === armed.start && input.selectionEnd === armed.end;
+    if (unchanged && performance.now() - armed.at <= DOUBLE_ENTER_WINDOW_MS) {
+      event.preventDefault();
+      composerEnterState.delete(input);
+      suppressComposerEnterKeyup.add(input);
+      if (!submitButton.disabled) form.requestSubmit();
+      return;
+    }
+    composerEnterState.delete(input);
+  });
+  input.addEventListener("keyup", (event) => {
+    if (event.key !== "Enter") return;
+    if (suppressComposerEnterKeyup.delete(input)) return;
+    if (
+      event.isComposing || event.keyCode === 229 || event.shiftKey || event.altKey ||
+      event.ctrlKey || event.metaKey
+    ) {
+      composerEnterState.delete(input);
+      return;
+    }
+    composerEnterState.set(input, {
+      value: input.value,
+      start: input.selectionStart,
+      end: input.selectionEnd,
+      at: performance.now(),
+    });
+  });
+  input.addEventListener("blur", () => composerEnterState.delete(input));
+}
+
 async function submitRoomText(text, explicitPresenceId = "", explicitManagedAgentId = "") {
   const managedTarget = explicitManagedAgentId
     ? state.managedAgents.find((agent) => agent.id === explicitManagedAgentId)
@@ -872,6 +931,17 @@ async function submitRoomText(text, explicitPresenceId = "", explicitManagedAgen
   }
   return api("/api/rooms/post", { method: "POST", body: JSON.stringify({ room: state.room, text }) });
 }
+
+installMacComposerKeyboard(
+  byId("post-input"),
+  byId("post-form"),
+  byId("post-form").querySelector('button[type="submit"]'),
+);
+installMacComposerKeyboard(
+  byId("office-chat-input"),
+  byId("office-chat-form"),
+  byId("office-chat-send"),
+);
 
 byId("post-form").addEventListener("submit", async (event) => {
   event.preventDefault();

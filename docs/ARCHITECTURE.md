@@ -199,6 +199,11 @@ Codex。只有 `@codex`／`@claude`／`@grok` 才沿用明確的常駐 wake 語�
 RAM，不新增持久化資料或權限。Miso 與 Byte 是純 HTML/CSS 的裝飾性辦公室夥伴，四足／雙足步態、
 巡邏路徑與表情只在瀏覽器動畫層執行，不讀帳本、不呼叫 provider，也沒有控制面權限。
 
+兩個 Room composer 共用同一鍵盤狀態機：單 Enter 保留 textarea 原生換行，只有在內容與 caret
+都未改變、1.6 秒內再按一次無修飾 Enter 才 `requestSubmit()`。`Command+Enter` 是 macOS 立即送出；
+Shift/Option/Control 修飾 Enter 不送出。Composition/IME、key repeat、其他鍵、blur 與已 disabled 的 submit
+都 fail safe，不將中文選字或重複送出誤當 owner 意圖。
+
 ### 3.6 Approval Service
 
 批准包含 actor、action、resource、workflow、expiry 與 nonce。批准不可泛用、不可跨 workflow 重放、不可由模型自行產生。

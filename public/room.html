@@ -189,7 +189,7 @@
             </div>
             <form id="office-chat-form" class="office-chat-form">
               <label for="office-chat-input">對話內容</label>
-              <textarea id="office-chat-input" rows="3" maxlength="16000" placeholder="點選 agent，或直接輸入訊息…"></textarea>
+              <textarea id="office-chat-input" rows="3" maxlength="16000" placeholder="點選 agent，或直接輸入訊息…Enter 兩次送出"></textarea>
               <div class="office-chat-actions">
                 <small id="office-chat-hint">@codex1 等終端只入帳；@codex 才會另外喚醒模型</small>
                 <button id="office-chat-send" class="primary" type="submit">送出</button>
@@ -198,9 +198,9 @@
           </aside>
         </div>
         <form id="post-form" class="composer">
-          <textarea id="post-input" rows="2" maxlength="16000" placeholder="直接發言，或輸入 @codex / @claude / @grok 喚醒模型…"></textarea>
+          <textarea id="post-input" rows="2" maxlength="16000" placeholder="直接發言，或輸入 @codex / @claude / @grok 喚醒模型…Enter 兩次送出"></textarea>
           <div class="composer-foot">
-            <span>一般文字只入帳；@模型 會立即喚醒並回覆 · append-only · 已過 redaction</span>
+            <span>Enter 兩次送出 · ⇧/⌥ Enter 換行 · ⌘ Enter 立即送出 · append-only</span>
             <button class="primary" type="submit">發言</button>
           </div>
         </form>
