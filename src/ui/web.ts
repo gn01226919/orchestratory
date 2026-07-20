@@ -748,7 +748,8 @@ export async function startWebServer(
           const target = parsed[1];
           const resolved = ledger.listAfter(value.room, seq).some((later) =>
             later.author === target ||
-            (later.kind === "system" && later.text.includes(`（提及 #${seq}）`))
+            (later.kind === "system" && later.text.includes(`（提及 #${seq}）`) &&
+              !later.text.includes("回應處理中"))
           );
           if (resolved) {
             json(response, 200, { cancelled: false, cleared: false, seq });

@@ -503,12 +503,19 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   });
   assert.equal(roomMention.status, 200);
   const mentionBody = (await roomMention.json()) as {
-    mention: { author: string; text: string };
+    mention: { seq: number; author: string; text: string };
     reply: { author: string };
   };
   assert.equal(mentionBody.mention.author, "you");
   assert.match(mentionBody.mention.text, /^@fake/u);
   assert.equal(mentionBody.reply.author, "fake");
+  const mentionLedger = new RoomLedger(app.store.dataDirectory);
+  assert.match(
+    mentionLedger.listAfter("demo", mentionBody.mention.seq)
+      .find((message) => message.kind === "system")?.text ?? "",
+    new RegExp(`@fake 回應處理中（提及 #${mentionBody.mention.seq}）`, "u"),
+  );
+  mentionLedger.close();
   const summarize = await fetch(`${server.url}/api/rooms/summarize`, {
     method: "POST",
     headers: csrfHeaders,
@@ -1087,6 +1094,8 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomScript, /function startIdleActivity\(/u);
   assert.match(roomScript, /function refreshOfficeControlPlane\(/u);
   assert.match(roomScript, /function refreshRoomCatalog\(/u);
+  assert.match(roomScript, /function mentionLifecycle\(/u);
+  assert.match(roomScript, /回應處理中/u);
   assert.match(roomScript, /件申請/u);
   assert.match(roomScript, /有申請/u);
   assert.match(roomScript, /const BASE_OFFICE_AGENTS = Object\.freeze\(\["you", "codex", "claude", "grok"\]\)/u);

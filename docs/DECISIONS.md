@@ -207,6 +207,11 @@ Room 選單以專案 basename 為主顯示、內部 Room ID 為輔，而實際�
 exact match 為準。這避免 `room-default-*` 等技術 ID 讓 owner 誤以為不同專案共用一間 Room，同時不冒險改寫
 已存在的 append-only ledger 身份。待核准數為跨 Room 全域提示，但核准動作仍只作用於該申請原本綁定的 Room。
 
+常駐 provider 呼叫的 GUI 等待狀態使用 append-only lifecycle event，不以任意 `@provider` 文字當作執行證據。
+只有 `room_mention` 寫入「回應處理中（提及 #N）」後才為 pending；同一 #N 的 reply、failure、cancel 或 clear
+收旂。新的 `room_post` 若使用 provider-prefixed `@mention` 會 fail closed 並要求改用 `room_mention`；
+這同時避免工具誤用、從舊帳本重載或 daemon 重啟後產生幽靈等待。
+
 ## ADR-025：Loopback GUI 的 owner 操作是可逆 Writer 工作的明確授權
 
 **決策：** 當 GUI 由本機終端啟動、只綁定 loopback，且 session、Host、Origin 與

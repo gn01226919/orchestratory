@@ -225,6 +225,10 @@ membership 固定，tool call 無法冒名。Owner 從 GUI 對精確席位交辦
 注入一個新 turn；需要不依賴外部 host 值班的 GUI 即時喚醒時，請建立「受控即時 Agent」，由
 Orchestratory 明確發起 bounded provider call，且不冒充外接終端。
 
+GUI 的「等待模型回應」只由真正的 `room_mention` 生命週期事件驅動：開始時寫入
+「回應處理中（提及 #N）」，後續必須以回覆、失敗、取消或清除收旂。單純用 `room_post`
+寫入以 `@claude` 等字樣開頭的帳本文字會 fail closed 並要求改用 `room_mention`，不再產生「看似等待、實際沒有呼叫」的狀態。
+
 Writer 可在 GUI 依 task 隨時指派或交接。外接席位成為 Writer 時，由受控 Writer Companion 代為
 執行；Room 帳本用自然語言標示「由誰代表誰執行」，技術 HMAC audit 另保存 `on_behalf_of`、
 `executed_by` 與 `lease_epoch`，不冒充原生終端程序。Writer 可派一層子 Agent：同 provider 子

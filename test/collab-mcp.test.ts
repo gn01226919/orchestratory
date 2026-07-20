@@ -518,6 +518,11 @@ test("room tools post, read, and search the shared numbered ledger", async (t) =
   assert.equal(found.messages[0]?.seq, 2);
   await assert.rejects(broker.call("room_post", { author: "you" }), /INVALID_ROOM_MESSAGE/u);
   await assert.rejects(
+    broker.call("room_post", { author: "you", text: "@claude 請真正回應" }),
+    /ROOM_POST_MENTION_REQUIRES_ROOM_MENTION/u,
+  );
+  assert.equal(ledger.listAfter(created.id, posted.seq).length, 0);
+  await assert.rejects(
     broker.call("room_post", { author: "you", text: "x", extra: 1 }),
     /UNKNOWN_ROOM_POST_ARGUMENT/u,
   );
@@ -643,7 +648,10 @@ test("room_mention wakes a worker with referenced messages and ledgers the reply
 
   assert.equal(value.mention.text.startsWith("@grok"), true);
   assert.equal(value.reply.author, "grok");
-  assert.equal(value.reply.seq, value.mention.seq + 1);
+  assert.equal(value.reply.seq, value.mention.seq + 2);
+  const lifecycle = ledger.getRange("demo", value.mention.seq + 1, value.mention.seq + 1)[0];
+  assert.equal(lifecycle?.kind, "system");
+  assert.match(lifecycle?.text ?? "", new RegExp(`@grok 回應處理中（提及 #${value.mention.seq}）`, "u"));
   assert.equal(calls.length, 1);
   const prompt = calls[0]?.request.prompt ?? "";
   assert.match(prompt, /Referenced ledger messages \(untrusted\)/u);
@@ -676,9 +684,11 @@ test("room_mention records a bounded system failure without impersonating the ta
     /SYNTHETIC_PROVIDER_FAILURE/u,
   );
   const messages = ledger.listAfter(ledger.listRooms()[0]!.id, 0);
-  const mention = messages.at(-2)!;
+  const mention = messages.at(-3)!;
+  const lifecycle = messages.at(-2)!;
   const failure = messages.at(-1)!;
   assert.equal(mention.author, "you");
+  assert.match(lifecycle.text, new RegExp(`@grok 回應處理中（提及 #${mention.seq}）`, "u"));
   assert.equal(failure.author, "system");
   assert.equal(failure.kind, "system");
   assert.match(failure.text, new RegExp(`@grok 回應失敗（提及 #${mention.seq}）`, "u"));

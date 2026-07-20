@@ -238,6 +238,19 @@ function updateAuthorStats(stats) {
   }
 }
 
+function mentionLifecycle(messages, index, target, seq) {
+  const later = messages.slice(index + 1);
+  const reference = `（提及 #${seq}）`;
+  const started = later.some((message) =>
+    message.kind === "system" && message.text.includes(`@${target} 回應處理中`) &&
+    message.text.includes(reference));
+  const resolved = later.some((message) =>
+    message.author === target ||
+    (message.kind === "system" && message.text.includes(reference) &&
+      !message.text.includes("回應處理中")));
+  return { started, resolved };
+}
+
 function updateWaitingIndicator(messages) {
   byId("waiting-row")?.remove();
   let pending = null;
@@ -248,10 +261,8 @@ function updateWaitingIndicator(messages) {
     if (!mention || mention[1] === message.author) continue;
     if (state.cancelledMentions.has(message.seq)) continue;
     const target = mention[1];
-    const resolved = messages.slice(index + 1).some((later) =>
-      later.author === target ||
-      (later.kind === "system" && later.text.includes(`（提及 #${message.seq}）`)));
-    if (!resolved) pending = { target, seq: message.seq };
+    const lifecycle = mentionLifecycle(messages, index, target, message.seq);
+    if (lifecycle.started && !lifecycle.resolved) pending = { target, seq: message.seq };
   }
   if (!pending) return;
   const row = document.createElement("div");
@@ -1495,10 +1506,10 @@ function detectPendingWork(messages) {
     if (!mention || mention[1] === m.author) continue;
     if (state.cancelledMentions.has(m.seq)) continue;
     const target = mention[1];
-    const resolved = messages.slice(i + 1).some((later) =>
-      later.author === target ||
-      (later.kind === "system" && later.text.includes(`（提及 #${m.seq}）`)));
-    if (!resolved) return { target, seq: m.seq, text: String(m.text).replace(/^@\S+\s+/u, "") };
+    const lifecycle = mentionLifecycle(messages, i, target, m.seq);
+    if (lifecycle.started && !lifecycle.resolved) {
+      return { target, seq: m.seq, text: String(m.text).replace(/^@\S+\s+/u, "") };
+    }
   }
   return null;
 }

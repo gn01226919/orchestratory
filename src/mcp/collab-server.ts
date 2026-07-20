@@ -34,6 +34,7 @@ const MIN_COMPARE_TARGETS = 2;
 const TREE_CACHE_MS = 60_000;
 const MODEL_ID_PATTERN = /^[A-Za-z0-9._:/-]{1,128}$/u;
 const TARGET_PATTERN = /^(codex|claude|grok|fake)(?::([A-Za-z0-9._:/-]{1,128}))?$/u;
+const ROOM_WAKE_PREFIX_PATTERN = /^@(codex|claude|grok|fake)(?::[A-Za-z0-9._:/-]{1,128})?\s+/u;
 const ASK_PROVIDERS = new Set<ProviderId>(["codex", "claude", "grok"]);
 const REFERENCE_PATTERN = /#(\d{1,6})(?:-(\d{1,6}))?/gu;
 const MAX_REFERENCED_MESSAGES = 60;
@@ -222,7 +223,7 @@ export class CollabToolBroker {
       {
         name: "room_post",
         description:
-          "Append one numbered message to the shared room ledger. The ledger is append-only, redacted, and visible to every participating agent.",
+          "Append one numbered message to the shared room ledger. The ledger is append-only, redacted, and visible to every participating agent. This does not wake a model; text beginning with @codex, @claude, @grok, or @fake is rejected and must use room_mention instead.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -679,6 +680,9 @@ export class CollabToolBroker {
     if (typeof input.text !== "string") {
       throw new Error("INVALID_ROOM_MESSAGE");
     }
+    if (ROOM_WAKE_PREFIX_PATTERN.test(input.text.trimStart())) {
+      throw new Error("ROOM_POST_MENTION_REQUIRES_ROOM_MENTION");
+    }
     return JSON.stringify(this.#requireLedger().append(roomId, this.#messageAuthor(input.author, roomId), input.text));
   }
 
@@ -763,6 +767,7 @@ export class CollabToolBroker {
       `New message addressed to you from ${mention.author} (#${mention.seq}):`,
       input.text,
     ].join("\n");
+    ledger.appendSystem(roomId, `@${provider} 回應處理中（提及 #${mention.seq}）`);
     let answer: { provider: ProviderId; model: string; answer: string; durationMs: number };
     try {
       answer = await this.#askWorker(provider, model, prompt, workspace, true, [], options.signal);
@@ -1061,6 +1066,8 @@ export async function handleCollabMcpMessage(
           '"open an orchestrator room" or collaborate with other models:',
           "1. room_init — open (or reuse) the shared numbered ledger for this project.",
           "2. room_post {author:<your provider id>, text} — speak into the room.",
+          "   room_post never wakes a model and rejects provider-prefixed @mentions; use room_mention",
+          "   whenever an actual Codex, Claude, Grok, or fake response is expected.",
           "   Before the first post, use room_join_request and wait for the owner to approve",
           "   this exact terminal in the GUI. Unjoined terminals are never recorded.",
           "   IMPORTANT: call the MCP tool directly. Never run `orchestrator room join` in a shell;",

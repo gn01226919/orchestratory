@@ -165,6 +165,10 @@ bounded 收件等待；之後終端只有在這段等待或 `room_wait` 長輪�
 idempotency 都由 inbox state machine 處理，絕不 fallback 到同 provider 的常駐席位。
 完全 idle 的既有 MCP host 不能接受 server-initiated turn，休班時的 GUI 工作只會 queued；API 以
 `wakeMode: active-tool-pull` 與 `wakeable: false` 明確揭露，不把 presence 誤報成可喚醒。
+常駐 provider 的等待指示也不從 `@provider` 文字推測；`room_mention` 在真正開始 provider call 前追加
+綁定原 mention sequence 的「回應處理中」system event，並以 reply/failure/cancel/clear 收旂。
+沒有 start event 的舊帳本文字不會顯示永久等待；新的 `room_post` 若以 `@claude` 等 provider
+提及開頭則 fail closed，明確要求 host 改用會真正發起呼叫的 `room_mention`。
 `managed-subagent`（GUI 名稱「受控即時 Agent」）由 owner
 在 GUI 明確建立，獨立身分保存於 owner-only `managed-room-agents.sqlite`，使用 per-row SHA-256
 偵測竄改，每房最多 12 個活躍席位。每次 GUI 喚醒都是獨立、可取消、納入同一 quota 的
