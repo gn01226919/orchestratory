@@ -4,9 +4,9 @@
 
 ## A. 人類授權
 
-- [ ] 使用者明確批准本次公開/發布範圍。
-- [ ] Repository visibility、owner、名稱與 license 已確認。
-- [ ] 確認沒有自動 push、auto publish 或 auto top-up。
+- [x] 使用者明確批准建立 sanitized Private GitHub repository 並首次 push；未批准公開或 npm publish。
+- [x] Repository visibility、owner、名稱與 license 已確認：`gn01226919/orchestratory`、Private、Apache-2.0。
+- [x] 確認沒有自動 publish 或 auto top-up；GitHub push 只限本次明確授權範圍。
 - [ ] 安全關鍵變更已由人類逐項審查；模型 review 只作輔助。
 
 ## B. 資料與個資
@@ -99,6 +99,6 @@
 - [ ] GitHub Private Vulnerability Reporting、secret scanning、dependency alerts 與 branch protection 需在建立 repository 後啟用。
 - [ ] 真實 provider/container smoke tests 等待額度、runtime 與 image 授權。
 - [ ] 完整 GUI 視覺點擊 QA 尚未涵蓋主儀表板所有流程；Room 辦公室切換、agent 預填、右側聊天與 Writer 面板已完成 Browser 驗收，HTTP/Web 安全整合測試已通過。
-- [ ] 人類 GO/NO-GO、名稱、license、Git identity、GitHub 公開範圍仍未批准。
-- [ ] 目前 tree 已去識別化 live project/Room metadata，但既有 Git history 曾保存該資料；公開前需 owner
-  明確選擇 declassify、批准 history rewrite，或由 sanitized snapshot 建立新 repository。
+- [ ] 人類對公開 visibility、npm publish 與正式 release 仍為 NO-GO；本次只批准 Private source push。
+- [x] Owner 已選擇由 sanitized snapshot 建立全新 repository；既有含 live project/Room metadata 的
+  內部 Git history 不得推送。

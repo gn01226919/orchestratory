@@ -5,10 +5,10 @@
   "metadata": {
     "component": {
       "type": "application",
-      "bom-ref": "pkg:npm/orchestratory@0.0.1",
+      "bom-ref": "pkg:npm/orchestratory@0.1.0",
       "name": "orchestratory",
-      "version": "0.0.1",
-      "purl": "pkg:npm/orchestratory@0.0.1"
+      "version": "0.1.0",
+      "purl": "pkg:npm/orchestratory@0.1.0"
     }
   },
   "components": [
@@ -102,7 +102,7 @@
       ]
     },
     {
-      "ref": "pkg:npm/orchestratory@0.0.1",
+      "ref": "pkg:npm/orchestratory@0.1.0",
       "dependsOn": [
         "pkg:npm/%40types%2Fnode@22.15.30",
         "pkg:npm/typescript@5.8.3"

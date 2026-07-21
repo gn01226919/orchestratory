@@ -335,7 +335,7 @@ async function handle(broker: WorkspaceToolBroker, message: unknown): Promise<vo
       send(response(id, {
         protocolVersion: typeof params.protocolVersion === "string" ? params.protocolVersion : "2024-11-05",
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "orchestratory-workspace", version: "0.0.1" },
+        serverInfo: { name: "orchestratory-workspace", version: "0.1.0" },
       }));
       return;
     }

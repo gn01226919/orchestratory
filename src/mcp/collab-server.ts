@@ -1060,7 +1060,7 @@ export async function handleCollabMcpMessage(
           ? params.protocolVersion
           : "2024-11-05",
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "orchestratory-collab", version: "0.0.1" },
+        serverInfo: { name: "orchestratory-collab", version: "0.1.0" },
         instructions: [
           "Orchestratory multi-model collaboration. Typical flow when the user asks to",
           '"open an orchestrator room" or collaborate with other models:',

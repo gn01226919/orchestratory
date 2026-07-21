@@ -322,5 +322,5 @@ container image 與任何額外額度操作仍需 owner 明確批准。
 
 ## 狀態
 
-尚未發布。Source tree 已放入 Apache-2.0 `LICENSE` 與 `NOTICE`，但首次公開前仍需 owner
-確認 copyright 名稱、Git identity、repository 名稱與 visibility。不得在未經 owner 明確批准下公開或散布。
+尚未對外發布。Owner 已批准以 `gn01226919`、Apache-2.0、版本 0.1.0 建立全新 sanitized
+`orchestratory` Private GitHub repository；舊內部 Git history 不得推送。npm、公開 visibility 與其他散布仍未批准。

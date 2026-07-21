@@ -280,7 +280,7 @@ try {
     throw new Error("INSTALLED_BIN_LINK_INVALID");
   }
   const help = await run(installedBin, ["--help"], installation, 30_000);
-  if (!help.stdout.includes("Orchestratory 0.0.1")) throw new Error("PACKAGED_CLI_SMOKE_FAILED");
+  if (!help.stdout.includes("Orchestratory 0.1.0")) throw new Error("PACKAGED_CLI_SMOKE_FAILED");
   const audit = await run(installedBin, ["audit"], installation, 30_000);
   if (!audit.stdout.includes("Local security scan passed.") ||
       !audit.stdout.includes("Git history security scan not applicable")) {

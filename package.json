@@ -1,6 +1,6 @@
 {
   "name": "orchestratory",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
   "publishConfig": {
     "registry": "http://127.0.0.1:9"

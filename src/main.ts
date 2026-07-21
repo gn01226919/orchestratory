@@ -37,7 +37,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     return;
   }
   if (command === "--version" || command === "-v") {
-    stdout.write("0.0.1\n");
+    stdout.write("0.1.0\n");
     return;
   }
   if (command === "doctor") {

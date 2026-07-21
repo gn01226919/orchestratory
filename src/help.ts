@@ -1,6 +1,6 @@
 export function helpText(): string {
   return [
-    "Orchestratory 0.0.1 — security-first local agent workflow",
+    "Orchestratory 0.1.0 — security-first local agent workflow",
     "",
     "Usage:",
     "  orchestrator                         Start natural-language TUI + local GUI",
