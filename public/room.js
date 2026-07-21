@@ -5,6 +5,8 @@ const state = {
   rooms: [],
   after: 0,
   poll: null,
+  polling: false,
+  controlPoll: null,
   searching: false,
   mode: page.searchParams.get("mode") === "history" ? "history" : "live",
   historyBefore: 0,
@@ -545,15 +547,17 @@ async function refreshPresence(force = false) {
   if (!state.room || state.presenceRefreshing) return;
   if (!force && Date.now() < state.presenceNextAt) return;
   state.presenceRefreshing = true;
-  state.presenceNextAt = Date.now() + 1800;
+  state.presenceNextAt = Date.now() + 5000;
+  const room = state.room;
   try {
     const previous = new Map((state.presences || []).map((session) => [session.id, session]));
     const [value, managedValue, deliveryValue, writerValue] = await Promise.all([
-      api(`/api/rooms/presence?room=${encodeURIComponent(state.room)}`),
-      api(`/api/rooms/managed-agents?room=${encodeURIComponent(state.room)}`),
-      api(`/api/rooms/deliveries?room=${encodeURIComponent(state.room)}`),
-      api(`/api/rooms/writers?room=${encodeURIComponent(state.room)}`),
+      api(`/api/rooms/presence?room=${encodeURIComponent(room)}`),
+      api(`/api/rooms/managed-agents?room=${encodeURIComponent(room)}`),
+      api(`/api/rooms/deliveries?room=${encodeURIComponent(room)}`),
+      api(`/api/rooms/writers?room=${encodeURIComponent(room)}`),
     ]);
+    if (state.room !== room) return;
     const nextPresences = Array.isArray(value.sessions) ? value.sessions : [];
     const nextManagedAgents = Array.isArray(managedValue.agents) ? managedValue.agents : [];
     const nextDeliveries = Array.isArray(deliveryValue.deliveries) ? deliveryValue.deliveries : [];
@@ -598,10 +602,13 @@ async function refreshPresence(force = false) {
 }
 
 async function poll() {
-  if (!state.room || state.searching || state.mode !== "live") return;
+  if (!state.room || state.searching || state.mode !== "live" || state.polling || document.hidden) return;
+  state.polling = true;
+  const room = state.room;
   try {
     const previousAfter = state.after;
-    const value = await api(`/api/rooms/messages?room=${encodeURIComponent(state.room)}&after=${state.after}`);
+    const value = await api(`/api/rooms/messages?room=${encodeURIComponent(room)}&after=${state.after}`);
+    if (state.room !== room) return;
     if (value.messages.length) {
       if (state.roomInitialized && previousAfter > 0) {
         ingestRoomNotifications(value.messages.filter((message) => message.seq > previousAfter));
@@ -624,6 +631,8 @@ async function poll() {
   } catch (error) {
     byId("connection").textContent = `連線錯誤：${error.message}`;
     byId("connection").className = "conn error";
+  } finally {
+    state.polling = false;
   }
 }
 
@@ -748,10 +757,19 @@ async function bootstrap() {
   byId("writer-handoff-toggle").hidden = state.mode === "history";
   await selectRoom(selected);
   if (state.mode === "live") {
-    state.poll = setInterval(poll, 1000);
-    state.controlPoll = setInterval(() => void refreshOfficeControlPlane(), 5000);
+    state.poll = setInterval(poll, 2000);
+    state.controlPoll = setInterval(() => {
+      if (!document.hidden) void refreshOfficeControlPlane();
+    }, 10000);
   }
 }
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden || state.mode !== "live") return;
+  void poll();
+  void refreshPresence(true);
+  void refreshOfficeControlPlane();
+});
 
 byId("ledger").addEventListener("click", (event) => {
   const ref = event.target.closest?.("a.refl");

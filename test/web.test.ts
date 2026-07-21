@@ -211,7 +211,44 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(indexHtml, /id="workspace-pick"/u);
   assert.match(indexHtml, /id="workspace-path"/u);
   assert.ok(cookie);
-  assert.match(cookie, /^orchestratory_session=/u);
+  assert.match(cookie, /^orchestratory_session_[0-9]+=/u);
+
+  const secondServer = await startWebServer(app, 0);
+  try {
+    const secondIndex = await fetch(secondServer.url);
+    const secondCookie = (secondIndex.headers.get("set-cookie") ?? "").split(";")[0];
+    assert.ok(secondCookie);
+    assert.match(secondCookie, /^orchestratory_session_[0-9]+=/u);
+    assert.notEqual(secondCookie.split("=")[0], cookie.split("=")[0]);
+    assert.equal(
+      (await fetch(`${secondServer.url}/api/bootstrap`, { headers: { Cookie: cookie } })).status,
+      401,
+    );
+    assert.equal(
+      (await fetch(`${server.url}/api/bootstrap`, { headers: { Cookie: secondCookie } })).status,
+      401,
+    );
+    assert.equal(
+      (await fetch(`${secondServer.url}/api/bootstrap`, { headers: { Cookie: secondCookie } })).status,
+      200,
+    );
+    let unauthorizedThrottled = false;
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const response = await fetch(`${secondServer.url}/api/bootstrap`);
+      if (response.status !== 429) continue;
+      unauthorizedThrottled = true;
+      assert.equal(response.headers.get("retry-after"), "60");
+      assert.deepEqual(await response.json(), { error: "RATE_LIMITED" });
+      break;
+    }
+    assert.equal(unauthorizedThrottled, true);
+    assert.equal(
+      (await fetch(`${secondServer.url}/api/bootstrap`, { headers: { Cookie: secondCookie } })).status,
+      200,
+    );
+  } finally {
+    await secondServer.close();
+  }
 
   const unauthorized = await fetch(`${server.url}/api/bootstrap`);
   assert.equal(unauthorized.status, 401);
@@ -1101,6 +1138,9 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomScript, /event\.isComposing/u);
   assert.match(roomScript, /event\.metaKey/u);
   assert.match(roomScript, /DOUBLE_ENTER_WINDOW_MS/u);
+  assert.match(roomScript, /state\.polling/u);
+  assert.match(roomScript, /document\.addEventListener\("visibilitychange"/u);
+  assert.match(roomScript, /setInterval\(poll, 2000\)/u);
   assert.match(roomScript, /回應處理中/u);
   assert.match(roomScript, /件申請/u);
   assert.match(roomScript, /有申請/u);
@@ -1513,7 +1553,7 @@ test("Web dashboard cancels only the exact active Writer run", async (t) => {
 
   const index = await fetch(server.url);
   const cookie = (index.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
-  assert.match(cookie, /^orchestratory_session=/u);
+  assert.match(cookie, /^orchestratory_session_[0-9]+=/u);
   const bootstrap = await fetch(`${server.url}/api/bootstrap`, { headers: { Cookie: cookie } });
   const { csrf } = (await bootstrap.json()) as { csrf: string };
   const headers = {

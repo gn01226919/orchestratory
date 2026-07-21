@@ -170,9 +170,19 @@ export async function startWebServer(
   }
   const session = token();
   const csrf = token();
-  const cookieName = "orchestratory_session";
+  let cookieName = "";
   let origin = "";
   const rate = new Map<string, { count: number; resetAt: number }>();
+  const consumeRateLimit = (key: string, maximum: number): boolean => {
+    const now = Date.now();
+    const current = rate.get(key);
+    if (!current || current.resetAt <= now) {
+      rate.set(key, { count: 1, resetAt: now + 60_000 });
+      return true;
+    }
+    current.count += 1;
+    return current.count <= maximum;
+  };
   let conversation: { key: string; value: WebConversation } | undefined;
   let chatBusy = false;
   let chatController: AbortController | undefined;
@@ -324,14 +334,6 @@ export async function startWebServer(
         response.writeHead(421).end();
         return;
       }
-      const now = Date.now();
-      const current = rate.get(remote);
-      if (!current || current.resetAt <= now) rate.set(remote, { count: 1, resetAt: now + 60_000 });
-      else if (++current.count > 240) {
-        response.writeHead(429).end();
-        return;
-      }
-
       response.setHeader("Cache-Control", "no-store");
       response.setHeader("X-Content-Type-Options", "nosniff");
       response.setHeader("Referrer-Policy", "no-referrer");
@@ -345,6 +347,11 @@ export async function startWebServer(
       const url = new URL(request.url ?? "/", origin);
       const staticFile = staticFiles[url.pathname];
       if (request.method === "GET" && staticFile) {
+        if (!consumeRateLimit(`public:${remote}`, 120)) {
+          response.setHeader("Retry-After", "60");
+          json(response, 429, { error: "RATE_LIMITED" });
+          return;
+        }
         if (url.pathname === "/" || url.pathname === "/room") {
           response.setHeader(
             "Set-Cookie",
@@ -359,7 +366,19 @@ export async function startWebServer(
 
       const sessionCookie = parseCookie(request.headers.cookie, cookieName);
       if (!equalSecret(sessionCookie, session)) {
+        if (!consumeRateLimit(`unauthorized:${remote}`, 60)) {
+          response.setHeader("Retry-After", "60");
+          json(response, 429, { error: "RATE_LIMITED" });
+          return;
+        }
         response.writeHead(401).end();
+        return;
+      }
+      const rateClass = request.method === "GET" ? "read" : "mutation";
+      const maximum = request.method === "GET" ? 240 : 120;
+      if (!consumeRateLimit(`${rateClass}:${session}`, maximum)) {
+        response.setHeader("Retry-After", "60");
+        json(response, 429, { error: "RATE_LIMITED" });
         return;
       }
 
@@ -1787,6 +1806,13 @@ export async function startWebServer(
       server.once("error", reject);
       server.listen(requestedPort, "127.0.0.1", () => {
         server.off("error", reject);
+        const address = server.address();
+        if (!address || typeof address === "string") {
+          reject(new Error("WEB_ADDRESS_UNAVAILABLE"));
+          return;
+        }
+        origin = `http://127.0.0.1:${address.port}`;
+        cookieName = `orchestratory_session_${address.port}`;
         resolvePromise();
       });
     });
@@ -1795,9 +1821,6 @@ export async function startWebServer(
     server.close();
     throw error;
   }
-  const address = server.address();
-  if (!address || typeof address === "string") throw new Error("WEB_ADDRESS_UNAVAILABLE");
-  origin = `http://127.0.0.1:${address.port}`;
   let closed = false;
   return {
     url: origin,

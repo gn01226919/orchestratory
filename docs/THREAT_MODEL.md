@@ -36,7 +36,7 @@
 | T03 | `../`、Unicode 或 symlink 逸出 workspace | Canonicalization、descriptor checks、特殊檔案拒絕 | OS/filesystem race 需持續測試 |
 | T04 | 惡意測試 script 讀取其他本機資料 | Digest-pinned Docker/Podman、no pull、最小 env、read-only mount/root、network off、resource limits、approval | Container runtime/daemon 與已批准 image 自身仍是高權限信任邊界；本機尚未完成真實 runtime smoke test |
 | T05 | 無限 loop、非整數／超大 hard-limit 設定消耗資源或訂閱/API 額度 | 每欄編譯期絕對 ceiling、count/time/byte safe-integer gate、跨欄關係驗證、quota reservation、timeout、circuit breaker | Provider 計量延遲可能造成小幅超額；編譯期 ceiling 仍需 release review 才能變更 |
-| T06 | Web 頁面控制 localhost dashboard | Loopback、Host/Origin、CSRF、session、CSP | 瀏覽器或 extension 遭入侵 |
+| T06 | Web 頁面控制 localhost dashboard | Loopback、Host/Origin、CSRF、每埠獨立 session cookie、CSP；未授權、讀取、寫入流量分桶，避免未授權請求耗盡合法 GUI 額度 | 瀏覽器或 extension 遭入侵；同一合法 session 的惡意分頁仍共享額度 |
 | T07 | Log/DB 洩漏 prompt、key、個資 | 欄位 allowlist、redaction、最小 retention | Redaction 無法保證辨識所有秘密 |
 | T08 | 惡意 dependency/postinstall 接管主機 | Pinning、no-script install、review、SBOM、scan | 上游合法版本被入侵仍可能影響 |
 | T09 | Agent／同機程序以 symlink、hardlink、寬鬆權限或超大檔修改 hard limits、provider/tester/workspace/retention policy | Policy/config 分離、restart required、owner `0700` directory、descriptor `O_NOFOLLOW`、regular-file/UID/精確 `0600`/single-link/1 MiB 驗證；異常不自動修權限而是 fail closed | 本機帳號被完全攻陷後不可保證 |
