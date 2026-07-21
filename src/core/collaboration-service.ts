@@ -1,0 +1,696 @@
+import type { RoomMessage } from "./room-ledger.ts";
+import { RoomLedger } from "./room-ledger.ts";
+import {
+  managedAgentDisplayName,
+  ManagedRoomAgentStore,
+  type ManagedAgentProvider,
+  type ManagedRoomAgent,
+} from "./managed-room-agent.ts";
+import {
+  RoomPresenceStore,
+  type PresenceHookInput,
+  type PresenceInfo,
+  type PresenceRegistration,
+} from "./room-presence.ts";
+import {
+  RoomInboxStore,
+  type ClaimedRoomDelivery,
+  type RoomDelivery,
+} from "./room-inbox.ts";
+import { safeSummary } from "../security/redact.ts";
+import { realpathSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import {
+  WriterLeaseStore,
+  type GrantedWriterLease,
+  type WriterIdentity,
+  type WriterLease,
+  type WriterProvider,
+} from "./writer-lease.ts";
+import {
+  WriterDelegationStore,
+  type GrantedWriterDelegation,
+  type WriterDelegation,
+} from "./writer-delegation.ts";
+import { WorktreeBroker } from "./worktree-broker.ts";
+import { CollaborationAuditLog, type AuditOutcome } from "./collaboration-audit.ts";
+
+export type WriterCandidate =
+  | { origin: "resident"; provider: WriterProvider }
+  | { origin: "managed"; actorId: string }
+  | { origin: "external"; actorId: string };
+
+function ledgerSummary(value: string, maxLength = 320): string {
+  return safeSummary(value, maxLength).replace(/[\r\n\t]+/gu, " ");
+}
+
+export interface CollaborationRoomView {
+  sessions: Array<PresenceInfo & {
+    kind: "external-pull";
+    wakeMode: "active-tool-pull";
+    listening: boolean;
+    wakeable: boolean;
+  }>;
+  deliveries: RoomDelivery[];
+  managedAgents: ManagedRoomAgent[];
+  writerLeases: WriterLease[];
+  writerDelegations: WriterDelegation[];
+}
+
+export interface WriterWorktreeLifecycle {
+  begin(input: {
+    runId: string;
+    roomId: string;
+    taskId: string;
+    workspace: string;
+    worktree: string;
+  }): Promise<void>;
+  fail(runId: string, reason: string): Promise<void>;
+}
+
+/**
+ * Shared room control plane used by GUI, TUI and MCP processes.
+ *
+ * Each process owns one service instance, while SQLite WAL + the append-only room
+ * ledger provide the cross-process source of truth and global per-room sequence.
+ */
+export class CollaborationService {
+  readonly ledger: RoomLedger;
+  readonly presence: RoomPresenceStore;
+  readonly inbox: RoomInboxStore;
+  readonly managedAgents: ManagedRoomAgentStore;
+  readonly writerLeases: WriterLeaseStore;
+  readonly writerDelegations: WriterDelegationStore;
+  readonly audit: CollaborationAuditLog;
+  readonly #worktrees: WorktreeBroker;
+  readonly #writerWorktrees: WriterWorktreeLifecycle | undefined;
+  #closed = false;
+
+  constructor(dataDirectory: string, options: { writerWorktrees?: WriterWorktreeLifecycle } = {}) {
+    this.ledger = new RoomLedger(dataDirectory);
+    this.presence = new RoomPresenceStore(dataDirectory);
+    this.inbox = new RoomInboxStore(dataDirectory);
+    this.managedAgents = new ManagedRoomAgentStore(dataDirectory);
+    this.writerLeases = new WriterLeaseStore(dataDirectory);
+    this.writerDelegations = new WriterDelegationStore(dataDirectory);
+    this.audit = new CollaborationAuditLog(dataDirectory);
+    this.#worktrees = new WorktreeBroker(dataDirectory);
+    this.#writerWorktrees = options.writerWorktrees;
+  }
+
+  roomView(roomId: string, workspace: string): CollaborationRoomView {
+    this.#assertRoomWorkspace(roomId, workspace);
+    const sessions = this.presence.list(workspace, roomId);
+    return {
+      sessions: sessions
+        .filter((session) => session.joined || session.requested)
+        .map((session) => {
+          const listening = session.joined && this.inbox.isListening(session.id, roomId);
+          return {
+            ...session,
+            kind: "external-pull" as const,
+            wakeMode: "active-tool-pull" as const,
+            listening,
+            wakeable: listening,
+          };
+        }),
+      deliveries: this.inbox.list(roomId),
+      managedAgents: this.managedAgents.list(roomId),
+      writerLeases: this.writerLeases.list(roomId),
+      writerDelegations: this.writerDelegations.list(roomId),
+    };
+  }
+
+  reconcileExternalPresence(roomId: string, workspace: string): RoomDelivery[] {
+    this.#assertRoomWorkspace(roomId, workspace);
+    const sessions = this.presence.list(workspace, roomId);
+    return this.inbox.failUnavailable(roomId, sessions.map((session) => session.id));
+  }
+
+  requestExternalJoin(presenceId: string, roomId: string, workspace: string): PresenceInfo {
+    this.#assertRoomWorkspace(roomId, workspace);
+    return this.presence.requestJoin(presenceId, roomId, workspace);
+  }
+
+  cancelExternalJoinRequest(presenceId: string, roomId: string, workspace: string): PresenceInfo {
+    this.#assertRoomWorkspace(roomId, workspace);
+    const current = this.presence.get(presenceId);
+    if (!current || current.workspace !== workspace) throw new Error("PRESENCE_NOT_FOUND");
+    return this.presence.cancelJoinRequest(presenceId, roomId);
+  }
+
+  approveExternalJoin(input: { presenceId: string; roomId: string; workspace: string; label?: string }): PresenceInfo {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    const before = this.presence.get(input.presenceId);
+    const joined = this.presence.join(input.presenceId, input.roomId, input.workspace, input.label);
+    if (this.managedAgents.list(input.roomId).some((agent) => agent.displayName === joined.displayName)) {
+      this.presence.leave(input.presenceId, input.roomId);
+      throw new Error("PRESENCE_DISPLAY_NAME_IN_USE");
+    }
+    if (before?.roomId !== input.roomId) {
+      this.ledger.appendSystem(input.roomId, `${joined.displayName} 已加入辦公室（GUI 明確加入）`);
+    }
+    return joined;
+  }
+
+  removeExternal(input: { presenceId: string; roomId: string; workspace: string }): PresenceInfo {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    const before = this.presence.get(input.presenceId);
+    if (!before || before.workspace !== input.workspace || before.roomId !== input.roomId) {
+      throw new Error("PRESENCE_NOT_JOINED");
+    }
+    this.#revokeWriterIdentity(input.presenceId, "外接席位已由 Owner 移除");
+    const left = this.presence.leave(input.presenceId, input.roomId);
+    this.inbox.failTarget(input.presenceId, "SEAT_REMOVED_BY_OWNER");
+    this.ledger.appendSystem(input.roomId, `${before.displayName ?? before.provider} 已離開辦公室`);
+    return left;
+  }
+
+  postToExternal(input: { roomId: string; workspace: string; presenceId: string; text: string }): {
+    message: RoomMessage;
+    target: PresenceInfo;
+    delivery: RoomDelivery;
+    dispatch: { wakeMode: "active-tool-pull"; wakeable: boolean; immediate: boolean };
+  } {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    if (typeof input.text !== "string" || input.text.trim().length < 1) throw new Error("INVALID_PRESENCE_MESSAGE");
+    const target = this.presence.get(input.presenceId);
+    if (!target || target.workspace !== input.workspace || !target.joined || target.roomId !== input.roomId || !target.displayName) {
+      throw new Error("TARGET_AGENT_OFFLINE");
+    }
+    const message = this.ledger.append(input.roomId, "you", `@${target.displayName} ${input.text}`);
+    try {
+      const delivery = this.inbox.enqueue({
+        message,
+        targetPresenceId: target.id,
+        targetDisplayName: target.displayName,
+      });
+      const wakeable = this.inbox.isListening(target.id, input.roomId);
+      return {
+        message,
+        target,
+        delivery,
+        dispatch: { wakeMode: "active-tool-pull", wakeable, immediate: wakeable },
+      };
+    } catch (error) {
+      try {
+        this.ledger.appendSystem(
+          input.roomId,
+          `⚠ #${message.seq} 無法投遞給 ${target.displayName}：${safeSummary(error instanceof Error ? error.message : "DELIVERY_FAILED", 160)}`,
+        );
+      } catch { /* preserve the original delivery failure */ }
+      throw error;
+    }
+  }
+
+  registerExternal(input: PresenceRegistration): PresenceInfo {
+    return this.presence.register(input);
+  }
+
+  heartbeatExternal(presenceId: string): PresenceInfo {
+    return this.presence.heartbeat(presenceId);
+  }
+
+  unregisterExternal(presenceId: string, reason = "SEAT_OFFLINE"): void {
+    this.#revokeWriterIdentity(presenceId, `外接席位已離線：${ledgerSummary(reason, 160)}`);
+    this.inbox.failTarget(presenceId, reason);
+    this.presence.unregister(presenceId);
+  }
+
+  externalActor(presenceId: string, roomId: string): string {
+    return this.presence.actorFor(presenceId, roomId);
+  }
+
+  async waitExternal(input: { presenceId: string; roomId: string; timeoutMs?: number; signal?: AbortSignal }): Promise<ClaimedRoomDelivery | undefined> {
+    this.presence.actorFor(input.presenceId, input.roomId);
+    return await this.inbox.wait({ ...input, ledger: this.ledger });
+  }
+
+  ackExternal(input: { presenceId: string; deliveryId: string; leaseToken: string; phase: "read" | "working" }): RoomDelivery {
+    this.#assertSeatDelivery(input.presenceId, input.deliveryId);
+    return this.inbox.ack(input);
+  }
+
+  async replyExternal(input: { presenceId: string; deliveryId: string; leaseToken: string; text: string }): Promise<{ delivery: RoomDelivery; reply: RoomMessage }> {
+    const delivery = this.#assertSeatDelivery(input.presenceId, input.deliveryId);
+    const author = this.presence.actorFor(input.presenceId, delivery.roomId);
+    return await this.inbox.reply({ ...input, ledger: this.ledger, author });
+  }
+
+  failExternal(input: { presenceId: string; deliveryId: string; leaseToken: string; reason: string }): RoomDelivery {
+    this.#assertSeatDelivery(input.presenceId, input.deliveryId);
+    return this.inbox.fail(input);
+  }
+
+  recordHook(input: PresenceHookInput): "recorded" | "ignored" | "duplicate" {
+    return this.presence.recordHook(this.ledger, input);
+  }
+
+  createManaged(input: { roomId: string; workspace: string; provider: ManagedAgentProvider; model: string; label: string }): ManagedRoomAgent {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    const desiredName = managedAgentDisplayName(input.provider, input.label);
+    if (this.presence.list(input.workspace, input.roomId).some((session) => session.displayName === desiredName)) {
+      throw new Error("MANAGED_AGENT_DISPLAY_NAME_IN_USE");
+    }
+    const agent = this.managedAgents.create(input);
+    this.ledger.appendSystem(input.roomId, `${agent.displayName} 受控即時 Agent 已建立`);
+    return agent;
+  }
+
+  archiveManaged(agentId: string, roomId: string, workspace: string): ManagedRoomAgent {
+    this.#assertRoomWorkspace(roomId, workspace);
+    const agent = this.managedAgents.get(agentId);
+    if (!agent || agent.roomId !== roomId || agent.workspace !== workspace) throw new Error("MANAGED_AGENT_NOT_FOUND");
+    this.#revokeWriterIdentity(agentId, "受控即時 Agent 已由 Owner 移除");
+    const archived = this.managedAgents.archive(agentId, roomId);
+    this.ledger.appendSystem(roomId, `${archived.displayName} 受控即時 Agent 已移除`);
+    return archived;
+  }
+
+  async grantWriter(input: {
+    taskId: string;
+    roomId: string;
+    workspace: string;
+    candidate: WriterCandidate;
+  }): Promise<GrantedWriterLease> {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    const writer = this.#resolveWriter(input.candidate, input.roomId, input.workspace);
+    const existing = this.writerLeases.taskScope(input.taskId);
+    if (existing) {
+      if (existing.roomId !== input.roomId || existing.workspace !== input.workspace) throw new Error("WRITER_TASK_SCOPE_MISMATCH");
+      if (existing.active) throw new Error("WRITER_LEASE_ALREADY_ACTIVE");
+      try {
+        realpathSync(existing.worktree);
+      } catch {
+        throw new Error("WRITER_RETAINED_WORKTREE_MISSING");
+      }
+      const granted = this.writerLeases.grant({ ...input, worktree: existing.worktree, writer });
+      this.#recordWriterGrant(granted.lease);
+      return granted;
+    }
+    const worktreeId = randomUUID();
+    let worktree: string;
+    try {
+      worktree = (await this.#worktrees.create(input.workspace, worktreeId)).workspace;
+    } catch (error) {
+      if (error instanceof Error && error.message === "WORKTREE_BASE_COMMIT_REQUIRED") {
+        throw new Error("WRITER_BASE_COMMIT_REQUIRED");
+      }
+      throw error;
+    }
+    try {
+      await this.#writerWorktrees?.begin({
+        runId: worktreeId,
+        roomId: input.roomId,
+        taskId: input.taskId,
+        workspace: input.workspace,
+        worktree,
+      });
+      const granted = this.writerLeases.grant({ ...input, worktree, writer });
+      this.#recordWriterGrant(granted.lease);
+      return granted;
+    } catch (error) {
+      try {
+        await this.#writerWorktrees?.fail(
+          worktreeId,
+          error instanceof Error ? error.message : "WRITER_WORKTREE_REGISTRATION_FAILED",
+        );
+      } catch { /* the original grant error remains authoritative */ }
+      try {
+        const preview = await this.#worktrees.previewCleanup(worktreeId);
+        await this.#worktrees.cleanup(preview);
+      } catch { /* retain isolated worktree for owner inspection */ }
+      throw error;
+    }
+  }
+
+  switchWriter(input: {
+    taskId: string;
+    roomId: string;
+    workspace: string;
+    expectedEpoch: number;
+    checkpoint: string;
+    candidate: WriterCandidate;
+  }): GrantedWriterLease {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    const previous = this.writerLeases.current(input.taskId);
+    if (!previous || previous.roomId !== input.roomId || previous.workspace !== input.workspace) {
+      throw new Error("WRITER_TASK_SCOPE_MISMATCH");
+    }
+    const writer = this.#resolveWriter(input.candidate, input.roomId, input.workspace);
+    const granted = this.writerLeases.switch({
+      taskId: input.taskId,
+      expectedEpoch: input.expectedEpoch,
+      checkpoint: input.checkpoint,
+      writer,
+    });
+    this.#revokeDelegations(previous, "父 Writer 已交接");
+    this.audit.append({
+      roomId: previous.roomId, taskId: previous.taskId, type: "writer.revoked",
+      actor: "you", onBehalfOf: previous.onBehalfOf, executedBy: previous.executedBy,
+      leaseEpoch: previous.epoch, action: "switch", outcome: "succeeded",
+      detail: { reason: "handoff", checkpoint: ledgerSummary(input.checkpoint) },
+    });
+    this.ledger.appendSystemIdempotent(
+      input.roomId,
+      `${previous.writer.displayName} 已交接任務 ${input.taskId}；checkpoint：${ledgerSummary(input.checkpoint)}`,
+      `writer:lease:${previous.id}:revoked`,
+    );
+    this.#recordWriterGrant(granted.lease);
+    return granted;
+  }
+
+  completeWriter(input: { taskId: string; roomId: string; workspace: string; epoch: number; checkpoint: string }): WriterLease {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    const current = this.writerLeases.current(input.taskId);
+    if (!current || current.roomId !== input.roomId || current.workspace !== input.workspace) {
+      throw new Error("WRITER_TASK_SCOPE_MISMATCH");
+    }
+    const completed = this.writerLeases.complete(input);
+    this.#revokeDelegations(current, "父 Writer 已完成任務");
+    this.audit.append({
+      roomId: completed.roomId, taskId: completed.taskId, type: "writer.completed",
+      actor: "you", onBehalfOf: completed.onBehalfOf, executedBy: completed.executedBy,
+      leaseEpoch: completed.epoch, action: "complete", outcome: "succeeded",
+      detail: { checkpoint: ledgerSummary(input.checkpoint) },
+    });
+    this.ledger.appendSystemIdempotent(
+      input.roomId,
+      `${completed.writer.displayName} 已完成任務 ${input.taskId} 的 Writer 工作；checkpoint：${ledgerSummary(input.checkpoint)}`,
+      `writer:lease:${completed.id}:completed`,
+    );
+    return completed;
+  }
+
+  assertWriterWrite(input: {
+    taskId: string;
+    roomId: string;
+    workspace: string;
+    epoch: number;
+    capabilityToken: string;
+    executedBy: string;
+  }): WriterLease {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    const lease = this.writerLeases.assertWrite(input);
+    if (lease.roomId !== input.roomId || lease.workspace !== input.workspace) throw new Error("WRITER_TASK_SCOPE_MISMATCH");
+    return lease;
+  }
+
+  async delegateWriterChild(input: {
+    taskId: string;
+    roomId: string;
+    workspace: string;
+    epoch: number;
+    capabilityToken: string;
+    executedBy: string;
+    childProvider: WriterProvider;
+    label: string;
+  }): Promise<GrantedWriterDelegation> {
+    const parent = this.assertWriterWrite(input);
+    const id = randomUUID();
+    // Same-provider children are part of the same Writer authority. They share
+    // the parent task worktree and are serialized by the control plane, so their
+    // changes converge into one owner-reviewed apply-back instead of becoming
+    // stranded in nested worktrees.
+    const childWorkspace = parent.worktree;
+    try {
+      const granted = this.writerDelegations.create({
+        id,
+        parent,
+        childProvider: input.childProvider,
+        label: input.label,
+        workspace: childWorkspace,
+      });
+      this.audit.append({
+        roomId: input.roomId, taskId: input.taskId, type: "writer.delegated",
+        actor: parent.writer.displayName, onBehalfOf: parent.onBehalfOf,
+        executedBy: granted.delegation.executedBy, leaseEpoch: parent.epoch,
+        action: "delegate", outcome: "succeeded",
+        detail: {
+          delegationId: granted.delegation.id,
+          parentLeaseId: parent.id,
+          childProvider: granted.delegation.childProvider,
+          access: granted.delegation.access,
+          workspace: granted.delegation.workspace,
+          redelegation: "denied",
+        },
+      });
+      const mode = granted.delegation.access === "write"
+        ? "共用父 Writer 任務 worktree，控制面序列執行"
+        : "跨模型唯讀";
+      this.ledger.appendSystemIdempotent(
+        input.roomId,
+        `${parent.writer.displayName} 已派駐 ${granted.delegation.displayName}（${mode}，不可再轉派）`,
+        `writer:delegation:${granted.delegation.id}:created`,
+      );
+      return granted;
+    } catch (error) {
+      throw error;
+    }
+  }
+
+  assertDelegatedWrite(input: {
+    delegationId: string;
+    taskId: string;
+    roomId: string;
+    workspace: string;
+    capabilityToken: string;
+    executedBy: string;
+  }): WriterDelegation {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    const parent = this.writerLeases.current(input.taskId);
+    if (!parent || parent.roomId !== input.roomId || parent.workspace !== input.workspace) {
+      throw new Error("DELEGATION_PARENT_LEASE_STALE");
+    }
+    return this.writerDelegations.assertWrite({
+      delegationId: input.delegationId,
+      parentLease: parent,
+      capabilityToken: input.capabilityToken,
+      executedBy: input.executedBy,
+    });
+  }
+
+  assertDelegatedRead(input: {
+    delegationId: string;
+    taskId: string;
+    roomId: string;
+    workspace: string;
+    executedBy: string;
+  }): WriterDelegation {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    const parent = this.writerLeases.current(input.taskId);
+    if (!parent || parent.roomId !== input.roomId || parent.workspace !== input.workspace) {
+      throw new Error("DELEGATION_PARENT_LEASE_STALE");
+    }
+    return this.writerDelegations.assertRead({
+      delegationId: input.delegationId,
+      parentLease: parent,
+      executedBy: input.executedBy,
+    });
+  }
+
+  recordWorkspaceOperation(input: {
+    taskId: string;
+    roomId: string;
+    workspace: string;
+    actor: string;
+    onBehalfOf: string;
+    executedBy: string;
+    leaseEpoch: number;
+    action: "list_files" | "read_file" | "create_directory" | "write_file";
+    path?: string;
+    outcome: AuditOutcome;
+    detail?: Record<string, unknown>;
+  }): void {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    this.audit.append({ ...input, type: `workspace.${input.action}` });
+    const verb = input.action === "write_file" ? "寫入"
+      : input.action === "create_directory" ? "建立資料夾"
+        : input.action === "read_file" ? "讀取" : "列出檔案";
+    const target = input.path ? ` ${ledgerSummary(input.path, 240)}` : "";
+    const room = this.ledger.getRoom(input.roomId);
+    const nearLedgerLimit = Boolean(room && (room.messages >= 4_500 || room.bytes >= 7 * 1_048_576));
+    try {
+      if (nearLedgerLimit) throw new Error("ROOM_LEDGER_RESERVED_FOR_CONVERSATION");
+      this.ledger.appendSystem(
+        input.roomId,
+        `${input.actor} ${verb}${target}：${input.outcome}`,
+      );
+    } catch (error) {
+      // The HMAC audit above is the authoritative technical record. A full room
+      // ledger must never turn an already-completed filesystem mutation into an
+      // apparent tool failure, nor consume the final room capacity needed for
+      // Owner/Agent conversation.
+      this.audit.append({
+        roomId: input.roomId, taskId: input.taskId, type: "workspace.ledger-notification-skipped",
+        actor: input.actor, onBehalfOf: input.onBehalfOf, executedBy: input.executedBy,
+        leaseEpoch: input.leaseEpoch, action: input.action, outcome: "failed",
+        detail: {
+          path: input.path,
+          reason: error instanceof Error ? error.message : "ROOM_LEDGER_NOTIFICATION_FAILED",
+          operationOutcome: input.outcome,
+        },
+      });
+    }
+  }
+
+  revokeUnrecoverableWriters(reason = "Owner 控制服務重新啟動，舊 capability 已失效"): number {
+    let revoked = 0;
+    for (const room of this.ledger.listRooms()) {
+      for (const lease of this.writerLeases.list(room.id)) {
+        if (lease.state !== "active" || this.writerLeases.hasActiveRun(lease.taskId)) continue;
+        let stale: WriterLease;
+        try {
+          stale = this.writerLeases.revoke({
+            taskId: lease.taskId,
+            epoch: lease.epoch,
+            checkpoint: reason,
+          });
+        } catch (error) {
+          if (error instanceof Error && error.message === "WRITER_TASK_ALREADY_RUNNING") continue;
+          throw error;
+        }
+        this.#revokeDelegations(stale, reason);
+        this.audit.append({
+          roomId: stale.roomId, taskId: stale.taskId, type: "writer.revoked",
+          actor: "you", onBehalfOf: stale.onBehalfOf, executedBy: stale.executedBy,
+          leaseEpoch: stale.epoch, action: "revoke-unrecoverable", outcome: "succeeded",
+          detail: { reason: ledgerSummary(reason) },
+        });
+        this.ledger.appendSystemIdempotent(
+          stale.roomId,
+          `${stale.writer.displayName} 的 Writer 權限已撤銷：${ledgerSummary(reason)}`,
+          `writer:lease:${stale.id}:revoked`,
+        );
+        revoked += 1;
+      }
+    }
+    return revoked;
+  }
+
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    const errors: unknown[] = [];
+    for (const close of [
+      () => this.audit.close(),
+      () => this.writerDelegations.close(),
+      () => this.writerLeases.close(),
+      () => this.managedAgents.close(),
+      () => this.inbox.close(),
+      () => this.presence.close(),
+      () => this.ledger.close(),
+    ]) {
+      try { close(); } catch (error) { errors.push(error); }
+    }
+    if (errors.length > 0) throw new AggregateError(errors, "COLLABORATION_SERVICE_CLOSE_FAILED");
+  }
+
+  #assertRoomWorkspace(roomId: string, workspace: string): void {
+    const room = this.ledger.getRoom(roomId);
+    if (!room) throw new Error("ROOM_NOT_FOUND");
+    if (room.workspace === workspace) return;
+    try {
+      if (realpathSync(room.workspace) === workspace) return;
+    } catch { /* the mismatch below remains fail-closed */ }
+    throw new Error("ROOM_WORKSPACE_MISMATCH");
+  }
+
+  #assertSeatDelivery(presenceId: string, deliveryId: string): RoomDelivery {
+    const delivery = this.inbox.get(deliveryId);
+    if (!delivery || delivery.targetPresenceId !== presenceId) throw new Error("DELIVERY_NOT_FOUND");
+    this.presence.actorFor(presenceId, delivery.roomId);
+    return delivery;
+  }
+
+  #resolveWriter(candidate: WriterCandidate, roomId: string, workspace: string): WriterIdentity {
+    if (candidate.origin === "resident") {
+      return {
+        origin: "resident",
+        provider: candidate.provider,
+        actorId: candidate.provider,
+        displayName: candidate.provider,
+      };
+    }
+    if (candidate.origin === "managed") {
+      const agent = this.managedAgents.get(candidate.actorId);
+      if (!agent || agent.roomId !== roomId || agent.workspace !== workspace) throw new Error("WRITER_CANDIDATE_NOT_ELIGIBLE");
+      return {
+        origin: "managed",
+        provider: agent.provider,
+        actorId: agent.id,
+        displayName: agent.displayName,
+      };
+    }
+    const presence = this.presence.get(candidate.actorId);
+    if (!presence?.joined || presence.roomId !== roomId || presence.workspace !== workspace || !presence.displayName) {
+      throw new Error("WRITER_CANDIDATE_NOT_ELIGIBLE");
+    }
+    return {
+      origin: "external",
+      provider: presence.provider,
+      actorId: presence.id,
+      displayName: presence.displayName,
+    };
+  }
+
+  #recordWriterGrant(lease: WriterLease): void {
+    const execution = lease.companionId
+      ? `，由受管 Writer Companion 代為執行`
+      : "";
+    this.ledger.appendSystemIdempotent(
+      lease.roomId,
+      `${lease.writer.displayName} 已成為任務 ${lease.taskId} 的 Writer${execution}（Writer Lease epoch ${lease.epoch}）`,
+      `writer:lease:${lease.id}:granted`,
+    );
+    this.audit.append({
+      roomId: lease.roomId, taskId: lease.taskId, type: "writer.granted",
+      actor: "you", onBehalfOf: lease.onBehalfOf, executedBy: lease.executedBy,
+      leaseEpoch: lease.epoch, action: "grant", outcome: "succeeded",
+      detail: {
+        leaseId: lease.id,
+        origin: lease.writer.origin,
+        provider: lease.writer.provider,
+        companionId: lease.companionId ?? null,
+        worktree: lease.worktree,
+      },
+    });
+  }
+
+  #revokeWriterIdentity(actorId: string, reason: string): WriterLease[] {
+    const revoked = this.writerLeases.revokeByActor(actorId, reason);
+    for (const lease of revoked) {
+      this.#revokeDelegations(lease, reason);
+      this.audit.append({
+        roomId: lease.roomId, taskId: lease.taskId, type: "writer.revoked",
+        actor: "you", onBehalfOf: lease.onBehalfOf, executedBy: lease.executedBy,
+        leaseEpoch: lease.epoch, action: "remove-identity", outcome: "succeeded",
+        detail: { reason: ledgerSummary(reason) },
+      });
+      this.ledger.appendSystemIdempotent(
+        lease.roomId,
+        `${lease.writer.displayName} 的任務 ${lease.taskId} Writer 權限已撤銷；原因：${ledgerSummary(reason)}`,
+        `writer:lease:${lease.id}:revoked`,
+      );
+    }
+    return revoked;
+  }
+
+  #revokeDelegations(parent: WriterLease, reason: string): WriterDelegation[] {
+    const revoked = this.writerDelegations.revokeByLease(parent.id, reason);
+    for (const child of revoked) {
+      this.audit.append({
+        roomId: child.roomId, taskId: child.taskId, type: "writer.delegation-revoked",
+        actor: child.onBehalfOf, onBehalfOf: child.onBehalfOf, executedBy: child.executedBy,
+        leaseEpoch: child.parentEpoch, action: "revoke-delegation", outcome: "succeeded",
+        detail: { delegationId: child.id, parentLeaseId: child.parentLeaseId, reason: ledgerSummary(reason) },
+      });
+      this.ledger.appendSystemIdempotent(
+        child.roomId,
+        `${child.displayName} 的子 Agent 權限已撤銷；原因：${ledgerSummary(reason)}`,
+        `writer:delegation:${child.id}:revoked`,
+      );
+    }
+    return revoked;
+  }
+}

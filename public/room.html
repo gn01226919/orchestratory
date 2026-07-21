@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Orchestratory · Room 控制室</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/room.js" defer></script>
+  </head>
+  <body>
+    <div class="app">
+      <aside class="side" aria-label="控制室">
+        <div class="brand">
+          <span class="brand-dot" aria-hidden="true"></span>
+          <b>Room 控制室</b>
+          <small>ledger live</small>
+        </div>
+        <nav class="side-nav" aria-label="Room 導航">
+          <a class="nav-card" href="/">
+            <b>← AI 對話</b>
+            <small>回到主代理工作區</small>
+          </a>
+          <a class="nav-card" id="live-link" href="/room">
+            <b>Room 即時協作</b>
+            <small>直播、發言與 @喚醒</small>
+          </a>
+          <a class="nav-card" id="history-link" href="/room?mode=history">
+            <b>歷史紀錄</b>
+            <small>每次向前翻閱 100 則</small>
+          </a>
+        </nav>
+        <label class="field" for="room-select">專案／房間
+          <select id="room-select"><option value="">載入中…</option></select>
+        </label>
+        <button id="agent-requests-open" class="agent-requests-open" type="button" aria-expanded="false">
+          <span>＋ 新增 Agents</span><b id="agent-request-count" hidden>0</b>
+        </button>
+        <section id="agent-requests-panel" class="agent-requests-panel" hidden aria-label="Agent 加入申請">
+          <p><b>外接終端值班席位</b>：<code>room_join_request</code> 會保持主機回合等待核准，核准後會等待第一則 GUI 任務。只有顯示「值班中」時可被 GUI 即時喚醒；休班時不冒充回覆，只保留精確收件匣。</p>
+          <div id="sidebar-presence-list" class="office-presence-list"></div>
+          <form id="managed-agent-create" class="managed-agent-create">
+            <b>受控即時 Agent</b>
+            <small>由 Orchestratory 啟動 · GUI 可主動喚醒 · 可重複對話 · 唯讀</small>
+            <label for="managed-agent-provider">模型來源</label>
+            <select id="managed-agent-provider">
+              <option value="codex">Codex</option>
+              <option value="claude">Claude</option>
+              <option value="grok">Grok</option>
+            </select>
+            <label for="managed-agent-label">名稱／任務編號</label>
+            <input id="managed-agent-label" maxlength="24" required placeholder="例如：前端 2">
+            <button class="primary" type="submit">＋ 建立受控即時 Agent</button>
+            <small id="managed-agent-create-status" aria-live="polite"></small>
+          </form>
+          <div id="sidebar-managed-agent-list" class="office-presence-list managed-agent-list"></div>
+        </section>
+        <label class="field" for="room-search">搜尋帳本
+          <input id="room-search" type="search" placeholder="關鍵字，清空回直播">
+        </label>
+        <div class="rail">
+          <div class="rail-row"><i class="dot on" id="rec-dot"></i><span><b id="rec-state">…</b><small id="room-stats">–</small></span></div>
+        </div>
+        <div class="rail" id="author-stats" aria-label="發言統計"></div>
+        <div class="side-foot">
+          <button id="older-history" type="button" hidden>↑ 載入更早紀錄</button>
+          <button id="summarize" type="button">🧾 摘要這個房間</button>
+          <button id="rec-toggle" type="button">⏸ 暫停收錄</button>
+          <button id="stop-all" type="button" class="danger">■ 緊急停止</button>
+          <div id="connection" class="conn">連線中…</div>
+        </div>
+      </aside>
+      <main class="main">
+        <div class="view-bar">
+          <button id="view-ledger" class="view-tab is-active" type="button">💬 帳本直播</button>
+          <button id="view-office" class="view-tab" type="button">🏢 辦公室</button>
+        </div>
+        <div id="ledger" class="stream" aria-live="polite">
+          <div class="welcome"><b>Room Ledger 直播</b><p>選擇房間後，這裡會即時顯示所有 agents 的編號對話。點 #編號可展開被引用段落。</p></div>
+        </div>
+        <div id="office" class="office" hidden aria-label="Agents 辦公室">
+          <section class="office-stage" aria-label="Agent 工作場景">
+            <div class="office-toolbar" aria-label="辦公室顯示控制">
+              <span class="office-toolbar-title"><i></i><b>AGENT STUDIO</b><small id="office-live-state">LIVE</small></span>
+              <span class="office-toolbar-actions">
+                <button id="office-theme-toggle" type="button" aria-pressed="false" title="切換日夜場景">☀ 日間</button>
+                <button id="office-quiet-toggle" type="button" aria-pressed="false" title="隱藏裝飾泡泡">🔕 安靜</button>
+                <button id="office-idle-toggle" type="button" aria-pressed="true" title="開關休閒活動">🧘 活動</button>
+                <button id="office-layout-reset" type="button" title="重新排列所有工位">⇄ 整理工位</button>
+                <button id="office-fullscreen-toggle" type="button" aria-pressed="false" title="切換全螢幕">⛶ 全螢幕</button>
+              </span>
+            </div>
+            <div class="office-viewport" id="office-viewport">
+              <div class="office-floor" id="office-floor"></div>
+            </div>
+            <div id="office-outcome" class="office-outcome" hidden aria-live="polite"><b></b><span></span></div>
+            <div class="office-caption" id="office-caption">待命中 · agents 在各自的工位</div>
+          </section>
+          <aside class="office-chat" aria-label="辦公室即時對話">
+            <header class="office-chat-head">
+              <span><i></i><b>即時對話</b></span>
+              <span class="office-chat-head-actions">
+                <small id="office-chat-room">LIVE</small>
+                <button id="office-task-toggle" type="button">任務 <b id="office-task-count">0</b></button>
+                <button id="office-notification-toggle" type="button" aria-label="開啟通知">🔔<b id="office-notification-count" hidden>0</b></button>
+                <button id="writer-handoff-toggle" type="button">✦ 交給 Writer</button>
+              </span>
+            </header>
+            <section id="office-task-center" class="office-side-panel" hidden aria-label="辦公室任務中心">
+              <div class="office-side-panel-head"><span><b>任務中心</b><small>只讀取既有 workflow 狀態</small></span><button id="office-task-close" type="button" aria-label="關閉任務中心">×</button></div>
+              <div id="office-task-list" class="office-task-list"></div>
+              <a href="/">前往主工作區管理 RUN →</a>
+            </section>
+            <section id="office-notifications" class="office-side-panel" hidden aria-label="辦公室通知">
+              <div class="office-side-panel-head"><span><b>通知</b><small>只保留在目前頁面</small></span><button id="office-notification-close" type="button" aria-label="關閉通知">×</button></div>
+              <div id="office-notification-list" class="office-notification-list"></div>
+              <button id="office-notification-clear" type="button">全部標示為已讀</button>
+            </section>
+            <section id="writer-handoff" class="writer-handoff" hidden aria-label="交給 Writer">
+              <div class="writer-handoff-title">
+                <span><b>交辦 coding workflow</b><small>預設 Claude Writer</small></span>
+                <button id="writer-handoff-close" type="button" aria-label="關閉 Writer 交辦">×</button>
+              </div>
+              <p>先為目前任務指定唯一 Writer；系統會建立隔離 worktree，交接時舊 epoch 與子 Agent 權限立即失效。</p>
+              <section class="writer-live-control" aria-label="Writer Lease 控制">
+                <div id="writer-active-summary" class="writer-active-summary">尚未指派 Writer</div>
+                <label for="writer-candidate">Writer 人選</label>
+                <select id="writer-candidate"></select>
+                <label for="writer-task-id">任務識別</label>
+                <input id="writer-task-id" maxlength="128" placeholder="例如：office-chat-fix">
+                <label for="writer-checkpoint">交接／完成 checkpoint</label>
+                <textarea id="writer-checkpoint" rows="2" maxlength="1024" placeholder="目前完成到哪裡、尚有哪些風險"></textarea>
+                <div class="writer-handoff-actions">
+                  <button id="writer-complete" type="button" disabled>完成並撤銷</button>
+                  <button id="writer-assign" class="primary" type="button">指派 Writer</button>
+                </div>
+                <div class="writer-delegate-control">
+                  <b>派駐子 Agent</b>
+                  <select id="writer-child-provider"><option value="codex">Codex</option><option value="claude">Claude</option><option value="grok">Grok</option></select>
+                  <input id="writer-child-label" maxlength="24" placeholder="例如：測試 1">
+                  <button id="writer-delegate" type="button" disabled>建立子 Agent</button>
+                  <small>與 Writer 同類型：共用目前 task worktree 並由系統序列執行；不同類型：唯讀；不可再轉派。</small>
+                </div>
+                <small id="writer-live-status" class="writer-handoff-status" aria-live="polite"></small>
+              </section>
+              <p>也可以只建立傳統 coding workflow 提案，之後到主工作區確認。</p>
+              <form id="writer-handoff-form">
+                <label for="writer-task">這次要 Writer 做什麼？</label>
+                <label for="writer-executor">實際執行者</label>
+                <select id="writer-executor"><option value="">目前 Writer 本人</option></select>
+                <textarea id="writer-task" rows="4" maxlength="20000" required placeholder="例如：在辦公室側邊對話新增訊息篩選…"></textarea>
+                <label for="writer-acceptance">驗收條件 <small>選填</small></label>
+                <textarea id="writer-acceptance" rows="3" maxlength="20000" placeholder="例如：所有測試通過，且點擊 agent 不會直接送出"></textarea>
+                <div class="writer-handoff-actions">
+                  <button id="writer-handoff-cancel" type="button">取消</button>
+                  <button id="writer-run-cancel" type="button" hidden disabled>取消 Writer 執行</button>
+                  <button id="writer-handoff-submit" class="primary" type="submit">建立待確認提案</button>
+                </div>
+                <small id="writer-handoff-status" class="writer-handoff-status" aria-live="polite"></small>
+              </form>
+              <div id="writer-handoff-result" class="writer-handoff-result" hidden>
+                <b>提案已建立，尚未啟動</b>
+                <span>前往主代理工作區確認 Writer、安全分支與上限。</span>
+                <a href="/">前往確認 RUN →</a>
+              </div>
+            </section>
+            <section id="office-agent-card" class="office-agent-card" hidden aria-label="Agent 狀態卡">
+              <div class="office-agent-card-head"><span><i id="office-agent-dot"></i><b id="office-agent-name">AGENT</b></span><button id="office-agent-close" type="button" aria-label="關閉 Agent 狀態卡">×</button></div>
+              <div class="office-agent-grid">
+                <span><small>目前狀態</small><b id="office-agent-status">待命</b></span>
+                <span><small>權限</small><b id="office-agent-access">唯讀</b></span>
+                <span><small>模型</small><b id="office-agent-model">—</b></span>
+                <span><small>最近發言</small><b id="office-agent-last">—</b></span>
+              </div>
+              <p id="office-agent-detail">點選工位後，訊息框會自動加入 @agent；仍需按送出才會喚醒模型。</p>
+            </section>
+            <section class="office-presence" aria-label="可加入的 MCP 終端">
+              <div class="office-presence-head">
+                <span><i></i><b>MCP 終端席位</b></span>
+                <small id="office-presence-count">偵測中…</small>
+              </div>
+              <div id="office-presence-list" class="office-presence-list">
+                <p>正在尋找此專案中已啟用 MCP 的終端…</p>
+              </div>
+              <div id="office-managed-agent-list" class="office-presence-list managed-agent-list"></div>
+            </section>
+            <div id="office-chat-stream" class="office-chat-stream" aria-live="polite">
+              <div class="office-chat-empty">選擇房間後，這裡會顯示 agents 最近的交流。</div>
+            </div>
+            <form id="office-chat-form" class="office-chat-form">
+              <label for="office-chat-input">對話內容</label>
+              <textarea id="office-chat-input" rows="3" maxlength="16000" placeholder="點選 agent，或直接輸入訊息…Enter 兩次送出"></textarea>
+              <div class="office-chat-actions">
+                <small id="office-chat-hint">@codex1 等終端只入帳；@codex 才會另外喚醒模型</small>
+                <button id="office-chat-send" class="primary" type="submit">送出</button>
+              </div>
+            </form>
+          </aside>
+        </div>
+        <form id="post-form" class="composer">
+          <textarea id="post-input" rows="2" maxlength="16000" placeholder="直接發言，或輸入 @codex / @claude / @grok 喚醒模型…Enter 兩次送出"></textarea>
+          <div class="composer-foot">
+            <span>Enter 兩次送出 · ⇧/⌥ Enter 換行 · ⌘ Enter 立即送出 · append-only</span>
+            <button class="primary" type="submit">發言</button>
+          </div>
+        </form>
+      </main>
+    </div>
+  </body>
+</html>

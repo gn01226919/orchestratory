@@ -1,0 +1,38 @@
+# Secrets and local configuration
+.claude/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Runtime data must never enter source control
+.orchestratory/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+logs/
+sessions/
+traces/
+
+# Dependencies and generated artifacts
+node_modules/
+coverage/
+dist/
+build/
+*.tsbuildinfo
+*.map
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Temporary files
+*.tmp
+*.temp
+*.log

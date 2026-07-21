@@ -1,0 +1,6 @@
+{
+  "terminalRunDays": 30,
+  "maxTerminalRuns": 500,
+  "debugCaptureEnabled": false,
+  "debugRetentionHours": 24
+}

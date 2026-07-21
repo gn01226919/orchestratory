@@ -1,0 +1,10 @@
+[
+  {
+    "id": "node-tests",
+    "displayName": "Node test runner",
+    "runtime": "docker",
+    "image": "node@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "executable": "node",
+    "args": ["--test"]
+  }
+]

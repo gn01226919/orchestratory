@@ -1,0 +1,16 @@
+{
+  "maxConcurrentWorkflows": 1,
+  "providerTimeoutMs": 600000,
+  "workflowTimeoutMs": 14400000,
+  "maxProviderCalls": 60,
+  "maxSubprocesses": 80,
+  "maxOutputBytes": 2097152,
+  "maxFilesChanged": 40,
+  "maxDiffLines": 10000,
+  "maxConsecutiveErrors": 3,
+  "maxRetries": 2,
+  "maxRounds": 20,
+  "maxApiBudgetUsdPerRun": 25,
+  "maxApiBudgetUsdPerDay": 50,
+  "maxApiBudgetUsdPerMonth": 250
+}
