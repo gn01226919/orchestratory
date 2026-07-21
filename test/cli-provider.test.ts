@@ -83,7 +83,7 @@ test("delegated Grok remains in an empty scratch directory without filesystem to
   });
   const workspace = await mkdtemp(join(tmpdir(), "orchestratory-grok-workspace-"));
   t.after(async () => await rm(workspace, { recursive: true, force: true }));
-  const result = await new SubscriptionCliProvider("grok").invoke({
+  const result = await new SubscriptionCliProvider("grok", { trustedExecutableRoots: [bin] }).invoke({
     ...request("read-only"),
     workspace,
     writerAuthorization: {
@@ -121,7 +121,8 @@ test("Codex conversation adapter can run in its empty read-only scratch director
     if (previousPath === undefined) delete process.env.PATH;
     else process.env.PATH = previousPath;
   });
-  const result = await new SubscriptionCliProvider("codex").invoke(request("read-only"));
+  const result = await new SubscriptionCliProvider("codex", { trustedExecutableRoots: [bin] })
+    .invoke(request("read-only"));
   assert.equal(result.text, "conversation-ready");
 });
 
@@ -167,7 +168,7 @@ test("read-only subscription execution uses and removes an empty scratch cwd", a
   });
   const original = await mkdtemp(join(tmpdir(), "orchestratory-cli-original-"));
   t.after(async () => await rm(original, { recursive: true, force: true }));
-  const result = await new SubscriptionCliProvider("claude").invoke({
+  const result = await new SubscriptionCliProvider("claude", { trustedExecutableRoots: [bin] }).invoke({
     ...request("read-only"),
     workspace: original,
   });
@@ -206,7 +207,7 @@ test("Claude writer keeps its owner-only MCP configuration out of process argume
   });
   const workspace = await mkdtemp(join(tmpdir(), "orchestratory-writer-workspace-"));
   t.after(async () => await rm(workspace, { recursive: true, force: true }));
-  const result = await new SubscriptionCliProvider("claude").invoke({
+  const result = await new SubscriptionCliProvider("claude", { trustedExecutableRoots: [bin] }).invoke({
     ...request("workspace-write"),
     workspace,
   });

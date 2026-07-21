@@ -32,7 +32,7 @@
 | ID | 濫用案例 | 主要控制 | 殘餘風險 |
 |---|---|---|---|
 | T01 | Repo 文字要求 agent 讀取憑證並上傳 | Prompt trust labels、無 secret capability、無任意網路 | Provider 本身仍會看到被選入的專案內容 |
-| T02 | 模型輸出 shell injection | 無 shell spawn、argv schema、allowlist | 被允許工具自身可能有漏洞 |
+| T02 | 模型輸出 shell injection，或 PATH/symlink 將 allowlisted 名稱導向惡意 binary | 無 shell spawn、argv schema、固定名稱、相對 PATH 拒絕、來源與最終目標 trusted-root containment、root/owner regular executable、directory/file group/other-write deny | 被允許工具自身可能有漏洞；Node pathname spawn 前仍有極窄同 uid TOCTOU |
 | T03 | `../`、Unicode 或 symlink 逸出 workspace | Canonicalization、descriptor checks、特殊檔案拒絕 | OS/filesystem race 需持續測試 |
 | T04 | 惡意測試 script 讀取其他本機資料 | Digest-pinned Docker/Podman、no pull、最小 env、read-only mount/root、network off、resource limits、approval | Container runtime/daemon 與已批准 image 自身仍是高權限信任邊界；本機尚未完成真實 runtime smoke test |
 | T05 | 無限 loop、非整數／超大 hard-limit 設定消耗資源或訂閱/API 額度 | 每欄編譯期絕對 ceiling、count/time/byte safe-integer gate、跨欄關係驗證、quota reservation、timeout、circuit breaker | Provider 計量延遲可能造成小幅超額；編譯期 ceiling 仍需 release review 才能變更 |
@@ -71,7 +71,7 @@
 ### Spoofing
 
 - 偽造 provider executable、Web session、approval actor。
-- 控制：固定 executable identity、版本/來源檢查、ephemeral session、scoped approval。
+- 控制：固定 executable identity、trusted-root/owner/mode/type/來源檢查、ephemeral session、scoped approval。
 
 ### Tampering
 

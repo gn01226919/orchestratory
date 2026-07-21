@@ -226,9 +226,14 @@ function claudeWorkspaceMcpConfiguration(request: ProviderRequest): Record<strin
 export class SubscriptionCliProvider implements ProviderAdapter {
   readonly capabilities: ProviderCapabilities;
   readonly #definition: CliDefinition;
+  readonly #trustedExecutableRoots: readonly string[];
 
-  constructor(id: "codex" | "claude" | "grok", options: { codexWriterEnabled?: boolean } = {}) {
+  constructor(
+    id: "codex" | "claude" | "grok",
+    options: { codexWriterEnabled?: boolean; trustedExecutableRoots?: readonly string[] } = {},
+  ) {
     this.#definition = DEFINITIONS[id];
+    this.#trustedExecutableRoots = options.trustedExecutableRoots ?? [];
     // Codex Writer is experimental and OFF by default: it requires an owner opt-in
     // because "Codex uses the Workspace MCP instead of shell to write" is not yet
     // live-verified. --sandbox read-only remains a hard kernel guarantee regardless.
@@ -256,7 +261,11 @@ export class SubscriptionCliProvider implements ProviderAdapter {
     if (request.access === "workspace-write" && !this.capabilities.canWrite) {
       throw new Error("PROVIDER_WRITE_NOT_ALLOWED");
     }
-    const executable = await resolveExecutable(this.#definition.executable);
+    const executable = await resolveExecutable(
+      this.#definition.executable,
+      process.env.PATH ?? "",
+      this.#trustedExecutableRoots,
+    );
     const scratch = await mkdtemp(join(tmpdir(), "orchestratory-provider-"));
     await chmod(scratch, 0o700);
     const boundedWorkspace =
@@ -292,6 +301,7 @@ export class SubscriptionCliProvider implements ProviderAdapter {
               : {}),
         },
         ...(request.signal ? { signal: request.signal } : {}),
+        trustedExecutableRoots: this.#trustedExecutableRoots,
       });
     } finally {
       await rm(scratch, { recursive: true, force: true });
@@ -312,7 +322,11 @@ export class SubscriptionCliProvider implements ProviderAdapter {
 
   async doctor(): Promise<{ ok: boolean; version?: string; reason?: string }> {
     try {
-      const executable = await resolveExecutable(this.#definition.executable);
+      const executable = await resolveExecutable(
+        this.#definition.executable,
+        process.env.PATH ?? "",
+        this.#trustedExecutableRoots,
+      );
       const result = await runProcess({
         executable,
         args: versionArgs(this.#definition.id),
@@ -320,6 +334,7 @@ export class SubscriptionCliProvider implements ProviderAdapter {
         timeoutMs: 10_000,
         outputLimitBytes: 16_384,
         env: minimalSubscriptionEnvironment(),
+        trustedExecutableRoots: this.#trustedExecutableRoots,
       });
       if (result.exitCode !== 0) return { ok: false, reason: "VERSION_COMMAND_FAILED" };
       return { ok: true, version: safeSummary(result.stdout || result.stderr, 200) };
@@ -331,7 +346,11 @@ export class SubscriptionCliProvider implements ProviderAdapter {
   async listModels(): Promise<string[]> {
     if (this.#definition.id !== "grok") return [...this.capabilities.suggestedModels];
     try {
-      const executable = await resolveExecutable("grok");
+      const executable = await resolveExecutable(
+        "grok",
+        process.env.PATH ?? "",
+        this.#trustedExecutableRoots,
+      );
       const scratch = await mkdtemp(join(tmpdir(), "orchestratory-models-"));
       await chmod(scratch, 0o700);
       let result;
@@ -343,6 +362,7 @@ export class SubscriptionCliProvider implements ProviderAdapter {
           timeoutMs: 20_000,
           outputLimitBytes: 65_536,
           env: minimalSubscriptionEnvironment(),
+          trustedExecutableRoots: this.#trustedExecutableRoots,
         });
       } finally {
         await rm(scratch, { recursive: true, force: true });

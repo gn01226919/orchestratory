@@ -1,6 +1,7 @@
-import { access, realpath } from "node:fs/promises";
-import { constants } from "node:fs";
-import { delimiter, join } from "node:path";
+import { access, lstat, realpath } from "node:fs/promises";
+import { constants, type Stats } from "node:fs";
+import { homedir } from "node:os";
+import { delimiter, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { spawn } from "node:child_process";
 import { performance } from "node:perf_hooks";
 
@@ -13,6 +14,8 @@ export interface ProcessRequest {
   outputLimitBytes: number;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
+  /** Test/embedded-code extension only; never populated from user or model input. */
+  trustedExecutableRoots?: readonly string[];
 }
 
 export interface ProcessResult {
@@ -39,6 +42,97 @@ const SAFE_ENV_KEYS = [
   "CLAUDE_CONFIG_DIR",
   "XDG_CONFIG_HOME",
 ] as const;
+
+const DEFAULT_TRUSTED_EXECUTABLE_ROOTS = [
+  "/bin",
+  "/sbin",
+  "/usr/bin",
+  "/usr/sbin",
+  "/usr/local",
+  "/opt/homebrew",
+  join(homedir(), ".local"),
+  join(homedir(), ".nvm", "versions", "node"),
+  join(homedir(), ".grok"),
+] as const;
+
+function ownedByTrustedPrincipal(uid: number): boolean {
+  const owner = typeof process.getuid === "function" ? process.getuid() : undefined;
+  return uid === 0 || owner === undefined || uid === owner;
+}
+
+function containedBy(path: string, root: string): boolean {
+  const child = relative(root, path);
+  return child === "" || (!isAbsolute(child) && child !== ".." && !child.startsWith(`..${sep}`));
+}
+
+async function canonicalTrustedRoots(additional: readonly string[] = []): Promise<string[]> {
+  if (additional.length > 16) throw new Error("TOO_MANY_TRUSTED_EXECUTABLE_ROOTS");
+  const roots = [...DEFAULT_TRUSTED_EXECUTABLE_ROOTS, ...additional];
+  const canonical: string[] = [];
+  for (const root of roots) {
+    if (!isAbsolute(root) || root.includes("\0")) throw new Error("INVALID_TRUSTED_EXECUTABLE_ROOT");
+    try {
+      const resolved = await realpath(root);
+      const info = await lstat(resolved);
+      if (!info.isDirectory() || !ownedByTrustedPrincipal(info.uid) || (info.mode & 0o022) !== 0) {
+        continue;
+      }
+      canonical.push(resolved);
+    } catch {
+      // Optional platform/tool roots may not exist on this host.
+    }
+  }
+  return [...new Set(canonical)].sort((left, right) => right.length - left.length);
+}
+
+async function assertSafeDirectoryChain(path: string, root: string): Promise<void> {
+  let current = path;
+  for (;;) {
+    const info = await lstat(current);
+    if (!info.isDirectory() || !ownedByTrustedPrincipal(info.uid) || (info.mode & 0o022) !== 0) {
+      throw new Error("UNSAFE_EXECUTABLE_DIRECTORY");
+    }
+    if (current === root) return;
+    const parent = dirname(current);
+    if (parent === current || !containedBy(parent, root)) throw new Error("UNSAFE_EXECUTABLE_DIRECTORY");
+    current = parent;
+  }
+}
+
+/** Validates both the selected PATH entry and the final symlink target. */
+export async function validateExecutable(
+  path: string,
+  trustedRoots: readonly string[] = [],
+): Promise<string> {
+  if (!isAbsolute(path) || path.includes("\0")) throw new Error("INVALID_EXECUTABLE_PATH");
+  const roots = await canonicalTrustedRoots(trustedRoots);
+  let sourceDirectory = "";
+  let before: Stats;
+  let canonical = "";
+  try {
+    sourceDirectory = await realpath(dirname(path));
+    before = await lstat(path);
+    canonical = await realpath(path);
+  } catch {
+    throw new Error("UNSAFE_EXECUTABLE_FILE");
+  }
+  const sourceRoot = roots.find((root) => containedBy(sourceDirectory, root));
+  const targetRoot = roots.find((root) => containedBy(canonical, root));
+  if (!sourceRoot || !targetRoot) throw new Error("UNTRUSTED_EXECUTABLE_LOCATION");
+  if (!ownedByTrustedPrincipal(before.uid)) throw new Error("UNSAFE_EXECUTABLE_FILE");
+  await assertSafeDirectoryChain(sourceDirectory, sourceRoot);
+  await assertSafeDirectoryChain(dirname(canonical), targetRoot);
+  const [after, target] = await Promise.all([lstat(path), lstat(canonical)]);
+  if (before.dev !== after.dev || before.ino !== after.ino) throw new Error("UNSAFE_EXECUTABLE_FILE");
+  if (
+    !target.isFile() ||
+    !ownedByTrustedPrincipal(target.uid) ||
+    (target.mode & 0o022) !== 0 ||
+    (target.mode & 0o111) === 0
+  ) throw new Error("UNSAFE_EXECUTABLE_FILE");
+  await access(canonical, constants.X_OK);
+  return canonical;
+}
 
 export function minimalSubscriptionEnvironment(
   source: NodeJS.ProcessEnv = process.env,
@@ -71,17 +165,23 @@ export function minimalGitEnvironment(
 export async function resolveExecutable(
   name: string,
   sourcePath = process.env.PATH ?? "",
+  trustedRoots: readonly string[] = [],
 ): Promise<string> {
   if (!/^[A-Za-z0-9._-]+$/u.test(name)) throw new Error("INVALID_EXECUTABLE_NAME");
   for (const directory of sourcePath.split(delimiter)) {
     if (!directory) continue;
+    if (!isAbsolute(directory) || directory.includes("\0")) {
+      throw new Error("UNSAFE_EXECUTABLE_PATH_ENTRY");
+    }
     const candidate = join(directory, name);
     try {
       await access(candidate, constants.X_OK);
-      return await realpath(candidate);
-    } catch {
-      // Continue searching the fixed PATH list.
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR" || code === "EACCES") continue;
+      throw error;
     }
+    return await validateExecutable(candidate, trustedRoots);
   }
   throw new Error(`EXECUTABLE_NOT_FOUND:${name}`);
 }
@@ -109,7 +209,10 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
     terminationReason: "cancelled",
   });
   if (request.signal?.aborted) return cancelledBeforeStart();
-  const executable = await realpath(request.executable);
+  const executable = await validateExecutable(
+    request.executable,
+    request.trustedExecutableRoots ?? [],
+  );
   if (request.signal?.aborted) return cancelledBeforeStart();
 
   return await new Promise<ProcessResult>((resolvePromise, reject) => {

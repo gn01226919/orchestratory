@@ -59,7 +59,9 @@ Private Vulnerability Reporting；公開後請使用 repository 的 **Security �
 ## 5. 命令執行
 
 - 使用無 shell 的 process spawn 與 argv array。
-- Executable 必須來自受控 registry，解析後固定實際路徑與版本。
+- Executable 必須來自受控 registry；PATH 不接受相對 entry，來源位置與 symlink 最終目標都必須
+  落在編譯期 trusted roots。沿途 directory 及最終 regular executable 只允許 root／目前 owner，
+  且拒絕 group/other writable；解析與 spawn boundary 會再次重驗 canonical target。
 - 禁止命令替換、重導向、pipe、subshell、glob 與動態 script。
 - 測試命令也視為高風險，需 allowlist、sandbox、timeout 與網路政策。
 - v1 測試 sandbox 只接受 owner 設定且 SHA-256 digest-pinned 的 Docker/Podman image，固定
@@ -68,6 +70,8 @@ Private Vulnerability Reporting；公開後請使用 repository 的 **Security �
 - macOS `sandbox-exec`/SBPL 不作為產品安全邊界；不自動安裝 runtime 或 pull image。
 - 終止時殺掉完整 process tree，避免 orphan process 持續消耗資源。
 - stdout/stderr 設 byte limit，超過即截斷並終止。
+- Node `spawn` 不接受 executable fd；因此同 uid 惡意程序仍可能競逐驗證完成到 kernel exec 的極窄
+  pathname 視窗。此風險不以「已消除」描述，並由 owner-only roots、不可跨使用者寫入與最小權限降低。
 
 ## 6. 檔案系統
 

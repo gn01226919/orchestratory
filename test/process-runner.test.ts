@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -183,6 +183,60 @@ test("process broker rejects invalid executables, arguments and limits", async (
       outputLimitBytes: 1,
     }),
     /TOO_MANY_ARGUMENTS/u,
+  );
+});
+
+test("executable trust rejects unsafe files, directories, locations, and PATH entries", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "orchestratory-executable-trust-"));
+  const outside = await mkdtemp(join(tmpdir(), "orchestratory-executable-outside-"));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  t.after(async () => await rm(outside, { recursive: true, force: true }));
+
+  const safeBin = join(root, "safe-bin");
+  await mkdir(safeBin, { mode: 0o700 });
+  const safe = join(safeBin, "safe-tool");
+  await writeFile(safe, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  assert.equal(await resolveExecutable("safe-tool", safeBin, [root]), await realpath(safe));
+
+  const writable = join(safeBin, "writable-tool");
+  await writeFile(writable, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  await chmod(writable, 0o722);
+  await assert.rejects(
+    resolveExecutable("writable-tool", safeBin, [root]),
+    /UNSAFE_EXECUTABLE_FILE/u,
+  );
+
+  const writableBin = join(root, "writable-bin");
+  await mkdir(writableBin, { mode: 0o700 });
+  const directoryTool = join(writableBin, "directory-tool");
+  await writeFile(directoryTool, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  await chmod(writableBin, 0o777);
+  await assert.rejects(
+    resolveExecutable("directory-tool", writableBin, [root]),
+    /UNSAFE_EXECUTABLE_DIRECTORY/u,
+  );
+
+  const outsideTarget = join(outside, "outside-tool");
+  await writeFile(outsideTarget, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  await symlink(outsideTarget, join(safeBin, "linked-tool"));
+  await assert.rejects(
+    resolveExecutable("linked-tool", safeBin, [root]),
+    /UNTRUSTED_EXECUTABLE_LOCATION/u,
+  );
+
+  const directoryExecutable = join(safeBin, "directory-executable");
+  await mkdir(directoryExecutable, { mode: 0o700 });
+  await assert.rejects(
+    resolveExecutable("directory-executable", safeBin, [root]),
+    /UNSAFE_EXECUTABLE_FILE/u,
+  );
+  await assert.rejects(
+    resolveExecutable("safe-tool", "relative/bin", [root]),
+    /UNSAFE_EXECUTABLE_PATH_ENTRY/u,
+  );
+  await assert.rejects(
+    resolveExecutable("safe-tool", safeBin, [outside]),
+    /UNTRUSTED_EXECUTABLE_LOCATION/u,
   );
 });
 

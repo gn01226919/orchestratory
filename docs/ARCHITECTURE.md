@@ -110,6 +110,11 @@ CommandRequest {
 ```
 
 `executable_id` 對應本機受信任 registry；不得由模型提供任意 executable path。
+解析器拒絕相對 PATH entry，並同時驗證被選取的 PATH 位置與 symlink 最終目標都位於編譯期
+trusted roots。兩側 directory chain 都只能由 root／目前 owner 擁有且不可 group/other writable；
+最終 executable 必須是 root／owner 的 regular executable file 且不可 group/other writable。
+測試注入額外 root 只存在程式內部 API，不從 JSON、UI、agent 或 provider 輸入載入。Node spawn
+仍以 pathname 執行，驗證後到 kernel exec 間保留極窄的同 uid race，列為平台殘餘風險。
 
 ### 3.5 Provider Adapter
 
