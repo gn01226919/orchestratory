@@ -22,12 +22,13 @@ by repository `.npmrc`, local reproduction, and CI.
 - `sbom.cdx.json` is deterministic CycloneDX 1.5 output and `npm run sbom:check` rejects drift.
 - `npm run repro:smoke` first makes a local `--no-hardlinks` clone of committed `HEAD`, proves its
   identity and clean status, installs offline with lifecycle scripts disabled, and runs the full check suite.
-  It separately builds the explicit package `files` allowlist and rejects development/Agent/CI entries except
-  the runtime security-audit modules and their declarations. An isolated verification harness supplies the
-  non-published lockfile and `tsconfig`, then performs an offline install, syntax-checks published JS/MJS,
-  typechecks all published TS, and starts the packaged CLI help and audit paths. Missing, accidentally untracked
-  or unexpectedly published inputs fail closed. Full fuzz/SBOM/history checks run in the clean clone because
-  their test sources and development scripts are intentionally excluded from the release artifact.
+  It separately derives the explicit package `files` allowlist from that clean clone, requires every entry to
+  be tracked and rejects development/Agent/CI entries except the runtime security-audit modules and declarations.
+  The temporary runtime manifest retains only `start`/`doctor`/`web`, so source-only test/SBOM/repro scripts are
+  not advertised by the artifact. The gate creates an actual tgz, installs it offline, verifies the npm `.bin`
+  symlink and executable mode, syntax-checks installed JS/MJS, typechecks all installed TS, then runs packaged CLI
+  help plus positive and synthetic-secret negative audit paths. Missing, untracked or unexpected entries fail
+  closed. Full fuzz/SBOM/history checks run in the clean clone because their development inputs are excluded.
 - GitHub Actions use immutable full commit SHAs, read-only repository permission, no persisted checkout
   credential, no dependency cache, no secrets, and a hard timeout.
 

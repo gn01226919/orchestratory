@@ -298,9 +298,10 @@ binary 或總 context 超限時 fail closed；模式篩選仍不是秘密偵測�
 - scoped/expiring/single-use approval、digest-pinned tester、checkpoint 指紋恢復。
 - Workspace allowlist、retention preview/purge rollback、worktree cleanup snapshot、SQLite migration/audit-chain tamper detection。
 - CycloneDX SBOM、deterministic fuzz smoke、SHA-pinned least-privilege CI 與離線乾淨 package snapshot。
-- 目前 259 個 deterministic tests；line 94.94%、branch 85.27%、functions 96.71%，門檻由指令阻擋。
+- 目前 273 個 deterministic tests；line 95.00%、branch 85.15%、functions 96.81%，門檻由指令阻擋。
 
-真實訂閱/provider 認證與付費 API 呼叫尚未執行，因為它們會使用使用者額度或產生費用。
+已完成受控唯讀 Codex 與 managed Claude 的最小 live smoke；真實 Writer 寫入、Grok、付費 API、
+container image 與任何額外額度操作仍需 owner 明確批准。
 
 ## 已知限制
 
@@ -314,8 +315,10 @@ binary 或總 context 超限時 fail closed；模式篩選仍不是秘密偵測�
   需 owner 明確批准訂閱額度；Grok/API Writer 保持停用。
 - Raw debug capture 尚未實作；設定為 true 會直接拒絕啟動，而不是假裝啟用 retention 保護。
 - Node 22 的內建 `node:sqlite` 仍會顯示 experimental warning。
-- GUI 的 HTTP/安全整合測試已通過；本次執行環境沒有可用 browser instance，所以視覺點擊 QA 尚待補做。
-- `npm run repro:smoke` 已驗證乾淨 package snapshot；真正 clean Git clone 仍須先有經 owner 批准的 commit。
+- GUI 的 HTTP/安全整合測試與先前 Browser 視覺流程已通過；最新 macOS IME 雙 Enter、雙埠 cookie、
+  external join decision 與 Writer apply-back 仍待 owner 允許新的受控 Chrome 視窗後實機驗收。
+- `npm run repro:smoke` 會從 committed HEAD 建立 `--no-hardlinks` clean clone、跑完整 gate，並從該
+  clone 產生實際 tgz、離線安裝與驗證 installed bin；不以 dirty working tree 代替發布來源。
 
 ## 狀態
 

@@ -47,8 +47,13 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     return;
   }
   if (command === "audit") {
-    await import("../scripts/security-scan.mjs");
-    await import("../scripts/history-scan.mjs");
+    const [{ runSecurityScan }, { runHistoryScan }] = await Promise.all([
+      import("../scripts/security-scan.mjs"),
+      import("../scripts/history-scan.mjs"),
+    ]);
+    const localPassed = await runSecurityScan();
+    const historyPassed = await runHistoryScan();
+    if (!localPassed || !historyPassed) throw new Error("SECURITY_AUDIT_FAILED");
     return;
   }
 

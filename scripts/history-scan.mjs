@@ -30,7 +30,7 @@ function findings(label, content) {
     .map(([name]) => `${name}: ${label}`);
 }
 
-async function runHistoryScan() {
+export async function runHistoryScan() {
   try {
     if ((await git(["rev-parse", "--is-inside-work-tree"], 1024)).trim() !== "true") {
       throw new Error("GIT_WORKTREE_REQUIRED");
@@ -38,7 +38,7 @@ async function runHistoryScan() {
   } catch (error) {
     if (!isMissingRepository(error)) throw error;
     process.stdout.write("Git history security scan not applicable (package has no repository metadata).\n");
-    return;
+    return true;
   }
 
   const objectLines = (await git(["rev-list", "--objects", "--all"]))
@@ -67,10 +67,12 @@ async function runHistoryScan() {
 
   if (detected.length > 0) {
     process.stderr.write(`${detected.join("\n")}\n`);
-    process.exitCode = 1;
-  } else {
-    process.stdout.write(`Git history security scan passed (${objectLines.length} objects).\n`);
+    return false;
   }
+  process.stdout.write(`Git history security scan passed (${objectLines.length} objects).\n`);
+  return true;
 }
 
-await runHistoryScan();
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  if (!(await runHistoryScan())) process.exitCode = 1;
+}

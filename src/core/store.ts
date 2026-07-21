@@ -65,7 +65,9 @@ export class LocalStore {
     this.path = join(dataDirectory, "orchestratory.sqlite");
     this.#db = openOwnerDatabase(this.path);
     try {
-      this.#db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;");
+      this.#db.exec(
+        "PRAGMA busy_timeout=3000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;",
+      );
       verifyOwnerDatabaseFiles(this.path);
       this.#assertQuickCheck();
       this.#migrate();

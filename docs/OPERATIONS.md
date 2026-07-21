@@ -19,6 +19,10 @@ provider-call governor.
 The GUI emergency stop increments a shared kill epoch: in-flight calls in every process are aborted, and
 already-running workflows cannot continue into their next provider or tester boundary.
 
+These read-only diagnostics may run while the GUI daemon is active. Every SQLite store, including the main
+run store, waits up to three seconds for a short concurrent writer before failing closed. A lock that outlives
+that bound is not bypassed: let the active workflow or maintenance command finish, then retry sequentially.
+
 `data purge` without `--execute` is preview-only. It excludes active runs and any run with a retained
 worktree. No scheduled or automatic purge exists. In v1, the purge applies only to terminal workflow runs;
 Room/presence/inbox/Writer/audit stores remain persistent for traceability and are listed by inventory rather

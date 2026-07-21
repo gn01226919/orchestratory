@@ -88,11 +88,12 @@ tests/
 - Policy、path、command、secret、approval 與 limits 模組要求接近完整 branch coverage，未覆蓋分支需書面理由。
 - 型別、lint、測試、dependency、secret、license 與 build scan 任一失敗即阻擋合併。
 - 不允許以 skip、ignore、降低 severity 或更新 snapshot 方式掩蓋安全失敗。
-- `npm run check` 會執行 syntax、strict typecheck、上述 coverage gate、deterministic fuzz、SBOM drift、
+- `npm run check` 會先對全部 tracked 與非 ignored untracked text 執行 LF／UTF-8／tab／trailing-space／final-newline／JSON／
+  executable-mode 與危險 code-pattern hygiene lint，再執行 syntax、strict typecheck、上述 coverage gate、deterministic fuzz、SBOM drift、
   working-tree scan 與完整 Git history scan；`npm run check:release` 再加入 dependency audit、offline
-  clean package-snapshot reproduction 與 package dry-run inventory。
-- 目前證據：272/272 tests；line 94.98%、branch 85.11%、functions 96.80%；package dry-run
-  為 87 個明確 allowlist 檔案。
+  committed-HEAD clean clone 與實際 tgz 安裝／bin／audit reproduction。
+- 目前證據：273/273 tests；line 95.00%、branch 85.15%、functions 96.81%；verified tgz
+  為 88 個 tracked allowlist 檔案。
 
 ## 6. Dependency policy
 

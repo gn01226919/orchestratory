@@ -30,17 +30,23 @@ async function* files(directory) {
   }
 }
 
-const findings = [];
-for await (const path of files(root)) {
-  const content = await readFile(path, "utf8");
-  for (const [name, pattern] of scanRules) {
-    if (pattern.test(content)) findings.push(`${name}: ${relative(root, path)}`);
+export async function runSecurityScan() {
+  const findings = [];
+  for await (const path of files(root)) {
+    const content = await readFile(path, "utf8");
+    for (const [name, pattern] of scanRules) {
+      if (pattern.test(content)) findings.push(`${name}: ${relative(root, path)}`);
+    }
   }
+
+  if (findings.length > 0) {
+    process.stderr.write(`${findings.join("\n")}\n`);
+    return false;
+  }
+  process.stdout.write("Local security scan passed.\n");
+  return true;
 }
 
-if (findings.length > 0) {
-  process.stderr.write(`${findings.join("\n")}\n`);
-  process.exitCode = 1;
-} else {
-  process.stdout.write("Local security scan passed.\n");
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  if (!(await runSecurityScan())) process.exitCode = 1;
 }

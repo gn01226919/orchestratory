@@ -3,8 +3,50 @@ import assert from "node:assert/strict";
 import { chmod, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { once } from "node:events";
+import { spawn } from "node:child_process";
 import { LocalStore } from "../src/core/store.ts";
 import { DatabaseSync } from "node:sqlite";
+
+test("main store waits briefly for a concurrent maintenance lock", async (t) => {
+  const fixture = await mkdtemp(join(tmpdir(), "orchestratory-store-lock-"));
+  t.after(async () => await rm(fixture, { recursive: true, force: true }));
+  const seed = new LocalStore(fixture);
+  seed.close();
+
+  const lock = new DatabaseSync(join(fixture, "orchestratory.sqlite"));
+  lock.exec("BEGIN IMMEDIATE");
+  let released = false;
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    lock.exec("ROLLBACK");
+    lock.close();
+  };
+  t.after(release);
+
+  const moduleUrl = new URL("../src/core/store.ts", import.meta.url).href;
+  const child = spawn(process.execPath, [
+    "--input-type=module",
+    "--eval",
+    `import { LocalStore } from ${JSON.stringify(moduleUrl)};
+     process.stdout.write("ready\\n");
+     const store = new LocalStore(process.argv[1]);
+     store.close();`,
+    fixture,
+  ], { stdio: ["ignore", "pipe", "pipe"] });
+  t.after(() => {
+    if (child.exitCode === null) child.kill("SIGKILL");
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+  await once(child.stdout, "data");
+  setTimeout(release, 100).unref();
+  const [code, signal] = await once(child, "exit") as [number | null, NodeJS.Signals | null];
+  assert.equal(signal, null, stderr);
+  assert.equal(code, 0, stderr);
+});
 
 test("stores only redacted event summaries in an owner-only database", async (t) => {
   const fixture = await mkdtemp(join(tmpdir(), "orchestratory-store-"));

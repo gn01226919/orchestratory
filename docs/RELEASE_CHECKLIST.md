@@ -73,19 +73,23 @@
 
 ## 目前本機證據（不等於發布批准）
 
-- [x] 272/272 deterministic tests 通過；line 94.98%、branch 85.11%、functions 96.80%，通過
+- [x] Dependency-free repository-source format/hygiene lint 通過：UTF-8/LF、tab/trailing-space/final-newline、
+  JSON、regular/executable mode 與 debugger/eval/dynamic Function/`shell: true` 規則均由 release gate 阻擋。
+- [x] 273/273 deterministic tests 通過；line 95.00%、branch 85.15%、functions 96.81%，通過
   固定 90%／85%／90% 覆蓋率門檻。
 - [x] CycloneDX 1.5 SBOM 已驗證；3 個 components，dependency/lockfile 無 drift。
 - [x] Working-tree 與完整 Git history 掃描通過。
 - [x] 完整 npm dependency audit（含 dev toolchain）為 0 vulnerabilities；offline clean package-snapshot
-  reproduction 與 package dry-run 均驗證 87 個明確 allowlist 檔案；test、CI、Agent instructions、
+  reproduction 與實際 tgz 離線安裝均驗證 88 個 tracked allowlist 檔案；test、CI、Agent instructions、
   package lock 與非 runtime scripts 均不進入 artifact。
 - [x] CI 使用完整 action commit SHA、`contents: read`、不保留 checkout credential、不使用 secrets。
 - [x] `npm run repro:smoke` 以 `--no-hardlinks` 複製 committed `HEAD`，驗證相同 commit、clean status、
-  offline `npm ci --ignore-scripts` 與完整 `npm run check`；package snapshot 另驗證 TS typecheck、
-  CLI help 與本機 audit；不依賴 working tree 的未提交檔案。
+  offline `npm ci --ignore-scripts` 與完整 `npm run check`；再由 clone 建實際 tgz、離線安裝並驗證
+  runtime-only manifest、`.bin` link／mode、TS typecheck、CLI help 與正負向本機 audit；不依賴 dirty tree。
 - [ ] Release artifact checksum、signature/provenance 等待實際發布授權。
 - [ ] GitHub Private Vulnerability Reporting、secret scanning、dependency alerts 與 branch protection 需在建立 repository 後啟用。
 - [ ] 真實 provider/container smoke tests 等待額度、runtime 與 image 授權。
 - [ ] 完整 GUI 視覺點擊 QA 尚未涵蓋主儀表板所有流程；Room 辦公室切換、agent 預填、右側聊天與 Writer 面板已完成 Browser 驗收，HTTP/Web 安全整合測試已通過。
 - [ ] 人類 GO/NO-GO、名稱、license、Git identity、GitHub 公開範圍仍未批准。
+- [ ] 目前 tree 已去識別化 live project/Room metadata，但既有 Git history 曾保存該資料；公開前需 owner
+  明確選擇 declassify、批准 history rewrite，或由 sanitized snapshot 建立新 repository。
