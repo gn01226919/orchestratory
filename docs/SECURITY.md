@@ -137,6 +137,9 @@ Private Vulnerability Reporting；公開後請使用 repository 的 **Security �
 - Provider call 有 call/time/output/subprocess/circuit-breaker 上限；v1 不自動 retry，因此不會因
   backoff 邏輯重複消耗額度。`maxRetries` 是未來實作不得超過的硬 ceiling，目前實際值固定為 0。
 - Long-run mode 不能變更 hard limits。
+- Hard limits、API model、tester、workspace 與 retention JSON 一律從 owner `0700` 資料目錄內的
+  owner `0600`、single-link regular file descriptor 讀取；`O_NOFOLLOW`、1 MiB 上限，任何 mode、owner、
+  type 或 link 異常皆 fail closed，不得由程式自動 chmod 掩蓋可能的竄改。
 - Kill switch 必須在 UI、TUI 與 OS signal 下都能運作；共享 kill epoch 會 abort 跨程序 in-flight
   call，既有 workflow 在下一個 provider/test 邊界也必須以 `GLOBAL_EMERGENCY_STOP` fail closed。
 - MCP provider 類型由啟動參數 `--actor` 固定，tool arguments 不得改寫。每個 stdio process 另有

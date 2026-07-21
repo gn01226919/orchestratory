@@ -222,6 +222,11 @@ SQLite 僅儲存必要 metadata、狀態、事件摘要與 redacted audit。Secr
 migration 包在 `BEGIN IMMEDIATE` 交易；啟動先後執行 quick check、版本上限、foreign-key check 與
 per-run SHA-256 event-chain 驗證。舊事件在交易內回填 hash，任何錯誤 rollback 並 fail closed。
 
+Owner-only JSON 設定（hard limits、API model policy、tester profile、workspace roots、retention）
+共用 descriptor-based preflight：資料目錄必須是 owner `0700` 的非 symlink directory；既有檔案以
+`O_NOFOLLOW` 開啟後從同一 descriptor 驗 regular file、owner、精確 `0600`、single hardlink 與 1 MiB
+上限。既有不安全權限不會被程式靜默 chmod 修復；啟動會 fail closed 並要求 owner 明確處理。
+
 Owner-only `workspace-roots.json` 預設為空。新 workflow 先 realpath/canonicalize，再驗證位於明確
 root 或其 descendant；字串 prefix、symlink alias 與 sibling prefix 不算授權。只有精確 run ID 對應的
 app-owned retained worktree 可作人工 checkpoint restore 例外。

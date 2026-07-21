@@ -39,7 +39,7 @@
 | T06 | Web 頁面控制 localhost dashboard | Loopback、Host/Origin、CSRF、session、CSP | 瀏覽器或 extension 遭入侵 |
 | T07 | Log/DB 洩漏 prompt、key、個資 | 欄位 allowlist、redaction、最小 retention | Redaction 無法保證辨識所有秘密 |
 | T08 | 惡意 dependency/postinstall 接管主機 | Pinning、no-script install、review、SBOM、scan | 上游合法版本被入侵仍可能影響 |
-| T09 | Agent 修改 hard limits 或 policy | Policy/config 分離、owner-only、restart required | 本機帳號被完全攻陷後不可保證 |
+| T09 | Agent／同機程序以 symlink、hardlink、寬鬆權限或超大檔修改 hard limits、provider/tester/workspace/retention policy | Policy/config 分離、restart required、owner `0700` directory、descriptor `O_NOFOLLOW`、regular-file/UID/精確 `0600`/single-link/1 MiB 驗證；異常不自動修權限而是 fail closed | 本機帳號被完全攻陷後不可保證；SQLite 主檔與 sidecar 的共用 preflight 尚待下一批 |
 | T10 | 多 agent 同時修改造成覆蓋或隱藏 diff | 每 task 單一 epoch-fenced Writer Lease、同 provider child 各自隔離 worktree、跨 provider child 唯讀、所有 reviewer 共用同一 captured status/tracked diff/untracked context、審查前後 content fingerprint | 不同 task 的 worktree 最終套回來源仍需 owner 逐一審查衝突；外部程式仍可能形成 TOCTOU |
 | T11 | Cancel 前後的競態仍啟動 child、leader 先退出使 grandchild 逃逸，或延遲 SIGKILL 誤傷重用的 PID/PGID | realpath 前後雙重 pre-abort gate、listener 註冊後重驗、process-group TERM→KILL、leader close 後持續確認整個 group 已 ESRCH、cleanup deadline 與明確失敗 | PGID 快速重用仍有極窄平台競態；OS 級不可中斷程序會以 `PROCESS_TREE_CLEANUP_FAILED` 停止而非宣稱取消完成 |
 | T12 | 公開 GitHub 時洩漏 history 或 screenshot | Full-history scan、artifact scan、human gate | 掃描器可能有 false negative |

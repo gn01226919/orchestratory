@@ -7,6 +7,11 @@ import {
   DEFAULT_HARD_LIMITS,
   defaultDataDirectory,
   PROFILES,
+  apiModelsPath,
+  hardLimitsPath,
+  loadOrCreateApiModelPolicies,
+  loadOrCreateHardLimits,
+  loadOrCreateTesterProfiles,
   validateApiModelPolicies,
   validateHardLimits,
   validateSoftLimits,
@@ -22,6 +27,7 @@ import {
   validateRetentionPolicy,
   loadCodexWriterEnabled,
   loadNativeRoomPtyEnabled,
+  testerProfilesPath,
 } from "../src/config.ts";
 
 test("default data directory is scoped to Orchestratory application support", () => {
@@ -57,6 +63,53 @@ test("owner capability gates fail closed on unsafe files and exact-schema violat
   await rm(ptyGate);
   await symlink(target, ptyGate);
   assert.equal(await loadNativeRoomPtyEnabled(data), false);
+});
+
+test("all owner configuration loaders reject unsafe existing paths", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "orchestratory-config-preflight-"));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const cases = [
+    {
+      name: "hard-limits",
+      path: hardLimitsPath,
+      content: `${JSON.stringify(DEFAULT_HARD_LIMITS)}\n`,
+      load: loadOrCreateHardLimits,
+    },
+    { name: "api-models", path: apiModelsPath, content: "[]\n", load: loadOrCreateApiModelPolicies },
+    { name: "tester-profiles", path: testerProfilesPath, content: "[]\n", load: loadOrCreateTesterProfiles },
+    { name: "workspace-roots", path: workspaceRootsPath, content: "[]\n", load: loadOrCreateWorkspaceRootPolicies },
+    {
+      name: "retention",
+      path: retentionPolicyPath,
+      content: `${JSON.stringify(DEFAULT_RETENTION_POLICY)}\n`,
+      load: loadOrCreateRetentionPolicy,
+    },
+  ] as const;
+
+  for (const fixture of cases) {
+    const symlinkData = join(root, `${fixture.name}-symlink`);
+    await mkdir(symlinkData, { mode: 0o700 });
+    const symlinkTarget = join(symlinkData, "target.json");
+    await writeFile(symlinkTarget, fixture.content, { mode: 0o600 });
+    await symlink(symlinkTarget, fixture.path(symlinkData));
+    await assert.rejects(fixture.load(symlinkData), /UNSAFE_OWNER_FILE/u);
+
+    const hardlinkData = join(root, `${fixture.name}-hardlink`);
+    await mkdir(hardlinkData, { mode: 0o700 });
+    const hardlinkTarget = join(hardlinkData, "target.json");
+    await writeFile(hardlinkTarget, fixture.content, { mode: 0o600 });
+    await link(hardlinkTarget, fixture.path(hardlinkData));
+    await assert.rejects(fixture.load(hardlinkData), /UNSAFE_OWNER_FILE/u);
+
+    const permissiveData = join(root, `${fixture.name}-mode`);
+    await mkdir(permissiveData, { mode: 0o700 });
+    await writeFile(fixture.path(permissiveData), fixture.content, { mode: 0o644 });
+    await assert.rejects(fixture.load(permissiveData), /UNSAFE_OWNER_FILE/u);
+
+    const unsafeDirectory = join(root, `${fixture.name}-directory`);
+    await mkdir(unsafeDirectory, { mode: 0o755 });
+    await assert.rejects(fixture.load(unsafeDirectory), /UNSAFE_DATA_DIRECTORY/u);
+  }
 });
 
 test("hard limits reject unknown keys", () => {

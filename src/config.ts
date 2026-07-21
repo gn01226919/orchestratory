@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdir, open, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
@@ -124,6 +124,87 @@ export function retentionPolicyPath(dataDirectory = defaultDataDirectory()): str
   return join(dataDirectory, "retention.json");
 }
 
+const MAX_OWNER_CONFIG_BYTES = 1_048_576;
+
+function isMissing(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException).code === "ENOENT";
+}
+
+async function ensureOwnerDataDirectory(dataDirectory: string): Promise<void> {
+  try {
+    await mkdir(dataDirectory, { recursive: true, mode: 0o700 });
+    const directory = await lstat(dataDirectory);
+    const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+    if (
+      !directory.isDirectory() ||
+      directory.isSymbolicLink() ||
+      (directory.mode & 0o777) !== 0o700 ||
+      (uid !== undefined && directory.uid !== uid)
+    ) throw new Error("UNSAFE_DATA_DIRECTORY");
+  } catch (error) {
+    if (error instanceof Error && error.message === "UNSAFE_DATA_DIRECTORY") throw error;
+    throw new Error("UNSAFE_DATA_DIRECTORY");
+  }
+}
+
+async function readOwnerOnlyText(path: string): Promise<string> {
+  let handle;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    if (isMissing(error)) throw error;
+    throw new Error("UNSAFE_OWNER_FILE");
+  }
+  try {
+    const info = await handle.stat();
+    const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+    if (
+      !info.isFile() ||
+      info.nlink !== 1 ||
+      info.size < 1 ||
+      info.size > MAX_OWNER_CONFIG_BYTES ||
+      (info.mode & 0o777) !== 0o600 ||
+      (uid !== undefined && info.uid !== uid)
+    ) throw new Error("UNSAFE_OWNER_FILE");
+    return await handle.readFile({ encoding: "utf8" });
+  } finally {
+    await handle.close();
+  }
+}
+
+async function createOwnerOnlyText(path: string, content: string): Promise<void> {
+  const handle = await open(
+    path,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+    0o600,
+  );
+  try {
+    await handle.writeFile(content, { encoding: "utf8" });
+    await handle.chmod(0o600);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readOrCreateOwnerConfig(
+  path: string,
+  defaultContent: string,
+): Promise<{ raw: string; created: boolean }> {
+  await ensureOwnerDataDirectory(dirname(path));
+  try {
+    return { raw: await readOwnerOnlyText(path), created: false };
+  } catch (error) {
+    if (!isMissing(error)) throw error;
+  }
+  try {
+    await createOwnerOnlyText(path, defaultContent);
+    return { raw: await readOwnerOnlyText(path), created: true };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    return { raw: await readOwnerOnlyText(path), created: false };
+  }
+}
+
 function isPositiveFinite(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
@@ -178,21 +259,11 @@ export async function loadOrCreateHardLimits(
   dataDirectory = defaultDataDirectory(),
 ): Promise<Readonly<HardLimits>> {
   const path = hardLimitsPath(dataDirectory);
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await chmod(dirname(path), 0o700);
-  try {
-    const raw = await readFile(path, "utf8");
-    return validateHardLimits(JSON.parse(raw) as unknown);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    await writeFile(path, `${JSON.stringify(DEFAULT_HARD_LIMITS, null, 2)}\n`, {
-      encoding: "utf8",
-      mode: 0o600,
-      flag: "wx",
-    });
-    await chmod(path, 0o600);
-    return DEFAULT_HARD_LIMITS;
-  }
+  const loaded = await readOrCreateOwnerConfig(
+    path,
+    `${JSON.stringify(DEFAULT_HARD_LIMITS, null, 2)}\n`,
+  );
+  return loaded.created ? DEFAULT_HARD_LIMITS : validateHardLimits(JSON.parse(loaded.raw) as unknown);
 }
 
 const API_PROVIDERS = new Set<ProviderId>(["codex", "claude", "grok"]);
@@ -256,19 +327,10 @@ export async function loadOrCreateApiModelPolicies(
   dataDirectory = defaultDataDirectory(),
 ): Promise<ReadonlyArray<Readonly<ApiModelPolicy>>> {
   const path = apiModelsPath(dataDirectory);
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await chmod(dirname(path), 0o700);
-  try {
-    const raw = await readFile(path, "utf8");
-    return Object.freeze(
-      validateApiModelPolicies(JSON.parse(raw) as unknown).map((policy) => Object.freeze(policy)),
-    );
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    await writeFile(path, "[]\n", { encoding: "utf8", mode: 0o600, flag: "wx" });
-    await chmod(path, 0o600);
-    return Object.freeze([]);
-  }
+  const loaded = await readOrCreateOwnerConfig(path, "[]\n");
+  return Object.freeze(
+    validateApiModelPolicies(JSON.parse(loaded.raw) as unknown).map((policy) => Object.freeze(policy)),
+  );
 }
 
 export function validateTesterProfiles(value: unknown): TesterProfile[] {
@@ -337,21 +399,12 @@ export async function loadOrCreateTesterProfiles(
   dataDirectory = defaultDataDirectory(),
 ): Promise<ReadonlyArray<Readonly<TesterProfile>>> {
   const path = testerProfilesPath(dataDirectory);
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await chmod(dirname(path), 0o700);
-  try {
-    const raw = await readFile(path, "utf8");
-    return Object.freeze(
-      validateTesterProfiles(JSON.parse(raw) as unknown).map((profile) =>
-        Object.freeze({ ...profile, args: Object.freeze([...profile.args]) }),
-      ),
-    );
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    await writeFile(path, "[]\n", { encoding: "utf8", mode: 0o600, flag: "wx" });
-    await chmod(path, 0o600);
-    return Object.freeze([]);
-  }
+  const loaded = await readOrCreateOwnerConfig(path, "[]\n");
+  return Object.freeze(
+    validateTesterProfiles(JSON.parse(loaded.raw) as unknown).map((profile) =>
+      Object.freeze({ ...profile, args: Object.freeze([...profile.args]) }),
+    ),
+  );
 }
 
 export function validateWorkspaceRootPolicies(value: unknown): WorkspaceRootPolicy[] {
@@ -412,8 +465,12 @@ async function canonicalizeWorkspaceRootPolicies(
 }
 
 async function atomicOwnerOnlyJson(path: string, value: unknown): Promise<void> {
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await chmod(dirname(path), 0o700);
+  await ensureOwnerDataDirectory(dirname(path));
+  try {
+    await readOwnerOnlyText(path);
+  } catch (error) {
+    if (!isMissing(error)) throw error;
+  }
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
     await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, {
@@ -424,6 +481,7 @@ async function atomicOwnerOnlyJson(path: string, value: unknown): Promise<void> 
     await chmod(temporary, 0o600);
     await rename(temporary, path);
     await chmod(path, 0o600);
+    await readOwnerOnlyText(path);
   } catch (error) {
     await rm(temporary, { force: true });
     throw error;
@@ -434,20 +492,11 @@ export async function loadOrCreateWorkspaceRootPolicies(
   dataDirectory = defaultDataDirectory(),
 ): Promise<ReadonlyArray<Readonly<WorkspaceRootPolicy>>> {
   const path = workspaceRootsPath(dataDirectory);
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await chmod(dirname(path), 0o700);
-  try {
-    const raw = await readFile(path, "utf8");
-    const validated = validateWorkspaceRootPolicies(JSON.parse(raw) as unknown);
-    return Object.freeze(
-      (await canonicalizeWorkspaceRootPolicies(validated)).map((policy) => Object.freeze(policy)),
-    );
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    await writeFile(path, "[]\n", { encoding: "utf8", mode: 0o600, flag: "wx" });
-    await chmod(path, 0o600);
-    return Object.freeze([]);
-  }
+  const loaded = await readOrCreateOwnerConfig(path, "[]\n");
+  const validated = validateWorkspaceRootPolicies(JSON.parse(loaded.raw) as unknown);
+  return Object.freeze(
+    (await canonicalizeWorkspaceRootPolicies(validated)).map((policy) => Object.freeze(policy)),
+  );
 }
 
 export async function saveWorkspaceRootPolicies(
@@ -504,21 +553,13 @@ export async function loadOrCreateRetentionPolicy(
   dataDirectory = defaultDataDirectory(),
 ): Promise<Readonly<RetentionPolicy>> {
   const path = retentionPolicyPath(dataDirectory);
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await chmod(dirname(path), 0o700);
-  try {
-    const raw = await readFile(path, "utf8");
-    return Object.freeze(validateRetentionPolicy(JSON.parse(raw) as unknown));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    await writeFile(path, `${JSON.stringify(DEFAULT_RETENTION_POLICY, null, 2)}\n`, {
-      encoding: "utf8",
-      mode: 0o600,
-      flag: "wx",
-    });
-    await chmod(path, 0o600);
-    return DEFAULT_RETENTION_POLICY;
-  }
+  const loaded = await readOrCreateOwnerConfig(
+    path,
+    `${JSON.stringify(DEFAULT_RETENTION_POLICY, null, 2)}\n`,
+  );
+  return loaded.created
+    ? DEFAULT_RETENTION_POLICY
+    : Object.freeze(validateRetentionPolicy(JSON.parse(loaded.raw) as unknown));
 }
 
 export async function saveRetentionPolicy(

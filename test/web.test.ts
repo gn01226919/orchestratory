@@ -45,12 +45,12 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
         args: ["--test"],
       },
     ])}\n`,
-    "utf8",
+    { encoding: "utf8", mode: 0o600 },
   );
   await writeFile(
     join(data, "workspace-roots.json"),
     `${JSON.stringify([{ id: "synthetic-root", label: "Synthetic root", path: workspace }])}\n`,
-    "utf8",
+    { encoding: "utf8", mode: 0o600 },
   );
   t.after(async () => await rm(data, { recursive: true, force: true }));
   t.after(async () => await rm(workspace, { recursive: true, force: true }));
@@ -1482,7 +1482,7 @@ test("Web dashboard cancels only the exact active Writer run", async (t) => {
   await writeFile(
     join(data, "workspace-roots.json"),
     `${JSON.stringify([{ id: "cancel-root", label: "Cancel root", path: workspace }])}\n`,
-    "utf8",
+    { encoding: "utf8", mode: 0o600 },
   );
   t.after(async () => await rm(data, { recursive: true, force: true }));
   t.after(async () => await rm(workspace, { recursive: true, force: true }));
