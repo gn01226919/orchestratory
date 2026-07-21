@@ -30,6 +30,38 @@ export const DEFAULT_HARD_LIMITS: Readonly<HardLimits> = Object.freeze({
   maxApiBudgetUsdPerMonth: 250,
 });
 
+/** Compiled ceilings: owner configuration may lower or raise defaults, never these bounds. */
+export const ABSOLUTE_HARD_LIMITS: Readonly<HardLimits> = Object.freeze({
+  maxConcurrentWorkflows: 4,
+  providerTimeoutMs: 1_800_000,
+  workflowTimeoutMs: 86_400_000,
+  maxProviderCalls: 1_000,
+  maxSubprocesses: 500,
+  maxOutputBytes: 8_388_608,
+  maxFilesChanged: 200,
+  maxDiffLines: 100_000,
+  maxConsecutiveErrors: 20,
+  maxRetries: 10,
+  maxRounds: 100,
+  maxApiBudgetUsdPerRun: 250,
+  maxApiBudgetUsdPerDay: 500,
+  maxApiBudgetUsdPerMonth: 2_500,
+});
+
+const INTEGER_HARD_LIMITS = new Set<keyof HardLimits>([
+  "maxConcurrentWorkflows",
+  "providerTimeoutMs",
+  "workflowTimeoutMs",
+  "maxProviderCalls",
+  "maxSubprocesses",
+  "maxOutputBytes",
+  "maxFilesChanged",
+  "maxDiffLines",
+  "maxConsecutiveErrors",
+  "maxRetries",
+  "maxRounds",
+]);
+
 export const PROFILES: Readonly<Record<"normal" | "long", Readonly<SoftLimits>>> =
   Object.freeze({
     normal: Object.freeze({
@@ -223,8 +255,24 @@ export function validateHardLimits(value: unknown): HardLimits {
   const output = {} as HardLimits;
   for (const key of expected) {
     const candidate = input[key];
-    if (!isPositiveFinite(candidate)) throw new Error(`INVALID_HARD_LIMIT:${key}`);
+    if (
+      !isPositiveFinite(candidate) ||
+      candidate > ABSOLUTE_HARD_LIMITS[key] ||
+      (INTEGER_HARD_LIMITS.has(key) && !Number.isSafeInteger(candidate))
+    ) throw new Error(`INVALID_HARD_LIMIT:${key}`);
     output[key] = candidate;
+  }
+  if (output.providerTimeoutMs > output.workflowTimeoutMs) {
+    throw new Error("INVALID_HARD_LIMIT_RELATION:providerTimeoutMs");
+  }
+  if (output.maxRounds > output.maxProviderCalls) {
+    throw new Error("INVALID_HARD_LIMIT_RELATION:maxRounds");
+  }
+  if (output.maxApiBudgetUsdPerRun > output.maxApiBudgetUsdPerDay) {
+    throw new Error("INVALID_HARD_LIMIT_RELATION:maxApiBudgetUsdPerRun");
+  }
+  if (output.maxApiBudgetUsdPerDay > output.maxApiBudgetUsdPerMonth) {
+    throw new Error("INVALID_HARD_LIMIT_RELATION:maxApiBudgetUsdPerDay");
   }
   return Object.freeze(output);
 }
@@ -240,7 +288,9 @@ export function validateSoftLimits(
     "providerTimeoutMs",
   ];
   for (const field of fields) {
-    if (!isPositiveFinite(value[field])) throw new Error(`INVALID_SOFT_LIMIT:${field}`);
+    if (!Number.isSafeInteger(value[field]) || value[field] <= 0) {
+      throw new Error(`INVALID_SOFT_LIMIT:${field}`);
+    }
   }
   if (value.maxRounds > hard.maxRounds) throw new Error("SOFT_LIMIT_EXCEEDS_HARD:maxRounds");
   if (value.maxProviderCalls > hard.maxProviderCalls) {

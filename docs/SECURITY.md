@@ -140,6 +140,11 @@ Private Vulnerability Reporting；公開後請使用 repository 的 **Security �
 - Hard limits、API model、tester、workspace 與 retention JSON 一律從 owner `0700` 資料目錄內的
   owner `0600`、single-link regular file descriptor 讀取；`O_NOFOLLOW`、1 MiB 上限，任何 mode、owner、
   type 或 link 異常皆 fail closed，不得由程式自動 chmod 掩蓋可能的竄改。
+- Hard-limit JSON 只能在編譯期 ceiling 內調整：同時 workflows 4、單次 provider 30 分鐘、workflow
+  24 小時、calls 1,000、subprocesses 500、單次輸出 8 MiB、變更 200 檔／100,000 lines、連續錯誤
+  20、retries 10、rounds 100、API 預算每 run/day/month 分別 250/500/2,500 USD。資源 count/time/byte
+  一律要求 positive safe integer，預算可為正小數；timeout、round/call、run/day/month 關係也會
+  fail closed 驗證。這是最外層災損 ceiling，不代表建議用量或自動批准費用。
 - Kill switch 必須在 UI、TUI 與 OS signal 下都能運作；共享 kill epoch 會 abort 跨程序 in-flight
   call，既有 workflow 在下一個 provider/test 邊界也必須以 `GLOBAL_EMERGENCY_STOP` fail closed。
 - MCP provider 類型由啟動參數 `--actor` 固定，tool arguments 不得改寫。每個 stdio process 另有

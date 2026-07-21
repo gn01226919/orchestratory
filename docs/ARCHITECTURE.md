@@ -233,6 +233,10 @@ Owner-only JSON 設定（hard limits、API model policy、tester profile、works
 共用 descriptor-based preflight：資料目錄必須是 owner `0700` 的非 symlink directory；既有檔案以
 `O_NOFOLLOW` 開啟後從同一 descriptor 驗 regular file、owner、精確 `0600`、single hardlink 與 1 MiB
 上限。既有不安全權限不會被程式靜默 chmod 修復；啟動會 fail closed 並要求 owner 明確處理。
+Hard-limit 設定也不能把產品編譯期 ceiling 改成無界：count/time/byte 欄位必須是正 safe integer，
+預算必須是正有限數；每欄另有絕對最大值，並驗證 provider timeout 不大於 workflow timeout、rounds
+不大於 calls、per-run 預算不大於 daily、daily 不大於 monthly。這些 ceiling 只能透過程式碼審查與
+新版發布改變，不能由 UI、agent 或本機 JSON 取消。
 
 Owner-only `workspace-roots.json` 預設為空。新 workflow 先 realpath/canonicalize，再驗證位於明確
 root 或其 descendant；字串 prefix、symlink alias 與 sibling prefix 不算授權。只有精確 run ID 對應的

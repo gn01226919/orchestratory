@@ -4,6 +4,7 @@ import { chmod, link, mkdtemp, mkdir, rm, stat, symlink, writeFile } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  ABSOLUTE_HARD_LIMITS,
   DEFAULT_HARD_LIMITS,
   defaultDataDirectory,
   PROFILES,
@@ -122,6 +123,36 @@ test("hard limits reject unknown keys", () => {
     () => validateHardLimits({ ...DEFAULT_HARD_LIMITS, maxRounds: 0 }),
     /INVALID_HARD_LIMIT:maxRounds/u,
   );
+  for (const [key, maximum] of Object.entries(ABSOLUTE_HARD_LIMITS)) {
+    assert.throws(
+      () => validateHardLimits({ ...DEFAULT_HARD_LIMITS, [key]: maximum + 1 }),
+      new RegExp(`INVALID_HARD_LIMIT:${key}`, "u"),
+    );
+  }
+  assert.throws(
+    () => validateHardLimits({ ...DEFAULT_HARD_LIMITS, maxProviderCalls: 10.5 }),
+    /INVALID_HARD_LIMIT:maxProviderCalls/u,
+  );
+  assert.deepEqual(
+    validateHardLimits({ ...DEFAULT_HARD_LIMITS, maxApiBudgetUsdPerRun: 25.5 }),
+    { ...DEFAULT_HARD_LIMITS, maxApiBudgetUsdPerRun: 25.5 },
+  );
+  assert.throws(
+    () => validateHardLimits({ ...DEFAULT_HARD_LIMITS, providerTimeoutMs: 1_000, workflowTimeoutMs: 999 }),
+    /INVALID_HARD_LIMIT_RELATION:providerTimeoutMs/u,
+  );
+  assert.throws(
+    () => validateHardLimits({ ...DEFAULT_HARD_LIMITS, maxRounds: 21, maxProviderCalls: 20 }),
+    /INVALID_HARD_LIMIT_RELATION:maxRounds/u,
+  );
+  assert.throws(
+    () => validateHardLimits({ ...DEFAULT_HARD_LIMITS, maxApiBudgetUsdPerRun: 51 }),
+    /INVALID_HARD_LIMIT_RELATION:maxApiBudgetUsdPerRun/u,
+  );
+  assert.throws(
+    () => validateHardLimits({ ...DEFAULT_HARD_LIMITS, maxApiBudgetUsdPerDay: 251 }),
+    /INVALID_HARD_LIMIT_RELATION:maxApiBudgetUsdPerDay/u,
+  );
 });
 
 test("soft limits cannot exceed hard limits", () => {
@@ -135,6 +166,10 @@ test("soft limits cannot exceed hard limits", () => {
   );
   assert.throws(
     () => validateSoftLimits({ ...PROFILES.normal, maxProviderCalls: 0 }, DEFAULT_HARD_LIMITS),
+    /INVALID_SOFT_LIMIT:maxProviderCalls/u,
+  );
+  assert.throws(
+    () => validateSoftLimits({ ...PROFILES.normal, maxProviderCalls: 1.5 }, DEFAULT_HARD_LIMITS),
     /INVALID_SOFT_LIMIT:maxProviderCalls/u,
   );
   assert.throws(
