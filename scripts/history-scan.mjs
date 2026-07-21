@@ -19,39 +19,58 @@ async function git(args, maxBuffer = 8 * 1024 * 1024) {
   return result.stdout;
 }
 
+function isMissingRepository(error) {
+  return error !== null && typeof error === "object" && "stderr" in error &&
+    String(error.stderr).includes("not a git repository");
+}
+
 function findings(label, content) {
   return scanRules
     .filter(([, pattern]) => pattern.test(content))
     .map(([name]) => `${name}: ${label}`);
 }
 
-const objectLines = (await git(["rev-list", "--objects", "--all"]))
-  .split("\n")
-  .filter(Boolean);
-if (objectLines.length > 100_000) throw new Error("HISTORY_OBJECT_LIMIT_REACHED");
-
-const detected = [];
-for (const line of objectLines) {
-  const separator = line.indexOf(" ");
-  const objectId = separator < 0 ? line : line.slice(0, separator);
-  const label = separator < 0 ? objectId : line.slice(separator + 1);
-  const type = (await git(["cat-file", "-t", objectId], 1024)).trim();
-  if (type !== "blob") continue;
-  const size = Number((await git(["cat-file", "-s", objectId], 1024)).trim());
-  if (!Number.isSafeInteger(size) || size < 0) throw new Error("INVALID_GIT_OBJECT_SIZE");
-  if (size > 5 * 1024 * 1024) {
-    detected.push(`oversized-unscanned-blob: ${label}`);
-    continue;
+async function runHistoryScan() {
+  try {
+    if ((await git(["rev-parse", "--is-inside-work-tree"], 1024)).trim() !== "true") {
+      throw new Error("GIT_WORKTREE_REQUIRED");
+    }
+  } catch (error) {
+    if (!isMissingRepository(error)) throw error;
+    process.stdout.write("Git history security scan not applicable (package has no repository metadata).\n");
+    return;
   }
-  detected.push(...findings(label, await git(["cat-file", "-p", objectId], 6 * 1024 * 1024)));
+
+  const objectLines = (await git(["rev-list", "--objects", "--all"]))
+    .split("\n")
+    .filter(Boolean);
+  if (objectLines.length > 100_000) throw new Error("HISTORY_OBJECT_LIMIT_REACHED");
+
+  const detected = [];
+  for (const line of objectLines) {
+    const separator = line.indexOf(" ");
+    const objectId = separator < 0 ? line : line.slice(0, separator);
+    const label = separator < 0 ? objectId : line.slice(separator + 1);
+    const type = (await git(["cat-file", "-t", objectId], 1024)).trim();
+    if (type !== "blob") continue;
+    const size = Number((await git(["cat-file", "-s", objectId], 1024)).trim());
+    if (!Number.isSafeInteger(size) || size < 0) throw new Error("INVALID_GIT_OBJECT_SIZE");
+    if (size > 5 * 1024 * 1024) {
+      detected.push(`oversized-unscanned-blob: ${label}`);
+      continue;
+    }
+    detected.push(...findings(label, await git(["cat-file", "-p", objectId], 6 * 1024 * 1024)));
+  }
+
+  const historyMetadata = await git(["log", "--all", "--format=%H%n%an%n%ae%n%B"], 8 * 1024 * 1024);
+  detected.push(...findings("commit-metadata", historyMetadata));
+
+  if (detected.length > 0) {
+    process.stderr.write(`${detected.join("\n")}\n`);
+    process.exitCode = 1;
+  } else {
+    process.stdout.write(`Git history security scan passed (${objectLines.length} objects).\n`);
+  }
 }
 
-const historyMetadata = await git(["log", "--all", "--format=%H%n%an%n%ae%n%B"], 8 * 1024 * 1024);
-detected.push(...findings("commit-metadata", historyMetadata));
-
-if (detected.length > 0) {
-  process.stderr.write(`${detected.join("\n")}\n`);
-  process.exitCode = 1;
-} else {
-  process.stdout.write(`Git history security scan passed (${objectLines.length} objects).\n`);
-}
+await runHistoryScan();

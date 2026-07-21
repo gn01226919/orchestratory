@@ -11,6 +11,21 @@
   "bin": {
     "orchestrator": "./bin/orchestrator.mjs"
   },
+  "files": [
+    "bin/",
+    "config/",
+    "docs/*.md",
+    "public/",
+    "scripts/history-scan.d.mts",
+    "scripts/history-scan.mjs",
+    "scripts/scan-rules.mjs",
+    "scripts/security-scan.d.mts",
+    "scripts/security-scan.mjs",
+    "src/",
+    "NOTICE",
+    "SECURITY.md",
+    "sbom.cdx.json"
+  ],
   "scripts": {
     "start": "node src/main.ts",
     "doctor": "node src/main.ts doctor",

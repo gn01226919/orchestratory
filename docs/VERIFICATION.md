@@ -43,17 +43,17 @@
 | Room macOS composer 鍵盤操作 | 已驗證（程式層／HTTP static contract） | 帳本直播與辦公室 textarea 共用 `installMacComposerKeyboard`；Enter 第一次保留換行、1.6s 內第二次送出；Shift/Option 換行、Command+Enter 立即送出；IME composition/229、repeat、內容／caret 變化、blur、disabled submit 防誤送；`test/web.test.ts` 覆蓋 HTML/JS contract | 仍需 owner 以實際 macOS 輸入法點擊驗收手感；可視鍵盤、語音輸入與 assistive technology 可繼續使用送出按鈕 |
 | Dirty Snapshot | 已驗證（synthetic） | RAM-only/TTL/pending ceiling、text/path/link/mode/size/hash/source race、獨立 approval、只匯入 worktree；`test/dirty-snapshot-broker.test.ts`、`test/workflow.test.ts`、`test/web.test.ts` | 未對真實專案執行；daemon 已於 2026-07-17 重載並監聽 127.0.0.1:4317 |
 | Apply-back | 已驗證（synthetic＋HTTP） | preview hash、source/worktree HEAD＋fingerprint、逐檔 CAS、短效 single-use approval、rollback、刪除移到 trash-pending；`test/apply-back-broker.test.ts`、`test/web.test.ts` | 多檔案仍有 OS/磁碟故障造成 rollback 也失敗的殘餘風險；會明確記錄 `APPLY_BACK_PARTIAL_ROLLBACK_FAILED` |
-| Supply chain/release gate | 已驗證（未發布 tree） | `npm run check:release`、SBOM、audit、secret/history scan、offline package snapshot | clean Git clone、artifact signing/provenance 需先有 owner 批准的 commit/release |
+| Supply chain/release gate | 已驗證（未發布 tree） | `npm run check:release`、SBOM、audit、secret/history scan、offline committed-HEAD clean clone；package `files` 明確 allowlist 排除 test/non-runtime scripts/CI/Agent instructions，artifact 離線安裝、JS/MJS syntax、TS typecheck、CLI startup 與本機 audit smoke | artifact signing/provenance 需先有 owner 批准的 release |
 | GitHub 開源發布 | 未批准 | release checklist 保持 NO-GO | 名稱、license、Git identity、remote、visibility、commit/push/release 均待 owner 決策 |
 
 ## 目前自動證據
 
-- 259/259 deterministic tests。
-- 最新最終 gate：line 94.94%、branch 85.27%、functions 96.71%；gate 分別為 90%、85%、90%。
+- 272/272 deterministic tests。
+- 最新最終 gate：line 94.98%、branch 85.11%、functions 96.80%；gate 分別為 90%、85%、90%。
 - 測試不使用真實 credentials、真實私人 repository、模型額度或付費 API。
 - CycloneDX SBOM 為 3 components，SHA-256 `259a893bfb419dda2e7a61691ea3f89f5a1e133ee32eac83d308e4113c8fde6c`。
-- 完整 npm dependency audit（含 dev toolchain）0 vulnerabilities；offline clean package snapshot 與 package
-  dry-run 均為 137 files；local/history scan 通過，但 history 現為 0 objects，不能取代首次 commit 後的重新掃描。
+- 完整 npm dependency audit（含 dev toolchain）0 vulnerabilities；offline committed-HEAD clean clone、
+  explicit-allowlist package snapshot 與 87-file package dry-run 均通過；local/history scan 已覆蓋目前完整 history。
 
 ## 不需 owner 批准即可重跑
 

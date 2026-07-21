@@ -91,7 +91,8 @@ tests/
 - `npm run check` 會執行 syntax、strict typecheck、上述 coverage gate、deterministic fuzz、SBOM drift、
   working-tree scan 與完整 Git history scan；`npm run check:release` 再加入 dependency audit、offline
   clean package-snapshot reproduction 與 package dry-run inventory。
-- 目前證據：259/259 tests；line 94.94%、branch 85.27%、functions 96.71%。
+- 目前證據：272/272 tests；line 94.98%、branch 85.11%、functions 96.80%；package dry-run
+  為 87 個明確 allowlist 檔案。
 
 ## 6. Dependency policy
 

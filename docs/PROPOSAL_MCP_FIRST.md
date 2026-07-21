@@ -186,8 +186,8 @@ Room 對話保留作為可稽核協作帳本；監控中心另保留/新增：�
 
 ## 8. 已知風險與未決事項
 
-- Coverage gate 已修復且未降低門檻；2026-07-19 完整 release gate 為 line 94.94%、
-  branch 85.27%、functions 96.71%，259/259 tests。
+- Coverage gate 已修復且未降低門檻；2026-07-21 完整 release gate 為 line 94.98%、
+  branch 85.11%、functions 96.80%，272/272 tests。
 - Codex／Grok CLI 旗標是以官方文件推定並以 fake CLI 整合測試驗證；真實訂閱 smoke
   test 仍待 owner 批准額度。
 - `WORKSPACE_MUST_START_CLEAN` 不直接放寬；M2 以明確、bounded、RAM-only Dirty Snapshot 匯入
