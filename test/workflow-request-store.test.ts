@@ -145,6 +145,7 @@ test("workflow request store rejects future schemas and reports live hash corrup
   const future = new DatabaseSync(join(futureRoot, "workflow-requests.sqlite"));
   future.exec("PRAGMA user_version = 2");
   future.close();
+  await chmod(join(futureRoot, "workflow-requests.sqlite"), 0o600);
   assert.throws(() => new WorkflowRequestStore(futureRoot), /SCHEMA_UNSUPPORTED/u);
 
   const store = new WorkflowRequestStore(tamperRoot);

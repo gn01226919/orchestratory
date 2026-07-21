@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { ProviderId } from "../types.ts";
+import { openOwnerDatabase, verifyOwnerDatabaseFiles } from "./sqlite-security.ts";
 
 const SCHEMA_VERSION = 1;
 const MAX_PENDING = 100;
@@ -111,13 +111,11 @@ export class WorkflowRequestStore {
   #closed = false;
 
   constructor(dataDirectory: string) {
-    mkdirSync(dataDirectory, { recursive: true, mode: 0o700 });
-    chmodSync(dataDirectory, 0o700);
     this.path = join(dataDirectory, "workflow-requests.sqlite");
-    this.#db = new DatabaseSync(this.path);
+    this.#db = openOwnerDatabase(this.path);
     try {
-      chmodSync(this.path, 0o600);
       this.#db.exec("PRAGMA journal_mode=WAL; PRAGMA secure_delete=ON; PRAGMA busy_timeout=5000;");
+      verifyOwnerDatabaseFiles(this.path);
       const quick = this.#db.prepare("PRAGMA quick_check").get() as { quick_check?: string };
       if (quick.quick_check !== "ok") throw new Error("WORKFLOW_REQUEST_STORE_CORRUPT");
       const version = Number(

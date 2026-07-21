@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type {
@@ -11,6 +10,7 @@ import type {
 } from "../types.ts";
 import { safeSummary } from "../security/redact.ts";
 import { defaultDataDirectory } from "../config.ts";
+import { openOwnerDatabase, verifyOwnerDatabaseFiles } from "./sqlite-security.ts";
 
 export interface PurgePreview {
   id: string;
@@ -62,13 +62,11 @@ export class LocalStore {
 
   constructor(dataDirectory = defaultDataDirectory()) {
     this.dataDirectory = dataDirectory;
-    mkdirSync(dataDirectory, { recursive: true, mode: 0o700 });
-    chmodSync(dataDirectory, 0o700);
     this.path = join(dataDirectory, "orchestratory.sqlite");
-    this.#db = new DatabaseSync(this.path);
+    this.#db = openOwnerDatabase(this.path);
     try {
-      chmodSync(this.path, 0o600);
       this.#db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;");
+      verifyOwnerDatabaseFiles(this.path);
       this.#assertQuickCheck();
       this.#migrate();
       this.#assertIntegrity();

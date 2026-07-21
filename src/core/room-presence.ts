@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { RoomLedger } from "./room-ledger.ts";
+import { openOwnerDatabase, verifyOwnerDatabaseFiles } from "./sqlite-security.ts";
 
 export type PresenceProvider = "codex" | "claude" | "grok";
 export type PresenceHookEvent = "SessionStart" | "UserPromptSubmit" | "Stop";
@@ -157,20 +158,18 @@ export class RoomPresenceStore {
     dataDirectory: string,
     options: { now?: () => number; leaseMs?: number } = {},
   ) {
-    mkdirSync(dataDirectory, { recursive: true, mode: 0o700 });
-    chmodSync(dataDirectory, 0o700);
     this.path = join(dataDirectory, "room-presence.sqlite");
     this.#now = options.now ?? Date.now;
     this.#leaseMs = options.leaseMs ?? DEFAULT_LEASE_MS;
     if (!Number.isSafeInteger(this.#leaseMs) || this.#leaseMs < 5_000 || this.#leaseMs > 120_000) {
       throw new Error("INVALID_PRESENCE_LEASE");
     }
-    this.#db = new DatabaseSync(this.path);
+    this.#db = openOwnerDatabase(this.path);
     try {
-      chmodSync(this.path, 0o600);
       this.#db.exec(
         "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON; PRAGMA busy_timeout=3000;",
       );
+      verifyOwnerDatabaseFiles(this.path);
       const quick = this.#db.prepare("PRAGMA quick_check").get() as { quick_check?: string };
       if (quick.quick_check !== "ok") throw new Error("PRESENCE_STORE_CORRUPT");
       const versionRow = this.#db.prepare("PRAGMA user_version").get() as { user_version?: number };

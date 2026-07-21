@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { chmod, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalStore } from "../src/core/store.ts";
@@ -350,6 +350,7 @@ test("migration backfills legacy audit hashes transactionally and rejects newer 
     PRAGMA user_version=1;
   `);
   legacy.close();
+  await chmod(path, 0o600);
   const migrated = new LocalStore(fixture);
   assert.equal(migrated.integrity().auditChainValid, true);
   assert.equal(migrated.integrity().schemaVersion, 2);

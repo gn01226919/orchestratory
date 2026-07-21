@@ -39,7 +39,7 @@
 | T06 | Web 頁面控制 localhost dashboard | Loopback、Host/Origin、CSRF、session、CSP | 瀏覽器或 extension 遭入侵 |
 | T07 | Log/DB 洩漏 prompt、key、個資 | 欄位 allowlist、redaction、最小 retention | Redaction 無法保證辨識所有秘密 |
 | T08 | 惡意 dependency/postinstall 接管主機 | Pinning、no-script install、review、SBOM、scan | 上游合法版本被入侵仍可能影響 |
-| T09 | Agent／同機程序以 symlink、hardlink、寬鬆權限或超大檔修改 hard limits、provider/tester/workspace/retention policy | Policy/config 分離、restart required、owner `0700` directory、descriptor `O_NOFOLLOW`、regular-file/UID/精確 `0600`/single-link/1 MiB 驗證；異常不自動修權限而是 fail closed | 本機帳號被完全攻陷後不可保證；SQLite 主檔與 sidecar 的共用 preflight 尚待下一批 |
+| T09 | Agent／同機程序以 symlink、hardlink、寬鬆權限或超大檔修改 hard limits、provider/tester/workspace/retention policy | Policy/config 分離、restart required、owner `0700` directory、descriptor `O_NOFOLLOW`、regular-file/UID/精確 `0600`/single-link/1 MiB 驗證；異常不自動修權限而是 fail closed | 本機帳號被完全攻陷後不可保證 |
 | T10 | 多 agent 同時修改造成覆蓋或隱藏 diff | 每 task 單一 epoch-fenced Writer Lease、同 provider child 各自隔離 worktree、跨 provider child 唯讀、所有 reviewer 共用同一 captured status/tracked diff/untracked context、審查前後 content fingerprint | 不同 task 的 worktree 最終套回來源仍需 owner 逐一審查衝突；外部程式仍可能形成 TOCTOU |
 | T11 | Cancel 前後的競態仍啟動 child、leader 先退出使 grandchild 逃逸，或延遲 SIGKILL 誤傷重用的 PID/PGID | realpath 前後雙重 pre-abort gate、listener 註冊後重驗、process-group TERM→KILL、leader close 後持續確認整個 group 已 ESRCH、cleanup deadline 與明確失敗 | PGID 快速重用仍有極窄平台競態；OS 級不可中斷程序會以 `PROCESS_TREE_CLEANUP_FAILED` 停止而非宣稱取消完成 |
 | T12 | 公開 GitHub 時洩漏 history 或 screenshot | Full-history scan、artifact scan、human gate | 掃描器可能有 false negative |
@@ -51,7 +51,7 @@
 | T18 | 崩潰後自動重播造成重複寫入或計費 | Restart 先 fail closed、writer-complete checkpoint、Git fingerprint、人工 scoped restore nonce、沿用 counters/budget run | Restore 會重新執行 planner/reviewer，仍可能產生新額度；首次 writer 完成前無可恢復 checkpoint |
 | T19 | 選取未授權 workspace，或以 sibling/prefix/symlink／preview 後替換混淆 | Owner-only empty-by-default allowlist、realpath canonicalization、exact root/descendant；Web 封鎖 broad/sensitive/non-Git/unsafe roots，以短效 single-use preview、精確 `ALLOW <name>` 及 directory／`.git` inode/device/mode/owner 重驗後 atomic 寫入 | 合法 owner 仍能故意授權含敏感內容的 Git 專案；本機帳號或瀏覽器完全失陷後無法保證 |
 | T20 | 重放、過期或快照變更後仍執行 purge/cleanup | Preview-first、snapshot binding、短效 single-use approval、核心維護服務再驗證 | 合法 owner 仍可人工批准刪除，因此不自動排程 |
-| T21 | SQLite event 被修改或 migration 部分成功 | Transactional migration、quick/foreign-key/version check、per-run SHA-256 tamper-evident chain | 具有本機寫權者可重算整條 chain；這不是簽章或外部時間錨 |
+| T21 | SQLite path／sidecar 被 symlink、hardlink、寬鬆權限或 pathname race 替換，或 event 被修改、migration 部分成功 | 十個 store 共用 owner `0700` directory 與 owner `0600` single-link regular main/WAL/SHM/journal preflight、主檔 `O_EXCL|O_NOFOLLOW` 預建、`DatabaseSync` 前後 inode/device 重驗、首次 WAL 後 sidecar 重驗、transactional migration、quick/foreign-key/version check、per-run SHA-256 tamper-evident chain | Node `DatabaseSync` 不接受 fd，仍有極窄 pathname open TOCTOU；具有本機寫權者也可重算整條 hash chain，這不是簽章或外部時間錨 |
 | T22 | CI action tag 被篡改或 fork PR 藉 token 提權 | 完整 commit SHA、`contents: read`、checkout 不保留 credential、無 secrets | GitHub 平台或已 pin action commit 自身仍是供應鏈信任邊界 |
 | T23 | Provider CLI 在唯讀角色濫讀 home 或其他專案 | 空白 scratch cwd、最小環境、停用 built-in filesystem/shell/network/subagent/plugin | Provider CLI binary 本身仍以本機使用者執行並可讀取自己的登入設定；需持續追蹤上游行為 |
 | T24 | Writer 以 stale write、symlink/hardlink 或敏感路徑逸出 | Live Writer worktree、custom Workspace MCP、canonical path、UTF-8/size/type gate、SHA-256 compare、new-file no-clobber、無 delete/shell/network | 本機其他程序可製造 filesystem TOCTOU；真實 Claude CLI/MCP smoke test 尚待額度批准 |

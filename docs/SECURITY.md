@@ -196,6 +196,11 @@ Private Vulnerability Reporting；公開後請使用 repository 的 **Security �
   session／Origin／CSRF 防護、短效單次 preview、敏感範圍封鎖、精確確認與 TOCTOU 重驗後加入。
   兩條入口都寫入同一份 owner-only atomic policy；TUI、Web、JSONL 對未授權路徑仍一律 fail closed。
 - SQLite 啟動時執行 `quick_check`、foreign-key check、schema version gate 與 per-run SHA-256 event-chain 驗證；migration 交易失敗即 rollback。
+- 全部 SQLite store 在任何 schema/query 前共用 owner-only preflight：資料目錄精確 `0700`，主檔與
+  `-wal`／`-shm`／`-journal` 精確 `0600`、owner UID、regular file、single hardlink；主檔以
+  `O_EXCL|O_NOFOLLOW` 建立並在 `DatabaseSync` pathname open 前後比對 device/inode，首次 WAL
+  pragma 後再驗 sidecar。異常權限或連結不會被靜默 chmod，會直接 fail closed。由於 Node
+  `DatabaseSync` 不接受 fd，同帳號惡意程序仍可能競逐極窄的 pathname open 視窗，列為殘餘風險。
 - 提供 `orchestrator data inventory`、`data integrity` 與有限 retention policy。`data purge` 預設只預覽；
   `--execute` 仍需 TTY 精確文字、短效 scoped nonce 與 snapshot 重驗，且不清除 active run 或 retained worktree。
 - Worktree cleanup 同樣 preview-first；拒絕 dirty/mismatched/active worktree、不使用 `--force`、不刪 branch。

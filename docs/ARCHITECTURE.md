@@ -222,6 +222,13 @@ SQLite 僅儲存必要 metadata、狀態、事件摘要與 redacted audit。Secr
 migration 包在 `BEGIN IMMEDIATE` 交易；啟動先後執行 quick check、版本上限、foreign-key check 與
 per-run SHA-256 event-chain 驗證。舊事件在交易內回填 hash，任何錯誤 rollback 並 fail closed。
 
+所有十個 SQLite store 共用 owner-only 開啟器：資料目錄必須是 owner 精確 `0700` 的非 symlink
+directory；主檔及既有 `-wal`、`-shm`、`-journal` 必須是 owner 精確 `0600`、single-link regular
+file。新主檔以 `O_EXCL|O_NOFOLLOW` 預先建立，`DatabaseSync` 開啟前後比對 device/inode，首次
+WAL pragma 後立即重驗主檔與 sidecar，任一異常皆在 schema/query 前關閉並 fail closed。Node 的
+`DatabaseSync` 目前不接受既有 file descriptor，因此 pathname open 前後仍存在極窄的同帳號
+filesystem race；inode 重驗將可觀測替換縮到不執行 SQL 的邊界，但不能宣稱完全消除 TOCTOU。
+
 Owner-only JSON 設定（hard limits、API model policy、tester profile、workspace roots、retention）
 共用 descriptor-based preflight：資料目錄必須是 owner `0700` 的非 symlink directory；既有檔案以
 `O_NOFOLLOW` 開啟後從同一 descriptor 驗 regular file、owner、精確 `0600`、single hardlink 與 1 MiB

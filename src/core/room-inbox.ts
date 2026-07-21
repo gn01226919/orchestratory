@@ -1,8 +1,9 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { chmodSync, mkdirSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { RoomLedger, RoomMessage } from "./room-ledger.ts";
+import { openOwnerDatabase, verifyOwnerDatabaseFiles } from "./sqlite-security.ts";
 
 export type RoomDeliveryState =
   | "queued"
@@ -166,18 +167,16 @@ export class RoomInboxStore {
   #closed = false;
 
   constructor(dataDirectory: string, options: { now?: () => number; deliveryLeaseMs?: number } = {}) {
-    mkdirSync(dataDirectory, { recursive: true, mode: 0o700 });
-    chmodSync(dataDirectory, 0o700);
     this.path = join(dataDirectory, "room-inbox.sqlite");
     this.#now = options.now ?? Date.now;
     this.#deliveryLeaseMs = options.deliveryLeaseMs ?? DEFAULT_DELIVERY_LEASE_MS;
     if (!Number.isSafeInteger(this.#deliveryLeaseMs) || this.#deliveryLeaseMs < 5_000 || this.#deliveryLeaseMs > 300_000) {
       throw new Error("INVALID_DELIVERY_LEASE");
     }
-    this.#db = new DatabaseSync(this.path);
+    this.#db = openOwnerDatabase(this.path);
     try {
-      chmodSync(this.path, 0o600);
       this.#db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON; PRAGMA busy_timeout=3000;");
+      verifyOwnerDatabaseFiles(this.path);
       const quick = this.#db.prepare("PRAGMA quick_check").get() as { quick_check?: string };
       if (quick.quick_check !== "ok") throw new Error("ROOM_INBOX_CORRUPT");
       let version = Number((this.#db.prepare("PRAGMA user_version").get() as { user_version?: number }).user_version ?? 0);

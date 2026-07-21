@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { openOwnerDatabase, verifyOwnerDatabaseFiles } from "./sqlite-security.ts";
 
 export type ManagedAgentProvider = "codex" | "claude" | "grok";
 
@@ -81,13 +82,11 @@ export class ManagedRoomAgentStore {
   #closed = false;
 
   constructor(dataDirectory: string) {
-    mkdirSync(dataDirectory, { recursive: true, mode: 0o700 });
-    chmodSync(dataDirectory, 0o700);
     this.path = join(dataDirectory, "managed-room-agents.sqlite");
-    this.#db = new DatabaseSync(this.path);
+    this.#db = openOwnerDatabase(this.path);
     try {
-      chmodSync(this.path, 0o600);
       this.#db.exec("PRAGMA journal_mode=WAL; PRAGMA secure_delete=ON; PRAGMA busy_timeout=3000;");
+      verifyOwnerDatabaseFiles(this.path);
       const quick = this.#db.prepare("PRAGMA quick_check").get() as { quick_check?: string };
       if (quick.quick_check !== "ok") throw new Error("MANAGED_AGENT_STORE_CORRUPT");
       const version = Number(

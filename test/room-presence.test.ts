@@ -1,6 +1,6 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { chmod, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -426,6 +426,7 @@ test("presence schema v1 migrates transactionally to explicit room requests", as
     PRAGMA user_version = 1;
   `);
   legacy.close();
+  await chmod(path, 0o600);
 
   const migrated = new RoomPresenceStore(data);
   t.after(() => migrated.close());

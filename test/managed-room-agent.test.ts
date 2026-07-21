@@ -98,6 +98,7 @@ test("managed room agent store rejects a future schema and closes the failed dat
   const raw = new DatabaseSync(path);
   raw.exec("PRAGMA user_version = 3");
   raw.close();
+  await chmod(path, 0o600);
   assert.throws(() => new ManagedRoomAgentStore(data), /MANAGED_AGENT_SCHEMA_UNSUPPORTED/u);
 });
 

@@ -1,8 +1,9 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { chmodSync, mkdirSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import { join } from "node:path";
 import { isAbsolute } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { openOwnerDatabase, verifyOwnerDatabaseFiles } from "./sqlite-security.ts";
 import type { WriterLease, WriterProvider } from "./writer-lease.ts";
 
 export type DelegatedAccess = "read-only" | "write";
@@ -94,14 +95,12 @@ export class WriterDelegationStore {
   #closed = false;
 
   constructor(dataDirectory: string, options: { now?: () => number } = {}) {
-    mkdirSync(dataDirectory, { recursive: true, mode: 0o700 });
-    chmodSync(dataDirectory, 0o700);
     this.path = join(dataDirectory, "writer-delegations.sqlite");
     this.#now = options.now ?? Date.now;
-    this.#db = new DatabaseSync(this.path);
+    this.#db = openOwnerDatabase(this.path);
     try {
-      chmodSync(this.path, 0o600);
       this.#db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON; PRAGMA busy_timeout=3000;");
+      verifyOwnerDatabaseFiles(this.path);
       const quick = this.#db.prepare("PRAGMA quick_check").get() as { quick_check?: string };
       if (quick.quick_check !== "ok") throw new Error("WRITER_DELEGATION_STORE_CORRUPT");
       const version = Number((this.#db.prepare("PRAGMA user_version").get() as { user_version?: number }).user_version ?? 0);

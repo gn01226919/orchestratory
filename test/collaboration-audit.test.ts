@@ -81,25 +81,26 @@ test("technical audit key rejects symlinks, hardlinks, non-files and permissive 
   t.after(async () => await rm(root, { recursive: true, force: true }));
 
   const symlinkData = join(root, "symlink");
-  await mkdir(symlinkData);
+  await mkdir(symlinkData, { mode: 0o700 });
   const symlinkTarget = join(root, "symlink-target");
   await writeFile(symlinkTarget, Buffer.alloc(32, 1), { mode: 0o600 });
   await symlink(symlinkTarget, join(symlinkData, "collaboration-audit.key"));
   assert.throws(() => new CollaborationAuditLog(symlinkData), /COLLABORATION_AUDIT_KEY_UNSAFE/u);
 
   const hardlinkData = join(root, "hardlink");
-  await mkdir(hardlinkData);
+  await mkdir(hardlinkData, { mode: 0o700 });
   const hardlinkTarget = join(root, "hardlink-target");
   await writeFile(hardlinkTarget, Buffer.alloc(32, 2), { mode: 0o600 });
   await link(hardlinkTarget, join(hardlinkData, "collaboration-audit.key"));
   assert.throws(() => new CollaborationAuditLog(hardlinkData), /COLLABORATION_AUDIT_KEY_UNSAFE/u);
 
   const directoryData = join(root, "directory");
-  await mkdir(join(directoryData, "collaboration-audit.key"), { recursive: true });
+  await mkdir(directoryData, { mode: 0o700 });
+  await mkdir(join(directoryData, "collaboration-audit.key"), { mode: 0o700 });
   assert.throws(() => new CollaborationAuditLog(directoryData), /COLLABORATION_AUDIT_KEY_UNSAFE/u);
 
   const modeData = join(root, "mode");
-  await mkdir(modeData);
+  await mkdir(modeData, { mode: 0o700 });
   const modeKey = join(modeData, "collaboration-audit.key");
   await writeFile(modeKey, Buffer.alloc(32, 3), { mode: 0o600 });
   await chmod(modeKey, 0o644);
