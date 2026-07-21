@@ -298,7 +298,7 @@ binary 或總 context 超限時 fail closed；模式篩選仍不是秘密偵測�
 - scoped/expiring/single-use approval、digest-pinned tester、checkpoint 指紋恢復。
 - Workspace allowlist、retention preview/purge rollback、worktree cleanup snapshot、SQLite migration/audit-chain tamper detection。
 - CycloneDX SBOM、deterministic fuzz smoke、SHA-pinned least-privilege CI 與離線乾淨 package snapshot。
-- 目前 273 個 deterministic tests；line 95.00%、branch 85.15%、functions 96.81%，門檻由指令阻擋。
+- 目前 274 個 deterministic tests；line 94.98%、branch 85.06%、functions 96.82%，門檻由指令阻擋。
 
 已完成受控唯讀 Codex 與 managed Claude 的最小 live smoke；真實 Writer 寫入、Grok、付費 API、
 container image 與任何額外額度操作仍需 owner 明確批准。

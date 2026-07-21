@@ -75,7 +75,7 @@
 
 - [x] Dependency-free repository-source format/hygiene lint 通過：UTF-8/LF、tab/trailing-space/final-newline、
   JSON、regular/executable mode 與 debugger/eval/dynamic Function/`shell: true` 規則均由 release gate 阻擋。
-- [x] 273/273 deterministic tests 通過；line 95.00%、branch 85.15%、functions 96.81%，通過
+- [x] 274/274 deterministic tests 通過；line 94.98%、branch 85.06%、functions 96.82%，通過
   固定 90%／85%／90% 覆蓋率門檻。
 - [x] CycloneDX 1.5 SBOM 已驗證；3 個 components，dependency/lockfile 無 drift。
 - [x] Working-tree 與完整 Git history 掃描通過。
@@ -92,6 +92,9 @@
   `npm run build:package`。它要求乾淨的
   committed HEAD，重用上述完整驗證，最後只把 publishable tgz 與 SHA-256 保留於 owner-only、Git ignored
   的 `dist/release/`；產生本機 artifact 不代表核准任何 registry／GitHub 發布。
+- [x] Artifact persistence 使用 `O_NOFOLLOW` descriptor 與 `O_CREAT|O_EXCL`，經 fd write、fsync、fstat；
+  collision 先驗 regular file、owner、single link、0600 與精確 bounded size 才讀取比較。symlink、hardlink、
+  oversized 與 0644 負向測試均 fail closed，且不修改 target。
 - [ ] Release artifact checksum、signature/provenance 等待實際發布授權。
 - [ ] GitHub Private Vulnerability Reporting、secret scanning、dependency alerts 與 branch protection 需在建立 repository 後啟用。
 - [ ] 真實 provider/container smoke tests 等待額度、runtime 與 image 授權。

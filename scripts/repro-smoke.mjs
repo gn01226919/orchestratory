@@ -1,10 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
 import { promisify } from "node:util";
 import {
-  chmod,
-  copyFile,
   cp,
   lstat,
   mkdir,
@@ -16,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ensureOwnerOnlyDirectory, writeIdempotentArtifact } from "./release-artifact.mjs";
 
 const execFileAsync = promisify(execFile);
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -82,42 +80,6 @@ async function runExpectedFailure(executable, args, cwd, timeout = 30_000) {
     throw error;
   }
   throw new Error("EXPECTED_COMMAND_FAILURE");
-}
-
-async function ensureOwnerOnlyDirectory(path) {
-  try {
-    await mkdir(path, { mode: 0o700 });
-  } catch (error) {
-    if (!error || typeof error !== "object" || !("code" in error) || error.code !== "EEXIST") throw error;
-  }
-  const metadata = await lstat(path);
-  if (!metadata.isDirectory() || metadata.isSymbolicLink() || metadata.uid !== process.getuid() ||
-      (metadata.mode & 0o777) !== 0o700) {
-    throw new Error(`UNSAFE_RELEASE_OUTPUT_DIRECTORY:${path}`);
-  }
-}
-
-async function writeIdempotentArtifact(source, destination, expectedContent) {
-  try {
-    if (expectedContent === undefined) {
-      await copyFile(source, destination, constants.COPYFILE_EXCL);
-      await chmod(destination, 0o600);
-    } else {
-      await writeFile(destination, expectedContent, { encoding: "utf8", flag: "wx", mode: 0o600 });
-    }
-  } catch (error) {
-    if (!error || typeof error !== "object" || !("code" in error) || error.code !== "EEXIST") throw error;
-    const [existing, expected] = await Promise.all([
-      readFile(destination),
-      expectedContent === undefined ? readFile(source) : Promise.resolve(Buffer.from(expectedContent)),
-    ]);
-    if (!existing.equals(expected)) throw new Error(`RELEASE_ARTIFACT_COLLISION:${destination}`);
-  }
-  const metadata = await lstat(destination);
-  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== process.getuid() ||
-      metadata.nlink !== 1 || (metadata.mode & 0o777) !== 0o600) {
-    throw new Error(`UNSAFE_RELEASE_ARTIFACT:${destination}`);
-  }
 }
 
 try {

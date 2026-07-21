@@ -23,7 +23,7 @@ worker 工具與 workflow 引擎，Web 降級為監控與批准中心。
 
 ## 1. 現狀：今天已交付的內容（在既有架構上）
 
-以下功能已完成並沿用到新架構；目前完整 suite 為 273/273 deterministic tests：
+以下功能已完成並沿用到新架構；目前完整 suite 為 274/274 deterministic tests：
 
 | # | 交付 | 說明 | 在 MCP-first 中的角色 |
 |---|------|------|----------------------|
@@ -186,8 +186,8 @@ Room 對話保留作為可稽核協作帳本；監控中心另保留/新增：�
 
 ## 8. 已知風險與未決事項
 
-- Coverage gate 已修復且未降低門檻；2026-07-21 完整 release gate 為 line 95.00%、
-  branch 85.15%、functions 96.81%，273/273 tests。
+- Coverage gate 已修復且未降低門檻；2026-07-21 完整 release gate 為 line 94.98%、
+  branch 85.06%、functions 96.82%，274/274 tests。
 - Codex／Grok CLI 旗標是以官方文件推定並以 fake CLI 整合測試驗證；真實訂閱 smoke
   test 仍待 owner 批准額度。
 - `WORKSPACE_MUST_START_CLEAN` 不直接放寬；M2 以明確、bounded、RAM-only Dirty Snapshot 匯入
