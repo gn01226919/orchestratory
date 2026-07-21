@@ -255,7 +255,9 @@ Retention policy 預設保留終止 run 30 天且最多 500 筆。Purge 先生�
   → 保存 redacted summary
 ```
 
-每個 provider call 前後都檢查 cancel flag、deadline、call count、output size 與 circuit breaker；另有
+每個 provider call 前後都檢查 cancel flag、deadline、call count、output size 與 circuit breaker；已在
+spawn 前取消的 request 不會建立 subprocess，spawn 後則以 process-group TERM→KILL 終止，且必須確認
+leader 與整個 group 都已消失才回報完成；清理超時會 fail closed 為 `PROCESS_TREE_CLEANUP_FAILED`。另有
 獨立 absolute workflow timer，可在 provider/test in-flight 時直接 abort。v1 不自動 retry provider call，
 因此實際自動重試數為 0；round loop 只由 bounded tester/reviewer 結果觸發。
 

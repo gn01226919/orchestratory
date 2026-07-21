@@ -95,12 +95,22 @@ function validateArgs(args: string[]): void {
 }
 
 export async function runProcess(request: ProcessRequest): Promise<ProcessResult> {
+  const started = performance.now();
   validateArgs(request.args);
   if (request.timeoutMs <= 0 || request.outputLimitBytes <= 0) {
     throw new Error("INVALID_PROCESS_LIMITS");
   }
+  const cancelledBeforeStart = (): ProcessResult => ({
+    exitCode: 1,
+    stdout: "",
+    stderr: "",
+    durationMs: Math.round(performance.now() - started),
+    outputBytes: 0,
+    terminationReason: "cancelled",
+  });
+  if (request.signal?.aborted) return cancelledBeforeStart();
   const executable = await realpath(request.executable);
-  const started = performance.now();
+  if (request.signal?.aborted) return cancelledBeforeStart();
 
   return await new Promise<ProcessResult>((resolvePromise, reject) => {
     const child = spawn(executable, request.args, {
@@ -117,31 +127,88 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
     let outputBytes = 0;
     let terminationReason: ProcessResult["terminationReason"];
     let settled = false;
+    let leaderClosed = false;
+    let closeCode = 1;
+    let forceTimer: ReturnType<typeof setTimeout> | undefined;
+    let groupProbeTimer: ReturnType<typeof setTimeout> | undefined;
+    let cleanupDeadline = 0;
+
+    const clearTerminationTimers = (): void => {
+      if (forceTimer) clearTimeout(forceTimer);
+      if (groupProbeTimer) clearTimeout(groupProbeTimer);
+      forceTimer = undefined;
+      groupProbeTimer = undefined;
+    };
+
+    const processGroupExists = (): boolean => {
+      if (!child.pid || process.platform === "win32") return false;
+      try {
+        process.kill(-child.pid, 0);
+        return true;
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code !== "ESRCH";
+      }
+    };
+
+    const cleanup = (): void => {
+      clearTimeout(timeout);
+      clearTerminationTimers();
+      request.signal?.removeEventListener("abort", onAbort);
+    };
+
+    const settleClosed = (): void => {
+      if (settled || !leaderClosed) return;
+      if (terminationReason && processGroupExists()) return;
+      settled = true;
+      cleanup();
+      resolvePromise({
+        exitCode: closeCode,
+        stdout: Buffer.concat(stdout).toString("utf8"),
+        stderr: Buffer.concat(stderr).toString("utf8"),
+        durationMs: Math.round(performance.now() - started),
+        outputBytes,
+        ...(terminationReason ? { terminationReason } : {}),
+      });
+    };
+
+    const probeTerminatedGroup = (): void => {
+      groupProbeTimer = undefined;
+      if (settled || !leaderClosed || !terminationReason) return;
+      if (!processGroupExists()) {
+        settleClosed();
+        return;
+      }
+      if (!forceTimer && cleanupDeadline > 0 && performance.now() >= cleanupDeadline) {
+        settled = true;
+        cleanup();
+        reject(new Error("PROCESS_TREE_CLEANUP_FAILED"));
+        return;
+      }
+      groupProbeTimer = setTimeout(probeTerminatedGroup, 25);
+    };
+
+    const signalProcessTree = (signal: NodeJS.Signals): void => {
+      if (child.pid && process.platform !== "win32") {
+        try {
+          process.kill(-child.pid, signal);
+          return;
+        } catch {
+          // The leader may already be gone; fall through to the child handle.
+        }
+      }
+      child.kill(signal);
+    };
 
     const terminate = (reason: NonNullable<ProcessResult["terminationReason"]>): void => {
       if (terminationReason) return;
       terminationReason = reason;
-      if (child.pid && process.platform !== "win32") {
-        try {
-          process.kill(-child.pid, "SIGTERM");
-        } catch {
-          child.kill("SIGTERM");
-        }
-      } else {
-        child.kill("SIGTERM");
-      }
-      const forceTimer = setTimeout(() => {
-        if (child.pid && process.platform !== "win32") {
-          try {
-            process.kill(-child.pid, "SIGKILL");
-          } catch {
-            child.kill("SIGKILL");
-          }
-        } else {
-          child.kill("SIGKILL");
-        }
+      signalProcessTree("SIGTERM");
+      forceTimer = setTimeout(() => {
+        forceTimer = undefined;
+        cleanupDeadline = performance.now() + 1_000;
+        signalProcessTree("SIGKILL");
+        if (leaderClosed && !groupProbeTimer) probeTerminatedGroup();
       }, 1_000);
-      forceTimer.unref();
     };
 
     const consume = (target: Buffer[], chunk: Buffer): void => {
@@ -158,28 +225,27 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
 
     const onAbort = (): void => terminate("cancelled");
     request.signal?.addEventListener("abort", onAbort, { once: true });
+    if (request.signal?.aborted) onAbort();
 
     child.on("error", (error) => {
       if (settled) return;
+      if (terminationReason && child.pid) {
+        leaderClosed = true;
+        closeCode = 1;
+        if (!groupProbeTimer) probeTerminatedGroup();
+        return;
+      }
       settled = true;
-      clearTimeout(timeout);
-      request.signal?.removeEventListener("abort", onAbort);
+      cleanup();
       reject(error);
     });
 
     child.on("close", (code) => {
       if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      request.signal?.removeEventListener("abort", onAbort);
-      resolvePromise({
-        exitCode: typeof code === "number" ? code : 1,
-        stdout: Buffer.concat(stdout).toString("utf8"),
-        stderr: Buffer.concat(stderr).toString("utf8"),
-        durationMs: Math.round(performance.now() - started),
-        outputBytes,
-        ...(terminationReason ? { terminationReason } : {}),
-      });
+      leaderClosed = true;
+      closeCode = typeof code === "number" ? code : 1;
+      settleClosed();
+      if (!settled && terminationReason && !groupProbeTimer) probeTerminatedGroup();
     });
 
     if (request.stdin !== undefined) child.stdin.end(request.stdin, "utf8");

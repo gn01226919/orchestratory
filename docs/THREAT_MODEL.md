@@ -41,7 +41,7 @@
 | T08 | 惡意 dependency/postinstall 接管主機 | Pinning、no-script install、review、SBOM、scan | 上游合法版本被入侵仍可能影響 |
 | T09 | Agent 修改 hard limits 或 policy | Policy/config 分離、owner-only、restart required | 本機帳號被完全攻陷後不可保證 |
 | T10 | 多 agent 同時修改造成覆蓋或隱藏 diff | 每 task 單一 epoch-fenced Writer Lease、同 provider child 各自隔離 worktree、跨 provider child 唯讀、所有 reviewer 共用同一 captured status/tracked diff/untracked context、審查前後 content fingerprint | 不同 task 的 worktree 最終套回來源仍需 owner 逐一審查衝突；外部程式仍可能形成 TOCTOU |
-| T11 | Cancel 後 child process 繼續執行 | Process groups、tree kill、deadline watchdog | OS 級不可中斷程序可能延遲停止 |
+| T11 | Cancel 前後的競態仍啟動 child、leader 先退出使 grandchild 逃逸，或延遲 SIGKILL 誤傷重用的 PID/PGID | realpath 前後雙重 pre-abort gate、listener 註冊後重驗、process-group TERM→KILL、leader close 後持續確認整個 group 已 ESRCH、cleanup deadline 與明確失敗 | PGID 快速重用仍有極窄平台競態；OS 級不可中斷程序會以 `PROCESS_TREE_CLEANUP_FAILED` 停止而非宣稱取消完成 |
 | T12 | 公開 GitHub 時洩漏 history 或 screenshot | Full-history scan、artifact scan、human gate | 掃描器可能有 false negative |
 | T13 | Fork PR 竊取 CI secrets | Read-only permissions、無 secrets、禁用危險 trigger | Maintainer 錯誤變更 workflow |
 | T14 | Terminal escape sequence 偽造 UI 或 clipboard | ANSI/control sanitization、長度限制 | 終端機實作差異 |
