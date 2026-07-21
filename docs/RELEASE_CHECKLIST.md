@@ -80,12 +80,12 @@
 - [x] CycloneDX 1.5 SBOM 已驗證；3 個 components，dependency/lockfile 無 drift。
 - [x] Working-tree 與完整 Git history 掃描通過。
 - [x] 完整 npm dependency audit（含 dev toolchain）為 0 vulnerabilities；offline clean package-snapshot
-  reproduction 與實際 tgz 離線安裝均驗證 88 個 tracked allowlist 檔案；test、CI、Agent instructions、
+  reproduction 與實際 tgz 離線安裝均驗證 86 個由 tracked allowlist 建出的 runtime 檔案；test、CI、Agent instructions、
   package lock 與非 runtime scripts 均不進入 artifact。
 - [x] CI 使用完整 action commit SHA、`contents: read`、不保留 checkout credential、不使用 secrets。
 - [x] `npm run repro:smoke` 以 `--no-hardlinks` 複製 committed `HEAD`，驗證相同 commit、clean status、
   offline `npm ci --ignore-scripts` 與完整 `npm run check`；再由 clone 建實際 tgz、離線安裝並驗證
-  runtime-only manifest、`.bin` link／mode、TS typecheck、CLI help 與正負向本機 audit；不依賴 dirty tree。
+  runtime-only manifest、pinned TS-to-JS build、`.bin` link／mode、CLI help 與正負向本機 audit；不依賴 dirty tree。
 - [ ] Release artifact checksum、signature/provenance 等待實際發布授權。
 - [ ] GitHub Private Vulnerability Reporting、secret scanning、dependency alerts 與 branch protection 需在建立 repository 後啟用。
 - [ ] 真實 provider/container smoke tests 等待額度、runtime 與 image 授權。

@@ -26,7 +26,8 @@ by repository `.npmrc`, local reproduction, and CI.
   be tracked and rejects development/Agent/CI entries except the runtime security-audit modules and declarations.
   The temporary runtime manifest retains only `start`/`doctor`/`web`, so source-only test/SBOM/repro scripts are
   not advertised by the artifact. The gate creates an actual tgz, installs it offline, verifies the npm `.bin`
-  symlink and executable mode, syntax-checks installed JS/MJS, typechecks all installed TS, then runs packaged CLI
+  symlink and executable mode, compiles all tracked TS with the pinned compiler, syntax-checks installed JS/MJS,
+  then runs packaged CLI
   help plus positive and synthetic-secret negative audit paths. Missing, untracked or unexpected entries fail
   closed. Full fuzz/SBOM/history checks run in the clean clone because their development inputs are excluded.
 - GitHub Actions use immutable full commit SHAs, read-only repository permission, no persisted checkout

@@ -92,8 +92,8 @@ tests/
   executable-mode 與危險 code-pattern hygiene lint，再執行 syntax、strict typecheck、上述 coverage gate、deterministic fuzz、SBOM drift、
   working-tree scan 與完整 Git history scan；`npm run check:release` 再加入 dependency audit、offline
   committed-HEAD clean clone 與實際 tgz 安裝／bin／audit reproduction。
-- 目前證據：273/273 tests；line 95.00%、branch 85.15%、functions 96.81%；verified tgz
-  為 88 個 tracked allowlist 檔案。
+- 目前證據：273/273 tests；line 95.00%、branch 85.15%、functions 96.81%；verified runtime tgz
+  為 86 個由 tracked allowlist 建出的檔案。
 
 ## 6. Dependency policy
 

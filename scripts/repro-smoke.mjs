@@ -141,7 +141,7 @@ try {
     type: manifest.type,
     engines: manifest.engines,
     bin: manifest.bin,
-    files: manifest.files,
+    files: manifest.files.filter((path) => !path.endsWith(".d.mts")),
     scripts: {
       start: manifest.scripts?.start,
       doctor: manifest.scripts?.doctor,
@@ -158,6 +158,45 @@ try {
     { encoding: "utf8", mode: 0o600 },
   );
 
+  const typeScriptSources = publishedPaths
+    .filter((path) => path.startsWith("src/") && path.endsWith(".ts"))
+    .map((path) => resolve(clone, path));
+  if (typeScriptSources.length < 1) throw new Error("RUNTIME_TYPESCRIPT_SOURCES_MISSING");
+  await rm(resolve(packageSource, "src"), { recursive: true, force: true });
+  await Promise.all([
+    rm(resolve(packageSource, "scripts", "history-scan.d.mts"), { force: true }),
+    rm(resolve(packageSource, "scripts", "security-scan.d.mts"), { force: true }),
+  ]);
+  await run(resolve(clone, "node_modules", ".bin", "tsc"), [
+    "--target", "ES2023",
+    "--module", "NodeNext",
+    "--moduleResolution", "NodeNext",
+    "--strict",
+    "--noUncheckedIndexedAccess",
+    "--exactOptionalPropertyTypes",
+    "--noImplicitOverride",
+    "--useUnknownInCatchVariables",
+    "--verbatimModuleSyntax",
+    "--allowImportingTsExtensions",
+    "--rewriteRelativeImportExtensions",
+    "--types", "node",
+    "--typeRoots", resolve(clone, "node_modules", "@types"),
+    "--rootDir", clone,
+    "--outDir", packageSource,
+    "--declaration", "false",
+    "--sourceMap", "false",
+    ...typeScriptSources,
+  ], staging, 120_000);
+  for (const path of ["bin/orchestrator.mjs", "bin/workspace-mcp.mjs"]) {
+    const binPath = resolve(packageSource, path);
+    const source = await readFile(binPath, "utf8");
+    const rewritten = source.replace(/\.ts(?=["'])/gu, ".js");
+    if (rewritten === source || rewritten.includes(".ts\"")) {
+      throw new Error(`RUNTIME_BIN_REWRITE_FAILED:${path}`);
+    }
+    await writeFile(binPath, rewritten, "utf8");
+  }
+
   const artifactDirectory = resolve(staging, "artifact");
   await mkdir(artifactDirectory, { recursive: true });
   const artifactResult = await run(
@@ -172,7 +211,12 @@ try {
     throw new Error("INVALID_PACKAGE_ARTIFACT");
   }
   const artifactPaths = artifactFiles.map((entry) => entry.path).sort();
-  if (JSON.stringify(artifactPaths) !== JSON.stringify([...publishedPaths].sort())) {
+  const expectedArtifactPaths = publishedPaths.flatMap((path) => {
+    if (path.endsWith(".d.mts")) return [];
+    if (path.startsWith("src/") && path.endsWith(".ts")) return [path.replace(/\.ts$/u, ".js")];
+    return [path];
+  }).sort();
+  if (JSON.stringify(artifactPaths) !== JSON.stringify(expectedArtifactPaths)) {
     throw new Error("PACKAGE_ARTIFACT_INVENTORY_MISMATCH");
   }
   const artifactPath = resolve(artifactDirectory, artifactFilename);
@@ -199,28 +243,6 @@ try {
   for (const path of artifactPaths.filter((path) => /\.(?:js|mjs)$/u.test(path))) {
     await run("node", ["--check", resolve(installedPackage, path)], installation, 30_000);
   }
-  const typecheckConfig = resolve(staging, "package-tsconfig.json");
-  await writeFile(typecheckConfig, `${JSON.stringify({
-    compilerOptions: {
-      target: "ES2023",
-      module: "NodeNext",
-      moduleResolution: "NodeNext",
-      strict: true,
-      noUncheckedIndexedAccess: true,
-      exactOptionalPropertyTypes: true,
-      noImplicitOverride: true,
-      useUnknownInCatchVariables: true,
-      verbatimModuleSyntax: true,
-      allowImportingTsExtensions: true,
-      noEmit: true,
-      types: ["node"],
-      typeRoots: [resolve(clone, "node_modules", "@types")],
-    },
-    files: artifactPaths
-      .filter((path) => /\.(?:ts|mts)$/u.test(path))
-      .map((path) => resolve(installedPackage, path)),
-  }, null, 2)}\n`, { mode: 0o600 });
-  await run(resolve(clone, "node_modules", ".bin", "tsc"), ["--project", typecheckConfig], staging, 120_000);
 
   const installedBin = resolve(installation, "node_modules", ".bin", "orchestrator");
   const [binLink, binTarget] = await Promise.all([lstat(installedBin), stat(installedBin)]);
@@ -248,7 +270,7 @@ try {
   await rm(canaryPath, { force: true });
   process.stdout.write(
     `Clean clone verified at ${cloneHead.stdout.trim().slice(0, 12)}; package snapshot reproduced ` +
-    `(${artifactFiles.length} tracked allowlisted files, tgz install, bin link, JS syntax, TS typecheck, ` +
+    `(${artifactFiles.length} tracked allowlisted files, pinned TS-to-JS build, tgz install, bin link, JS syntax, ` +
     `CLI and positive/negative audit smoke).\n`,
   );
 } finally {
