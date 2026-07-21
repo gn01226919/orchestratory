@@ -20,8 +20,10 @@ by repository `.npmrc`, local reproduction, and CI.
 - `scripts/sbom.mjs` rejects non-exact versions, non-HTTPS/non-npmjs registry sources, missing SHA-512
   integrity, unapproved licenses, and more than 200 packages.
 - `sbom.cdx.json` is deterministic CycloneDX 1.5 output and `npm run sbom:check` rejects drift.
-- `npm run repro:smoke` builds a clean package snapshot, installs from the lockfile with lifecycle
-  scripts disabled and network forced offline, then runs typecheck, fuzz smoke and the local secret scan.
+- `npm run repro:smoke` first makes a local `--no-hardlinks` clone of committed `HEAD`, proves its
+  identity and clean status, installs offline with lifecycle scripts disabled, and runs the full check suite.
+  It separately builds a clean package snapshot and repeats offline install, typecheck, fuzz smoke and the
+  local secret scan so missing or accidentally untracked inputs fail closed.
 - GitHub Actions use immutable full commit SHAs, read-only repository permission, no persisted checkout
   credential, no dependency cache, no secrets, and a hard timeout.
 

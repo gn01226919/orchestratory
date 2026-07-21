@@ -1,13 +1,12 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { cp, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const execFileAsync = promisify(execFile);
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const staging = await mkdtemp(join(tmpdir(), "orchestratory-repro-"));
+const staging = await mkdtemp(join(dirname(root), ".orchestratory-repro-"));
 const cacheResult = await execFileAsync("npm", ["config", "get", "cache"], {
   cwd: root,
   timeout: 30_000,
@@ -27,15 +26,41 @@ const environment = {
 };
 
 async function run(executable, args, cwd, timeout = 120_000) {
-  return execFileAsync(executable, args, {
-    cwd,
-    env: environment,
-    timeout,
-    maxBuffer: 16 * 1024 * 1024,
-  });
+  try {
+    return await execFileAsync(executable, args, {
+      cwd,
+      env: environment,
+      timeout,
+      maxBuffer: 16 * 1024 * 1024,
+    });
+  } catch (error) {
+    const output = error && typeof error === "object" && "stdout" in error &&
+      typeof error.stdout === "string" ? error.stdout : "";
+    if (output) {
+      const lines = output.split("\n");
+      const failures = lines.flatMap((line, index) =>
+        line.startsWith("not ok ") ? lines.slice(Math.max(0, index - 2), index + 24) : []
+      );
+      const diagnostic = failures.length ? failures.join("\n") : output.slice(-12_000);
+      process.stderr.write(`${diagnostic}\n`);
+    }
+    throw error;
+  }
 }
 
 try {
+  const clone = resolve(staging, "clean-clone");
+  await run("git", ["clone", "--local", "--no-hardlinks", "--quiet", root, clone], staging, 120_000);
+  const [sourceHead, cloneHead, cloneStatus] = await Promise.all([
+    run("git", ["rev-parse", "HEAD"], root),
+    run("git", ["rev-parse", "HEAD"], clone),
+    run("git", ["status", "--porcelain=v1", "--untracked-files=all"], clone),
+  ]);
+  if (sourceHead.stdout.trim() !== cloneHead.stdout.trim()) throw new Error("CLEAN_CLONE_HEAD_MISMATCH");
+  if (cloneStatus.stdout.trim()) throw new Error("CLEAN_CLONE_NOT_CLEAN");
+  await run("npm", ["ci", "--offline", "--ignore-scripts"], clone, 180_000);
+  await run("npm", ["run", "check"], clone, 240_000);
+
   const packed = await run("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], root);
   const inventory = JSON.parse(packed.stdout);
   const files = inventory[0]?.files;
@@ -61,7 +86,10 @@ try {
   await run("npm", ["run", "typecheck"], staging, 120_000);
   await run("npm", ["run", "test:fuzz"], staging, 120_000);
   await run("npm", ["run", "audit:local"], staging, 120_000);
-  process.stdout.write(`Clean package snapshot reproduced (${files.length} published files, offline install, typecheck, fuzz, security scan).\n`);
+  process.stdout.write(
+    `Clean clone verified at ${cloneHead.stdout.trim().slice(0, 12)}; package snapshot reproduced ` +
+    `(${files.length} published files, offline installs, full checks, package typecheck/fuzz/security scan).\n`,
+  );
 } finally {
   await rm(staging, { recursive: true, force: true });
 }

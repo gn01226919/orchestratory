@@ -39,7 +39,7 @@
 - [ ] Lockfile 與 runtime/package-manager versions 已 pin。
 - [ ] CI actions pin 到 commit SHA，permissions 最小化。
 - [ ] Fork PR 無法取得 secrets 或高權限 token。
-- [ ] 乾淨、隔離的 clone 可重現安裝、建置與測試。
+- [x] 乾淨、隔離的 committed-HEAD clone 可離線重現安裝、型別、完整測試、SBOM 與安全掃描。
 - [ ] 產生 SBOM、checksums 與 provenance；簽章流程無長期 secret。
 
 ## E. 文件與操作
@@ -73,14 +73,15 @@
 
 ## 目前本機證據（不等於發布批准）
 
-- [x] 259/259 deterministic tests 通過；line 94.94%、branch 85.27%、functions 96.71%，通過
+- [x] 272/272 deterministic tests 通過；line 94.98%、branch 85.10%、functions 96.90%，通過
   固定 90%／85%／90% 覆蓋率門檻。
 - [x] CycloneDX 1.5 SBOM 已驗證；3 個 components，dependency/lockfile 無 drift。
-- [x] Working-tree 與完整 Git history 掃描通過；目前 history 為 0 objects。
+- [x] Working-tree 與完整 Git history 掃描通過；目前掃描 278 個 Git objects。
 - [x] 完整 npm dependency audit（含 dev toolchain）為 0 vulnerabilities；offline clean package-snapshot
-  reproduction 與 package dry-run 均驗證 137 個公開檔案。
+  reproduction 與 package dry-run 均驗證 141 個公開檔案。
 - [x] CI 使用完整 action commit SHA、`contents: read`、不保留 checkout credential、不使用 secrets。
-- [ ] 真正 clean Git clone 需要先有 owner 批准的 commit；目前只能驗證 clean package snapshot。
+- [x] `npm run repro:smoke` 以 `--no-hardlinks` 複製 committed `HEAD`，驗證相同 commit、clean status、
+  offline `npm ci --ignore-scripts` 與完整 `npm run check`；不依賴 working tree 的未提交檔案。
 - [ ] Release artifact checksum、signature/provenance 等待實際發布授權。
 - [ ] GitHub Private Vulnerability Reporting、secret scanning、dependency alerts 與 branch protection 需在建立 repository 後啟用。
 - [ ] 真實 provider/container smoke tests 等待額度、runtime 與 image 授權。
