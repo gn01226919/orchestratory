@@ -1,11 +1,31 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { constants } from "node:fs";
 import { promisify } from "node:util";
-import { cp, lstat, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  copyFile,
+  cp,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const execFileAsync = promisify(execFile);
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
+const outputArguments = process.argv.slice(2);
+const retainArtifact = outputArguments.length === 2 && outputArguments[0] === "--output";
+if (outputArguments.length !== 0 && !retainArtifact) throw new Error("INVALID_REPRO_ARGUMENTS");
+const releaseDirectory = resolve(root, "dist", "release");
+if (retainArtifact && resolve(root, outputArguments[1]) !== releaseDirectory) {
+  throw new Error("RELEASE_OUTPUT_MUST_BE_DIST_RELEASE");
+}
 const staging = await mkdtemp(join(dirname(root), ".orchestratory-repro-"));
 const cacheResult = await execFileAsync("npm", ["config", "get", "cache"], {
   cwd: root,
@@ -64,6 +84,42 @@ async function runExpectedFailure(executable, args, cwd, timeout = 30_000) {
   throw new Error("EXPECTED_COMMAND_FAILURE");
 }
 
+async function ensureOwnerOnlyDirectory(path) {
+  try {
+    await mkdir(path, { mode: 0o700 });
+  } catch (error) {
+    if (!error || typeof error !== "object" || !("code" in error) || error.code !== "EEXIST") throw error;
+  }
+  const metadata = await lstat(path);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink() || metadata.uid !== process.getuid() ||
+      (metadata.mode & 0o777) !== 0o700) {
+    throw new Error(`UNSAFE_RELEASE_OUTPUT_DIRECTORY:${path}`);
+  }
+}
+
+async function writeIdempotentArtifact(source, destination, expectedContent) {
+  try {
+    if (expectedContent === undefined) {
+      await copyFile(source, destination, constants.COPYFILE_EXCL);
+      await chmod(destination, 0o600);
+    } else {
+      await writeFile(destination, expectedContent, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    }
+  } catch (error) {
+    if (!error || typeof error !== "object" || !("code" in error) || error.code !== "EEXIST") throw error;
+    const [existing, expected] = await Promise.all([
+      readFile(destination),
+      expectedContent === undefined ? readFile(source) : Promise.resolve(Buffer.from(expectedContent)),
+    ]);
+    if (!existing.equals(expected)) throw new Error(`RELEASE_ARTIFACT_COLLISION:${destination}`);
+  }
+  const metadata = await lstat(destination);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.uid !== process.getuid() ||
+      metadata.nlink !== 1 || (metadata.mode & 0o777) !== 0o600) {
+    throw new Error(`UNSAFE_RELEASE_ARTIFACT:${destination}`);
+  }
+}
+
 try {
   const clone = resolve(staging, "clean-clone");
   await run("git", ["clone", "--local", "--no-hardlinks", "--quiet", root, clone], staging, 120_000);
@@ -74,8 +130,18 @@ try {
   ]);
   if (sourceHead.stdout.trim() !== cloneHead.stdout.trim()) throw new Error("CLEAN_CLONE_HEAD_MISMATCH");
   if (cloneStatus.stdout.trim()) throw new Error("CLEAN_CLONE_NOT_CLEAN");
+  if (retainArtifact) {
+    const sourceStatus = await run("git", ["status", "--porcelain=v1", "--untracked-files=all"], root);
+    if (sourceStatus.stdout.trim()) throw new Error("RELEASE_SOURCE_NOT_CLEAN");
+  }
   await run("npm", ["ci", "--offline", "--ignore-scripts"], clone, 180_000);
   await run("npm", ["run", "check"], clone, 240_000);
+
+  const sourcePublish = await run("npm", ["publish", "--dry-run"], clone);
+  const sourcePublishOutput = `${sourcePublish.stdout}\n${sourcePublish.stderr}`;
+  if (!sourcePublishOutput.includes("http://127.0.0.1:9")) {
+    throw new Error("SOURCE_PACKAGE_PUBLISH_SINK_MISSING");
+  }
 
   const packed = await run("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], clone);
   const inventory = JSON.parse(packed.stdout);
@@ -128,6 +194,9 @@ try {
   const packageSource = resolve(staging, "package-source");
   const manifest = JSON.parse(await readFile(resolve(packageSource, "package.json"), "utf8"));
   if (manifest.private !== true) throw new Error("PACKAGE_MUST_REMAIN_PRIVATE_BEFORE_OWNER_RELEASE_APPROVAL");
+  if (manifest.publishConfig?.registry !== "http://127.0.0.1:9") {
+    throw new Error("SOURCE_PACKAGE_PUBLISH_SINK_REQUIRED");
+  }
   if (!Array.isArray(manifest.files) || manifest.files.length < 1) throw new Error("PACKAGE_FILES_ALLOWLIST_REQUIRED");
   if (manifest.scripts?.preinstall || manifest.scripts?.install || manifest.scripts?.postinstall) {
     throw new Error("INSTALL_LIFECYCLE_SCRIPT_DENIED");
@@ -136,7 +205,6 @@ try {
   const runtimeManifest = {
     name: manifest.name,
     version: manifest.version,
-    private: true,
     description: manifest.description,
     type: manifest.type,
     engines: manifest.engines,
@@ -235,7 +303,7 @@ try {
   );
   const installedPackage = resolve(installation, "node_modules", manifest.name);
   const installedManifest = JSON.parse(await readFile(resolve(installedPackage, "package.json"), "utf8"));
-  if (installedManifest.private !== true ||
+  if ("private" in installedManifest || "publishConfig" in installedManifest ||
       JSON.stringify(Object.keys(installedManifest.scripts ?? {}).sort()) !==
         JSON.stringify(["doctor", "start", "web"])) {
     throw new Error("RUNTIME_PACKAGE_MANIFEST_INVALID");
@@ -268,10 +336,32 @@ try {
     throw new Error("PACKAGED_AUDIT_NEGATIVE_SMOKE_FAILED");
   }
   await rm(canaryPath, { force: true });
+  let retainedMessage = "";
+  if (retainArtifact) {
+    await ensureOwnerOnlyDirectory(resolve(root, "dist"));
+    await ensureOwnerOnlyDirectory(releaseDirectory);
+    const artifactBytes = await readFile(artifactPath);
+    const digest = createHash("sha256").update(artifactBytes).digest("hex");
+    const commit = cloneHead.stdout.trim().slice(0, 12);
+    if (!/^[A-Za-z0-9._-]+\.tgz$/u.test(artifactFilename)) {
+      throw new Error("INVALID_RELEASE_ARTIFACT_FILENAME");
+    }
+    const retainedFilename = artifactFilename.replace(/\.tgz$/u, `-${commit}.tgz`);
+    const retainedPath = resolve(releaseDirectory, retainedFilename);
+    if (relative(releaseDirectory, retainedPath).startsWith(`..${sep}`)) {
+      throw new Error("RELEASE_ARTIFACT_PATH_ESCAPE");
+    }
+    const checksumPath = `${retainedPath}.sha256`;
+    await writeIdempotentArtifact(artifactPath, retainedPath);
+    const retainedDigest = createHash("sha256").update(await readFile(retainedPath)).digest("hex");
+    if (retainedDigest !== digest) throw new Error("RETAINED_RELEASE_ARTIFACT_HASH_MISMATCH");
+    await writeIdempotentArtifact("", checksumPath, `${digest}  ${retainedFilename}\n`);
+    retainedMessage = ` Retained ${relative(root, retainedPath)} with SHA-256 ${digest}.`;
+  }
   process.stdout.write(
     `Clean clone verified at ${cloneHead.stdout.trim().slice(0, 12)}; package snapshot reproduced ` +
     `(${artifactFiles.length} tracked allowlisted files, pinned TS-to-JS build, tgz install, bin link, JS syntax, ` +
-    `CLI and positive/negative audit smoke).\n`,
+    `CLI and positive/negative audit smoke).${retainedMessage}\n`,
   );
 } finally {
   await rm(staging, { recursive: true, force: true });

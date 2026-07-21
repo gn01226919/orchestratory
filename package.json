@@ -2,6 +2,9 @@
   "name": "orchestratory",
   "version": "0.0.1",
   "private": true,
+  "publishConfig": {
+    "registry": "http://127.0.0.1:9"
+  },
   "description": "Security-first local orchestrator for subscription coding CLIs",
   "type": "module",
   "engines": {
@@ -31,6 +34,7 @@
     "start": "node src/main.ts",
     "doctor": "node src/main.ts doctor",
     "web": "node src/main.ts web",
+    "build:package": "node scripts/repro-smoke.mjs --output dist/release",
     "test": "node --test",
     "test:fuzz": "node --test test/fuzz-smoke.test.ts",
     "test:coverage": "node --experimental-test-coverage --test --test-coverage-exclude=**/tui.ts --test-coverage-lines=90 --test-coverage-branches=85 --test-coverage-functions=90",

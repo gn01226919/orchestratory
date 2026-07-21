@@ -95,6 +95,14 @@ tests/
 - 目前證據：273/273 tests；line 95.00%、branch 85.15%、functions 96.81%；verified runtime tgz
   為 86 個由 tracked allowlist 建出的檔案。
 
+Source manifest 保持 `private: true`，並把 `publishConfig.registry` 固定到 loopback sink，避免一般
+`npm publish` 將 source tree 傳至外部 registry；直接 `npm pack` 只會產生含 TypeScript 與開發 scripts
+的未驗證 source snapshot，不是 release artifact。以乾淨 committed HEAD
+執行 `npm run build:package`，它會完成與
+release gate 相同的 clean-clone、tgz、離線安裝、CLI 與正負 audit 驗證，並把候選 tgz 與 SHA-256
+寫入 owner-only、Git ignored 的 `dist/release/`。任何 push、registry publish 或 release upload 仍需
+owner 對版本、package ownership 與發布範圍另行明確核准。
+
 ## 6. Dependency policy
 
 新增 dependency 前記錄：

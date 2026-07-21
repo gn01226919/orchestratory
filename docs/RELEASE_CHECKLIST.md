@@ -86,6 +86,12 @@
 - [x] `npm run repro:smoke` 以 `--no-hardlinks` 複製 committed `HEAD`，驗證相同 commit、clean status、
   offline `npm ci --ignore-scripts` 與完整 `npm run check`；再由 clone 建實際 tgz、離線安裝並驗證
   runtime-only manifest、pinned TS-to-JS build、`.bin` link／mode、CLI help 與正負向本機 audit；不依賴 dirty tree。
+- [x] Source manifest 保持 `private: true`，並將 `publishConfig.registry` 固定到 loopback sink，
+  避免一般 `npm publish` 把 source tree 傳到外部 registry；`npm pack` 只能產生未驗證的 source
+  snapshot，不是 release artifact。唯一支援的本機候選版路徑是
+  `npm run build:package`。它要求乾淨的
+  committed HEAD，重用上述完整驗證，最後只把 publishable tgz 與 SHA-256 保留於 owner-only、Git ignored
+  的 `dist/release/`；產生本機 artifact 不代表核准任何 registry／GitHub 發布。
 - [ ] Release artifact checksum、signature/provenance 等待實際發布授權。
 - [ ] GitHub Private Vulnerability Reporting、secret scanning、dependency alerts 與 branch protection 需在建立 repository 後啟用。
 - [ ] 真實 provider/container smoke tests 等待額度、runtime 與 image 授權。
