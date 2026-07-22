@@ -315,8 +315,10 @@ container image 與任何額外額度操作仍需 owner 明確批准。
   需 owner 明確批准訂閱額度；Grok/API Writer 保持停用。
 - Raw debug capture 尚未實作；設定為 true 會直接拒絕啟動，而不是假裝啟用 retention 保護。
 - Node 22 的內建 `node:sqlite` 仍會顯示 experimental warning。
-- GUI 的 HTTP/安全整合測試與先前 Browser 視覺流程已通過；最新 macOS IME 雙 Enter、雙埠 cookie、
-  external join decision 與 Writer apply-back 仍待 owner 允許新的受控 Chrome 視窗後實機驗收。
+- GUI 的 HTTP/安全整合測試與 Browser 視覺流程已通過；2026-07-22 受控 Chrome 實機驗證了
+  專案／Room 精確切換、external join decision、exact-seat wake/reply、bounded wait timeout、
+  常駐 Codex／Claude 喚醒、雙 Enter，以及零檔案變更的 Writer 完成／apply-back。瀏覽器控制層
+  無法切換 macOS 系統輸入來源，因此真實中文 IME composition 與雙埠 cookie 視覺確認仍待人工驗收。
 - `npm run repro:smoke` 會從 committed HEAD 建立 `--no-hardlinks` clean clone、跑完整 gate，並從該
   clone 產生實際 tgz、離線安裝與驗證 installed bin；不以 dirty working tree 代替發布來源。
 
