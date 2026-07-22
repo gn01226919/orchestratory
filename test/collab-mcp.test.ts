@@ -695,6 +695,43 @@ test("MCP notifications/cancelled abort an in-flight room_wait and clear wakeabl
   assert.match(String((emitted[0]?.error as { message?: string } | undefined)?.message), /ROOM_WAIT_CANCELLED/u);
 });
 
+test("MCP transport returns bounded protocol metadata and ignores notifications", async (t) => {
+  const { broker, cleanup } = await fixture();
+  t.after(cleanup);
+  const inflight = new Map<string, AbortController>();
+  const emitted: Array<Record<string, unknown>> = [];
+  const emit = (value: Record<string, unknown>): number => emitted.push(value);
+
+  await handleCollabMcpMessage(
+    broker,
+    { jsonrpc: "2.0", id: 1, method: "initialize" },
+    inflight,
+    emit,
+  );
+  await handleCollabMcpMessage(
+    broker,
+    { jsonrpc: "2.0", id: "init", method: "initialize", params: { protocolVersion: "test-version" } },
+    inflight,
+    emit,
+  );
+  await handleCollabMcpMessage(broker, { jsonrpc: "2.0", id: 2, method: "ping" }, inflight, emit);
+  await handleCollabMcpMessage(broker, { jsonrpc: "2.0", id: 3, method: "tools/list" }, inflight, emit);
+  await handleCollabMcpMessage(
+    broker,
+    { jsonrpc: "2.0", method: "notifications/progress", params: null },
+    inflight,
+    emit,
+  );
+  await handleCollabMcpMessage(broker, { jsonrpc: "2.0", id: 4, method: "unknown" }, inflight, emit);
+
+  assert.equal((emitted[0]?.result as { protocolVersion: string }).protocolVersion, "2024-11-05");
+  assert.equal((emitted[1]?.result as { protocolVersion: string }).protocolVersion, "test-version");
+  assert.deepEqual(emitted[2]?.result, {});
+  assert.equal(Array.isArray((emitted[3]?.result as { tools: unknown[] }).tools), true);
+  assert.match(String((emitted[4]?.error as { message: string }).message), /UNKNOWN_MCP_METHOD/u);
+  assert.equal(inflight.size, 0);
+});
+
 test("room_mention wakes a worker with referenced messages and ledgers the reply", async (t) => {
   const { broker, ledger, calls, root, cleanup } = await fixture({
     reply: (assignment) => `${assignment.provider} 認為 #2 的假設有問題`,
