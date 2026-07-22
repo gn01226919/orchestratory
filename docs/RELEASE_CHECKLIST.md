@@ -100,7 +100,8 @@
 - [ ] Codex／Claude 最小 live smoke 已完成；Grok、API 與 container smoke 仍等待額度、runtime／image 與逐次授權。
 - [ ] 2026-07-22 受控 Chrome 已驗證 Room 精確切換、external join/approve、exact-seat 與常駐
   Codex／Claude 喚醒回覆、bounded wait timeout、雙 Enter、Writer grant/run/checkpoint 與零變更
-  apply-back；HTTP/Web 安全整合測試已通過。真實 macOS 中文 IME、雙埠 cookie、child executor 與
+  apply-back；HTTP/Web 安全整合測試已通過。macOS 已確認選取真實注音輸入來源，但 Browser
+  自動化送鍵繞過系統 text-input service；中文 IME composition、雙埠 cookie、child executor 與
   非零檔案 apply-back 仍待個別人工驗收。
 - [ ] 人類對公開 visibility、npm publish 與正式 release 仍為 NO-GO；本次只批准 Private source push。
 - [x] Owner 已選擇由 sanitized snapshot 建立全新 repository；既有含 live project/Room metadata 的
