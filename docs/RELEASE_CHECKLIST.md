@@ -103,6 +103,9 @@
   apply-back；HTTP/Web 安全整合測試已通過。真實 macOS 注音 composition Enter 及後續雙 Enter
   已由 owner 直接操作通過，截圖與 Room 帳本均確認只送出一則。雙埠 cookie、child executor 與
   非零檔案 apply-back 仍待個別人工驗收。
+- [x] 2026-07-22 新增 room-first／seat-only 核准 UI 與 server 強制路由，277 項完整 gate 已通過；
+  Chrome 已在精確專案 Room 實際選擇並核准兩種 mode 與相反的 turn-sync 設定。Zero-quota fake compare
+  證明 room-first 依序讀寫帳本、seat-only 不增加帳本，跨專案切換不顯示兩個席位，console 無 error。
 - [ ] 人類對公開 visibility、npm publish 與正式 release 仍為 NO-GO；本次只批准 Private source push。
 - [x] Owner 已選擇由 sanitized snapshot 建立全新 repository；既有含 live project/Room metadata 的
   內部 Git history 不得推送。

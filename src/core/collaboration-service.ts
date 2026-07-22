@@ -8,6 +8,7 @@ import {
 } from "./managed-room-agent.ts";
 import {
   RoomPresenceStore,
+  type PresenceCollaborationMode,
   type PresenceHookInput,
   type PresenceInfo,
   type PresenceRegistration,
@@ -139,16 +140,29 @@ export class CollaborationService {
     return this.presence.cancelJoinRequest(presenceId, roomId);
   }
 
-  approveExternalJoin(input: { presenceId: string; roomId: string; workspace: string; label?: string }): PresenceInfo {
+  approveExternalJoin(input: {
+    presenceId: string;
+    roomId: string;
+    workspace: string;
+    collaborationMode: PresenceCollaborationMode;
+    syncTurns: boolean;
+    label?: string;
+  }): PresenceInfo {
     this.#assertRoomWorkspace(input.roomId, input.workspace);
     const before = this.presence.get(input.presenceId);
-    const joined = this.presence.join(input.presenceId, input.roomId, input.workspace, input.label);
+    const joined = this.presence.join(input.presenceId, input.roomId, input.workspace, {
+      collaborationMode: input.collaborationMode,
+      syncTurns: input.syncTurns,
+      ...(input.label ? { label: input.label } : {}),
+    });
     if (this.managedAgents.list(input.roomId).some((agent) => agent.displayName === joined.displayName)) {
       this.presence.leave(input.presenceId, input.roomId);
       throw new Error("PRESENCE_DISPLAY_NAME_IN_USE");
     }
     if (before?.roomId !== input.roomId) {
-      this.ledger.appendSystem(input.roomId, `${joined.displayName} 已加入辦公室（GUI 明確加入）`);
+      const mode = joined.collaborationMode === "room-first" ? "全程帳本協作" : "僅加入席位";
+      const turns = joined.syncTurns ? "終端對話同步已開啟" : "終端對話同步未開啟";
+      this.ledger.appendSystem(input.roomId, `${joined.displayName} 已加入辦公室（${mode}；${turns}）`);
     }
     return joined;
   }

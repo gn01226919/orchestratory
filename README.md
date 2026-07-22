@@ -180,8 +180,10 @@ provider 類型；每個 MCP stdio process 會在同一個 allowlisted workspace
 Room 也以 canonical workspace 精確綁定：每個專案使用自己的 Room，不會把其他專案的申請、帳本或席位混入。GUI 以
 「專案名 — 內部 Room ID」顯示這層對應，並會在任一專案有待核准申請時於全域顯示數量。
 MCP 終端必須先呼叫 `room_join_request`，才會在 Room 辦公室右側列為「待核准」；沒有申請的終端
-不會出現在 GUI。Owner 按「＋ 加入」後才分配 `codex1`、`codex2` 等不回收身分、建立人物與辦公桌
-並開始允許該 session 入帳。`room_join_request` 會保持目前 host 回合等待核准，核准後立刻進入第一段
+不會出現在 GUI。Owner 核准時選擇「全程帳本協作（room-first）」或「僅加入值班席位（seat-only）」，
+並獨立決定是否用已安裝的 structured hooks 同步該終端的可見 user／assistant turns；Agent 自己不能
+選擇或變更。之後才分配 `codex1`、`codex2` 等不回收身分、建立人物與辦公桌。
+`room_join_request` 會保持目前 host 回合等待核准，核准後立刻進入第一段
 bounded `room_wait`，因此 Owner 可直接從 GUI 交辦第一則工作；若要持續值班，終端在 timeout 或回覆後
 必須立即再次呼叫 `room_wait`。未加入完全不記錄；終端正常
 關閉會立即移除，crash 最遲在約十五秒 lease 到期後移除。不同 workspace 不能互相加入，GUI 也
@@ -213,6 +215,16 @@ orchestrator room hooks --provider grok
 答後自行比較統整。所有 worker 皆唯讀、跑在空白 scratch cwd，由 Orchestratory 注入受限的專
 案檔案清單；host 也可在 `files` 明確指定最多 8 個相對路徑，內容仍經相同唯讀邊界與總量上限。
 workspace 必須在 allowlist 內；程序內計數之外，真實呼叫還受跨程序持久 governor 約束。
+若這個精確 session 已由 Owner 核准為 room-first，上述 `ask_*`／`compare_agents` 不再繞過房間：
+server 會使用已綁定的 Room/workspace、先讀有界最新帳本，再把提問、處理生命週期與回覆全部 append；
+compare 改為依帳本順序執行，讓後一位 Agent 讀到前一位的已完成回覆。每次結果帶有
+`readThroughSeq`，不會把呼叫期間才新增的訊息冒充成已讀。seat-only 則維持 standalone worker 行為。
+這項強制只涵蓋 Orchestratory MCP 工具；Codex／Claude／Grok 自己另外啟動、且未經 MCP broker 的
+原生 subagent 無法被攔截，也不能宣稱已寫入 Room。
+
+2026-07-22 的 Chrome live smoke 在同一精確專案 Room 分別核准 room-first＋turn sync off 與
+seat-only＋turn sync on：前者用兩個 zero-quota fake worker 證明 compare 依序讀寫帳本，後者完成
+相同 compare 但 ledger count 不變；切換另一個已授權專案 Room 時，兩個 session-bound 席位都不會出現。
 終端必須先呼叫 `room_join_request`；只有同專案、live 且有 MCP 的精確 session 才會進入 GUI
 「新增 Agents」待審核。Owner 加入後才建立 `codex1` 等臨時工位並開始記錄；終端關閉會移除
 臨時人物，Codex／Claude／Grok／You 四個常駐工位不受影響。加入後的 Room 作者由 presence

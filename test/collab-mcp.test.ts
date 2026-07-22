@@ -49,6 +49,7 @@ async function fixture(options: {
     signal?: AbortSignal;
   }) => Promise<boolean>;
   cancelRoomJoin?: (roomId: string, workspace: string) => void;
+  sessionRoomMode?: "room-first" | "seat-only";
 } = {}): Promise<BrokerFixture> {
   const directories: string[] = [];
   for (let index = 0; index < (options.roots ?? 1); index += 1) {
@@ -86,6 +87,17 @@ async function fixture(options: {
     ...(options.requestRoomJoin ? { requestRoomJoin: options.requestRoomJoin } : {}),
     ...(options.waitForRoomJoin ? { waitForRoomJoin: options.waitForRoomJoin } : {}),
     ...(options.cancelRoomJoin ? { cancelRoomJoin: options.cancelRoomJoin } : {}),
+    ...(options.sessionRoomMode
+      ? {
+          resolveSessionRoom: () => ({
+            roomId: "demo",
+            workspace: workspaces.roots()[0]!.path,
+            actor: "codex1",
+            collaborationMode: options.sessionRoomMode!,
+            syncTurns: true,
+          }),
+        }
+      : {}),
   });
   return {
     broker,
@@ -491,6 +503,60 @@ test("compare_agents preserves successful answers when one worker fails", async 
   assert.match(value.answers[1]?.error ?? "", /SYNTHETIC_PROVIDER_FAILURE/u);
 });
 
+test("room-first mode forces ask and compare through the shared ledger", async (t) => {
+  const { broker, calls, ledger, root, cleanup } = await fixture({
+    sessionRoomMode: "room-first",
+    reply: (assignment) => `${assignment.provider} ledger answer`,
+  });
+  t.after(cleanup);
+  ledger.createRoom("demo", root);
+  ledger.append("demo", "claude", "第一手架構資訊");
+
+  const asked = JSON.parse(await broker.call("ask_codex", { question: "請審查" })) as {
+    answer: string;
+    ledger: { room: string; mentionSeq: number; replySeq: number; readThroughSeq: number };
+  };
+  assert.equal(asked.answer, "codex ledger answer");
+  assert.equal(asked.ledger.room, "demo");
+  assert.equal(asked.ledger.readThroughSeq, 2);
+  assert.match(calls[0]?.request.prompt ?? "", /#2 claude: 第一手架構資訊/u);
+  assert.equal(ledger.getRange("demo", asked.ledger.mentionSeq, asked.ledger.mentionSeq)[0]?.author, "codex1");
+  assert.equal(ledger.getRange("demo", asked.ledger.replySeq, asked.ledger.replySeq)[0]?.author, "codex");
+
+  const compared = JSON.parse(await broker.call("compare_agents", {
+    question: "依最新帳本比較",
+    targets: ["codex", "claude"],
+  })) as { answers: Array<{ provider: string; ledger?: { room: string; readThroughSeq: number } }> };
+  assert.equal(compared.answers.every((answer) => answer.ledger?.room === "demo"), true);
+  assert.match(calls.at(-1)?.request.prompt ?? "", /codex ledger answer/u);
+  assert.equal(ledger.verifyChain("demo"), true);
+});
+
+test("seat-only stays standalone while room-first cannot escape its bound workspace", async (t) => {
+  const seat = await fixture({ sessionRoomMode: "seat-only" });
+  t.after(seat.cleanup);
+  seat.ledger.createRoom("demo", seat.root);
+  await seat.broker.call("ask_codex", { question: "一次性諮詢" });
+  assert.equal(seat.ledger.getRoom("demo")?.messages, 1);
+  assert.doesNotMatch(seat.calls[0]?.request.prompt ?? "", /Recent room messages/u);
+
+  const bound = await fixture({ sessionRoomMode: "room-first", roots: 2 });
+  t.after(bound.cleanup);
+  bound.ledger.createRoom("demo", bound.root);
+  const otherWorkspace = (JSON.parse(await bound.broker.call("list_agents", {})) as {
+    workspaceRoots: Array<{ path: string }>;
+  }).workspaceRoots[1]!.path;
+  const implicit = JSON.parse(await bound.broker.call("ask_codex", { question: "使用已綁定專案" })) as {
+    ledger: { room: string };
+  };
+  assert.equal(implicit.ledger.room, "demo");
+  await assert.rejects(
+    bound.broker.call("ask_codex", { question: "跨專案繞過", workspace: otherWorkspace }),
+    /ROOM_FIRST_WORKSPACE_MISMATCH/u,
+  );
+  assert.equal(bound.calls.length, 1);
+});
+
 test("room tools post, read, and search the shared numbered ledger", async (t) => {
   const { broker, ledger, root, cleanup } = await fixture();
   t.after(cleanup);
@@ -627,6 +693,43 @@ test("MCP notifications/cancelled abort an in-flight room_wait and clear wakeabl
   assert.equal(inbox.isListening(presenceId, "demo"), false);
   assert.equal(inflight.size, 0);
   assert.match(String((emitted[0]?.error as { message?: string } | undefined)?.message), /ROOM_WAIT_CANCELLED/u);
+});
+
+test("MCP transport returns bounded protocol metadata and ignores notifications", async (t) => {
+  const { broker, cleanup } = await fixture();
+  t.after(cleanup);
+  const inflight = new Map<string, AbortController>();
+  const emitted: Array<Record<string, unknown>> = [];
+  const emit = (value: Record<string, unknown>): number => emitted.push(value);
+
+  await handleCollabMcpMessage(
+    broker,
+    { jsonrpc: "2.0", id: 1, method: "initialize" },
+    inflight,
+    emit,
+  );
+  await handleCollabMcpMessage(
+    broker,
+    { jsonrpc: "2.0", id: "init", method: "initialize", params: { protocolVersion: "test-version" } },
+    inflight,
+    emit,
+  );
+  await handleCollabMcpMessage(broker, { jsonrpc: "2.0", id: 2, method: "ping" }, inflight, emit);
+  await handleCollabMcpMessage(broker, { jsonrpc: "2.0", id: 3, method: "tools/list" }, inflight, emit);
+  await handleCollabMcpMessage(
+    broker,
+    { jsonrpc: "2.0", method: "notifications/progress", params: null },
+    inflight,
+    emit,
+  );
+  await handleCollabMcpMessage(broker, { jsonrpc: "2.0", id: 4, method: "unknown" }, inflight, emit);
+
+  assert.equal((emitted[0]?.result as { protocolVersion: string }).protocolVersion, "2024-11-05");
+  assert.equal((emitted[1]?.result as { protocolVersion: string }).protocolVersion, "test-version");
+  assert.deepEqual(emitted[2]?.result, {});
+  assert.equal(Array.isArray((emitted[3]?.result as { tools: unknown[] }).tools), true);
+  assert.match(String((emitted[4]?.error as { message: string }).message), /UNKNOWN_MCP_METHOD/u);
+  assert.equal(inflight.size, 0);
 });
 
 test("room_mention wakes a worker with referenced messages and ledgers the reply", async (t) => {

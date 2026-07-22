@@ -678,16 +678,31 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
     body: JSON.stringify({ room: "presence-demo", presenceId: availableSession.id }),
   });
   assert.equal(joinWithoutCsrf.status, 403);
-  const joinPresence = await fetch(`${server.url}/api/rooms/presence/join`, {
+  const joinWithoutMode = await fetch(`${server.url}/api/rooms/presence/join`, {
     method: "POST",
     headers: csrfHeaders,
     body: JSON.stringify({ room: "presence-demo", presenceId: availableSession.id, label: "前端 2" }),
   });
+  assert.equal(joinWithoutMode.status, 400);
+  assert.deepEqual(await joinWithoutMode.json(), { error: "INVALID_PRESENCE_JOIN_REQUEST" });
+  const joinPresence = await fetch(`${server.url}/api/rooms/presence/join`, {
+    method: "POST",
+    headers: csrfHeaders,
+    body: JSON.stringify({
+      room: "presence-demo",
+      presenceId: availableSession.id,
+      label: "前端 2",
+      collaborationMode: "room-first",
+      syncTurns: true,
+    }),
+  });
   assert.equal(joinPresence.status, 200);
-  assert.equal(
-    ((await joinPresence.json()) as { session: { displayName: string } }).session.displayName,
-    "codex（前端 2）",
-  );
+  const joinedPresenceBody = (await joinPresence.json()) as {
+    session: { displayName: string; collaborationMode: string; syncTurns: boolean };
+  };
+  assert.equal(joinedPresenceBody.session.displayName, "codex（前端 2）");
+  assert.equal(joinedPresenceBody.session.collaborationMode, "room-first");
+  assert.equal(joinedPresenceBody.session.syncTurns, true);
   const joined = await fetch(`${server.url}/api/rooms/presence?room=presence-demo`, {
     headers: { Cookie: cookie },
   });
@@ -1121,7 +1136,9 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomHtml, /⌘ Enter 立即送出/u);
   assert.match(roomHtml, /id="managed-agent-create"/u);
   assert.match(roomHtml, /受控即時 Agent/u);
-  assert.match(roomHtml, /核准後會等待第一則 GUI 任務/u);
+  assert.match(roomHtml, /請選擇「全程帳本協作」或「僅加入值班席位」/u);
+  assert.match(roomHtml, /獨立決定是否同步此終端可見對話/u);
+  assert.match(roomHtml, /原生旁路無法攔截/u);
   assert.match(roomHtml, /休班時不冒充回覆/u);
   assert.match(roomHtml, /id="writer-run-cancel"/u);
   assert.match(roomHtml, /共用目前 task worktree 並由系統序列執行/u);
@@ -1149,8 +1166,10 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomScript, /value\.session/u);
   assert.match(roomScript, /filter\(\(entry\) => entry\.id !== value\.session\.id\)/u);
   assert.match(roomScript, /核准並建立值班席位/u);
-  assert.match(roomScript, /值班中 · GUI @ 會立即喚醒/u);
-  assert.match(roomScript, /線上但休班 · GUI 不會喚醒/u);
+  assert.match(roomScript, /全程帳本協作/u);
+  assert.match(roomScript, /終端對話同步/u);
+  assert.match(roomScript, /值班中/u);
+  assert.match(roomScript, /線上但休班/u);
   assert.match(roomScript, /已排隊（外接終端未值班，無法喚醒）/u);
   assert.match(roomScript, /selectedPresenceId/u);
   assert.match(roomScript, /managedAgentId/u);

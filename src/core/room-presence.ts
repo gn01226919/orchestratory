@@ -7,6 +7,13 @@ import { openOwnerDatabase, verifyOwnerDatabaseFiles } from "./sqlite-security.t
 
 export type PresenceProvider = "codex" | "claude" | "grok";
 export type PresenceHookEvent = "SessionStart" | "UserPromptSubmit" | "Stop";
+export type PresenceCollaborationMode = "room-first" | "seat-only";
+
+export interface PresenceJoinApproval {
+  collaborationMode: PresenceCollaborationMode;
+  syncTurns: boolean;
+  label?: string;
+}
 
 export interface PresenceInfo {
   id: string;
@@ -21,6 +28,8 @@ export interface PresenceInfo {
   requestedAtMs?: number;
   roomId?: string;
   displayName?: string;
+  collaborationMode?: PresenceCollaborationMode;
+  syncTurns?: boolean;
 }
 
 export interface PresenceRegistration {
@@ -58,9 +67,11 @@ interface PresenceRow {
   requested_room_id: string | null;
   requested_at_ms: number | null;
   open_turn_key: string | null;
+  collaboration_mode: PresenceCollaborationMode | null;
+  sync_turns: number;
 }
 
-const PRESENCE_SCHEMA_VERSION = 3;
+const PRESENCE_SCHEMA_VERSION = 4;
 const DEFAULT_LEASE_MS = 15_000;
 const MAX_ACTIVE_SESSIONS = 32;
 const MAX_WORKSPACE_SESSIONS = 12;
@@ -116,6 +127,26 @@ function validOwnerLabel(value: unknown): string | undefined {
   return label;
 }
 
+function validJoinApproval(value: unknown): PresenceJoinApproval {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("INVALID_PRESENCE_JOIN_APPROVAL");
+  }
+  const input = value as Record<string, unknown>;
+  if (Object.keys(input).some((key) => !["collaborationMode", "syncTurns", "label"].includes(key))) {
+    throw new Error("INVALID_PRESENCE_JOIN_APPROVAL");
+  }
+  if (input.collaborationMode !== "room-first" && input.collaborationMode !== "seat-only") {
+    throw new Error("INVALID_PRESENCE_COLLABORATION_MODE");
+  }
+  if (typeof input.syncTurns !== "boolean") throw new Error("INVALID_PRESENCE_TURN_SYNC");
+  const label = validOwnerLabel(input.label);
+  return {
+    collaborationMode: input.collaborationMode,
+    syncTurns: input.syncTurns,
+    ...(label ? { label } : {}),
+  };
+}
+
 function sessionHash(provider: PresenceProvider, sessionId: string): string {
   if (sessionId.length < 1 || sessionId.length > 512 || sessionId.includes("\0")) {
     throw new Error("INVALID_PRESENCE_SESSION_ID");
@@ -140,6 +171,9 @@ function publicInfo(row: PresenceRow, roomId?: string): PresenceInfo {
     ...(requested && row.requested_at_ms !== null ? { requestedAtMs: Number(row.requested_at_ms) } : {}),
     ...(exposeMembership && row.room_id ? { roomId: row.room_id } : {}),
     ...(exposeMembership && row.display_name ? { displayName: row.display_name } : {}),
+    ...(joined && row.collaboration_mode
+      ? { collaborationMode: row.collaboration_mode, syncTurns: row.sync_turns === 1 }
+      : {}),
   };
 }
 
@@ -181,6 +215,7 @@ export class RoomPresenceStore {
       else {
         if (version === 1) this.#migrateV2();
         if (version <= 2) this.#migrateV3();
+        if (version <= 3) this.#migrateV4();
       }
       if (this.#db.prepare("PRAGMA foreign_key_check").all().length > 0) {
         throw new Error("PRESENCE_FOREIGN_KEY_VIOLATION");
@@ -211,9 +246,11 @@ export class RoomPresenceStore {
           requested_room_id TEXT,
           requested_at_ms INTEGER,
           open_turn_key TEXT,
+          collaboration_mode TEXT CHECK (collaboration_mode IN ('room-first', 'seat-only') OR collaboration_mode IS NULL),
+          sync_turns INTEGER NOT NULL DEFAULT 0 CHECK (sync_turns IN (0, 1)),
           UNIQUE(provider, workspace, host_pid),
-          CHECK ((room_id IS NULL AND display_name IS NULL) OR
-                 (room_id IS NOT NULL AND display_name IS NOT NULL)),
+          CHECK ((room_id IS NULL AND display_name IS NULL AND collaboration_mode IS NULL AND sync_turns = 0) OR
+                 (room_id IS NOT NULL AND display_name IS NOT NULL AND collaboration_mode IS NOT NULL)),
           CHECK ((requested_room_id IS NULL AND requested_at_ms IS NULL) OR
                  (requested_room_id IS NOT NULL AND requested_at_ms IS NOT NULL))
         );
@@ -231,7 +268,7 @@ export class RoomPresenceStore {
           created_at_ms INTEGER NOT NULL,
           PRIMARY KEY (session_hash, event_key)
         );
-        PRAGMA user_version = 3;
+        PRAGMA user_version = 4;
       `);
       this.#db.exec("COMMIT");
     } catch (error) {
@@ -275,6 +312,24 @@ export class RoomPresenceStore {
         DROP TABLE presence_hook_dedup;
         ALTER TABLE presence_hook_dedup_v3 RENAME TO presence_hook_dedup;
         PRAGMA user_version = 3;
+      `);
+      this.#db.exec("COMMIT");
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  #migrateV4(): void {
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      this.#db.exec(`
+        ALTER TABLE agent_presence ADD COLUMN collaboration_mode TEXT;
+        ALTER TABLE agent_presence ADD COLUMN sync_turns INTEGER NOT NULL DEFAULT 0;
+        UPDATE agent_presence
+          SET collaboration_mode = 'seat-only', sync_turns = 1
+          WHERE room_id IS NOT NULL;
+        PRAGMA user_version = 4;
       `);
       this.#db.exec("COMMIT");
     } catch (error) {
@@ -333,6 +388,9 @@ export class RoomPresenceStore {
          OR connected_at_ms > last_seen_at_ms
          OR (room_id IS NULL) <> (display_name IS NULL)
          OR (requested_room_id IS NULL) <> (requested_at_ms IS NULL)
+         OR sync_turns NOT IN (0, 1)
+         OR (room_id IS NULL AND (collaboration_mode IS NOT NULL OR sync_turns <> 0))
+         OR (room_id IS NOT NULL AND collaboration_mode NOT IN ('room-first', 'seat-only'))
          OR LENGTH(id) < 1 OR LENGTH(id) > 128
     `).get() as { count: number };
     return {
@@ -457,10 +515,11 @@ export class RoomPresenceStore {
     return publicInfo(this.#row(id)!, roomId);
   }
 
-  join(id: string, roomId: string, roomWorkspace: string, ownerLabel?: string): PresenceInfo {
+  join(id: string, roomId: string, roomWorkspace: string, approvalValue: PresenceJoinApproval): PresenceInfo {
     validRoom(roomId);
     validWorkspace(roomWorkspace);
-    const label = validOwnerLabel(ownerLabel);
+    const approval = validJoinApproval(approvalValue);
+    const label = approval.label;
     const now = this.#now();
     this.#db.exec("BEGIN IMMEDIATE");
     try {
@@ -503,8 +562,8 @@ export class RoomPresenceStore {
         .get(roomId, displayName, id) as { found: number } | undefined;
       if (duplicate) throw new Error("PRESENCE_DISPLAY_NAME_IN_USE");
       this.#db
-        .prepare("UPDATE agent_presence SET room_id = ?, display_name = ?, requested_room_id = NULL, requested_at_ms = NULL WHERE id = ?")
-        .run(roomId, displayName, id);
+        .prepare("UPDATE agent_presence SET room_id = ?, display_name = ?, collaboration_mode = ?, sync_turns = ?, requested_room_id = NULL, requested_at_ms = NULL WHERE id = ?")
+        .run(roomId, displayName, approval.collaborationMode, approval.syncTurns ? 1 : 0, id);
       const joined = this.#row(id)!;
       this.#db.exec("COMMIT");
       return publicInfo(joined, roomId);
@@ -521,7 +580,7 @@ export class RoomPresenceStore {
     if (!row) throw new Error("PRESENCE_NOT_FOUND");
     if (row.room_id !== roomId) throw new Error("PRESENCE_NOT_JOINED");
     this.#db
-      .prepare("UPDATE agent_presence SET room_id = NULL, display_name = NULL, session_hash = NULL, requested_room_id = NULL, requested_at_ms = NULL, open_turn_key = NULL WHERE id = ?")
+      .prepare("UPDATE agent_presence SET room_id = NULL, display_name = NULL, collaboration_mode = NULL, sync_turns = 0, session_hash = NULL, requested_room_id = NULL, requested_at_ms = NULL, open_turn_key = NULL WHERE id = ?")
       .run(id);
     return publicInfo(this.#row(id)!, roomId);
   }
@@ -564,7 +623,10 @@ export class RoomPresenceStore {
         "UPDATE agent_presence SET session_hash = ?, model = COALESCE(?, model), last_seen_at_ms = ?, lease_expires_at_ms = ? WHERE id = ?",
       )
       .run(hash, model ?? null, now, now + this.#leaseMs, row.id);
-    if (input.event === "SessionStart" || row.room_id === null || row.display_name === null) return "ignored";
+    if (
+      input.event === "SessionStart" || row.room_id === null || row.display_name === null ||
+      row.sync_turns !== 1
+    ) return "ignored";
     if (typeof input.text !== "string" || input.text.trim().length === 0) return "ignored";
     this.#db.exec("BEGIN IMMEDIATE");
     try {

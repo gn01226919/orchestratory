@@ -880,6 +880,31 @@ button.cancel-pending:hover { border-color: var(--warn); }
   border-color: #5ebd8c;
   outline: 1px solid rgb(94 189 140 / 28%);
 }
+.office-presence-row .presence-mode-select {
+  grid-column: 1 / -1;
+  width: 100%;
+  min-width: 0;
+  padding: 6px 7px;
+  border: 1px solid #413846;
+  border-radius: 6px;
+  color: #e0d7e3;
+  background: #111015;
+  font: 700 8px/1.2 var(--font-mono);
+}
+.office-presence-row .presence-mode-select:focus {
+  border-color: #5ebd8c;
+  outline: 1px solid rgb(94 189 140 / 28%);
+}
+.office-presence-row .presence-sync-label {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  color: #998f9c;
+  font-size: 7.5px;
+  line-height: 1.35;
+}
+.office-presence-row .presence-sync-input { margin: 1px 0 0; accent-color: #5ebd8c; }
 .office-presence-row .office-presence-identity > i { grid-row: 1 / 3; align-self: center; width: 7px; height: 7px; border-radius: 2px; box-shadow: 0 0 7px currentColor; }
 .office-presence-row .office-presence-identity > b { color: #d9d0dc; font: 800 8px/1.2 var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .office-presence-row .office-presence-identity > small { color: #776f7a; font-size: 7px; line-height: 1.25; }
