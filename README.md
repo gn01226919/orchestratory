@@ -221,6 +221,10 @@ compare 改為依帳本順序執行，讓後一位 Agent 讀到前一位的已�
 `readThroughSeq`，不會把呼叫期間才新增的訊息冒充成已讀。seat-only 則維持 standalone worker 行為。
 這項強制只涵蓋 Orchestratory MCP 工具；Codex／Claude／Grok 自己另外啟動、且未經 MCP broker 的
 原生 subagent 無法被攔截，也不能宣稱已寫入 Room。
+
+2026-07-22 的 Chrome live smoke 在同一精確專案 Room 分別核准 room-first＋turn sync off 與
+seat-only＋turn sync on：前者用兩個 zero-quota fake worker 證明 compare 依序讀寫帳本，後者完成
+相同 compare 但 ledger count 不變；切換另一個已授權專案 Room 時，兩個 session-bound 席位都不會出現。
 終端必須先呼叫 `room_join_request`；只有同專案、live 且有 MCP 的精確 session 才會進入 GUI
 「新增 Agents」待審核。Owner 加入後才建立 `codex1` 等臨時工位並開始記錄；終端關閉會移除
 臨時人物，Codex／Claude／Grok／You 四個常駐工位不受影響。加入後的 Room 作者由 presence
