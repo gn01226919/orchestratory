@@ -791,9 +791,11 @@ export async function startWebServer(
           }
           const value = body as Record<string, unknown>;
           if (
-            Object.keys(value).some((key) => !["room", "presenceId", "label"].includes(key)) ||
+            Object.keys(value).some((key) => !["room", "presenceId", "label", "collaborationMode", "syncTurns"].includes(key)) ||
             typeof value.room !== "string" || typeof value.presenceId !== "string" ||
-            (value.label !== undefined && typeof value.label !== "string")
+            (value.label !== undefined && typeof value.label !== "string") ||
+            (value.collaborationMode !== "room-first" && value.collaborationMode !== "seat-only") ||
+            typeof value.syncTurns !== "boolean"
           ) throw new Error("INVALID_PRESENCE_JOIN_REQUEST");
           const info = ledger.getRoom(value.room);
           if (!info) throw new Error("ROOM_NOT_FOUND");
@@ -809,6 +811,8 @@ export async function startWebServer(
             presenceId: value.presenceId,
             roomId: value.room,
             workspace,
+            collaborationMode: value.collaborationMode,
+            syncTurns: value.syncTurns,
             ...(typeof value.label === "string" ? { label: value.label } : {}),
           });
           json(response, 200, { session: joined });

@@ -226,3 +226,20 @@ bounded Workspace MCP、完整 ledger／HMAC audit 與最後 apply-back 的人�
 
 **限制：** 這不是無限權限，也不允許模型自行把 proposal 升級成 owner 操作。任何非
 loopback、session／Origin／CSRF 不符、繞過 worktree、stale epoch 或無法完整記錄的請求一律 fail closed。
+
+## ADR-026：Room collaboration mode 由 Owner 核准並由 broker 強制
+
+**決策：** 外接 MCP session 呼叫 `room_join_request` 後，GUI Owner 必須選擇 `room-first` 或
+`seat-only`，另以 boolean 決定 supported structured hooks 是否同步可見 user／assistant turns。
+選擇綁定 exact presence＋Room＋canonical workspace，Agent 不能自行選擇、變更或跨 workspace 使用。
+room-first 將所有 Orchestratory `ask_*`／`compare_agents` 經同一 Room ledger 執行；每次保存
+`readThroughSeq`，append mention／lifecycle／reply，compare 依序執行。seat-only 只提供精確 GUI
+inbox／席位，standalone worker call 不宣稱入帳。
+
+**理由：** MCP 註冊、加入房間、可被 GUI 交辦、可見對話同步與所有 broker 協作入帳是不同能力。
+把它們混為單一隱含狀態，會造成偷偷錄音或「以為其他 Agent 看過帳本、實際走了旁路」；由 Owner
+在加入點做一次明確選擇，並由 server 路由而非 prompt 自律，才能讓帳本成為可驗證的第一手資訊面。
+
+**限制：** MCP 只能強制它所代理的呼叫；provider 原生且繞過 Orchestratory 的 subagent／host
+協作無法攔截，UI 與文件必須誠實標示此邊界。Snapshot cursor 只代表該次呼叫開始前已讀至哪一則，
+不保證在 provider 執行期間持續看到新訊息。

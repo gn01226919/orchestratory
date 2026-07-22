@@ -99,6 +99,20 @@
 - 非互動模式不得隱含批准危險操作。
 - 無 TTY 時，所有需要人類批准的步驟都必須 fail closed 或進入 paused 狀態。
 
+### 4.4 Room 協作模式
+
+- 新 MCP session 只在它主動呼叫 `room_join_request` 時提出加入申請；啟動終端或載入 MCP 本身不得
+  自動加入、讀取或記錄 Room。
+- GUI Owner 核准精確 session 時必須明確選擇 `room-first` 或 `seat-only`，並獨立決定是否透過已安裝的
+  structured hooks 同步該 session 的可見 user／assistant turns。Agent 不得自行選擇或變更模式。
+- `room-first` 必須由 server 以 exact session＋Room＋canonical workspace 強制：所有經 Orchestratory
+  `ask_*`／`compare_agents` 發起的跨 Agent 呼叫，呼叫前讀取有界最新帳本，並將 prompt、生命週期與
+  回覆 append 到同一帳本；多 Agent compare 依帳本順序執行，後一位能讀到前一位已完成回覆。
+- `seat-only` 保留精確 GUI inbox／值班席位，但 standalone `ask_*`／`compare_agents` 可以不入 Room。
+- 每次 room-first worker call 必須回報明確的 `readThroughSeq`；呼叫進行中新增的訊息不得宣稱已讀。
+- 保證只涵蓋經 Orchestratory MCP broker 的協作。Provider 原生、繞過 MCP 的 subagent／host 協作無法
+  被攔截，UI 與文件不得宣稱已完整入帳。
+
 ## 5. 限制與長時間模式
 
 限制分為：

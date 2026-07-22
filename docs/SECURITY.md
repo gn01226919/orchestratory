@@ -166,6 +166,13 @@ Private Vulnerability Reporting；公開後請使用 repository 的 **Security �
   bounded TTL 內失效。
   後續只有活躍的 join/wait call 可被 GUI 即時喚醒。完全 idle 的外部 host 不支援 server-initiated
   turn，API/UI 必須回報 `wakeable: false` 並讓工作維持 queued；不得用新 provider call 冒充它。
+- GUI 核准必須提交明確的 `room-first`／`seat-only` 與 boolean turn-sync 選項；缺欄、未知 mode 或
+  額外欄位一律拒絕。設定綁定精確 presence、Room 與 canonical workspace，同一已加入席位的重送
+  不得變更。`room-first` 下，broker 強制將 `ask_*`／`compare_agents` 經共同帳本執行，並記錄各次
+  snapshot `readThroughSeq`、mention、bounded lifecycle 與 reply；跨 workspace 呼叫 fail closed。
+  `seat-only` 不把 standalone worker call 冒充為已入帳。Structured hooks 只在 owner 開啟 turn sync
+  時擷取官方事件提供的可見 prompt／assistant message；不讀 reasoning、raw tools 或 shell transcript。
+  Provider 原生且繞過 Orchestratory MCP 的 subagent 不在可攔截邊界內，任何介面不得宣稱已入帳。
 - macOS Room PTY join 只允許固定 `codex`／`grok` executable，不接受額外 provider flags、不經
   shell，且必須由 owner 在已授權 workspace 的實體 TTY 主動啟動。Codex 強制 read-only sandbox、
   never approval 並停用 shell/hooks/plugins；Grok 強制 plan mode、空 tools 與停用 web/subagents/

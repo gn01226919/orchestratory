@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { CollaborationService } from "../src/core/collaboration-service.ts";
 
 const execFileAsync = promisify(execFile);
+const ROOM_FIRST_JOIN = { collaborationMode: "room-first" as const, syncTurns: true };
 
 async function repository(prefix = "orchestratory-collaboration-source-"): Promise<string> {
   const source = await mkdtemp(join(tmpdir(), prefix));
@@ -36,6 +37,7 @@ test("GUI, TUI and MCP service instances share one exact-seat ledger sequence", 
   });
   mcp.requestExternalJoin(external.id, "demo", "/tmp/project");
   const joined = gui.approveExternalJoin({
+    ...ROOM_FIRST_JOIN,
     presenceId: external.id,
     roomId: "demo",
     workspace: "/tmp/project",
@@ -99,6 +101,7 @@ test("managed and external seats cannot claim the same room display identity", a
   const external = service.registerExternal({ provider: "codex", workspace: "/tmp/project", hostPid: 7101 });
   service.requestExternalJoin(external.id, "demo", "/tmp/project");
   service.approveExternalJoin({
+    ...ROOM_FIRST_JOIN,
     presenceId: external.id,
     roomId: "demo",
     workspace: "/tmp/project",
@@ -122,6 +125,7 @@ test("managed and external seats cannot claim the same room display identity", a
   const another = service.registerExternal({ provider: "claude", workspace: "/tmp/project", hostPid: 7102 });
   service.requestExternalJoin(another.id, "demo", "/tmp/project");
   assert.throws(() => service.approveExternalJoin({
+    ...ROOM_FIRST_JOIN,
     presenceId: another.id,
     roomId: "demo",
     workspace: "/tmp/project",
@@ -171,8 +175,8 @@ test("service rejects cross-room removal and delivery impersonation", async (t) 
   );
   service.requestExternalJoin(first.id, "first", "/tmp/project");
   service.requestExternalJoin(second.id, "first", "/tmp/project");
-  service.approveExternalJoin({ presenceId: first.id, roomId: "first", workspace: "/tmp/project" });
-  service.approveExternalJoin({ presenceId: second.id, roomId: "first", workspace: "/tmp/project" });
+  service.approveExternalJoin({ ...ROOM_FIRST_JOIN, presenceId: first.id, roomId: "first", workspace: "/tmp/project" });
+  service.approveExternalJoin({ ...ROOM_FIRST_JOIN, presenceId: second.id, roomId: "first", workspace: "/tmp/project" });
   const posted = service.postToExternal({ roomId: "first", workspace: "/tmp/project", presenceId: first.id, text: "task" });
 
   assert.throws(
@@ -204,7 +208,7 @@ test("service grants and switches Writer only to eligible room identities", asyn
     candidate: { origin: "external", actorId: external.id },
   }), /WRITER_CANDIDATE_NOT_ELIGIBLE/u);
   service.requestExternalJoin(external.id, "demo", source);
-  const joined = service.approveExternalJoin({ presenceId: external.id, roomId: "demo", workspace: source, label: "修復" });
+  const joined = service.approveExternalJoin({ ...ROOM_FIRST_JOIN, presenceId: external.id, roomId: "demo", workspace: source, label: "修復" });
   const granted = await service.grantWriter({
     taskId: "task-1", roomId: "demo", workspace: source,
     candidate: { origin: "external", actorId: external.id },

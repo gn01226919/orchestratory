@@ -25,6 +25,8 @@ const state = {
   selectedAgent: "",
   selectedPresenceId: "",
   presenceLabels: {},
+  presenceJoinModes: {},
+  presenceTurnSync: {},
   presenceViewSignature: "",
   presences: [],
   knownExternalNames: new Set(),
@@ -338,6 +340,8 @@ function presenceViewSignature(sessions) {
     requested: Boolean(session.requested),
     listening: Boolean(session.listening),
     displayName: session.displayName || "",
+    collaborationMode: session.collaborationMode || "",
+    syncTurns: Boolean(session.syncTurns),
   })));
 }
 
@@ -382,9 +386,9 @@ function renderPresencePanel() {
       label.textContent = session.displayName || `${session.provider} 申請 ${index + 1}`;
       const detail = document.createElement("small");
       detail.textContent = session.joined
-        ? `${session.client || "MCP"} · ${session.listening ? "值班中 · GUI @ 會立即喚醒" : "線上但休班 · GUI 不會喚醒；訊息僅排入收件匣"}`
+        ? `${session.client || "MCP"} · ${session.collaborationMode === "room-first" ? "全程帳本協作" : "僅加入席位"} · ${session.syncTurns ? "終端對話同步" : "終端對話不入帳"} · ${session.listening ? "值班中" : "線上但休班"}`
         : selected
-          ? "已選取 · 核准後會等待第一則 GUI 任務"
+          ? "已選取 · 請確認協作與對話同步模式"
           : `${session.client || "MCP"} · 點擊選取`;
       identity.append(dot, label, detail);
       identity.addEventListener("click", () => {
@@ -392,6 +396,8 @@ function renderPresencePanel() {
         renderPresencePanel();
       });
       let nameInput;
+      let modeSelect;
+      let syncLabel;
       if (!session.joined) {
         nameInput = document.createElement("input");
         nameInput.type = "text";
@@ -411,6 +417,44 @@ function renderPresencePanel() {
             : "留空則由系統自動編號";
         });
         nameInput.addEventListener("click", (event) => event.stopPropagation());
+
+        modeSelect = document.createElement("select");
+        modeSelect.className = "presence-mode-select";
+        modeSelect.dataset.presenceId = session.id;
+        modeSelect.setAttribute("aria-label", `選擇 ${session.provider} 的協作模式`);
+        const roomFirst = document.createElement("option");
+        roomFirst.value = "room-first";
+        roomFirst.textContent = "全程帳本協作（MCP 路由，建議）";
+        const seatOnly = document.createElement("option");
+        seatOnly.value = "seat-only";
+        seatOnly.textContent = "僅加入值班席位";
+        modeSelect.append(roomFirst, seatOnly);
+        modeSelect.value = state.presenceJoinModes[session.id] || "room-first";
+        state.presenceJoinModes[session.id] = modeSelect.value;
+        modeSelect.addEventListener("change", () => {
+          state.presenceJoinModes[session.id] = modeSelect.value;
+          for (const peer of document.querySelectorAll(`.presence-mode-select[data-presence-id="${CSS.escape(session.id)}"]`)) {
+            if (peer !== modeSelect) peer.value = modeSelect.value;
+          }
+        });
+        modeSelect.addEventListener("click", (event) => event.stopPropagation());
+
+        syncLabel = document.createElement("label");
+        syncLabel.className = "presence-sync-label";
+        const syncInput = document.createElement("input");
+        syncInput.type = "checkbox";
+        syncInput.className = "presence-sync-input";
+        syncInput.dataset.presenceId = session.id;
+        syncInput.checked = state.presenceTurnSync[session.id] !== false;
+        state.presenceTurnSync[session.id] = syncInput.checked;
+        syncInput.addEventListener("change", () => {
+          state.presenceTurnSync[session.id] = syncInput.checked;
+          for (const peer of document.querySelectorAll(`.presence-sync-input[data-presence-id="${CSS.escape(session.id)}"]`)) {
+            if (peer !== syncInput) peer.checked = syncInput.checked;
+          }
+        });
+        syncLabel.addEventListener("click", (event) => event.stopPropagation());
+        syncLabel.append(syncInput, document.createTextNode(" 同步此終端的使用者／Assistant 可見對話"));
       }
       const action = document.createElement("button");
       action.type = "button";
@@ -423,6 +467,8 @@ function renderPresencePanel() {
       });
       row.append(identity, action);
       if (nameInput) row.append(nameInput);
+      if (modeSelect) row.append(modeSelect);
+      if (syncLabel) row.append(syncLabel);
       list.append(row);
     });
   }
@@ -521,11 +567,19 @@ async function changePresenceMembership(session, button) {
         ...(joining && state.presenceLabels[session.id]?.trim()
           ? { label: state.presenceLabels[session.id].trim() }
           : {}),
+        ...(joining
+          ? {
+              collaborationMode: state.presenceJoinModes[session.id] || "room-first",
+              syncTurns: state.presenceTurnSync[session.id] !== false,
+            }
+          : {}),
       }),
     });
     if (joining && value.session) {
       state.presences = [...(state.presences || []).filter((entry) => entry.id !== value.session.id), value.session];
       delete state.presenceLabels[session.id];
+      delete state.presenceJoinModes[session.id];
+      delete state.presenceTurnSync[session.id];
       state.selectedPresenceId = "";
     } else if (!joining) {
       state.presences = (state.presences || []).filter((entry) => entry.id !== session.id);

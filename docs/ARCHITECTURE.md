@@ -148,6 +148,16 @@ raw session id 或 transcript path。Codex／Claude 官方 structured hooks 只�
 `session_id`／`turn_id`／`prompt`／`last_assistant_message` 欄位；session id 只保存 SHA-256，重試以
 event key 去重。Legacy `room log-hook` 已改成 no-op，避免舊設定在沒有 GUI membership 時繼續錄音。
 
+核准時 Owner 必須選擇 session-bound collaboration mode。`room-first` 讓 broker 在 server 端把
+`ask_codex`／`ask_claude`／`ask_grok` 與 `compare_agents` 重新導向該精確 session 已綁定的 Room；
+每次先取得有界 ledger snapshot cursor，再 append mention、生命週期與 reply。`compare_agents` 改為
+依序呼叫，所以後一位 worker 的 snapshot 可包含前一位回覆。`seat-only` 只保留 GUI 精確 inbox 與
+席位，standalone worker call 維持原路由。可見 user／assistant turn 是否由 supported structured hooks
+同步是獨立的 owner 選項；隱藏 reasoning、raw tool log、token、cookie 與未加入 session 永不擷取。
+Mode、Room 與 canonical workspace 同列持久化並在每次 broker call 重驗；同一 membership 重送核准
+不能偷換模式，跨 workspace 指定會 fail closed。MCP 無法攔截 provider 自帶且未經 broker 的原生
+subagent，因此這個保證不延伸到繞過 Orchestratory 的協作路徑。
+
 Room 與專案的邊界使用 canonical workspace exact match，不依賴相似的顯示名稱。`/api/rooms` 同時回傳
 專案 basename、待核准數與可喚醒席位數；GUI 以「專案名 — 內部 Room ID」顯示，並將所有專案的申請數
 納入全域提示。切換 GUI 只改變目前查看的帳本，不會改寫 presence 原本的 workspace/room 綁定。

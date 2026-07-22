@@ -65,6 +65,7 @@
 | T31 | GUI 訊息投遞給錯誤 Codex/Claude 視窗，或離線後 fallback 到同名常駐 Agent | per-process presence UUID、room/workspace exact binding、owner join、target presence id、delivery lease token、完整 receipt state、無 fallback、離線 fail、idempotent reply | 終端未持續呼叫 `room_wait` 時只能排隊或明確失敗，無法保證原生 CLI 被動接收 unsolicited input |
 | T32 | Writer 交接後舊 Writer／子 Agent 繼續寫，或技術 executor 冒充顯示身份 | monotonic lease epoch、RAM capability、每次 Workspace MCP mutation 重驗、父 lease 撤銷連帶 child、same-provider-only child write、HMAC dual-identity audit | daemon crash 後 RAM capability 遺失，active lease 必須由 owner 重新建立或交接；本機 owner 完全失陷不在邊界內 |
 | T33 | 雙 Enter 送出與中文 IME、換行、長按或異步送出衝突，造成未預期訊息／provider call | 只接受 1.6 秒內、內容／selection 完全不變的第二次無修飾 Enter；IME `isComposing`/229 連 keyup 壓制、repeat 拒絕、modifier/blur/其他鍵清除、disabled submit 不重送；Shift/Option 換行、Command+Enter 為明確快速送出 | 瀏覽器／輸入法對 composition event 的上游行為可能改變；可視鍵盤與 assistive technology 仍可使用可見送出按鈕 |
+| T34 | Agent 假稱已讀 Room、在 room-first 下把協作送往旁路／其他專案，或未經 Owner 變更錄音模式 | GUI join API strict schema；mode／turn sync 綁定 exact presence＋Room＋canonical workspace；idempotent join 不改模式；room-first server-side 強制 `ask_*`／`compare_agents` ledger route、snapshot cursor、append-only lifecycle／reply；跨 workspace fail closed；seat-only 不冒充已入帳 | Provider 原生且繞過 Orchestratory MCP 的 subagent 無法攔截；structured hooks 仍受官方 CLI 事件欄位契約限制；`readThroughSeq` 不涵蓋 provider 執行期間的新訊息 |
 
 ## 5. STRIDE 摘要
 

@@ -37,7 +37,7 @@
           <span>＋ 新增 Agents</span><b id="agent-request-count" hidden>0</b>
         </button>
         <section id="agent-requests-panel" class="agent-requests-panel" hidden aria-label="Agent 加入申請">
-          <p><b>外接終端值班席位</b>：<code>room_join_request</code> 會保持主機回合等待核准，核准後會等待第一則 GUI 任務。只有顯示「值班中」時可被 GUI 即時喚醒；休班時不冒充回覆，只保留精確收件匣。</p>
+          <p><b>外接終端值班席位</b>：<code>room_join_request</code> 會保持主機回合等待核准。請選擇「全程帳本協作」或「僅加入值班席位」，並獨立決定是否同步此終端可見對話。「全程」涵蓋經 Orchestratory MCP 的跨 Agent 呼叫；原生旁路無法攔截。只有顯示「值班中」時可被 GUI 即時喚醒；休班時不冒充回覆，只保留精確收件匣。</p>
           <div id="sidebar-presence-list" class="office-presence-list"></div>
           <form id="managed-agent-create" class="managed-agent-create">
             <b>受控即時 Agent</b>
