@@ -97,8 +97,12 @@
   oversized 與 0644 負向測試均 fail closed，且不修改 target。
 - [ ] Release artifact checksum、signature/provenance 等待實際發布授權。
 - [ ] GitHub Private Vulnerability Reporting、secret scanning、dependency alerts 與 branch protection 需在建立 repository 後啟用。
-- [ ] 真實 provider/container smoke tests 等待額度、runtime 與 image 授權。
-- [ ] 完整 GUI 視覺點擊 QA 尚未涵蓋主儀表板所有流程；Room 辦公室切換、agent 預填、右側聊天與 Writer 面板已完成 Browser 驗收，HTTP/Web 安全整合測試已通過。
+- [ ] Codex／Claude 最小 live smoke 已完成；Grok、API 與 container smoke 仍等待額度、runtime／image 與逐次授權。
+- [ ] 2026-07-22 受控 Chrome 已驗證 Room 精確切換、external join/approve、exact-seat 與常駐
+  Codex／Claude 喚醒回覆、bounded wait timeout、雙 Enter、Writer grant/run/checkpoint 與零變更
+  apply-back；HTTP/Web 安全整合測試已通過。真實 macOS 注音 composition Enter 及後續雙 Enter
+  已由 owner 直接操作通過，截圖與 Room 帳本均確認只送出一則。雙埠 cookie、child executor 與
+  非零檔案 apply-back 仍待個別人工驗收。
 - [ ] 人類對公開 visibility、npm publish 與正式 release 仍為 NO-GO；本次只批准 Private source push。
 - [x] Owner 已選擇由 sanitized snapshot 建立全新 repository；既有含 live project/Room metadata 的
   內部 Git history 不得推送。
