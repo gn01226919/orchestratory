@@ -183,14 +183,16 @@ MCP 終端必須先呼叫 `room_join_request`，才會在 Room 辦公室右側�
 不會出現在 GUI。Owner 核准時選擇「全程帳本協作（room-first）」或「僅加入值班席位（seat-only）」，
 並獨立決定是否用已安裝的 structured hooks 同步該終端的可見 user／assistant turns；Agent 自己不能
 選擇或變更。之後才分配 `codex1`、`codex2` 等不回收身分、建立人物與辦公桌。
-`room_join_request` 會保持目前 host 回合等待核准，核准後立刻進入第一段
-bounded `room_wait`，因此 Owner 可直接從 GUI 交辦第一則工作；若要持續值班，終端在 timeout 或回覆後
-必須立即再次呼叫 `room_wait`。未加入完全不記錄；終端正常
+加入房間本身不等於待命授權。加入完成後，該精確終端必須呼叫 `room_wait`，GUI 才會顯示另一筆
+session-scoped 待命申請；Owner 核准後，同一個 open tool call 才開始 bounded 收件。每次 timeout、
+取消或回覆後，若要繼續待命，終端必須立即再次呼叫 `room_wait`。未加入完全不記錄；終端正常
 關閉會立即移除，crash 最遲在約十五秒 lease 到期後移除。不同 workspace 不能互相加入，GUI 也
 看不到 PID 或 raw provider session id。
 
-一般呼叫 `room_join_request` 只需傳 `room`；不要自行帶入 timeout。預設核准等待 30 秒、首輪值班等待
-20 秒，明確上限分別為 120 秒與 25 秒；超出時 fail closed，不會產生一筆看似成功的申請。
+一般呼叫 `room_join_request` 只需傳 `room`；它只等待加入核准，預設 30 秒、明確上限 120 秒。
+加入後立即呼叫 `room_wait`；第一次呼叫先等待 GUI 待命核准（預設 30 秒、上限 120 秒），核准後
+在同一個 tool call 進入 bounded 收件（預設與上限皆為四小時）。Owner 撤銷、終端關閉、client
+取消或 hard timeout 都會結束待命並把 GUI 改回不可喚醒，不會產生替身 Agent。
 
 自動記錄原生 host 的 user/assistant turn 另需 structured hooks。先用下列命令只看預覽；它不會
 修改任何設定：
@@ -226,14 +228,15 @@ compare 改為依帳本順序執行，讓後一位 Agent 讀到前一位的已�
 seat-only＋turn sync on：前者用兩個 zero-quota fake worker 證明 compare 依序讀寫帳本，後者完成
 相同 compare 但 ledger count 不變；切換另一個已授權專案 Room 時，兩個 session-bound 席位都不會出現。
 終端必須先呼叫 `room_join_request`；只有同專案、live 且有 MCP 的精確 session 才會進入 GUI
-「新增 Agents」待審核。Owner 加入後才建立 `codex1` 等臨時工位並開始記錄；終端關閉會移除
+「新增 Agents」待審核。Owner 加入後才建立 `codex1` 等臨時工位並開始記錄；加入的終端再呼叫
+`room_wait` 時，GUI 會提出獨立的 session-scoped 待命申請。終端關閉會移除
 臨時人物，Codex／Claude／Grok／You 四個常駐工位不受影響。加入後的 Room 作者由 presence
 membership 固定，tool call 無法冒名。Owner 從 GUI 對精確席位交辦後，訊息會進入 owner-only
 收件匣並依序呈現 `queued → delivered → read → working → replied`；終端以 bounded
 `room_wait` 長輪詢收件，再用私有 lease token 呼叫 `room_ack`、`room_reply` 或 `room_fail`。
 離線、取消、重送與 idempotent reply 都有明確狀態，不會 fallback 到同 provider 的常駐模型。
-外接終端沒有執行 `room_join_request` 的核准等待或 `room_wait` 時，GUI 會誠實標示「線上但休班」，
-`@` 訊息只會排入精確收件匣，不宣稱已即時喚醒。MCP 協定不能向已經完全 idle 的既有 CLI host
+待命未經 GUI 核准時，新的精確席位交辦會 fail closed；核准後但暫時沒有 active `room_wait` 時，
+既有工作可留在精確收件匣，GUI 會誠實標示不可即時喚醒。MCP 協定不能向已經完全 idle 的既有 CLI host
 注入一個新 turn；需要不依賴外部 host 值班的 GUI 即時喚醒時，請建立「受控即時 Agent」，由
 Orchestratory 明確發起 bounded provider call，且不冒充外接終端。
 

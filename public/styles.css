@@ -865,6 +865,12 @@ button.cancel-pending:hover { border-color: var(--warn); }
 .office-presence-row span > small { color: #776f7a; font-size: 7px; line-height: 1.25; }
 .office-presence-row button { flex: none; padding: 4px 6px; font-size: 7.5px; }
 .office-presence-row button.office-presence-identity { padding: 2px; }
+.office-presence-row .presence-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
 .office-presence-row .presence-name-input {
   grid-column: 1 / -1;
   width: 100%;

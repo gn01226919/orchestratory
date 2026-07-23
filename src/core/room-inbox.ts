@@ -71,7 +71,7 @@ const AUTHOR_PATTERN = /^(?:[a-z][a-z0-9-]{0,31}|(?:codex|claude|grok)（[\p{L}\
 const MAX_PENDING_PER_SEAT = 32;
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_DELIVERY_LEASE_MS = 60_000;
-const MAX_WAIT_MS = 25_000;
+const MAX_WAIT_MS = 4 * 60 * 60 * 1_000;
 const WAIT_POLL_MS = 150;
 
 function rowHash(row: Omit<DeliveryRow, "row_hash">): string {
@@ -377,7 +377,14 @@ export class RoomInboxStore {
     return Boolean(row);
   }
 
-  async wait(input: { presenceId: string; roomId: string; timeoutMs?: number; ledger: RoomLedger; signal?: AbortSignal }): Promise<ClaimedRoomDelivery | undefined> {
+  async wait(input: {
+    presenceId: string;
+    roomId: string;
+    timeoutMs?: number;
+    ledger: RoomLedger;
+    signal?: AbortSignal;
+    canContinue?: () => boolean;
+  }): Promise<ClaimedRoomDelivery | undefined> {
     const presenceId = validId(input.presenceId, "INVALID_PRESENCE_ID");
     const roomId = validRoom(input.roomId);
     const timeoutMs = input.timeoutMs ?? MAX_WAIT_MS;
@@ -387,6 +394,7 @@ export class RoomInboxStore {
     this.#beginWait(presenceId, roomId, waiterToken, deadline + 2_000);
     try {
       while (true) {
+        if (input.canContinue && !input.canContinue()) throw new Error("ROOM_STANDBY_REVOKED");
         const claimed = this.#claim(presenceId, roomId);
         if (claimed) {
           const message = input.ledger.getRange(roomId, claimed.ledgerSeq, claimed.ledgerSeq)[0];
@@ -399,6 +407,7 @@ export class RoomInboxStore {
         const remaining = deadline - this.#now();
         if (remaining <= 0) return undefined;
         await wait(Math.min(WAIT_POLL_MS, remaining), input.signal);
+        if (input.canContinue && !input.canContinue()) throw new Error("ROOM_STANDBY_REVOKED");
         this.#refreshWait(presenceId, waiterToken, deadline + 2_000);
       }
     } finally {

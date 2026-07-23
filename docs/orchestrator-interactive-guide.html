@@ -926,7 +926,7 @@ orchestrator daemon install&lt;/code&gt;&lt;/pre&gt;
         &lt;pre&gt;&lt;code id=&quot;mcp-code&quot;&gt;claude mcp add --scope user orchestrator -- orchestrator mcp --actor claude
 claude mcp list&lt;/code&gt;&lt;/pre&gt;
         &lt;div class=&quot;viz-row&quot;&gt;&lt;button class=&quot;btn&quot; type=&quot;button&quot; data-copy=&quot;mcp-code&quot;&gt;複製 MCP 指令&lt;/button&gt;&lt;span class=&quot;copy-note text-small&quot; aria-live=&quot;polite&quot;&gt;&lt;/span&gt;&lt;/div&gt;
-        &lt;p class=&quot;text-muted&quot; id=&quot;mcp-note&quot;&gt;重新開啟 Claude Code session 後，它會看到 Room 與多模型工具；room_join_request 會等待 GUI 核准並開始第一段值班，之後精確核准的外接席位可使用 room_wait、room_ack、room_reply、room_fail。&lt;/p&gt;
+        &lt;p class=&quot;text-muted&quot; id=&quot;mcp-note&quot;&gt;重新開啟 Claude Code session 後，它會看到 Room 與多模型工具；room_join_request 只等待 GUI 核准加入。加入後呼叫 room_wait，GUI 會再顯示該 session 的待命申請；Owner 核准後才開始精確收件，並搭配 room_ack、room_reply、room_fail。&lt;/p&gt;
       &lt;/div&gt;
       &lt;div class=&quot;card wide&quot;&gt;
         &lt;h3&gt;「跑過的專案」代表什麼？&lt;/h3&gt;
@@ -1009,7 +1009,7 @@ claude mcp list&lt;/code&gt;&lt;/pre&gt;
           &lt;textarea class=&quot;form-control&quot; id=&quot;room-natural-prompt&quot; rows=&quot;4&quot;&gt;請使用 Orchestratory MCP，在目前專案建立或重用一個 Room。把我的需求寫入房間，然後告訴我房間名稱與最新訊息編號。&lt;/textarea&gt;
         &lt;/label&gt;
         &lt;div class=&quot;viz-row&quot;&gt;&lt;button class=&quot;btn&quot; type=&quot;button&quot; data-copy=&quot;room-natural-prompt&quot;&gt;複製自然語言指令&lt;/button&gt;&lt;span class=&quot;copy-note text-small&quot; aria-live=&quot;polite&quot;&gt;&lt;/span&gt;&lt;/div&gt;
-        &lt;p class=&quot;text-muted&quot;&gt;Agent 會自行呼叫 &lt;code&gt;room_init&lt;/code&gt; 與 &lt;code&gt;room_post&lt;/code&gt;。若要求喚醒常駐模型，會使用 &lt;code&gt;room_mention&lt;/code&gt;；每喚醒一個模型會消耗一次對應的訂閱呼叫。外接終端是精確席位：&lt;code&gt;room_join_request&lt;/code&gt; 在 GUI 核准後直接開始第一段值班，後續以 &lt;code&gt;room_wait&lt;/code&gt; 維持；休班時 GUI 交辦只會安全排隊。&lt;/p&gt;
+        &lt;p class=&quot;text-muted&quot;&gt;Agent 會自行呼叫 &lt;code&gt;room_init&lt;/code&gt; 與 &lt;code&gt;room_post&lt;/code&gt;。若要求喚醒常駐模型，會使用 &lt;code&gt;room_mention&lt;/code&gt;；每喚醒一個模型會消耗一次對應的訂閱呼叫。外接終端是精確席位：&lt;code&gt;room_join_request&lt;/code&gt; 只申請加入；加入後呼叫 &lt;code&gt;room_wait&lt;/code&gt;，由 GUI 另行核准此 session 待命。只有 active wait 才可即時喚醒。&lt;/p&gt;
       &lt;/div&gt;
       &lt;div class=&quot;card wide&quot;&gt;
         &lt;div class=&quot;ledger-head&quot;&gt;&lt;span class=&quot;viz-badge&quot;&gt;Room: my-app&lt;/span&gt;&lt;span class=&quot;text-muted&quot;&gt;append-only · 已遮蔽敏感內容&lt;/span&gt;&lt;/div&gt;
@@ -1036,7 +1036,7 @@ claude mcp list&lt;/code&gt;&lt;/pre&gt;
         &lt;p class=&quot;text-muted&quot; id=&quot;summary-demo-result&quot; hidden&gt;【摘要】#101 要求比較方案；#102 建議方案 A 並補 token rotation 測試；#103 補充 session revocation。&lt;/p&gt;
       &lt;/div&gt;
       &lt;div class=&quot;card&quot;&gt;
-        &lt;h3&gt;Room 即時協作&lt;/h3&gt;&lt;p&gt;顯示新訊息、搜尋內容與直接發言。&lt;code&gt;@codex&lt;/code&gt;、&lt;code&gt;@claude&lt;/code&gt;、&lt;code&gt;@grok&lt;/code&gt; 可喚醒常駐模型；受控即時 Agent 也可由 GUI 立即喚醒。外接 MCP 終端不接受未經請求的鍵盤注入：只有該精確席位仍在核准後等待或正在 &lt;code&gt;room_wait&lt;/code&gt; 值班時才會即時取得工作，否則工作安全留在 &lt;code&gt;queued&lt;/code&gt;。&lt;/p&gt;
+        &lt;h3&gt;Room 即時協作&lt;/h3&gt;&lt;p&gt;顯示新訊息、搜尋內容與直接發言。&lt;code&gt;@codex&lt;/code&gt;、&lt;code&gt;@claude&lt;/code&gt;、&lt;code&gt;@grok&lt;/code&gt; 可喚醒常駐模型；受控即時 Agent 也可由 GUI 立即喚醒。外接 MCP 終端不接受未經請求的鍵盤注入：加入後須呼叫 &lt;code&gt;room_wait&lt;/code&gt; 並由 GUI 核准待命；只有 active wait 才會即時取得工作，否則 GUI 誠實顯示不可喚醒。&lt;/p&gt;
       &lt;/div&gt;
       &lt;div class=&quot;card&quot;&gt;
         &lt;h3&gt;歷史紀錄&lt;/h3&gt;&lt;p&gt;從最新訊息開始，每次向前載入最多 100 則。純翻閱不會呼叫模型或消耗額度。&lt;/p&gt;
@@ -1059,7 +1059,7 @@ orchestrator room hooks --provider codex --install&lt;/code&gt;&lt;/pre&gt;
         &lt;div class=&quot;delivery-flow&quot; id=&quot;delivery-flow&quot; aria-label=&quot;外接終端收件匣七種狀態&quot;&gt;
           &lt;div class=&quot;delivery-node is-current&quot; data-delivery-state=&quot;queued&quot;&gt;queued&lt;br&gt;已排隊&lt;/div&gt;&lt;div class=&quot;delivery-node&quot; data-delivery-state=&quot;delivered&quot;&gt;delivered&lt;br&gt;已送達&lt;/div&gt;&lt;div class=&quot;delivery-node&quot; data-delivery-state=&quot;read&quot;&gt;read&lt;br&gt;已讀取&lt;/div&gt;&lt;div class=&quot;delivery-node&quot; data-delivery-state=&quot;working&quot;&gt;working&lt;br&gt;處理中&lt;/div&gt;&lt;div class=&quot;delivery-node&quot; data-delivery-state=&quot;replied&quot;&gt;replied&lt;br&gt;已回覆&lt;/div&gt;&lt;div class=&quot;delivery-node&quot; data-delivery-state=&quot;failed&quot;&gt;failed&lt;br&gt;失敗&lt;/div&gt;&lt;div class=&quot;delivery-node&quot; data-delivery-state=&quot;cancelled&quot;&gt;cancelled&lt;br&gt;已取消&lt;/div&gt;
         &lt;/div&gt;
-        &lt;div aria-live=&quot;polite&quot;&gt;&lt;strong id=&quot;delivery-demo-title&quot;&gt;queued · 已排隊&lt;/strong&gt;&lt;p id=&quot;delivery-demo-detail&quot;&gt;訊息已在帳本，工作只屬於被指定席位；若沒有 active room_wait 就留在隊列，不會改派常駐模型。&lt;/p&gt;&lt;/div&gt;
+        &lt;div aria-live=&quot;polite&quot;&gt;&lt;strong id=&quot;delivery-demo-title&quot;&gt;queued · 已排隊&lt;/strong&gt;&lt;p id=&quot;delivery-demo-detail&quot;&gt;待命已核准後，工作只屬於被指定席位；若 active room_wait 暫時結束就留在隊列，不會改派常駐模型。待命未核准時，新交辦會直接拒絕。&lt;/p&gt;&lt;/div&gt;
         &lt;div class=&quot;viz-row&quot;&gt;&lt;button class=&quot;btn btn-primary&quot; id=&quot;delivery-next&quot; type=&quot;button&quot;&gt;下一狀態&lt;/button&gt;&lt;button class=&quot;btn&quot; id=&quot;delivery-fail&quot; type=&quot;button&quot;&gt;模擬失敗&lt;/button&gt;&lt;button class=&quot;btn&quot; id=&quot;delivery-cancel&quot; type=&quot;button&quot;&gt;取消&lt;/button&gt;&lt;button class=&quot;btn btn-ghost&quot; id=&quot;delivery-retry&quot; type=&quot;button&quot; disabled&gt;重送&lt;/button&gt;&lt;/div&gt;
         &lt;p class=&quot;text-muted&quot;&gt;席位離線、租約逾時且嘗試耗盡，或主動 &lt;code&gt;room_fail&lt;/code&gt; 都會 fail closed；不會 fallback 到同名常駐模型。只有 &lt;code&gt;failed&lt;/code&gt;／&lt;code&gt;cancelled&lt;/code&gt; 可重送，重用原帳本訊息與精確目標，不重複對話。相同輸入的 &lt;code&gt;room_reply&lt;/code&gt; 重試具冪等性；私密 lease token 不會寫入帳本或顯示在 GUI。&lt;/p&gt;
       &lt;/div&gt;
@@ -1098,8 +1098,8 @@ orchestrator room hooks --provider codex --install&lt;/code&gt;&lt;/pre&gt;
     &lt;/div&gt;
     &lt;div class=&quot;content-grid&quot;&gt;
       &lt;div class=&quot;card&quot;&gt;&lt;h3&gt;三層架構，一眼看懂&lt;/h3&gt;&lt;ol&gt;&lt;li&gt;&lt;strong&gt;房間層&lt;/strong&gt;：每個專案建議使用一個主要 Room；切換房間就切換完整協作上下文。&lt;/li&gt;&lt;li&gt;&lt;strong&gt;帳本層&lt;/strong&gt;：所有核准成員共讀編號訊息，直播與歷史使用同一份 Room Ledger。&lt;/li&gt;&lt;li&gt;&lt;strong&gt;辦公室層&lt;/strong&gt;：把成員、DND、工作內容、任務與通知投影成可視化控制面；畫面本身不會增加權限。&lt;/li&gt;&lt;/ol&gt;&lt;/div&gt;
-      &lt;div class=&quot;card&quot;&gt;&lt;h3&gt;新增 Agents 有兩條路&lt;/h3&gt;&lt;p&gt;&lt;strong&gt;外接 MCP 終端&lt;/strong&gt;：終端先用自然語言要求加入 → 呼叫 &lt;code&gt;room_join_request&lt;/code&gt; → GUI「新增 Agents」核准並命名 → 立即開始第一段值班並出現桌位；後續需用 &lt;code&gt;room_wait&lt;/code&gt; 維持，終端離線後人物移除。&lt;/p&gt;&lt;p&gt;&lt;strong&gt;受控即時 Agent&lt;/strong&gt;：在 GUI 選模型來源與任務名稱後建立；立即有獨立桌位，可由 GUI 重複喚醒，同一席位同時只處理一個回覆。&lt;/p&gt;&lt;/div&gt;
-      &lt;div class=&quot;card wide&quot;&gt;&lt;h3&gt;席位與權限比較&lt;/h3&gt;&lt;table class=&quot;trouble-table&quot;&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;席位&lt;/th&gt;&lt;th&gt;GUI @ 行為&lt;/th&gt;&lt;th&gt;能力與限制&lt;/th&gt;&lt;/tr&gt;&lt;/thead&gt;&lt;tbody&gt;&lt;tr&gt;&lt;td&gt;You&lt;/td&gt;&lt;td&gt;代表本機使用者，不喚醒模型&lt;/td&gt;&lt;td&gt;每個房間唯一，不會因多開終端而複製&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;常駐 Codex／Claude／Grok&lt;/td&gt;&lt;td&gt;立即建立受限制的 provider 回合&lt;/td&gt;&lt;td&gt;依角色與 quota；寫檔仍要 Writer Lease 核准&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;外接 MCP 終端&lt;/td&gt;&lt;td&gt;建立精確收件匣工作；值班中立即取得，未值班則 queued&lt;/td&gt;&lt;td&gt;核准後會開始第一段值班；完全 idle 的既有 MCP host 不能由 server 發起新 turn。加入 Room 不升權也不降權，工作不會改派同名常駐模型&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;受控即時 Agent&lt;/td&gt;&lt;td&gt;GUI 可立即喚醒精確席位&lt;/td&gt;&lt;td&gt;獨立名稱、可取消、共用 quota；不冒充外接終端，可被 owner 選為 Writer 或子執行者，實際寫入仍受 lease 與 worktree 限制&lt;/td&gt;&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;/div&gt;
+      &lt;div class=&quot;card&quot;&gt;&lt;h3&gt;新增 Agents 有兩條路&lt;/h3&gt;&lt;p&gt;&lt;strong&gt;外接 MCP 終端&lt;/strong&gt;：終端先用自然語言要求加入 → 呼叫 &lt;code&gt;room_join_request&lt;/code&gt; → GUI「新增 Agents」核准並命名 → 終端呼叫 &lt;code&gt;room_wait&lt;/code&gt; → GUI 核准此 session 待命；終端離線後人物與待命授權自動移除。&lt;/p&gt;&lt;p&gt;&lt;strong&gt;受控即時 Agent&lt;/strong&gt;：在 GUI 選模型來源與任務名稱後建立；立即有獨立桌位，可由 GUI 重複喚醒，同一席位同時只處理一個回覆。&lt;/p&gt;&lt;/div&gt;
+      &lt;div class=&quot;card wide&quot;&gt;&lt;h3&gt;席位與權限比較&lt;/h3&gt;&lt;table class=&quot;trouble-table&quot;&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;席位&lt;/th&gt;&lt;th&gt;GUI @ 行為&lt;/th&gt;&lt;th&gt;能力與限制&lt;/th&gt;&lt;/tr&gt;&lt;/thead&gt;&lt;tbody&gt;&lt;tr&gt;&lt;td&gt;You&lt;/td&gt;&lt;td&gt;代表本機使用者，不喚醒模型&lt;/td&gt;&lt;td&gt;每個房間唯一，不會因多開終端而複製&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;常駐 Codex／Claude／Grok&lt;/td&gt;&lt;td&gt;立即建立受限制的 provider 回合&lt;/td&gt;&lt;td&gt;依角色與 quota；寫檔仍要 Writer Lease 核准&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;外接 MCP 終端&lt;/td&gt;&lt;td&gt;待命已核准且 active room_wait 時精確喚醒&lt;/td&gt;&lt;td&gt;加入與待命分開核准；完全 idle 的既有 MCP host 不能由 server 發起新 turn。加入 Room 不升權也不降權，工作不會改派同名常駐模型&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;受控即時 Agent&lt;/td&gt;&lt;td&gt;GUI 可立即喚醒精確席位&lt;/td&gt;&lt;td&gt;獨立名稱、可取消、共用 quota；不冒充外接終端，可被 owner 選為 Writer 或子執行者，實際寫入仍受 lease 與 worktree 限制&lt;/td&gt;&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;/div&gt;
       &lt;div class=&quot;card&quot;&gt;&lt;h3&gt;人物狀態與工作內容&lt;/h3&gt;&lt;p&gt;DND／⛔ 表示正在工作；卡片顯示目前角色與任務摘要。完成、失敗、待命、通知與未讀數量都來自既有事件或帳本，不是額外批准。點人物只會選取與預填 @，仍要按「送出」。&lt;/p&gt;&lt;/div&gt;
       &lt;div class=&quot;card&quot;&gt;&lt;h3&gt;桌位、休閒與夥伴&lt;/h3&gt;&lt;p&gt;加入成員時辦公室可擴編；桌位可拖曳重新排列。閒置人物會伸展、看文件、喝水或休息；Miso 貓與 Byte 恐龍會在地板巡邏並有腳步／表情動畫。這些都只在瀏覽器 DOM／CSS 執行，不讀帳本、不呼叫 provider。&lt;/p&gt;&lt;/div&gt;
       &lt;div class=&quot;card wide&quot;&gt;&lt;h3&gt;任務、通知與「交給 Writer」&lt;/h3&gt;&lt;p&gt;右側任務與通知可查看等待、執行、完成或失敗狀態。「交給 Writer」只建立待核准提案，workspace 由目前房間反查；它不會立即寫檔。owner 可在 GUI 選常駐、管理型或外接席位擔任 Writer，也可指定子執行者；按 &lt;code&gt;RUN&lt;/code&gt; 且通過安全檢查後，才授予單一 Writer Lease 並進入隔離 worktree。&lt;/p&gt;&lt;/div&gt;
@@ -1161,7 +1161,7 @@ orchestrator room hooks --provider codex --install&lt;/code&gt;&lt;/pre&gt;
           &lt;tr&gt;&lt;td&gt;Writer 顯示完成但主專案沒變&lt;/td&gt;&lt;td&gt;完成只代表 retained task worktree 已待審，還沒有 apply-back&lt;/td&gt;&lt;td&gt;檢查自然語言風險與逐檔清單；確認後完整輸入 &lt;code&gt;APPLY WRITER &amp;lt;taskId&amp;gt; TO PROJECT&lt;/code&gt;&lt;/td&gt;&lt;/tr&gt;
           &lt;tr&gt;&lt;td&gt;同一 taskId 無法再授予 Writer&lt;/td&gt;&lt;td&gt;該任務已成功 applied，是不可復活的終態&lt;/td&gt;&lt;td&gt;為新工作建立新的 taskId；不要嘗試重用舊 capability 或 epoch&lt;/td&gt;&lt;/tr&gt;
           &lt;tr&gt;&lt;td&gt;只看到 Room 歷史&lt;/td&gt;&lt;td&gt;目前在歷史模式&lt;/td&gt;&lt;td&gt;點「Room 即時協作」回到直播與發言模式&lt;/td&gt;&lt;/tr&gt;
-          &lt;tr&gt;&lt;td&gt;@外接終端沒有立即回覆&lt;/td&gt;&lt;td&gt;工作可能仍是 queued、核准後第一段等待已結束、席位未呼叫 &lt;code&gt;room_wait&lt;/code&gt;、已離線，或處理失敗&lt;/td&gt;&lt;td&gt;看 GUI 的「值班中／線上但休班」精確狀態；讓該席位值班，或改用受控即時 Agent。系統不會冒充或改派同名常駐模型&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;@外接終端沒有立即回覆&lt;/td&gt;&lt;td&gt;待命可能尚未由 GUI 核准、席位沒有 active &lt;code&gt;room_wait&lt;/code&gt;、已離線，或處理失敗&lt;/td&gt;&lt;td&gt;看 GUI 的「等待待命核准／待命已核准但未掛起／room-wait 待命中」精確狀態；讓該席位重新呼叫 room_wait，或改用受控即時 Agent。系統不會冒充或改派同名常駐模型&lt;/td&gt;&lt;/tr&gt;
           &lt;tr&gt;&lt;td&gt;需要立刻停止&lt;/td&gt;&lt;td&gt;可能有錯誤調度或異常消耗&lt;/td&gt;&lt;td&gt;在 Room 控制室按「緊急停止」&lt;/td&gt;&lt;/tr&gt;
         &lt;/tbody&gt;&lt;/table&gt;
       &lt;/div&gt;
@@ -1306,7 +1306,7 @@ orchestrator room hooks --provider codex --install&lt;/code&gt;&lt;/pre&gt;
       const deliveryRetry = root.querySelector(&quot;#delivery-retry&quot;);
       const deliveryOrder = [&quot;queued&quot;, &quot;delivered&quot;, &quot;read&quot;, &quot;working&quot;, &quot;replied&quot;];
       const deliveryCopy = {
-        queued: [&quot;queued · 已排隊&quot;, &quot;訊息已在帳本，工作只屬於被指定席位；若沒有 active room_wait 就留在隊列，不會改派常駐模型。&quot;],
+        queued: [&quot;queued · 已排隊&quot;, &quot;待命已核准後，工作只屬於被指定席位；若 active room_wait 暫時結束就留在隊列，不會改派常駐模型。&quot;],
         delivered: [&quot;delivered · 已送達終端&quot;, &quot;精確席位的 room_wait 已領取工作並取得私密 lease token；GUI 只顯示狀態，不顯示 token。&quot;],
         read: [&quot;read · 已讀取&quot;, &quot;終端已呼叫 room_ack(read)，表示內容已交給正確席位。&quot;],
         working: [&quot;working · 處理中&quot;, &quot;終端已呼叫 room_ack(working)。此時 owner 取消會成為合作式 cancel request，不會把工作偷交給別人。&quot;],

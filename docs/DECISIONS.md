@@ -193,8 +193,10 @@ executor，而不是 UI 名稱或 provider 類型，才能兼顧彈性、可追�
 
 ## ADR-024：外接 MCP 席位使用精確 pull inbox，不做 provider fallback
 
+**狀態：** pull inbox 與 no-fallback 決策仍有效；「加入後直接開始首輪收件」已由 ADR-027 取代。
+
 **決策：** Owner 對外接席位的 GUI 訊息同時進 Room Ledger 與該 presence 的 owner-only inbox。
-`room_join_request` 保持原 host tool call 等待 GUI 核准，核准後直接進入第一段 bounded 收件；
+外接終端以 bounded `room_wait` 收件；
 後續終端以 bounded `room_wait` 收件，依序 ack read／working，最後 reply 或 fail；每筆 delivery 使用
 私有短 lease、bounded retry、cancel/offline terminal state 與 idempotent reply receipt。未值班時
 GUI 與 API 誠實顯示 `wakeable: false`，禁止改送常駐模型或由 GUI 冒充原終端。需要不依賴外部
@@ -243,3 +245,21 @@ inbox／席位，standalone worker call 不宣稱入帳。
 **限制：** MCP 只能強制它所代理的呼叫；provider 原生且繞過 Orchestratory 的 subagent／host
 協作無法攔截，UI 與文件必須誠實標示此邊界。Snapshot cursor 只代表該次呼叫開始前已讀至哪一則，
 不保證在 provider 執行期間持續看到新訊息。
+
+## ADR-027：Room membership 與 session-scoped `room_wait` 待命分離
+
+**決策：** `room_join_request` 只提出並等待 Room membership 核准，核准後返回。已加入的精確
+MCP session 呼叫 `room_wait` 時，控制面建立另一筆 GUI 待命申請；Owner 核准後，同一個 open
+tool call 才能成為 `wakeable: true`。核准綁定 exact presence＋Room＋canonical workspace，Owner
+可撤銷；client cancellation、stdio EOF、presence lease 過期或四小時 hard timeout 都會終止 active
+wait。待命未核准時拒絕新的精確席位交辦。終端必須在每次 timeout、回覆或失敗後再次呼叫
+`room_wait` 才持續待命，系統不建立 managed proxy 或 provider fallback。
+
+**理由：** 「已加入房間」、「Owner 允許 GUI 對該 session 派工」與「原終端目前正阻塞等待工作」
+是三個不同事實。分離狀態後，終端關閉仍能由既有 EOF／lease 機制自動移除，而 GUI 也不會把只是
+在線或只是加入的 Agent 誤報成可喚醒。一次 session-scoped 核准保留低摩擦，active wait 則提供
+可驗證的精確喚醒路徑。
+
+**風險與回滾：** 部分 MCP client 可能自行施加低於四小時的 request timeout；此時 active wait
+結束後 GUI 必須立即顯示不可喚醒，不能延長或冒充。若需回滾，只能縮短 bounded wait 或恢復每次
+`room_wait` 的核准；不得回到「加入即待命」或用同 provider 新回合代收。

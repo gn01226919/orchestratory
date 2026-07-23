@@ -106,7 +106,8 @@ export class CollaborationService {
       sessions: sessions
         .filter((session) => session.joined || session.requested)
         .map((session) => {
-          const listening = session.joined && this.inbox.isListening(session.id, roomId);
+          const listening = session.joined && session.standbyApproved &&
+            this.inbox.isListening(session.id, roomId);
           return {
             ...session,
             kind: "external-pull" as const,
@@ -138,6 +139,46 @@ export class CollaborationService {
     const current = this.presence.get(presenceId);
     if (!current || current.workspace !== workspace) throw new Error("PRESENCE_NOT_FOUND");
     return this.presence.cancelJoinRequest(presenceId, roomId);
+  }
+
+  requestExternalStandby(presenceId: string, roomId: string, workspace: string): PresenceInfo {
+    this.#assertRoomWorkspace(roomId, workspace);
+    const current = this.presence.get(presenceId);
+    if (!current || current.workspace !== workspace) throw new Error("PRESENCE_NOT_FOUND");
+    const requested = this.presence.requestStandby(presenceId, roomId);
+    if (!current.standbyRequested && !current.standbyApproved && requested.standbyRequested) {
+      this.ledger.appendSystem(roomId, `${requested.displayName ?? requested.provider} 申請 room-wait 待命（等待 GUI 核准）`);
+    }
+    return requested;
+  }
+
+  cancelExternalStandbyRequest(presenceId: string, roomId: string, workspace: string): PresenceInfo {
+    this.#assertRoomWorkspace(roomId, workspace);
+    const current = this.presence.get(presenceId);
+    if (!current || current.workspace !== workspace) throw new Error("PRESENCE_NOT_FOUND");
+    return this.presence.cancelStandbyRequest(presenceId, roomId);
+  }
+
+  approveExternalStandby(presenceId: string, roomId: string, workspace: string): PresenceInfo {
+    this.#assertRoomWorkspace(roomId, workspace);
+    const current = this.presence.get(presenceId);
+    if (!current || current.workspace !== workspace) throw new Error("PRESENCE_NOT_FOUND");
+    const approved = this.presence.approveStandby(presenceId, roomId);
+    if (!current.standbyApproved) {
+      this.ledger.appendSystem(roomId, `${approved.displayName ?? approved.provider} 的 room-wait 待命申請已核准`);
+    }
+    return approved;
+  }
+
+  revokeExternalStandby(presenceId: string, roomId: string, workspace: string): PresenceInfo {
+    this.#assertRoomWorkspace(roomId, workspace);
+    const current = this.presence.get(presenceId);
+    if (!current || current.workspace !== workspace) throw new Error("PRESENCE_NOT_FOUND");
+    const revoked = this.presence.revokeStandby(presenceId, roomId);
+    if (current.standbyApproved || current.standbyRequested) {
+      this.ledger.appendSystem(roomId, `${revoked.displayName ?? revoked.provider} 的 room-wait 待命已撤銷`);
+    }
+    return revoked;
   }
 
   approveExternalJoin(input: {
@@ -192,6 +233,7 @@ export class CollaborationService {
     if (!target || target.workspace !== input.workspace || !target.joined || target.roomId !== input.roomId || !target.displayName) {
       throw new Error("TARGET_AGENT_OFFLINE");
     }
+    if (!target.standbyApproved) throw new Error("TARGET_AGENT_STANDBY_NOT_APPROVED");
     const message = this.ledger.append(input.roomId, "you", `@${target.displayName} ${input.text}`);
     try {
       const delivery = this.inbox.enqueue({
@@ -237,7 +279,16 @@ export class CollaborationService {
 
   async waitExternal(input: { presenceId: string; roomId: string; timeoutMs?: number; signal?: AbortSignal }): Promise<ClaimedRoomDelivery | undefined> {
     this.presence.actorFor(input.presenceId, input.roomId);
-    return await this.inbox.wait({ ...input, ledger: this.ledger });
+    const approved = () => {
+      const current = this.presence.get(input.presenceId);
+      return Boolean(
+        current?.joined &&
+        current.roomId === input.roomId &&
+        current.standbyApproved,
+      );
+    };
+    if (!approved()) throw new Error("PRESENCE_STANDBY_NOT_APPROVED");
+    return await this.inbox.wait({ ...input, ledger: this.ledger, canContinue: approved });
   }
 
   ackExternal(input: { presenceId: string; deliveryId: string; leaseToken: string; phase: "read" | "working" }): RoomDelivery {

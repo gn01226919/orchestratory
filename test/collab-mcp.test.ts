@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { CollabToolBroker, handleCollabMcpMessage } from "../src/mcp/collab-server.ts";
 import { RoomLedger } from "../src/core/room-ledger.ts";
 import { RoomInboxStore } from "../src/core/room-inbox.ts";
+import { CollaborationService } from "../src/core/collaboration-service.ts";
 import { WorkflowRequestStore } from "../src/core/workflow-request-store.ts";
 import { ProviderRegistry } from "../src/providers/registry.ts";
 import { WorkspacePolicy } from "../src/security/workspace-policy.ts";
@@ -155,8 +156,8 @@ test("room_join_request only proposes this terminal for the matching room", asyn
   assert.equal(broker.tools().some((tool) => tool.name === "room_join_request"), true);
   const joinTool = broker.tools().find((tool) => tool.name === "room_join_request");
   assert.match(String(joinTool?.description ?? ""), /Normally pass only room/u);
-  assert.match(String(joinTool?.description ?? ""), /approvalTimeoutMs=30000/u);
-  assert.match(String(joinTool?.description ?? ""), /taskTimeoutMs=20000/u);
+  assert.match(String(joinTool?.description ?? ""), /approvalTimeoutMs defaults to 30000/u);
+  assert.match(String(joinTool?.description ?? ""), /separate GUI standby request/u);
   const result = JSON.parse(await broker.call("room_join_request", { room: "demo" })) as {
     requested: boolean;
     joined: boolean;
@@ -172,7 +173,7 @@ test("room_join_request only proposes this terminal for the matching room", asyn
   );
 });
 
-test("room_join_request stays on duty through GUI approval and returns the first exact-seat delivery", async (t) => {
+test("room_join_request returns after membership approval without silently starting duty", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "orchestratory-join-duty-root-"));
   const data = await mkdtemp(join(tmpdir(), "orchestratory-join-duty-data-"));
   const ledger = new RoomLedger(data);
@@ -212,7 +213,6 @@ test("room_join_request stays on duty through GUI approval and returns the first
   const pending = broker.call("room_join_request", {
     room: "demo",
     approvalTimeoutMs: 5_000,
-    taskTimeoutMs: 1_000,
   });
   await requestObserved;
   assert.equal(requested, true);
@@ -225,14 +225,11 @@ test("room_join_request stays on duty through GUI approval and returns the first
     requested: boolean;
     joined: boolean;
     duty: string;
-    actor: string;
-    delivery: { message: { seq: number } };
   };
   assert.equal(result.requested, true);
   assert.equal(result.joined, true);
-  assert.equal(result.duty, "delivery");
-  assert.equal(result.actor, "codex（即時）");
-  assert.equal(result.delivery.message.seq, mention.seq);
+  assert.equal(result.duty, "standby-approval-required");
+  assert.equal(inbox.list("demo")[0]?.ledgerSeq, mention.seq);
   assert.deepEqual(calls, []);
 });
 
@@ -251,7 +248,6 @@ test("room_join_request times out fail-closed and validates both bounded waits",
   const timedOut = JSON.parse(await broker.call("room_join_request", {
     room: "demo",
     approvalTimeoutMs: 37,
-    taskTimeoutMs: 41,
   })) as { joined: boolean; recording: boolean; duty: string };
   assert.deepEqual(timedOut, {
     requested: true,
@@ -268,7 +264,7 @@ test("room_join_request times out fail-closed and validates both bounded waits",
   );
   await assert.rejects(
     broker.call("room_join_request", { room: "demo", taskTimeoutMs: 25_001 }),
-    /INVALID_ROOM_JOIN_TASK_TIMEOUT/u,
+    /UNKNOWN_ROOM_JOIN_REQUEST_ARGUMENT/u,
   );
 });
 
@@ -292,6 +288,117 @@ test("room_join_request cancellation clears the stale GUI request", async (t) =>
   controller.abort();
   await assert.rejects(pending, /ROOM_WAIT_CANCELLED/u);
   assert.deepEqual(cancelled, [{ roomId: "demo", workspace: root }]);
+});
+
+test("room_wait requests GUI standby approval for the exact joined session before listening", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "orchestratory-standby-root-"));
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-standby-data-"));
+  const gui = new CollaborationService(data);
+  const mcp = new CollaborationService(data);
+  t.after(() => gui.close());
+  t.after(() => mcp.close());
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  gui.ledger.createRoom("demo", root);
+  const session = mcp.registerExternal({
+    provider: "codex",
+    workspace: root,
+    hostPid: 9_001,
+    client: "Codex MCP",
+  });
+  mcp.requestExternalJoin(session.id, "demo", root);
+  gui.approveExternalJoin({
+    presenceId: session.id,
+    roomId: "demo",
+    workspace: root,
+    collaborationMode: "room-first",
+    syncTurns: false,
+    label: "待命測試",
+  });
+  const broker = new CollabToolBroker({
+    providers: new ProviderRegistry([]),
+    workspaces: WorkspacePolicy.fromPaths([root]),
+    hardLimits: DEFAULT_HARD_LIMITS,
+    ledger: mcp.ledger,
+    collaboration: mcp,
+    resolvePresenceId: () => session.id,
+    resolveActor: () => mcp.externalActor(session.id, "demo"),
+    resolveSessionRoom: () => ({
+      roomId: "demo",
+      workspace: root,
+      actor: "codex（待命測試）",
+      collaborationMode: "room-first",
+      syncTurns: false,
+    }),
+  });
+
+  const waiting = broker.call("room_wait", {
+    room: "demo",
+    approvalTimeoutMs: 1_000,
+    timeoutMs: 1_000,
+  });
+  for (let attempt = 0; attempt < 20 && !gui.presence.get(session.id)?.standbyRequested; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(gui.presence.get(session.id)?.standbyRequested, true);
+  assert.equal(gui.roomView("demo", root).sessions[0]?.wakeable, false);
+  gui.approveExternalStandby(session.id, "demo", root);
+  for (let attempt = 0; attempt < 80 && !gui.roomView("demo", root).sessions[0]?.wakeable; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  const posted = gui.postToExternal({
+    roomId: "demo",
+    workspace: root,
+    presenceId: session.id,
+    text: "核准後才可喚醒",
+  });
+  assert.equal(posted.dispatch.immediate, true);
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const result = JSON.parse(await waiting) as {
+    timeout: boolean;
+    standbyApproved: boolean;
+    delivery: { message: { seq: number } };
+  };
+  assert.equal(result.timeout, false);
+  assert.equal(result.standbyApproved, true);
+  assert.equal(result.delivery.message.seq, posted.message.seq);
+
+  const cancelled = new AbortController();
+  gui.revokeExternalStandby(session.id, "demo", root);
+  const pendingApproval = broker.call("room_wait", {
+    room: "demo",
+    approvalTimeoutMs: 1_000,
+    timeoutMs: 1_000,
+  }, { signal: cancelled.signal });
+  for (let attempt = 0; attempt < 20 && !gui.presence.get(session.id)?.standbyRequested; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  cancelled.abort();
+  await assert.rejects(pendingApproval, /ROOM_WAIT_CANCELLED/u);
+  assert.equal(gui.presence.get(session.id)?.standbyRequested, false);
+  assert.equal(gui.presence.get(session.id)?.standbyApproved, false);
+
+  const approvalTimeout = broker.call("room_wait", {
+    room: "demo",
+    approvalTimeoutMs: 1,
+    timeoutMs: 1_000,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(JSON.parse(await approvalTimeout), {
+    timeout: true,
+    phase: "standby-approval",
+    actor: "codex（待命測試）",
+    room: "demo",
+  });
+  assert.equal(gui.presence.get(session.id)?.standbyRequested, false);
+  await assert.rejects(
+    broker.call("room_wait", { room: "demo", approvalTimeoutMs: 120_001 }),
+    /INVALID_ROOM_STANDBY_APPROVAL_TIMEOUT/u,
+  );
+  await assert.rejects(
+    broker.call("room_wait", { room: "demo", timeoutMs: 14_400_001 }),
+    /INVALID_ROOM_WAIT_TIMEOUT/u,
+  );
 });
 
 test("coding workflow tool only queues an owner-reviewed proposal without provider calls", async (t) => {

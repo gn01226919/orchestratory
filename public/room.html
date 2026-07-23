@@ -36,8 +36,8 @@
         <button id="agent-requests-open" class="agent-requests-open" type="button" aria-expanded="false">
           <span>＋ 新增 Agents</span><b id="agent-request-count" hidden>0</b>
         </button>
-        <section id="agent-requests-panel" class="agent-requests-panel" hidden aria-label="Agent 加入申請">
-          <p><b>外接終端值班席位</b>：<code>room_join_request</code> 會保持主機回合等待核准。請選擇「全程帳本協作」或「僅加入值班席位」，並獨立決定是否同步此終端可見對話。「全程」涵蓋經 Orchestratory MCP 的跨 Agent 呼叫；原生旁路無法攔截。只有顯示「值班中」時可被 GUI 即時喚醒；休班時不冒充回覆，只保留精確收件匣。</p>
+        <section id="agent-requests-panel" class="agent-requests-panel" hidden aria-label="Agent 加入與待命申請">
+          <p><b>外接終端分兩步授權</b>：<code>room_join_request</code> 只申請加入這個房間；加入後，終端呼叫 <code>room_wait</code> 才會在這裡提出待命申請。Owner 核准待命後，只有同一個終端 session 正在掛起 <code>room_wait</code> 時可由 GUI 即時喚醒。關閉終端會自動移除 session 與待命授權；不建立替身 Agent。加入時仍可選擇「全程帳本協作」或「僅加入房間」，並獨立決定是否同步此終端可見對話；原生旁路無法攔截。</p>
           <div id="sidebar-presence-list" class="office-presence-list"></div>
           <form id="managed-agent-create" class="managed-agent-create">
             <b>受控即時 Agent</b>
@@ -191,7 +191,7 @@
               <label for="office-chat-input">對話內容</label>
               <textarea id="office-chat-input" rows="3" maxlength="16000" placeholder="點選 agent，或直接輸入訊息…Enter 兩次送出"></textarea>
               <div class="office-chat-actions">
-                <small id="office-chat-hint">@codex1 等終端只入帳；@codex 才會另外喚醒模型</small>
+                <small id="office-chat-hint">@codex1 等外接終端需先核准 room-wait；@codex 會喚醒常駐模型</small>
                 <button id="office-chat-send" class="primary" type="submit">送出</button>
               </div>
             </form>

@@ -48,19 +48,33 @@ test("GUI, TUI and MCP service instances share one exact-seat ledger sequence", 
   assert.equal(offDutyView?.kind, "external-pull");
   assert.equal(offDutyView?.wakeMode, "active-tool-pull");
   assert.equal(offDutyView?.wakeable, false);
+  assert.equal(offDutyView?.standbyRequested, false);
+  assert.equal(offDutyView?.standbyApproved, false);
 
+  assert.throws(() => gui.postToExternal({
+    roomId: "demo", workspace: "/tmp/project", presenceId: external.id, text: "尚未核准待命",
+  }), /TARGET_AGENT_STANDBY_NOT_APPROVED/u);
+
+  const standby = mcp.requestExternalStandby(external.id, "demo", "/tmp/project");
+  assert.equal(standby.standbyRequested, true);
+  assert.equal(gui.roomView("demo", "/tmp/project").sessions[0]?.wakeable, false);
+  gui.approveExternalStandby(external.id, "demo", "/tmp/project");
+  assert.equal(gui.roomView("demo", "/tmp/project").sessions[0]?.standbyApproved, true);
+
+  const pendingWait = mcp.waitExternal({ presenceId: external.id, roomId: "demo", timeoutMs: 1_000 });
+  for (let attempt = 0; attempt < 20 && !gui.roomView("demo", "/tmp/project").sessions[0]?.wakeable; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
   const posted = gui.postToExternal({
-    roomId: "demo",
-    workspace: "/tmp/project",
-    presenceId: external.id,
-    text: "請修正登入",
+    roomId: "demo", workspace: "/tmp/project", presenceId: external.id, text: "請修正登入",
   });
   assert.deepEqual(posted.dispatch, {
     wakeMode: "active-tool-pull",
-    wakeable: false,
-    immediate: false,
+    wakeable: true,
+    immediate: true,
   });
-  const claimed = await mcp.waitExternal({ presenceId: external.id, roomId: "demo", timeoutMs: 100 });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const claimed = await pendingWait;
   assert.ok(claimed);
   assert.equal(claimed.message.seq, posted.message.seq);
   mcp.ackExternal({ presenceId: external.id, deliveryId: claimed.id, leaseToken: claimed.leaseToken, phase: "read" });
@@ -78,15 +92,22 @@ test("GUI, TUI and MCP service instances share one exact-seat ledger sequence", 
   assert.equal(gui.ledger.getRange("demo", reply.reply.seq, reply.reply.seq)[0]?.text, "登入已修正");
   assert.equal(gui.roomView("demo", "/tmp/project").deliveries[0]?.state, "replied");
   assert.equal(gui.ledger.verifyChain("demo"), true);
+  const nextWait = mcp.waitExternal({ presenceId: external.id, roomId: "demo", timeoutMs: 1_000 });
+  for (let attempt = 0; attempt < 20 && !gui.roomView("demo", "/tmp/project").sessions[0]?.wakeable; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
   const failing = gui.postToExternal({
     roomId: "demo", workspace: "/tmp/project", presenceId: external.id, text: "請執行失敗案例",
   });
-  const failingClaim = await mcp.waitExternal({ presenceId: external.id, roomId: "demo", timeoutMs: 100 });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const failingClaim = await nextWait;
   assert.ok(failingClaim);
   assert.equal(mcp.failExternal({
     presenceId: external.id, deliveryId: failing.delivery.id,
     leaseToken: failingClaim.leaseToken, reason: "synthetic failure",
   }).state, "failed");
+  gui.revokeExternalStandby(external.id, "demo", "/tmp/project");
+  assert.equal(gui.roomView("demo", "/tmp/project").sessions[0]?.standbyApproved, false);
   mcp.unregisterExternal(external.id, "test finished");
   assert.equal(gui.reconcileExternalPresence("demo", "/tmp/project").length, 0);
 });
@@ -177,6 +198,8 @@ test("service rejects cross-room removal and delivery impersonation", async (t) 
   service.requestExternalJoin(second.id, "first", "/tmp/project");
   service.approveExternalJoin({ ...ROOM_FIRST_JOIN, presenceId: first.id, roomId: "first", workspace: "/tmp/project" });
   service.approveExternalJoin({ ...ROOM_FIRST_JOIN, presenceId: second.id, roomId: "first", workspace: "/tmp/project" });
+  service.requestExternalStandby(first.id, "first", "/tmp/project");
+  service.approveExternalStandby(first.id, "first", "/tmp/project");
   const posted = service.postToExternal({ roomId: "first", workspace: "/tmp/project", presenceId: first.id, text: "task" });
 
   assert.throws(
