@@ -133,6 +133,52 @@ test("join is owner-controlled, workspace-bound, live-only, and idempotent", asy
   assert.deepEqual(presence.list("/tmp/a", "demo"), []);
 });
 
+test("joined terminals request session-scoped room-wait approval before becoming standby", async (t) => {
+  const { presence } = await fixture(t);
+  const session = presence.register({ provider: "claude", workspace: "/tmp/project", hostPid: 205 });
+
+  assert.throws(
+    () => presence.requestStandby(session.id, "demo"),
+    /PRESENCE_NOT_JOINED/u,
+  );
+  presence.requestJoin(session.id, "demo", "/tmp/project");
+  const joined = presence.join(session.id, "demo", "/tmp/project", ROOM_FIRST);
+  assert.equal(joined.standbyRequested, false);
+  assert.equal(joined.standbyApproved, false);
+
+  const requested = presence.requestStandby(session.id, "demo");
+  assert.equal(requested.standbyRequested, true);
+  assert.equal(requested.standbyApproved, false);
+  assert.equal(typeof requested.standbyRequestedAtMs, "number");
+  assert.equal(presence.requestStandby(session.id, "demo").standbyRequested, true);
+  assert.throws(
+    () => presence.approveStandby(session.id, "other"),
+    /PRESENCE_NOT_JOINED/u,
+  );
+
+  const approved = presence.approveStandby(session.id, "demo");
+  assert.equal(approved.standbyRequested, false);
+  assert.equal(approved.standbyApproved, true);
+  assert.equal(presence.approveStandby(session.id, "demo").standbyApproved, true);
+  assert.equal(presence.cancelStandbyRequest(session.id, "demo").standbyApproved, true);
+  assert.equal(presence.requestStandby(session.id, "demo").standbyApproved, true);
+
+  const revoked = presence.revokeStandby(session.id, "demo");
+  assert.equal(revoked.standbyRequested, false);
+  assert.equal(revoked.standbyApproved, false);
+  assert.equal(presence.revokeStandby(session.id, "demo").standbyApproved, false);
+  assert.throws(
+    () => presence.approveStandby(session.id, "demo"),
+    /PRESENCE_STANDBY_NOT_REQUESTED/u,
+  );
+
+  presence.requestStandby(session.id, "demo");
+  assert.equal(presence.cancelStandbyRequest(session.id, "demo").standbyRequested, false);
+  assert.equal(presence.cancelStandbyRequest(session.id, "demo").standbyRequested, false);
+  presence.unregister(session.id);
+  assert.equal(presence.get(session.id), undefined);
+});
+
 test("owner can name a joined desk while invalid or duplicate labels fail closed", async (t) => {
   const { presence } = await fixture(t);
   const first = presence.register({ provider: "codex", workspace: "/tmp/project", hostPid: 221 });
@@ -490,10 +536,12 @@ test("presence schema v1 migrates transactionally to explicit requests and safe 
 
   const migrated = new RoomPresenceStore(data);
   t.after(() => migrated.close());
-  assert.equal(migrated.inventory().schemaVersion, 4);
+  assert.equal(migrated.inventory().schemaVersion, 5);
   const legacySeat = migrated.list("/tmp/legacy-project", "legacy-room")[0];
   assert.equal(legacySeat?.collaborationMode, "seat-only");
   assert.equal(legacySeat?.syncTurns, true);
+  assert.equal(legacySeat?.standbyRequested, false);
+  assert.equal(legacySeat?.standbyApproved, false);
   const session = migrated.register({ provider: "claude", workspace: "/tmp/project", hostPid: 501 });
   assert.equal(migrated.requestJoin(session.id, "demo", "/tmp/project").requested, true);
   assert.equal(migrated.integrity().stateValid, true);

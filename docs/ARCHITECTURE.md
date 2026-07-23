@@ -174,12 +174,15 @@ TUI 內每輪 token，不能取代自動 workflow governor。
 
 額外席位明確分成兩種。`external-terminal` 由 presence 短租約建立，保留外部 CLI 上下文；
 GUI 將訊息同時寫入共同帳本與該精確 presence 的 owner-only inbox，不另外呼叫 provider 冒充
-終端。`room_join_request` 在提出申請後保持同一 host tool call，等 GUI 核准後立即進入第一段
-bounded 收件等待；之後終端只有在這段等待或 `room_wait` 長輪詢期間才是「正在值班」，並以 delivery lease token
+終端。`room_join_request` 在提出申請後只保持到 GUI 完成 membership 核准，然後返回。已加入的
+精確 session 接著呼叫 `room_wait`；第一次呼叫會建立另一筆 session-scoped GUI 待命申請，Owner
+核准後同一個 tool call 才進入 bounded 收件等待。終端只有在 active `room_wait` 期間才是「正在待命」，並以 delivery lease token
 依序確認 `delivered/read/working/replied` 或 `failed`。取消、離線、租約過期、重送與 reply
 idempotency 都由 inbox state machine 處理，絕不 fallback 到同 provider 的常駐席位。
-完全 idle 的既有 MCP host 不能接受 server-initiated turn，休班時的 GUI 工作只會 queued；API 以
-`wakeMode: active-tool-pull` 與 `wakeable: false` 明確揭露，不把 presence 誤報成可喚醒。
+待命未核准時，新 GUI 交辦 fail closed。核准後若 `room_wait` 暫時結束，既有工作可留在精確 inbox；
+API 以 `wakeMode: active-tool-pull` 與 `wakeable: false` 明確揭露，不把 presence 誤報成可喚醒。
+Owner 撤銷、client cancellation、stdio EOF、presence lease 過期或四小時 hard timeout 會終止
+active wait；同一 session 必須再次呼叫 `room_wait` 才重新待命，不建立替身 Agent。
 常駐 provider 的等待指示也不從 `@provider` 文字推測；`room_mention` 在真正開始 provider call 前追加
 綁定原 mention sequence 的「回應處理中」system event，並以 reply/failure/cancel/clear 收旂。
 沒有 start event 的舊帳本文字不會顯示永久等待；新的 `room_post` 若以 `@claude` 等 provider
@@ -208,8 +211,8 @@ GUI 對 Room 提供兩個明確模式：直播可發言與喚醒模型；歷史�
 執行中角色與完成狀態來自
 `/api/bootstrap` 與已遮蔽的 workflow events。它可顯示 Agent DND／目前工作、任務中心、通知與
 完成／失敗動畫，但不能從這些卡片批准、啟動或修改 workflow。Agent 點擊只預填 `@agent`，仍需
-owner 送出才會喚醒 provider。點 `@codex1` 會把訊息寫入帳本並排入該精確 MCP 席位的 inbox；
-host 必須仍在 `room_join_request` 的核准後等待或正在呼叫 `room_wait` 才會即時收件，不會偷偷建立另一筆 provider call，也不會改送常駐
+owner 送出才會喚醒 provider。點 `@codex1` 只有在該 session 的待命申請已由 Owner 核准後，
+才會把訊息寫入帳本並排入精確 inbox；host 必須正在呼叫 `room_wait` 才會即時收件，不會偷偷建立另一筆 provider call，也不會改送常駐
 Codex。只有 `@codex`／`@claude`／`@grok` 才沿用明確的常駐 wake 語意。日夜、安靜、休閒與全螢幕偏好，以及頁內通知，全部只存在目前頁面
 RAM，不新增持久化資料或權限。Miso 與 Byte 是純 HTML/CSS 的裝飾性辦公室夥伴，四足／雙足步態、
 巡邏路徑與表情只在瀏覽器動畫層執行，不讀帳本、不呼叫 provider，也沒有控制面權限。

@@ -45,7 +45,8 @@ const MAX_REFERENCED_MESSAGES = 60;
 const ROOM_TAIL_MESSAGES = 12;
 const MAX_JOIN_APPROVAL_WAIT_MS = 120_000;
 const DEFAULT_JOIN_APPROVAL_WAIT_MS = 30_000;
-const DEFAULT_JOIN_TASK_WAIT_MS = 20_000;
+const MAX_STANDBY_WAIT_MS = 4 * 60 * 60 * 1_000;
+const DEFAULT_STANDBY_WAIT_MS = MAX_STANDBY_WAIT_MS;
 const MAX_MCP_INFLIGHT_REQUESTS = 16;
 
 type CollabInvoker = (
@@ -375,14 +376,13 @@ export class CollabToolBroker {
       tools.push({
         name: "room_join_request",
         description:
-          "Ask the local owner to admit this exact MCP terminal and choose its server-enforced collaboration mode: room-first routes Orchestratory ask/compare calls through the bound ledger; seat-only leaves standalone collaboration outside the ledger. The owner separately chooses whether supported structured hooks mirror visible user/assistant turns. Keep the current host turn alive while approval is pending, then immediately wait for the first GUI task after approval. Normally pass only room and omit both timeout fields; the safe defaults are approvalTimeoutMs=30000 and taskTimeoutMs=20000. If explicitly set, approvalTimeoutMs must be <=120000 and taskTimeoutMs <=25000. This is the honest wake path for an existing terminal: the terminal is wakeable only while this call or room_wait is active. Never substitute a shell command or claim that an idle host can be pushed by MCP.",
+          "Ask the local owner to admit this exact MCP terminal and choose its server-enforced collaboration mode: room-first routes Orchestratory ask/compare calls through the bound ledger; seat-only leaves standalone collaboration outside the ledger. The owner separately chooses whether supported structured hooks mirror visible user/assistant turns. This tool returns as soon as Room membership is approved; it does not silently start duty. Then immediately call room_wait, which creates a separate GUI standby request for this exact session. Normally pass only room. approvalTimeoutMs defaults to 30000 and must be <=120000. Never substitute a shell command.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
           properties: {
             room: { type: "string", minLength: 1, maxLength: 48 },
             approvalTimeoutMs: { type: "integer", minimum: 1, maximum: MAX_JOIN_APPROVAL_WAIT_MS },
-            taskTimeoutMs: { type: "integer", minimum: 1, maximum: 25_000 },
           },
         },
       });
@@ -392,13 +392,14 @@ export class CollabToolBroker {
         {
           name: "room_wait",
           description:
-            "Wait for the next task addressed to this exact approved MCP terminal seat. While this bounded long-poll is active the GUI truthfully shows the seat as listening. Immediately acknowledge returned work with room_ack(read), then room_ack(working), and finish with room_reply or room_fail. Never share the private lease token.",
+            "Request session-scoped standby approval in the GUI, then keep this exact MCP terminal waiting for the next addressed task. Owner approval is required once per live session and never transfers to another terminal. The default standby wait is bounded to four hours; stdio close, heartbeat expiry, owner revocation, MCP cancellation, or the hard timeout ends it. While the approved long-poll is active the GUI truthfully shows this seat as wakeable. Immediately acknowledge returned work with room_ack(read), then room_ack(working), finish with room_reply or room_fail, and call room_wait again to resume standby. Never share the private lease token.",
           inputSchema: {
             type: "object",
             additionalProperties: false,
             properties: {
               room: { type: "string", minLength: 1, maxLength: 48 },
-              timeoutMs: { type: "integer", minimum: 1, maximum: 25_000 },
+              approvalTimeoutMs: { type: "integer", minimum: 1, maximum: MAX_JOIN_APPROVAL_WAIT_MS },
+              timeoutMs: { type: "integer", minimum: 1, maximum: MAX_STANDBY_WAIT_MS },
             },
           },
         },
@@ -554,7 +555,7 @@ export class CollabToolBroker {
   async #roomJoinRequest(input: JsonObject, options: CollabCallOptions): Promise<string> {
     this.#allowedKeys(
       input,
-      ["room", "approvalTimeoutMs", "taskTimeoutMs"],
+      ["room", "approvalTimeoutMs"],
       "UNKNOWN_ROOM_JOIN_REQUEST_ARGUMENT",
     );
     if (!this.#requestRoomJoin) throw new Error("ROOM_JOIN_REQUEST_UNAVAILABLE");
@@ -568,16 +569,10 @@ export class CollabToolBroker {
     const approvalTimeoutMs = input.approvalTimeoutMs === undefined
       ? DEFAULT_JOIN_APPROVAL_WAIT_MS
       : input.approvalTimeoutMs;
-    const taskTimeoutMs = input.taskTimeoutMs === undefined
-      ? DEFAULT_JOIN_TASK_WAIT_MS
-      : input.taskTimeoutMs;
     if (
       !Number.isSafeInteger(approvalTimeoutMs) || Number(approvalTimeoutMs) < 1 ||
       Number(approvalTimeoutMs) > MAX_JOIN_APPROVAL_WAIT_MS
     ) throw new Error("INVALID_ROOM_JOIN_APPROVAL_TIMEOUT");
-    if (!Number.isSafeInteger(taskTimeoutMs) || Number(taskTimeoutMs) < 1 || Number(taskTimeoutMs) > 25_000) {
-      throw new Error("INVALID_ROOM_JOIN_TASK_TIMEOUT");
-    }
     let joined: boolean;
     try {
       joined = await this.#waitForRoomJoin({
@@ -600,10 +595,6 @@ export class CollabToolBroker {
         duty: "approval-timeout",
       });
     }
-    const waiting = JSON.parse(await this.#roomWait(
-      { room: roomId, timeoutMs: Number(taskTimeoutMs) },
-      options,
-    )) as JsonObject;
     const binding = this.#resolveSessionRoom?.();
     if (binding && (binding.roomId !== roomId || binding.workspace !== workspace)) {
       throw new Error("ROOM_JOIN_BINDING_MISMATCH");
@@ -616,18 +607,63 @@ export class CollabToolBroker {
         ? { collaborationMode: binding.collaborationMode, syncTurns: binding.syncTurns }
         : {}),
       room: roomId,
-      duty: waiting.timeout === true ? "listening-timeout" : "delivery",
-      ...waiting,
+      duty: "standby-approval-required",
     });
   }
 
   async #roomWait(input: JsonObject, options: CollabCallOptions): Promise<string> {
-    this.#allowedKeys(input, ["room", "timeoutMs"], "UNKNOWN_ROOM_WAIT_ARGUMENT");
+    this.#allowedKeys(input, ["room", "approvalTimeoutMs", "timeoutMs"], "UNKNOWN_ROOM_WAIT_ARGUMENT");
     const roomId = this.#resolveRoomId(input.room);
     const { inbox, collaboration, presenceId } = this.#seatInbox();
     const actor = this.#messageAuthor(undefined, roomId);
-    const timeoutMs = input.timeoutMs === undefined ? 25_000 : input.timeoutMs;
-    if (!Number.isSafeInteger(timeoutMs)) throw new Error("INVALID_ROOM_WAIT_TIMEOUT");
+    const timeoutMs = input.timeoutMs === undefined ? DEFAULT_STANDBY_WAIT_MS : input.timeoutMs;
+    const approvalTimeoutMs = input.approvalTimeoutMs === undefined
+      ? DEFAULT_JOIN_APPROVAL_WAIT_MS
+      : input.approvalTimeoutMs;
+    if (
+      !Number.isSafeInteger(timeoutMs) || Number(timeoutMs) < 1 ||
+      Number(timeoutMs) > MAX_STANDBY_WAIT_MS
+    ) throw new Error("INVALID_ROOM_WAIT_TIMEOUT");
+    if (
+      !Number.isSafeInteger(approvalTimeoutMs) || Number(approvalTimeoutMs) < 1 ||
+      Number(approvalTimeoutMs) > MAX_JOIN_APPROVAL_WAIT_MS
+    ) throw new Error("INVALID_ROOM_STANDBY_APPROVAL_TIMEOUT");
+    if (collaboration) {
+      const binding = this.#resolveSessionRoom?.();
+      if (!binding || binding.roomId !== roomId) throw new Error("PRESENCE_NOT_JOINED");
+      collaboration.requestExternalStandby(presenceId, roomId, binding.workspace);
+      const deadline = Date.now() + Number(approvalTimeoutMs);
+      try {
+        while (Date.now() < deadline) {
+          if (options.signal?.aborted) throw new Error("ROOM_WAIT_CANCELLED");
+          const current = collaboration.presence.get(presenceId);
+          if (!current) throw new Error("PRESENCE_NOT_FOUND");
+          if (current.standbyApproved) break;
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) break;
+          try {
+            await delay(Math.min(200, remaining), undefined, { signal: options.signal, ref: false });
+          } catch {
+            if (options.signal?.aborted) throw new Error("ROOM_WAIT_CANCELLED");
+            throw new Error("ROOM_STANDBY_WAIT_FAILED");
+          }
+        }
+        if (!collaboration.presence.get(presenceId)?.standbyApproved) {
+          collaboration.cancelExternalStandbyRequest(presenceId, roomId, binding.workspace);
+          return JSON.stringify({
+            timeout: true,
+            phase: "standby-approval",
+            actor,
+            room: roomId,
+          });
+        }
+      } catch (error) {
+        try {
+          collaboration.cancelExternalStandbyRequest(presenceId, roomId, binding.workspace);
+        } catch { /* a closed or removed presence is already fail-closed */ }
+        throw error;
+      }
+    }
     const delivery = collaboration
       ? await collaboration.waitExternal({
         presenceId,
@@ -643,8 +679,8 @@ export class CollabToolBroker {
         ...(options.signal ? { signal: options.signal } : {}),
       });
     return JSON.stringify(delivery
-      ? { timeout: false, actor, delivery }
-      : { timeout: true, actor, room: roomId });
+      ? { timeout: false, standbyApproved: true, actor, delivery }
+      : { timeout: true, phase: "standby", standbyApproved: Boolean(collaboration), actor, room: roomId });
   }
 
   #roomAck(input: JsonObject): string {
@@ -1229,15 +1265,16 @@ export async function handleCollabMcpMessage(
           "   cannot be intercepted; do not claim that those calls were ledgered.",
           "   IMPORTANT: call the MCP tool directly. Never run `orchestrator room join` in a shell;",
           "   that command does not identify or admit this MCP terminal.",
-          "   After GUI approval, stay available with bounded room_wait calls. For each exact-seat",
+          "   Room membership does not itself start duty. Immediately call room_wait after joining;",
+          "   that exact live session then submits a separate standby request for GUI approval.",
+          "   Once approved, room_wait stays open for a bounded maximum of four hours. For each exact-seat",
           "   delivery call room_ack(read), room_ack(working), then room_reply or room_fail.",
-          "   room_join_request itself waits through approval and starts the first bounded duty wait.",
-          "   Normally pass only room: its safe defaults are a 30s approval wait and 20s first duty wait;",
-          "   never invent longer timeout values (hard maxima are 120s and 25s respectively).",
-          "   When a duty wait times out, immediately call room_wait again while the owner expects duty;",
+          "   Normally pass only room to both tools. Join and standby approval each wait 30 seconds;",
+          "   the standby wait has a four-hour hard maximum and is never infinite.",
+          "   When a standby wait ends, immediately call room_wait again while the owner expects duty;",
           "   after room_reply or room_fail, immediately call room_wait again for the next assignment.",
-          "   External MCP terminals cannot receive unsolicited keystrokes while room_wait is inactive;",
-          "   the GUI truthfully shows whether this exact seat is listening and otherwise leaves work queued.",
+          "   Closing the terminal or stdio removes the session and its standby approval. If the host",
+          "   cancels the tool call, the GUI truthfully stops showing this exact seat as wakeable.",
           "3. room_mention {target:'codex'|'claude'|'grok', text} — wake another model;",
           "   reference earlier messages as #12 or #40-#45 and their content is injected",
           "   automatically. The reply is appended to the ledger. Costs one quota call.",

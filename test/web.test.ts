@@ -434,6 +434,7 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
       projectName: string;
       workspace: string;
       pendingAgentRequests: number;
+      pendingStandbyRequests: number;
       joinedExternalSeats: number;
       wakeableExternalSeats: number;
     }>;
@@ -444,6 +445,7 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
     projectName: basename(workspace),
     workspace: await realpath(workspace),
     pendingAgentRequests: 0,
+    pendingStandbyRequests: 0,
     joinedExternalSeats: 0,
     wakeableExternalSeats: 0,
   });
@@ -647,10 +649,16 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   presenceStore.requestJoin(availableSession.id, "presence-demo", await realpath(workspace));
   const roomsWithPendingAgent = await fetch(`${server.url}/api/rooms`, { headers: { Cookie: cookie } });
   const pendingRoomSummary = ((await roomsWithPendingAgent.json()) as {
-    rooms: Array<{ id: string; projectName: string; pendingAgentRequests: number }>;
+    rooms: Array<{
+      id: string;
+      projectName: string;
+      pendingAgentRequests: number;
+      pendingStandbyRequests: number;
+    }>;
   }).rooms.find((room) => room.id === "presence-demo");
   assert.equal(pendingRoomSummary?.projectName, basename(workspace));
   assert.equal(pendingRoomSummary?.pendingAgentRequests, 1);
+  assert.equal(pendingRoomSummary?.pendingStandbyRequests, 0);
   const available = await fetch(`${server.url}/api/rooms/presence?room=presence-demo`, {
     headers: { Cookie: cookie },
   });
@@ -698,11 +706,19 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   });
   assert.equal(joinPresence.status, 200);
   const joinedPresenceBody = (await joinPresence.json()) as {
-    session: { displayName: string; collaborationMode: string; syncTurns: boolean };
+    session: {
+      displayName: string;
+      collaborationMode: string;
+      syncTurns: boolean;
+      standbyRequested: boolean;
+      standbyApproved: boolean;
+    };
   };
   assert.equal(joinedPresenceBody.session.displayName, "codex（前端 2）");
   assert.equal(joinedPresenceBody.session.collaborationMode, "room-first");
   assert.equal(joinedPresenceBody.session.syncTurns, true);
+  assert.equal(joinedPresenceBody.session.standbyRequested, false);
+  assert.equal(joinedPresenceBody.session.standbyApproved, false);
   const joined = await fetch(`${server.url}/api/rooms/presence?room=presence-demo`, {
     headers: { Cookie: cookie },
   });
@@ -717,6 +733,48 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   });
   assert.equal(emptyPresencePost.status, 400);
   assert.deepEqual(await emptyPresencePost.json(), { error: "INVALID_PRESENCE_MESSAGE" });
+  const presencePostBeforeStandbyApproval = await fetch(`${server.url}/api/rooms/presence/post`, {
+    method: "POST",
+    headers: csrfHeaders,
+    body: JSON.stringify({ room: "presence-demo", presenceId: availableSession.id, text: "尚未核准" }),
+  });
+  assert.equal(presencePostBeforeStandbyApproval.status, 400);
+  assert.deepEqual(
+    await presencePostBeforeStandbyApproval.json(),
+    { error: "TARGET_AGENT_STANDBY_NOT_APPROVED" },
+  );
+  presenceStore.requestStandby(availableSession.id, "presence-demo");
+  const roomsWithPendingStandby = await fetch(`${server.url}/api/rooms`, { headers: { Cookie: cookie } });
+  const pendingStandbyRoom = ((await roomsWithPendingStandby.json()) as {
+    rooms: Array<{ id: string; pendingAgentRequests: number; pendingStandbyRequests: number }>;
+  }).rooms.find((room) => room.id === "presence-demo");
+  assert.equal(pendingStandbyRoom?.pendingAgentRequests, 0);
+  assert.equal(pendingStandbyRoom?.pendingStandbyRequests, 1);
+  const standbyApproveWithoutCsrf = await fetch(`${server.url}/api/rooms/presence/standby/approve`, {
+    method: "POST",
+    headers: { Cookie: cookie, Origin: server.url, "Content-Type": "application/json" },
+    body: JSON.stringify({ room: "presence-demo", presenceId: availableSession.id }),
+  });
+  assert.equal(standbyApproveWithoutCsrf.status, 403);
+  const invalidStandbyApprove = await fetch(`${server.url}/api/rooms/presence/standby/approve`, {
+    method: "POST",
+    headers: csrfHeaders,
+    body: JSON.stringify({ room: "presence-demo", presenceId: availableSession.id, extra: true }),
+  });
+  assert.equal(invalidStandbyApprove.status, 400);
+  assert.deepEqual(await invalidStandbyApprove.json(), { error: "INVALID_PRESENCE_STANDBY_REQUEST" });
+  const standbyApprove = await fetch(`${server.url}/api/rooms/presence/standby/approve`, {
+    method: "POST",
+    headers: csrfHeaders,
+    body: JSON.stringify({ room: "presence-demo", presenceId: availableSession.id }),
+  });
+  assert.equal(standbyApprove.status, 200);
+  const standbyApproveBody = (await standbyApprove.json()) as {
+    session: { standbyRequested: boolean; standbyApproved: boolean; wakeable: boolean };
+  };
+  assert.equal(standbyApproveBody.session.standbyRequested, false);
+  assert.equal(standbyApproveBody.session.standbyApproved, true);
+  assert.equal(standbyApproveBody.session.wakeable, false);
   const presencePost = await fetch(`${server.url}/api/rooms/presence/post`, {
     method: "POST",
     headers: csrfHeaders,
@@ -1091,6 +1149,25 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
     body: JSON.stringify({ room: "presence-demo", agentId: managedCreateBody.agent.id }),
   });
   assert.equal(managedArchive.status, 200);
+  const standbyRevoke = await fetch(`${server.url}/api/rooms/presence/standby/revoke`, {
+    method: "POST",
+    headers: csrfHeaders,
+    body: JSON.stringify({ room: "presence-demo", presenceId: availableSession.id }),
+  });
+  assert.equal(standbyRevoke.status, 200);
+  const standbyRevokeBody = (await standbyRevoke.json()) as {
+    session: { standbyRequested: boolean; standbyApproved: boolean; wakeable: boolean };
+  };
+  assert.equal(standbyRevokeBody.session.standbyRequested, false);
+  assert.equal(standbyRevokeBody.session.standbyApproved, false);
+  assert.equal(standbyRevokeBody.session.wakeable, false);
+  const revokedPresencePost = await fetch(`${server.url}/api/rooms/presence/post`, {
+    method: "POST",
+    headers: csrfHeaders,
+    body: JSON.stringify({ room: "presence-demo", presenceId: availableSession.id, text: "撤銷後不可投遞" }),
+  });
+  assert.equal(revokedPresencePost.status, 400);
+  assert.deepEqual(await revokedPresencePost.json(), { error: "TARGET_AGENT_STANDBY_NOT_APPROVED" });
   const crossRoomLeave = await fetch(`${server.url}/api/rooms/presence/leave`, {
     method: "POST",
     headers: csrfHeaders,
@@ -1132,14 +1209,16 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomHtml, /id="agent-request-count"/u);
   assert.match(roomHtml, /id="agent-requests-panel"/u);
   assert.match(roomHtml, /room_join_request/u);
+  assert.match(roomHtml, /room_wait/u);
   assert.match(roomHtml, /Enter 兩次送出/u);
   assert.match(roomHtml, /⌘ Enter 立即送出/u);
   assert.match(roomHtml, /id="managed-agent-create"/u);
   assert.match(roomHtml, /受控即時 Agent/u);
-  assert.match(roomHtml, /請選擇「全程帳本協作」或「僅加入值班席位」/u);
+  assert.match(roomHtml, /「全程帳本協作」或「僅加入房間」/u);
   assert.match(roomHtml, /獨立決定是否同步此終端可見對話/u);
   assert.match(roomHtml, /原生旁路無法攔截/u);
-  assert.match(roomHtml, /休班時不冒充回覆/u);
+  assert.match(roomHtml, /關閉終端會自動移除 session 與待命授權/u);
+  assert.match(roomHtml, /不建立替身 Agent/u);
   assert.match(roomHtml, /id="writer-run-cancel"/u);
   assert.match(roomHtml, /共用目前 task worktree 並由系統序列執行/u);
   assert.doesNotMatch(roomHtml, /(?:src|href)="https?:\/\//u);
@@ -1165,12 +1244,16 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomScript, /function syncOfficeDesks\(/u);
   assert.match(roomScript, /value\.session/u);
   assert.match(roomScript, /filter\(\(entry\) => entry\.id !== value\.session\.id\)/u);
-  assert.match(roomScript, /核准並建立值班席位/u);
+  assert.match(roomScript, /核准加入房間/u);
+  assert.match(roomScript, /核准 room-wait 待命/u);
+  assert.match(roomScript, /撤銷 room-wait 待命/u);
   assert.match(roomScript, /全程帳本協作/u);
   assert.match(roomScript, /終端對話同步/u);
-  assert.match(roomScript, /值班中/u);
-  assert.match(roomScript, /線上但休班/u);
-  assert.match(roomScript, /已排隊（外接終端未值班，無法喚醒）/u);
+  assert.match(roomScript, /room-wait 待命中，可由 GUI 喚醒/u);
+  assert.match(roomScript, /已申請 room-wait，等待 Owner 核准/u);
+  assert.match(roomScript, /待命已核准，但終端目前未掛起 room_wait/u);
+  assert.match(roomScript, /已加入，尚未申請 room-wait/u);
+  assert.match(roomScript, /已排隊（待命已核准，等待終端重新掛起 room_wait）/u);
   assert.match(roomScript, /selectedPresenceId/u);
   assert.match(roomScript, /managedAgentId/u);
   assert.match(roomScript, /\/api\/rooms\/managed-agents\/mention/u);

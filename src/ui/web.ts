@@ -391,6 +391,9 @@ export async function startWebServer(
             ...room,
             projectName: basename(room.workspace),
             pendingAgentRequests: view.sessions.filter((session) => session.requested && !session.joined).length,
+            pendingStandbyRequests: view.sessions.filter(
+              (session) => session.joined && session.standbyRequested && !session.standbyApproved,
+            ).length,
             joinedExternalSeats: view.sessions.filter((session) => session.joined).length,
             wakeableExternalSeats: view.sessions.filter((session) => session.wakeable).length,
           });
@@ -833,6 +836,33 @@ export async function startWebServer(
           abortWriterIdentity(value.room, value.presenceId, "EXTERNAL_WRITER_REMOVED");
           const left = collaboration.removeExternal({ presenceId: value.presenceId, roomId: value.room, workspace });
           json(response, 200, { session: left });
+          return;
+        }
+        if (
+          url.pathname === "/api/rooms/presence/standby/approve" ||
+          url.pathname === "/api/rooms/presence/standby/revoke"
+        ) {
+          if (typeof body !== "object" || body === null || Array.isArray(body)) {
+            throw new Error("INVALID_PRESENCE_STANDBY_REQUEST");
+          }
+          const value = body as Record<string, unknown>;
+          if (
+            Object.keys(value).some((key) => key !== "room" && key !== "presenceId") ||
+            typeof value.room !== "string" || typeof value.presenceId !== "string"
+          ) throw new Error("INVALID_PRESENCE_STANDBY_REQUEST");
+          const info = ledger.getRoom(value.room);
+          if (!info) throw new Error("ROOM_NOT_FOUND");
+          const workspace = await app.workspaces.assertAllowed(info.workspace);
+          if (url.pathname.endsWith("/approve")) {
+            collaboration.approveExternalStandby(value.presenceId, value.room, workspace);
+          } else {
+            collaboration.revokeExternalStandby(value.presenceId, value.room, workspace);
+          }
+          const session = collaboration.roomView(value.room, workspace).sessions.find(
+            (candidate) => candidate.id === value.presenceId,
+          );
+          if (!session) throw new Error("PRESENCE_NOT_FOUND");
+          json(response, 200, { session });
           return;
         }
         if (url.pathname === "/api/rooms/presence/post") {

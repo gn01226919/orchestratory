@@ -160,12 +160,13 @@ Private Vulnerability Reporting；公開後請使用 repository 的 **Security �
   私有 delivery lease token 呼叫 `room_ack`、`room_reply` 或 `room_fail`。狀態只允許
   queued/delivered/read/working/replied/failed/cancelled；離線、取消、重送、過期與去重均 fail
   closed，且不會 fallback 到同 provider 的常駐 Agent。
-- `room_join_request` 會把同一 MCP tool call 保持到 GUI 核准，核准後直接進入第一段 bounded wait；
-  預設核准 30 秒加首輪收件 20 秒，總和低於常見的 60 秒 MCP request timeout；client 的
-  `notifications/cancelled` 會傳入 AbortSignal、清除待核准請求與 wait lease，程序死亡後 lease 也在
-  bounded TTL 內失效。
-  後續只有活躍的 join/wait call 可被 GUI 即時喚醒。完全 idle 的外部 host 不支援 server-initiated
-  turn，API/UI 必須回報 `wakeable: false` 並讓工作維持 queued；不得用新 provider call 冒充它。
+- `room_join_request` 只保持到 GUI 完成 Room membership 核准；加入不授予待命。已加入 session
+  呼叫 `room_wait` 才建立獨立的 GUI 待命申請，Owner 核准後同一 tool call 才進入 bounded 收件。
+  待命核准綁定 exact presence＋Room＋workspace，不能跨 session 重用。待命未核准時新交辦 fail closed。
+  核准後只有 active wait 可被 GUI 即時喚醒；沒有 active wait 時 API/UI 回報 `wakeable: false`。
+- `room_wait` 的 GUI 核准等待預設 30 秒、上限 120 秒；收件等待預設與上限皆為四小時。
+  `notifications/cancelled`、Owner 撤銷、stdio EOF、presence lease 過期與 timeout 都會清除 active
+  wait 或待核准請求。不得用新 provider call、替身或同名常駐 Agent 冒充原終端。
 - GUI 核准必須提交明確的 `room-first`／`seat-only` 與 boolean turn-sync 選項；缺欄、未知 mode 或
   額外欄位一律拒絕。設定綁定精確 presence、Room 與 canonical workspace，同一已加入席位的重送
   不得變更。`room-first` 下，broker 強制將 `ask_*`／`compare_agents` 經共同帳本執行，並記錄各次

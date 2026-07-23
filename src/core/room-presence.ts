@@ -30,6 +30,9 @@ export interface PresenceInfo {
   displayName?: string;
   collaborationMode?: PresenceCollaborationMode;
   syncTurns?: boolean;
+  standbyRequested: boolean;
+  standbyRequestedAtMs?: number;
+  standbyApproved: boolean;
 }
 
 export interface PresenceRegistration {
@@ -69,9 +72,11 @@ interface PresenceRow {
   open_turn_key: string | null;
   collaboration_mode: PresenceCollaborationMode | null;
   sync_turns: number;
+  standby_requested_at_ms: number | null;
+  standby_approved: number;
 }
 
-const PRESENCE_SCHEMA_VERSION = 4;
+const PRESENCE_SCHEMA_VERSION = 5;
 const DEFAULT_LEASE_MS = 15_000;
 const MAX_ACTIVE_SESSIONS = 32;
 const MAX_WORKSPACE_SESSIONS = 12;
@@ -174,6 +179,11 @@ function publicInfo(row: PresenceRow, roomId?: string): PresenceInfo {
     ...(joined && row.collaboration_mode
       ? { collaborationMode: row.collaboration_mode, syncTurns: row.sync_turns === 1 }
       : {}),
+    standbyRequested: joined && row.standby_requested_at_ms !== null,
+    ...(joined && row.standby_requested_at_ms !== null
+      ? { standbyRequestedAtMs: Number(row.standby_requested_at_ms) }
+      : {}),
+    standbyApproved: joined && row.standby_approved === 1,
   };
 }
 
@@ -216,6 +226,7 @@ export class RoomPresenceStore {
         if (version === 1) this.#migrateV2();
         if (version <= 2) this.#migrateV3();
         if (version <= 3) this.#migrateV4();
+        if (version <= 4) this.#migrateV5();
       }
       if (this.#db.prepare("PRAGMA foreign_key_check").all().length > 0) {
         throw new Error("PRESENCE_FOREIGN_KEY_VIOLATION");
@@ -248,9 +259,12 @@ export class RoomPresenceStore {
           open_turn_key TEXT,
           collaboration_mode TEXT CHECK (collaboration_mode IN ('room-first', 'seat-only') OR collaboration_mode IS NULL),
           sync_turns INTEGER NOT NULL DEFAULT 0 CHECK (sync_turns IN (0, 1)),
+          standby_requested_at_ms INTEGER,
+          standby_approved INTEGER NOT NULL DEFAULT 0 CHECK (standby_approved IN (0, 1)),
           UNIQUE(provider, workspace, host_pid),
-          CHECK ((room_id IS NULL AND display_name IS NULL AND collaboration_mode IS NULL AND sync_turns = 0) OR
+          CHECK ((room_id IS NULL AND display_name IS NULL AND collaboration_mode IS NULL AND sync_turns = 0 AND standby_requested_at_ms IS NULL AND standby_approved = 0) OR
                  (room_id IS NOT NULL AND display_name IS NOT NULL AND collaboration_mode IS NOT NULL)),
+          CHECK (standby_approved = 0 OR standby_requested_at_ms IS NULL),
           CHECK ((requested_room_id IS NULL AND requested_at_ms IS NULL) OR
                  (requested_room_id IS NOT NULL AND requested_at_ms IS NOT NULL))
         );
@@ -268,7 +282,7 @@ export class RoomPresenceStore {
           created_at_ms INTEGER NOT NULL,
           PRIMARY KEY (session_hash, event_key)
         );
-        PRAGMA user_version = 4;
+        PRAGMA user_version = 5;
       `);
       this.#db.exec("COMMIT");
     } catch (error) {
@@ -338,6 +352,22 @@ export class RoomPresenceStore {
     }
   }
 
+  #migrateV5(): void {
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      this.#db.exec(`
+        ALTER TABLE agent_presence ADD COLUMN standby_requested_at_ms INTEGER;
+        ALTER TABLE agent_presence ADD COLUMN standby_approved INTEGER NOT NULL DEFAULT 0
+          CHECK (standby_approved IN (0, 1));
+        PRAGMA user_version = 5;
+      `);
+      this.#db.exec("COMMIT");
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
@@ -389,8 +419,11 @@ export class RoomPresenceStore {
          OR (room_id IS NULL) <> (display_name IS NULL)
          OR (requested_room_id IS NULL) <> (requested_at_ms IS NULL)
          OR sync_turns NOT IN (0, 1)
+         OR standby_approved NOT IN (0, 1)
          OR (room_id IS NULL AND (collaboration_mode IS NOT NULL OR sync_turns <> 0))
+         OR (room_id IS NULL AND (standby_requested_at_ms IS NOT NULL OR standby_approved <> 0))
          OR (room_id IS NOT NULL AND collaboration_mode NOT IN ('room-first', 'seat-only'))
+         OR (standby_approved = 1 AND standby_requested_at_ms IS NOT NULL)
          OR LENGTH(id) < 1 OR LENGTH(id) > 128
     `).get() as { count: number };
     return {
@@ -515,6 +548,63 @@ export class RoomPresenceStore {
     return publicInfo(this.#row(id)!, roomId);
   }
 
+  requestStandby(id: string, roomId: string): PresenceInfo {
+    validRoom(roomId);
+    const now = this.#now();
+    this.#prune(now);
+    const row = this.#row(id);
+    if (!row) throw new Error("PRESENCE_NOT_FOUND");
+    if (row.room_id !== roomId || row.display_name === null) throw new Error("PRESENCE_NOT_JOINED");
+    if (row.standby_approved === 1 || row.standby_requested_at_ms !== null) {
+      return publicInfo(row, roomId);
+    }
+    this.#db
+      .prepare("UPDATE agent_presence SET standby_requested_at_ms = ? WHERE id = ?")
+      .run(now, id);
+    return publicInfo(this.#row(id)!, roomId);
+  }
+
+  cancelStandbyRequest(id: string, roomId: string): PresenceInfo {
+    validRoom(roomId);
+    this.#prune();
+    const row = this.#row(id);
+    if (!row) throw new Error("PRESENCE_NOT_FOUND");
+    if (row.room_id !== roomId || row.display_name === null) throw new Error("PRESENCE_NOT_JOINED");
+    if (row.standby_approved === 1 || row.standby_requested_at_ms === null) {
+      return publicInfo(row, roomId);
+    }
+    this.#db
+      .prepare("UPDATE agent_presence SET standby_requested_at_ms = NULL WHERE id = ?")
+      .run(id);
+    return publicInfo(this.#row(id)!, roomId);
+  }
+
+  approveStandby(id: string, roomId: string): PresenceInfo {
+    validRoom(roomId);
+    this.#prune();
+    const row = this.#row(id);
+    if (!row) throw new Error("PRESENCE_NOT_FOUND");
+    if (row.room_id !== roomId || row.display_name === null) throw new Error("PRESENCE_NOT_JOINED");
+    if (row.standby_approved === 1) return publicInfo(row, roomId);
+    if (row.standby_requested_at_ms === null) throw new Error("PRESENCE_STANDBY_NOT_REQUESTED");
+    this.#db
+      .prepare("UPDATE agent_presence SET standby_requested_at_ms = NULL, standby_approved = 1 WHERE id = ?")
+      .run(id);
+    return publicInfo(this.#row(id)!, roomId);
+  }
+
+  revokeStandby(id: string, roomId: string): PresenceInfo {
+    validRoom(roomId);
+    this.#prune();
+    const row = this.#row(id);
+    if (!row) throw new Error("PRESENCE_NOT_FOUND");
+    if (row.room_id !== roomId || row.display_name === null) throw new Error("PRESENCE_NOT_JOINED");
+    this.#db
+      .prepare("UPDATE agent_presence SET standby_requested_at_ms = NULL, standby_approved = 0 WHERE id = ?")
+      .run(id);
+    return publicInfo(this.#row(id)!, roomId);
+  }
+
   join(id: string, roomId: string, roomWorkspace: string, approvalValue: PresenceJoinApproval): PresenceInfo {
     validRoom(roomId);
     validWorkspace(roomWorkspace);
@@ -580,7 +670,7 @@ export class RoomPresenceStore {
     if (!row) throw new Error("PRESENCE_NOT_FOUND");
     if (row.room_id !== roomId) throw new Error("PRESENCE_NOT_JOINED");
     this.#db
-      .prepare("UPDATE agent_presence SET room_id = NULL, display_name = NULL, collaboration_mode = NULL, sync_turns = 0, session_hash = NULL, requested_room_id = NULL, requested_at_ms = NULL, open_turn_key = NULL WHERE id = ?")
+      .prepare("UPDATE agent_presence SET room_id = NULL, display_name = NULL, collaboration_mode = NULL, sync_turns = 0, standby_requested_at_ms = NULL, standby_approved = 0, session_hash = NULL, requested_room_id = NULL, requested_at_ms = NULL, open_turn_key = NULL WHERE id = ?")
       .run(id);
     return publicInfo(this.#row(id)!, roomId);
   }

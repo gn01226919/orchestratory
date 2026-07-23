@@ -105,6 +105,12 @@
   自動加入、讀取或記錄 Room。
 - GUI Owner 核准精確 session 時必須明確選擇 `room-first` 或 `seat-only`，並獨立決定是否透過已安裝的
   structured hooks 同步該 session 的可見 user／assistant turns。Agent 不得自行選擇或變更模式。
+- 加入核准只建立 Room membership，不得隱含授予待命。已加入的精確 session 呼叫 `room_wait` 時，
+  GUI 必須顯示獨立、session-scoped 的待命申請；Owner 核准後同一個 tool call 才能成為可喚醒狀態。
+- `room_wait` 必須有硬上限，且在 Owner 撤銷、client cancellation、stdio EOF、presence lease 過期或
+  timeout 時結束。GUI 只有在 active wait 存在時才能顯示可喚醒；不得建立替身或 fallback Agent。
+- 待命未核准時，新 GUI 精確席位交辦必須 fail closed。已核准但 active wait 暫時結束時可保留該
+  exact-session inbox 的既有 queued 工作，但 UI 不得宣稱已喚醒。
 - `room-first` 必須由 server 以 exact session＋Room＋canonical workspace 強制：所有經 Orchestratory
   `ask_*`／`compare_agents` 發起的跨 Agent 呼叫，呼叫前讀取有界最新帳本，並將 prompt、生命週期與
   回覆 append 到同一帳本；多 Agent compare 依帳本順序執行，後一位能讀到前一位已完成回覆。

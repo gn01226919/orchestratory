@@ -75,7 +75,7 @@
 
 - [x] Dependency-free repository-source format/hygiene lint 通過：UTF-8/LF、tab/trailing-space/final-newline、
   JSON、regular/executable mode 與 debugger/eval/dynamic Function/`shell: true` 規則均由 release gate 阻擋。
-- [x] 274/274 deterministic tests 通過；line 94.98%、branch 85.06%、functions 96.82%，通過
+- [x] 280/280 deterministic tests 通過；line 95.17%、branch 85.06%、functions 96.81%，通過
   固定 90%／85%／90% 覆蓋率門檻。
 - [x] CycloneDX 1.5 SBOM 已驗證；3 個 components，dependency/lockfile 無 drift。
 - [x] Working-tree 與完整 Git history 掃描通過。
@@ -106,6 +106,10 @@
 - [x] 2026-07-22 新增 room-first／seat-only 核准 UI 與 server 強制路由，277 項完整 gate 已通過；
   Chrome 已在精確專案 Room 實際選擇並核准兩種 mode 與相反的 turn-sync 設定。Zero-quota fake compare
   證明 room-first 依序讀寫帳本、seat-only 不增加帳本，跨專案切換不顯示兩個席位，console 無 error。
+- [x] 2026-07-23 將 Room membership 與 session-scoped `room_wait` 待命核准分離；280 項測試、
+  coverage、fuzz、SBOM 與 local/history security scan 全通過。Chrome 在 `orchestratory` 精確 Room
+  實測加入、待命申請／核准、exact-seat GUI 喚醒、ack／回覆、回覆後重新待命、Owner 撤銷與
+  stdio 關閉後自動移除；不建立替身 Agent、不 fallback。
 - [ ] 人類對公開 visibility、npm publish 與正式 release 仍為 NO-GO；本次只批准 Private source push。
 - [x] Owner 已選擇由 sanitized snapshot 建立全新 repository；既有含 live project/Room metadata 的
   內部 Git history 不得推送。

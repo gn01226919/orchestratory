@@ -141,7 +141,9 @@ function renderDeliveryReceipt(body, seq) {
   const deliveryLabel = delivery.state === "queued" && target
     ? target.wakeable
       ? "喚醒中"
-      : "已排隊（外接終端未值班，無法喚醒）"
+      : target.standbyApproved
+        ? "已排隊（待命已核准，等待終端重新掛起 room_wait）"
+        : "已排隊（room_wait 待命尚未核准）"
     : DELIVERY_LABELS[delivery.state] || delivery.state;
   text.textContent = `${deliveryLabel} · ${delivery.targetDisplayName} · 嘗試 ${delivery.attempt}/${delivery.maxAttempts}`;
   receipt.append(text);
@@ -339,6 +341,8 @@ function presenceViewSignature(sessions) {
     joined: Boolean(session.joined),
     requested: Boolean(session.requested),
     listening: Boolean(session.listening),
+    standbyRequested: Boolean(session.standbyRequested),
+    standbyApproved: Boolean(session.standbyApproved),
     displayName: session.displayName || "",
     collaborationMode: session.collaborationMode || "",
     syncTurns: Boolean(session.syncTurns),
@@ -357,10 +361,18 @@ function renderPresencePanel() {
     : null;
   state.presenceViewSignature = presenceViewSignature(sessions);
   const joinedCount = sessions.filter((session) => session.joined).length;
-  const pendingCount = sessions.filter((session) => session.requested && !session.joined).length;
-  byId("office-presence-count").textContent = `${joinedCount} 外接收件匣 · ${state.managedAgents.length} 可喚醒`;
+  const pendingJoinCount = sessions.filter((session) => session.requested && !session.joined).length;
+  const pendingStandbyCount = sessions.filter(
+    (session) => session.joined && session.standbyRequested && !session.standbyApproved,
+  ).length;
+  const wakeableCount = sessions.filter((session) => session.wakeable).length;
+  byId("office-presence-count").textContent =
+    `${joinedCount} 已加入 · ${wakeableCount} room-wait 待命中 · ${state.managedAgents.length} 受控`;
   const room = state.rooms.find((entry) => entry.id === state.room);
-  if (room) room.pendingAgentRequests = pendingCount;
+  if (room) {
+    room.pendingAgentRequests = pendingJoinCount;
+    room.pendingStandbyRequests = pendingStandbyCount;
+  }
   renderRoomCatalog();
   for (const listId of ["office-presence-list", "sidebar-presence-list"]) {
     const list = byId(listId);
@@ -386,7 +398,15 @@ function renderPresencePanel() {
       label.textContent = session.displayName || `${session.provider} 申請 ${index + 1}`;
       const detail = document.createElement("small");
       detail.textContent = session.joined
-        ? `${session.client || "MCP"} · ${session.collaborationMode === "room-first" ? "全程帳本協作" : "僅加入席位"} · ${session.syncTurns ? "終端對話同步" : "終端對話不入帳"} · ${session.listening ? "值班中" : "線上但休班"}`
+        ? `${session.client || "MCP"} · ${session.collaborationMode === "room-first" ? "全程帳本協作" : "僅加入房間"} · ${session.syncTurns ? "終端對話同步" : "終端對話不入帳"} · ${
+            session.listening
+              ? "room-wait 待命中，可由 GUI 喚醒"
+              : session.standbyRequested && !session.standbyApproved
+                ? "已申請 room-wait，等待 Owner 核准"
+                : session.standbyApproved
+                  ? "待命已核准，但終端目前未掛起 room_wait"
+                  : "已加入，尚未申請 room-wait"
+          }`
         : selected
           ? "已選取 · 請確認協作與對話同步模式"
           : `${session.client || "MCP"} · 點擊選取`;
@@ -427,7 +447,7 @@ function renderPresencePanel() {
         roomFirst.textContent = "全程帳本協作（MCP 路由，建議）";
         const seatOnly = document.createElement("option");
         seatOnly.value = "seat-only";
-        seatOnly.textContent = "僅加入值班席位";
+        seatOnly.textContent = "僅加入房間（非 room-first）";
         modeSelect.append(roomFirst, seatOnly);
         modeSelect.value = state.presenceJoinModes[session.id] || "room-first";
         state.presenceJoinModes[session.id] = modeSelect.value;
@@ -456,16 +476,32 @@ function renderPresencePanel() {
         syncLabel.addEventListener("click", (event) => event.stopPropagation());
         syncLabel.append(syncInput, document.createTextNode(" 同步此終端的使用者／Assistant 可見對話"));
       }
-      const action = document.createElement("button");
-      action.type = "button";
-      action.textContent = session.joined
-        ? "移除外接值班席位"
-        : "核准並建立值班席位";
-      action.className = session.joined ? "leave" : "join";
-      action.addEventListener("click", () => {
-        void changePresenceMembership(session, action);
+      const actions = document.createElement("div");
+      actions.className = "presence-actions";
+      if (session.joined && session.standbyRequested && !session.standbyApproved) {
+        const standby = document.createElement("button");
+        standby.type = "button";
+        standby.textContent = "核准 room-wait 待命";
+        standby.className = "join";
+        standby.addEventListener("click", () => void changePresenceStandby(session, "approve", standby));
+        actions.append(standby);
+      } else if (session.joined && session.standbyApproved) {
+        const standby = document.createElement("button");
+        standby.type = "button";
+        standby.textContent = "撤銷 room-wait 待命";
+        standby.className = "leave";
+        standby.addEventListener("click", () => void changePresenceStandby(session, "revoke", standby));
+        actions.append(standby);
+      }
+      const membership = document.createElement("button");
+      membership.type = "button";
+      membership.textContent = session.joined ? "移出房間" : "核准加入房間";
+      membership.className = session.joined ? "leave" : "join";
+      membership.addEventListener("click", () => {
+        void changePresenceMembership(session, membership);
       });
-      row.append(identity, action);
+      actions.append(membership);
+      row.append(identity, actions);
       if (nameInput) row.append(nameInput);
       if (modeSelect) row.append(modeSelect);
       if (syncLabel) row.append(syncLabel);
@@ -496,7 +532,9 @@ function managedAgentViewSignature(agents) {
 function renderManagedAgents() {
   state.managedAgentViewSignature = managedAgentViewSignature(state.managedAgents);
   const joinedCount = state.presences.filter((session) => session.joined).length;
-  byId("office-presence-count").textContent = `${joinedCount} 外接收件匣 · ${state.managedAgents.length} 可喚醒`;
+  const wakeableCount = state.presences.filter((session) => session.wakeable).length;
+  byId("office-presence-count").textContent =
+    `${joinedCount} 已加入 · ${wakeableCount} room-wait 待命中 · ${state.managedAgents.length} 受控`;
   for (const listId of ["sidebar-managed-agent-list", "office-managed-agent-list"]) {
     const list = byId(listId);
     if (!list) continue;
@@ -597,6 +635,30 @@ async function changePresenceMembership(session, button) {
   }
 }
 
+async function changePresenceStandby(session, action, button) {
+  if (!state.room) return;
+  button.disabled = true;
+  button.textContent = action === "approve" ? "核准中…" : "撤銷中…";
+  try {
+    const value = await api(`/api/rooms/presence/standby/${action}`, {
+      method: "POST",
+      body: JSON.stringify({ room: state.room, presenceId: session.id }),
+    });
+    if (value.session) {
+      state.presences = [...state.presences.filter((entry) => entry.id !== value.session.id), value.session];
+    }
+    renderPresencePanel();
+    syncOfficeDesks();
+    if (!byId("office").hidden) updateOffice(state.recent || []);
+    await refreshPresence(true);
+    await poll();
+  } catch (error) {
+    byId("connection").textContent = `room-wait 待命變更失敗：${error.message}`;
+    alert(error.message);
+    renderPresencePanel();
+  }
+}
+
 async function refreshPresence(force = false) {
   if (!state.room || state.presenceRefreshing) return;
   if (!force && Date.now() < state.presenceNextAt) return;
@@ -634,6 +696,14 @@ async function refreshPresence(force = false) {
         const before = previous.get(session.id);
         if (!before && !session.joined) {
           addOfficeNotification("presence", `${session.provider} 申請加入 Room`, "請在左側「新增 Agents」審核；批准前不會記錄內容。", false);
+        }
+        if (session.joined && session.standbyRequested && !before?.standbyRequested) {
+          addOfficeNotification(
+            "presence",
+            `${session.displayName || session.provider} 申請 room-wait 待命`,
+            "請在左側「新增 Agents」核准；核准後只有這個終端 session 掛起 room_wait 時可由 GUI 喚醒。",
+            false,
+          );
         }
       }
       for (const [id, before] of previous) {
@@ -757,9 +827,13 @@ async function selectRoom(id) {
 }
 
 function roomOptionLabel(room) {
-  const pending = Number(room.pendingAgentRequests || 0);
+  const pending = roomPendingCount(room);
   const project = room.projectName || room.workspace?.split("/").filter(Boolean).at(-1) || room.id;
   return `${project} — ${room.id}${pending > 0 ? ` · ${pending} 件申請` : ""}`;
+}
+
+function roomPendingCount(room) {
+  return Number(room?.pendingAgentRequests || 0) + Number(room?.pendingStandbyRequests || 0);
 }
 
 function renderRoomCatalog() {
@@ -769,11 +843,11 @@ function renderRoomCatalog() {
   select.textContent = "";
   for (const room of state.rooms) select.append(new Option(roomOptionLabel(room), room.id));
   if (state.rooms.some((room) => room.id === selected)) select.value = selected;
-  const globalPending = state.rooms.reduce((sum, room) => sum + Number(room.pendingAgentRequests || 0), 0);
+  const globalPending = state.rooms.reduce((sum, room) => sum + roomPendingCount(room), 0);
   const badge = byId("agent-request-count");
   badge.textContent = String(globalPending);
   badge.hidden = globalPending === 0;
-  const pendingProjects = state.rooms.filter((room) => Number(room.pendingAgentRequests || 0) > 0);
+  const pendingProjects = state.rooms.filter((room) => roomPendingCount(room) > 0);
   const label = byId("agent-requests-open")?.querySelector("span");
   if (label) label.textContent = pendingProjects.length === 1 && pendingProjects[0]?.id !== state.room
     ? `＋ 新增 Agents（${pendingProjects[0].projectName} 有申請）`
@@ -799,7 +873,7 @@ async function bootstrap() {
     return;
   }
   const requestedRoom = page.searchParams.get("room");
-  const pendingRoom = rooms.find((room) => Number(room.pendingAgentRequests || 0) > 0);
+  const pendingRoom = rooms.find((room) => roomPendingCount(room) > 0);
   const selected = rooms.some((room) => room.id === requestedRoom)
     ? requestedRoom
     : pendingRoom?.id || rooms[0].id;
@@ -832,8 +906,8 @@ byId("ledger").addEventListener("click", (event) => {
 byId("room-select").addEventListener("change", () => void selectRoom(byId("room-select").value));
 byId("agent-requests-open").addEventListener("click", async () => {
   const current = state.rooms.find((room) => room.id === state.room);
-  const pendingRooms = state.rooms.filter((room) => Number(room.pendingAgentRequests || 0) > 0);
-  if (Number(current?.pendingAgentRequests || 0) === 0 && pendingRooms.length === 1) {
+  const pendingRooms = state.rooms.filter((room) => roomPendingCount(room) > 0);
+  if (roomPendingCount(current) === 0 && pendingRooms.length === 1) {
     byId("room-select").value = pendingRooms[0].id;
     await selectRoom(pendingRooms[0].id);
   }
