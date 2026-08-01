@@ -103,8 +103,10 @@ Agent 準備自行在 shell 中修改 canonical main 時，也必須先主動提
 
 - 優先使用使用者已登入的官方 CLI，不讀取或複製其 session token。
 - MCP server 提供 control-plane 與 collaboration tools，不取代 host 的原生 coding tools。
-- Room 工具契約見 `PROPOSAL_MCP_FIRST.md`；peer-seat tools 是下一階段必做，不得以既有 `ask_*`
-  worker 代替。
+- Room 工具契約見 `PROPOSAL_MCP_FIRST.md`；development branch 已實作 `list_agents.terminalSeats`、
+  `room_send`、`room_await_reply`、stable send idempotency 與 participant/task-bound source/thread metadata，
+  仍須真實 Codex＋Claude Code host 驗收。
+  既有 `ask_*` worker 保持分離，任何情況都不得拿來代替 exact-seat target。
 - Provider worker 工具可以保留，但必須標示它們是新建 worker，而非 live terminal seat。
 - API 模式是否啟用、費用與資料傳送仍由 Owner 明確決定；不得自動 fallback 或自動付費。
 

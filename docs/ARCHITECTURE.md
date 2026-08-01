@@ -88,7 +88,7 @@ thread，也不代表每位 Agent 已即時讀完所有訊息。
 
 - authenticated source seat；
 - target exact seat；
-- thread ID、reply-to、task/candidate 與 ledger reference；
+- thread ID、reply-to、task 與 ledger reference；candidate linkage 由 Candidate Registry 階段加入；
 - send、wait reply、reply-and-wait、reconnect 與 cancel；
 - 無固定 thread round ceiling。
 
@@ -158,6 +158,8 @@ Native capability 回答「host 原本允許 Agent 做什麼」；merge approval
 ## 6. 失敗與恢復
 
 - Seat offline：保留 thread 和 candidate，顯示不可喚醒，不 fallback。
+- Send 與 source/target unregister 競態：presence delete → inbox reconciliation；ledger/enqueue 前後重驗，
+  不讓已離線 target 留下 active queued delivery，也不讓已消失的 source 產生無人可 await 的新工作。
 - Transport timeout：同一 thread 可重新 wait，不結束任務。
 - Candidate crash：從已驗證 checkpoint 恢復，不能假裝未保存內容存在。
 - Main drift：使 pending merge approval 失效，重新 preview。
@@ -167,6 +169,10 @@ Native capability 回答「host 原本允許 Agent 做什麼」；merge approval
 
 ## 7. 導入相容性
 
-目前 runtime 仍是 GUI → exact-seat 的單向 inbox，`ask_*` 仍建立唯讀 worker，Writer 路徑仍受 lease
-與 Workspace MCP 限制。導入 ADR-028 時必須使用 feature/capability negotiation，直到 peer thread、
-candidate completion 與 promotion 全部通過驗收，GUI 才能標示 Native Full-Trust workflow ready。
+隔離 development branch 已把 inbox 擴充為 schema v4，支援 authenticated source、thread、reply-to、
+durable send idempotency、`list_agents.terminalSeats`、`room_send` 與 `room_await_reply`；synthetic
+multi-connection peer tests、20 輪 thread、transport reconnect、三席 hijack negative test，以及雙 OS process
+migration race 已通過。真實兩個 MCP stdio host 的 cross-provider 驗收仍待執行。
+已安裝 runtime 尚未切換，`ask_*` 仍是分離的唯讀 worker，Writer 路徑仍受 legacy lease 與 Workspace
+MCP 限制。導入 ADR-028 時必須使用 feature/capability negotiation，直到真實 peer thread、candidate
+completion 與 promotion 全部通過驗收，GUI 才能標示 Native Full-Trust workflow ready。

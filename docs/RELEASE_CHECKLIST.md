@@ -85,7 +85,7 @@
 
 - [x] Dependency-free repository-source format/hygiene lint 通過：UTF-8/LF、tab/trailing-space/final-newline、
   JSON、regular/executable mode 與 debugger/eval/dynamic Function/`shell: true` 規則均由 release gate 阻擋。
-- [x] 280/280 deterministic tests 通過；line 95.17%、branch 85.06%、functions 96.81%，通過
+- [x] 289/289 deterministic tests 通過；line 95.21%、branch 85.17%、functions 96.78%，通過
   固定 90%／85%／90% 覆蓋率門檻。
 - [x] CycloneDX 1.5 SBOM 已驗證；3 個 components，dependency/lockfile 無 drift。
 - [x] Working-tree 與完整 Git history 掃描通過。

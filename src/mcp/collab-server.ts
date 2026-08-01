@@ -37,6 +37,7 @@ const MAX_COMPARE_TARGETS = 3;
 const MIN_COMPARE_TARGETS = 2;
 const TREE_CACHE_MS = 60_000;
 const MODEL_ID_PATTERN = /^[A-Za-z0-9._:/-]{1,128}$/u;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const TARGET_PATTERN = /^(codex|claude|grok|fake)(?::([A-Za-z0-9._:/-]{1,128}))?$/u;
 const ROOM_WAKE_PREFIX_PATTERN = /^@(codex|claude|grok|fake)(?::[A-Za-z0-9._:/-]{1,128})?\s+/u;
 const ASK_PROVIDERS = new Set<ProviderId>(["codex", "claude", "grok"]);
@@ -47,6 +48,7 @@ const MAX_JOIN_APPROVAL_WAIT_MS = 120_000;
 const DEFAULT_JOIN_APPROVAL_WAIT_MS = 30_000;
 const MAX_STANDBY_WAIT_MS = 4 * 60 * 60 * 1_000;
 const DEFAULT_STANDBY_WAIT_MS = MAX_STANDBY_WAIT_MS;
+const DEFAULT_PEER_REPLY_WAIT_MS = 30_000;
 const MAX_MCP_INFLIGHT_REQUESTS = 16;
 
 type CollabInvoker = (
@@ -207,7 +209,7 @@ export class CollabToolBroker {
       {
         name: "list_agents",
         description:
-          "List available subscription worker agents, their models, and the allowlisted workspace roots.",
+          "List subscription workers plus authenticated exact terminal seats in this session's joined Room. Terminal seats are distinct live Codex/Claude/Grok processes and can be addressed with room_send; they are never replaced by a provider worker.",
         inputSchema: { type: "object", additionalProperties: false, properties: {} },
       },
       {
@@ -388,6 +390,41 @@ export class CollabToolBroker {
       });
     }
     if ((this.#inbox || this.#collaboration) && this.#resolvePresenceId && this.#resolveActor) {
+      if (this.#collaboration && this.#resolveSessionRoom) {
+        tools.push(
+          {
+            name: "room_send",
+            description:
+              "Send work directly from this authenticated terminal seat to one exact joined terminal seat. Supply one stable UUID clientRequestId per logical send so transport retries cannot duplicate it. The sender identity is server-bound and cannot be supplied or spoofed. The target must have approved standby; delivery never falls back to a resident/provider worker. New threads are server-generated; follow-ups require both threadId and replyToDeliveryId and keep the same participants/task. Threads have no fixed round limit. Optionally wait for this delivery's reply for up to four hours.",
+            inputSchema: {
+              type: "object", additionalProperties: false,
+              required: ["targetPresenceId", "text", "clientRequestId"],
+              properties: {
+                targetPresenceId: { type: "string", minLength: 36, maxLength: 36 },
+                text: { type: "string", minLength: 1, maxLength: MAX_QUESTION_CHARS },
+                threadId: { type: "string", minLength: 36, maxLength: 36 },
+                replyToDeliveryId: { type: "string", minLength: 36, maxLength: 36 },
+                clientRequestId: { type: "string", minLength: 36, maxLength: 36 },
+                taskId: { type: "string", minLength: 1, maxLength: 128 },
+                waitForReplyMs: { type: "integer", minimum: 1, maximum: MAX_STANDBY_WAIT_MS },
+              },
+            },
+          },
+          {
+            name: "room_await_reply",
+            description:
+              "Wait for the reply, failure, or cancellation of a delivery previously sent by this exact authenticated terminal. A transport timeout does not close its thread; call again or continue later. No fixed thread round limit is imposed.",
+            inputSchema: {
+              type: "object", additionalProperties: false,
+              required: ["deliveryId"],
+              properties: {
+                deliveryId: { type: "string", minLength: 36, maxLength: 36 },
+                timeoutMs: { type: "integer", minimum: 1, maximum: MAX_STANDBY_WAIT_MS },
+              },
+            },
+          },
+        );
+      }
       tools.push(
         {
           name: "room_wait",
@@ -466,6 +503,8 @@ export class CollabToolBroker {
     if (name === "room_mention") return await this.#roomMention(asObject(input), options);
     if (name === "request_coding_workflow") return await this.#requestCodingWorkflow(asObject(input));
     if (name === "room_join_request") return await this.#roomJoinRequest(asObject(input), options);
+    if (name === "room_send") return await this.#roomSend(asObject(input), options);
+    if (name === "room_await_reply") return await this.#roomAwaitReply(asObject(input), options);
     if (name === "room_wait") return await this.#roomWait(asObject(input), options);
     if (name === "room_ack") return this.#roomAck(asObject(input));
     if (name === "room_reply") return await this.#roomReply(asObject(input));
@@ -609,6 +648,110 @@ export class CollabToolBroker {
       room: roomId,
       duty: "standby-approval-required",
     });
+  }
+
+  #peerSession(): {
+    collaboration: CollaborationService;
+    presenceId: string;
+    binding: SessionRoomBinding;
+  } {
+    if (!this.#collaboration || !this.#resolvePresenceId || !this.#resolveSessionRoom) {
+      throw new Error("ROOM_PEER_MESSAGING_UNAVAILABLE");
+    }
+    const binding = this.#resolveSessionRoom();
+    if (!binding) throw new Error("PRESENCE_NOT_JOINED");
+    return {
+      collaboration: this.#collaboration,
+      presenceId: this.#resolvePresenceId(),
+      binding,
+    };
+  }
+
+  async #roomSend(input: JsonObject, options: CollabCallOptions): Promise<string> {
+    this.#allowedKeys(
+      input,
+      ["targetPresenceId", "text", "threadId", "replyToDeliveryId", "clientRequestId", "taskId", "waitForReplyMs"],
+      "UNKNOWN_ROOM_SEND_ARGUMENT",
+    );
+    if (typeof input.targetPresenceId !== "string" || !UUID_PATTERN.test(input.targetPresenceId)) {
+      throw new Error("INVALID_TARGET_PRESENCE_ID");
+    }
+    if (typeof input.clientRequestId !== "string" || !UUID_PATTERN.test(input.clientRequestId)) {
+      throw new Error("INVALID_CLIENT_REQUEST_ID");
+    }
+    const text = requireQuestion(input.text);
+    for (const [value, error] of [
+      [input.threadId, "INVALID_THREAD_ID"],
+      [input.replyToDeliveryId, "INVALID_REPLY_TO_DELIVERY_ID"],
+    ] as const) {
+      if (value !== undefined && (typeof value !== "string" || !UUID_PATTERN.test(value))) {
+        throw new Error(error);
+      }
+    }
+    if ((input.threadId === undefined) !== (input.replyToDeliveryId === undefined)) {
+      throw new Error("THREAD_CONTINUATION_FIELDS_MISMATCH");
+    }
+    if (
+      input.taskId !== undefined &&
+      (typeof input.taskId !== "string" || input.taskId.length < 1 || input.taskId.length > 128 || input.taskId.includes("\0"))
+    ) throw new Error("INVALID_DELIVERY_TASK_ID");
+    if (
+      input.waitForReplyMs !== undefined &&
+      (!Number.isSafeInteger(input.waitForReplyMs) || Number(input.waitForReplyMs) < 1 || Number(input.waitForReplyMs) > MAX_STANDBY_WAIT_MS)
+    ) throw new Error("INVALID_ROOM_REPLY_WAIT_TIMEOUT");
+    const { collaboration, presenceId, binding } = this.#peerSession();
+    const sent = collaboration.postBetweenExternals({
+      roomId: binding.roomId,
+      workspace: binding.workspace,
+      sourcePresenceId: presenceId,
+      targetPresenceId: input.targetPresenceId,
+      clientRequestId: input.clientRequestId,
+      text,
+      ...(typeof input.threadId === "string" ? { threadId: input.threadId } : {}),
+      ...(typeof input.replyToDeliveryId === "string" ? { replyToDeliveryId: input.replyToDeliveryId } : {}),
+      ...(typeof input.taskId === "string" ? { taskId: input.taskId } : {}),
+    });
+    const base = {
+      message: sent.message,
+      delivery: sent.delivery,
+      target: {
+        id: sent.target.id,
+        provider: sent.target.provider,
+        displayName: sent.target.displayName,
+      },
+      dispatch: sent.dispatch,
+    };
+    if (input.waitForReplyMs === undefined) return JSON.stringify(base);
+    const outcome = await collaboration.waitForExternalReply({
+      presenceId,
+      deliveryId: sent.delivery.id,
+      timeoutMs: Number(input.waitForReplyMs),
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    return JSON.stringify({
+      ...base,
+      replyWait: outcome ? { timeout: false, ...outcome } : { timeout: true },
+    });
+  }
+
+  async #roomAwaitReply(input: JsonObject, options: CollabCallOptions): Promise<string> {
+    this.#allowedKeys(input, ["deliveryId", "timeoutMs"], "UNKNOWN_ROOM_AWAIT_REPLY_ARGUMENT");
+    if (typeof input.deliveryId !== "string" || !UUID_PATTERN.test(input.deliveryId)) {
+      throw new Error("INVALID_DELIVERY_ID");
+    }
+    const timeoutMs = input.timeoutMs === undefined ? DEFAULT_PEER_REPLY_WAIT_MS : input.timeoutMs;
+    if (
+      !Number.isSafeInteger(timeoutMs) || Number(timeoutMs) < 1 ||
+      Number(timeoutMs) > MAX_STANDBY_WAIT_MS
+    ) throw new Error("INVALID_ROOM_REPLY_WAIT_TIMEOUT");
+    const { collaboration, presenceId } = this.#peerSession();
+    const outcome = await collaboration.waitForExternalReply({
+      presenceId,
+      deliveryId: input.deliveryId,
+      timeoutMs: Number(timeoutMs),
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    return JSON.stringify(outcome ? { timeout: false, ...outcome } : { timeout: true });
   }
 
   async #roomWait(input: JsonObject, options: CollabCallOptions): Promise<string> {
@@ -901,6 +1044,21 @@ export class CollabToolBroker {
 
   #listAgents(input: JsonObject): string {
     if (Object.keys(input).length > 0) throw new Error("UNKNOWN_LIST_AGENTS_ARGUMENT");
+    const binding = this.#resolveSessionRoom?.();
+    const selfId = binding ? this.#resolvePresenceId?.() : undefined;
+    const terminalSeats = binding && this.#collaboration
+      ? this.#collaboration.roomView(binding.roomId, binding.workspace).sessions
+        .filter((session) => session.joined)
+        .map((session) => ({
+          id: session.id,
+          provider: session.provider,
+          displayName: session.displayName,
+          ...(session.model ? { model: session.model } : {}),
+          standbyApproved: session.standbyApproved,
+          wakeable: session.wakeable,
+          self: session.id === selfId,
+        }))
+      : [];
     return JSON.stringify({
       providers: this.#providers.capabilities()
         .filter((capabilities) => capabilities.subscription)
@@ -911,6 +1069,15 @@ export class CollabToolBroker {
           canWriteSubscription: capabilities.canWriteSubscription,
         })),
       workspaceRoots: this.#workspaces.roots(),
+      ...(binding
+        ? {
+            room: {
+              id: binding.roomId,
+              collaborationMode: binding.collaborationMode,
+            },
+            terminalSeats,
+          }
+        : {}),
       usage: this.status(),
     });
   }
@@ -1269,13 +1436,20 @@ export async function handleCollabMcpMessage(
           "   that exact live session then submits a separate standby request for GUI approval.",
           "   Once approved, room_wait stays open for a bounded maximum of four hours. For each exact-seat",
           "   delivery call room_ack(read), room_ack(working), then room_reply or room_fail.",
+          "   list_agents includes authenticated terminalSeats for the joined Room. Use room_send with the",
+          "   exact targetPresenceId and one stable UUID clientRequestId per logical send to collaborate with",
+          "   that existing Codex/Claude/Grok terminal; optionally",
+          "   wait for its reply, or use room_await_reply later. Reuse threadId and replyToDeliveryId for",
+          "   follow-ups; new thread IDs are server-generated. Threads have no fixed round limit, and exact-seat",
+          "   delivery never falls back to a worker.",
           "   Normally pass only room to both tools. Join and standby approval each wait 30 seconds;",
           "   the standby wait has a four-hour hard maximum and is never infinite.",
           "   When a standby wait ends, immediately call room_wait again while the owner expects duty;",
           "   after room_reply or room_fail, immediately call room_wait again for the next assignment.",
           "   Closing the terminal or stdio removes the session and its standby approval. If the host",
           "   cancels the tool call, the GUI truthfully stops showing this exact seat as wakeable.",
-          "3. room_mention {target:'codex'|'claude'|'grok', text} — wake another model;",
+          "3. room_mention {target:'codex'|'claude'|'grok', text} — start a separate provider worker only;",
+          "   do not use it when the user asked for an existing terminal seat.",
           "   reference earlier messages as #12 or #40-#45 and their content is injected",
           "   automatically. The reply is appended to the ledger. Costs one quota call.",
           "4. room_read/room_get/room_search — catch up on or cite the ledger.",

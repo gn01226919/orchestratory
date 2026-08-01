@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { CollabToolBroker, handleCollabMcpMessage } from "../src/mcp/collab-server.ts";
 import { RoomLedger } from "../src/core/room-ledger.ts";
 import { RoomInboxStore } from "../src/core/room-inbox.ts";
@@ -142,6 +143,14 @@ test("collab broker exposes only the fixed bounded tool registry", async (t) => 
   }
   await assert.rejects(broker.call("write_file", {}), /UNKNOWN_COLLAB_TOOL/u);
   await assert.rejects(broker.call("ask_fake", {}), /UNKNOWN_COLLAB_TOOL/u);
+  await assert.rejects(
+    broker.call("room_send", {
+      targetPresenceId: "11111111-1111-4111-8111-111111111111",
+      clientRequestId: randomUUID(),
+      text: "peer",
+    }),
+    /ROOM_PEER_MESSAGING_UNAVAILABLE/u,
+  );
 });
 
 test("room_join_request only proposes this terminal for the matching room", async (t) => {
@@ -757,6 +766,207 @@ test("exact-seat MCP tools wait, acknowledge, and reply without provider fallbac
   assert.equal(replied.delivery.state, "replied");
   assert.equal(replied.reply.author, "codex（外接）");
   assert.deepEqual(calls, []);
+});
+
+test("MCP exact terminal seats discover, send, await, and continue threads directly", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "orchestratory-peer-mcp-root-"));
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-peer-mcp-data-"));
+  const codexService = new CollaborationService(data);
+  const claudeService = new CollaborationService(data);
+  t.after(() => codexService.close());
+  t.after(() => claudeService.close());
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  codexService.ledger.createRoom("demo", root);
+  const codex = codexService.registerExternal({ provider: "codex", workspace: root, hostPid: 7301 });
+  const claude = claudeService.registerExternal({ provider: "claude", workspace: root, hostPid: 7302 });
+  for (const seat of [codex, claude]) {
+    codexService.requestExternalJoin(seat.id, "demo", root);
+    codexService.approveExternalJoin({
+      presenceId: seat.id,
+      roomId: "demo",
+      workspace: root,
+      collaborationMode: "room-first",
+      syncTurns: false,
+      label: seat.provider,
+    });
+    codexService.requestExternalStandby(seat.id, "demo", root);
+    codexService.approveExternalStandby(seat.id, "demo", root);
+  }
+  const providerCalls: string[] = [];
+  const makeBroker = (service: CollaborationService, presenceId: string) => new CollabToolBroker({
+    providers: new ProviderRegistry([]),
+    workspaces: WorkspacePolicy.fromPaths([root]),
+    hardLimits: DEFAULT_HARD_LIMITS,
+    invoke: async () => {
+      providerCalls.push("provider");
+      throw new Error("PROVIDER_MUST_NOT_RUN");
+    },
+    ledger: service.ledger,
+    collaboration: service,
+    resolvePresenceId: () => presenceId,
+    resolveActor: (roomId) => service.externalActor(presenceId, roomId),
+    resolveSessionRoom: () => {
+      const current = service.presence.get(presenceId)!;
+      return {
+        roomId: current.roomId!,
+        workspace: current.workspace,
+        actor: current.displayName!,
+        collaborationMode: current.collaborationMode!,
+        syncTurns: current.syncTurns!,
+      };
+    },
+  });
+  const codexBroker = makeBroker(codexService, codex.id);
+  const claudeBroker = makeBroker(claudeService, claude.id);
+  assert.deepEqual(
+    codexBroker.tools().slice(-6).map((tool) => tool.name),
+    ["room_send", "room_await_reply", "room_wait", "room_ack", "room_reply", "room_fail"],
+  );
+  const agents = JSON.parse(await codexBroker.call("list_agents", {})) as {
+    terminalSeats: Array<{ id: string; displayName: string; self: boolean }>;
+  };
+  assert.deepEqual(agents.terminalSeats.map((seat) => seat.id), [codex.id, claude.id]);
+  assert.equal(agents.terminalSeats.find((seat) => seat.id === codex.id)?.self, true);
+
+  const sent = JSON.parse(await codexBroker.call("room_send", {
+    targetPresenceId: claude.id,
+    clientRequestId: randomUUID(),
+    text: "請直接檢查這個修正",
+    taskId: "peer-task",
+  })) as { delivery: { id: string; threadId: string; sourcePresenceId: string } };
+  assert.equal(sent.delivery.sourcePresenceId, codex.id);
+  const claimed = JSON.parse(await claudeBroker.call("room_wait", {
+    room: "demo", timeoutMs: 100,
+  })) as { delivery: { id: string; leaseToken: string; threadId: string; sourcePresenceId: string } };
+  assert.equal(claimed.delivery.threadId, sent.delivery.threadId);
+  assert.equal(claimed.delivery.sourcePresenceId, codex.id);
+  await claudeBroker.call("room_ack", {
+    deliveryId: claimed.delivery.id, leaseToken: claimed.delivery.leaseToken, phase: "read",
+  });
+  await claudeBroker.call("room_ack", {
+    deliveryId: claimed.delivery.id, leaseToken: claimed.delivery.leaseToken, phase: "working",
+  });
+  await claudeBroker.call("room_reply", {
+    deliveryId: claimed.delivery.id,
+    leaseToken: claimed.delivery.leaseToken,
+    text: "我已直接檢查，建議補測試",
+  });
+  const outcome = JSON.parse(await codexBroker.call("room_await_reply", {
+    deliveryId: sent.delivery.id,
+    timeoutMs: 100,
+  })) as { timeout: boolean; reply: { author: string } };
+  assert.equal(outcome.timeout, false);
+  assert.equal(outcome.reply.author, "claude（claude）");
+  const sendAndWait = codexBroker.call("room_send", {
+    targetPresenceId: claude.id,
+    clientRequestId: randomUUID(),
+    text: "請直接回覆第二輪",
+    threadId: sent.delivery.threadId,
+    replyToDeliveryId: sent.delivery.id,
+    taskId: "peer-task",
+    waitForReplyMs: 1_000,
+  });
+  const secondClaim = JSON.parse(await claudeBroker.call("room_wait", {
+    room: "demo", timeoutMs: 100,
+  })) as { delivery: { id: string; leaseToken: string } };
+  await claudeBroker.call("room_ack", {
+    deliveryId: secondClaim.delivery.id, leaseToken: secondClaim.delivery.leaseToken, phase: "read",
+  });
+  await claudeBroker.call("room_ack", {
+    deliveryId: secondClaim.delivery.id, leaseToken: secondClaim.delivery.leaseToken, phase: "working",
+  });
+  await claudeBroker.call("room_reply", {
+    deliveryId: secondClaim.delivery.id,
+    leaseToken: secondClaim.delivery.leaseToken,
+    text: "第二輪已直接回覆",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const combined = JSON.parse(await sendAndWait) as {
+    replyWait: { timeout: boolean; reply: { author: string } };
+  };
+  assert.equal(combined.replyWait.timeout, false);
+  assert.equal(combined.replyWait.reply.author, "claude（claude）");
+
+  const leftPending = JSON.parse(await codexBroker.call("room_send", {
+    targetPresenceId: claude.id,
+    clientRequestId: randomUUID(),
+    text: "這一則刻意測 transport timeout",
+  })) as { delivery: { id: string } };
+  const timeoutPromise = codexBroker.call("room_await_reply", {
+    deliveryId: leftPending.delivery.id,
+    timeoutMs: 1,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(JSON.parse(await timeoutPromise), { timeout: true });
+  const resumed = JSON.parse(await claudeBroker.call("room_wait", {
+    room: "demo", timeoutMs: 100,
+  })) as { delivery: { id: string; leaseToken: string } };
+  assert.equal(resumed.delivery.id, leftPending.delivery.id);
+  await claudeBroker.call("room_ack", {
+    deliveryId: resumed.delivery.id, leaseToken: resumed.delivery.leaseToken, phase: "read",
+  });
+  await claudeBroker.call("room_ack", {
+    deliveryId: resumed.delivery.id, leaseToken: resumed.delivery.leaseToken, phase: "working",
+  });
+  await claudeBroker.call("room_reply", {
+    deliveryId: resumed.delivery.id,
+    leaseToken: resumed.delivery.leaseToken,
+    text: "逾時後仍可重新接續",
+  });
+  const resumedOutcome = JSON.parse(await codexBroker.call("room_await_reply", {
+    deliveryId: leftPending.delivery.id,
+    timeoutMs: 100,
+  })) as { timeout: boolean; delivery: { state: string } };
+  assert.equal(resumedOutcome.timeout, false);
+  assert.equal(resumedOutcome.delivery.state, "replied");
+  await assert.rejects(
+    codexBroker.call("room_send", {
+      targetPresenceId: "claude",
+      clientRequestId: randomUUID(),
+      text: "不可 fallback",
+    }),
+    /INVALID_TARGET_PRESENCE_ID/u,
+  );
+  await assert.rejects(
+    codexBroker.call("room_send", {
+      targetPresenceId: claude.id,
+      clientRequestId: "retry-me",
+      text: "idempotency key 必須是 UUID",
+    }),
+    /INVALID_CLIENT_REQUEST_ID/u,
+  );
+  await assert.rejects(
+    codexBroker.call("room_send", {
+      targetPresenceId: claude.id,
+      clientRequestId: randomUUID(),
+      text: "不可冒名",
+      author: "you",
+    }),
+    /UNKNOWN_ROOM_SEND_ARGUMENT/u,
+  );
+  for (const invalid of [
+    { targetPresenceId: claude.id, clientRequestId: randomUUID(), text: "x", threadId: "bad" },
+    { targetPresenceId: claude.id, clientRequestId: randomUUID(), text: "x", threadId: sent.delivery.threadId },
+    { targetPresenceId: claude.id, clientRequestId: randomUUID(), text: "x", replyToDeliveryId: "bad" },
+    { targetPresenceId: claude.id, clientRequestId: randomUUID(), text: "x", replyToDeliveryId: sent.delivery.id },
+    { targetPresenceId: claude.id, clientRequestId: randomUUID(), text: "x", taskId: "" },
+    { targetPresenceId: claude.id, clientRequestId: randomUUID(), text: "x", waitForReplyMs: 0 },
+  ]) {
+    await assert.rejects(
+      codexBroker.call("room_send", invalid),
+      /INVALID_THREAD_ID|THREAD_CONTINUATION_FIELDS_MISMATCH|INVALID_REPLY_TO_DELIVERY_ID|INVALID_DELIVERY_TASK_ID|INVALID_ROOM_REPLY_WAIT_TIMEOUT/u,
+    );
+  }
+  await assert.rejects(
+    codexBroker.call("room_await_reply", { deliveryId: "bad" }),
+    /INVALID_DELIVERY_ID/u,
+  );
+  await assert.rejects(
+    codexBroker.call("room_await_reply", { deliveryId: sent.delivery.id, timeoutMs: 0 }),
+    /INVALID_ROOM_REPLY_WAIT_TIMEOUT/u,
+  );
+  assert.deepEqual(providerCalls, []);
 });
 
 test("MCP notifications/cancelled abort an in-flight room_wait and clear wakeable state", async (t) => {

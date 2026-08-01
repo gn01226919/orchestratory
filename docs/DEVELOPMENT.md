@@ -100,7 +100,7 @@ tests/
   executable-mode 與危險 code-pattern hygiene lint，再執行 syntax、strict typecheck、上述 coverage gate、deterministic fuzz、SBOM drift、
   working-tree scan 與完整 Git history scan；`npm run check:release` 再加入 dependency audit、offline
   committed-HEAD clean clone 與實際 tgz 安裝／bin／audit reproduction。
-- 目前證據：280/280 tests；line 95.17%、branch 85.06%、functions 96.81%；verified runtime tgz
+- 目前證據：289/289 tests；line 95.21%、branch 85.17%、functions 96.78%；verified runtime tgz
   為 86 個由 tracked allowlist 建出的檔案。
 
 Source manifest 保持 `private: true`，並把 `publishConfig.registry` 固定到 loopback sink，避免一般

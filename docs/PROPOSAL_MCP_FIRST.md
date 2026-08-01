@@ -1,6 +1,6 @@
 # Orchestratory MCP-first Native Full-Trust 規格
 
-狀態：**Accepted design / implementation pending**
+狀態：**Accepted design / exact-seat phase implemented in development source; live acceptance pending**
 
 更新：2026-08-01
 
@@ -16,19 +16,21 @@ Codex／Claude Code 原生 TUI 是具完整能力的 Supervisor／Worker；Orche
 
 ## 2. 目前 runtime 與目標差距
 
-目前已完成：Room membership、standby approval、`room_wait`、ack/reply/fail、GUI → exact-seat inbox、
-Room Ledger 與 read-only `ask_*` workers。
+目前已完成：Room membership、standby approval、`room_wait`、ack/reply/fail、Room Ledger、read-only
+`ask_*` workers，以及 development branch 上的 exact terminal discovery、authenticated `room_send`、
+delivery-scoped `room_await_reply`、thread metadata、source identity 與 v3→v4 inbox migration。這一批已通過
+synthetic/cross-process tests，但尚未切換已安裝 MCP，也尚未完成兩個真實 host 的人工驗收。
 
 目前尚未完成：
 
-- Terminal seat discovery；
-- authenticated terminal → terminal send；
-- thread/wait-reply/reply-and-wait；
+- 真實 Codex／Claude Code terminal-to-terminal live acceptance；
+- `room_reply_and_wait`／thread cancel 等 convenience tools；
 - candidate task lifecycle 與 completion checkpoint；
 - 任務完成後主動產生「是否 merge main」詢問；
 - snapshot-bound promotion approval、main drift、recovery 與 verify。
 
-Runtime 完成前，MCP `tools/list` 不得宣稱下列 pending 工具已可用。
+MCP `tools/list` 只能列出 development runtime 已實作的工具；下列標示 deferred 的 convenience 工具
+不得提前宣稱可用。
 
 ## 3. 身分與共同欄位
 
@@ -58,14 +60,15 @@ type Seat = {
 input: {}
 output: {
   providers: ProviderWorker[];
-  seats: Seat[];
+  terminalSeats: Seat[];
   workspaceRoots: WorkspaceRef[];
 }
 ```
 
-`providers` 與 `seats` 必須分開，避免把新 worker 當成既有終端。
+`providers` 與 `terminalSeats` 必須分開，避免把新 worker 當成既有終端。目前輸出只包含 same Room
+已加入席位的 bounded public identity、standby/wakeable 與 self；不包含 PID、stdio 或 provider session。
 
-### `room_list_seats`
+### `room_list_seats`（deferred convenience）
 
 ```ts
 input: { room?: string }
@@ -75,53 +78,64 @@ output: { room: string; self: Seat; seats: Seat[] }
 - 只列出目前 session 已加入之 Room 的可見席位。
 - 不回傳私有 lease、stdio/process、provider session 或 host secrets。
 
-### `room_send_to_seat`
+### `room_send`（已實作）
 
 ```ts
 input: {
-  room?: string;
-  targetSeatId: string;
-  message: string;
+  targetPresenceId: string;
+  text: string;
+  clientRequestId: string;
   threadId?: string;
-  replyTo?: string;
+  replyToDeliveryId?: string;
   taskId?: string;
-  candidateId?: string;
-  ledgerSeq?: number;
+  waitForReplyMs?: number;
 }
 output: {
-  deliveryId: string;
-  threadId: string;
-  sourceSeatId: string;
-  targetSeatId: string;
-  state: "queued" | "delivered";
+  message: RoomMessage;
+  delivery: RoomDelivery;
+  target: { id: string; provider: string; displayName: string };
+  dispatch: { wakeable: boolean; immediate: boolean };
+  replyWait?: { timeout: boolean; delivery?: RoomDelivery; reply?: RoomMessage };
 }
 ```
 
 - `sourceSeatId` 只由 server 從 authenticated presence 產生。
 - 驗證 same Room、canonical workspace 與 membership。
 - Target 不 wakeable 時可以 queued，但不得 fallback 到 provider worker。
+- 每個 logical send 使用穩定 UUID `clientRequestId`；同一 authenticated presence 且 source/target route
+  仍有效時，transport retry 會取回同一 ledger message／delivery；相同 key 若改 payload、target、thread
+  或 task 必須拒絕。
+  MCP host 完全退出後的跨 presence orphan recovery 尚待 stable seat identity／durable outbox 階段。
+- 新 thread ID 由 server 產生；延續既有 thread 必須同時引用 `threadId` 與該 thread 的
+  `replyToDeliveryId`，participants 與 task 不得中途替換。
 
 ### `room_wait`
 
-保留既有收件語意，但 delivery 增加 source seat、thread、task/candidate 與引用欄位。Transport timeout
+保留既有收件語意，但 delivery 增加 source seat、thread、task 與引用欄位；candidate linkage 由後續
+candidate lifecycle 階段加入。Transport timeout
 只結束本次 long-poll，不結束 thread；session-scoped standby 核准持續到撤銷、session EOF 或 lease
 失效，不應要求每個對話回合重新經 GUI 核准。
 
-### `room_wait_reply`
+### `room_await_reply`（已實作）
 
 ```ts
-input: { threadId: string; afterMessageId?: string; timeoutMs?: number }
-output: { threadId: string; messages: ThreadMessage[]; timedOut: boolean }
+input: { deliveryId: string; timeoutMs?: number }
+output: { timeout: boolean; delivery?: RoomDelivery; reply?: RoomMessage }
 ```
 
-- 只能等待呼叫者參與的 thread。
+- 只能等待 `sourcePresenceId` 等於呼叫者 authenticated presence 的 delivery；其他席位即使知道 ID 也拒絕。
 - `timeoutMs` 有 transport 上限；沒有 thread round ceiling。
 
 ### `room_reply`
 
-擴充既有工具，使 reply 綁定 authenticated seat 與 thread；重試維持 idempotent。
+擴充既有工具，使 reply 綁定 authenticated seat 與 thread；重試維持 idempotent。Immutable reply prepare
+是 reply／cancel 的線性化點：prepare 前已觀察到 cancel 則不得寫 ledger；prepare 後 reply 勝出並必須
+完成 receipt，避免 ledger orphan。若 process 在 prepare 後、delivery receipt 尚未確定時失聯，lease expiry
+先 fail closed 為 `REPLY_COMMIT_UNCERTAIN`；`room_await_reply`／原 responder retry 只有在 durable ledger
+idempotency receipt 的 key、Room、author 精確吻合時可正向 reconcile 為 replied。沒有 receipt 時不得用
+一般 retry 猜測性重播。
 
-### `room_reply_and_wait`
+### `room_reply_and_wait`（deferred convenience）
 
 ```ts
 input: {
@@ -138,7 +152,7 @@ output: {
 
 原子完成本輪回覆並繼續等待同 thread，減少協作摩擦。它不增加或削弱 host coding 能力。
 
-### `room_cancel_thread`
+### `room_cancel_thread`（deferred convenience）
 
 ```ts
 input: { threadId: string; reason?: string }
