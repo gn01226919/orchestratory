@@ -7,7 +7,7 @@ export function helpText(): string {
     "  orchestrator tui                     Start terminal-only natural-language mode",
     "  orchestrator gui [--port <number>]   Start the loopback-only visual GUI",
     "  orchestrator web [--port <number>]   Alias for orchestrator gui",
-    "  orchestrator mcp [--actor <id>]      Serve read-only collaboration tools over stdio MCP",
+    "  orchestrator mcp [--actor <id>]      Serve collaboration control-plane tools over stdio MCP",
     "  orchestrator run                     Read one workflow JSON from stdin and emit JSONL",
     "  orchestrator doctor                  Check local CLI versions without model calls",
     "  orchestrator models list <provider> [--api]",

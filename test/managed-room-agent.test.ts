@@ -17,6 +17,10 @@ test("managed room agents have persistent distinct identities and archive cleanl
   }, 1_000);
   assert.equal(created.displayName, "claude（前端小組）");
   assert.equal(created.kind, "managed-subagent");
+  assert.equal(created.executionClass, "gui-managed");
+  assert.equal(created.capabilityAuthority, "orchestratory");
+  assert.equal(created.conversationAccess, "read-only");
+  assert.equal(created.writeAccess, "owner-writer-lease-required");
   assert.equal((await stat(store.path)).mode & 0o777, 0o600);
   assert.throws(() => store.create({
     roomId: "demo", workspace: "/tmp/project", provider: "claude", model: "sonnet", label: "前端小組",

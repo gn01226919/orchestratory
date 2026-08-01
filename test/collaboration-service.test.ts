@@ -625,6 +625,103 @@ test("a second GUI preserves a live cross-process Writer run and revokes it only
   assert.equal(second.audit.verify(), true);
 });
 
+test("vNext revokes persisted external Writer capabilities and runs while preserving managed leases", async (t) => {
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-collaboration-legacy-external-"));
+  const service = new CollaborationService(data);
+  t.after(() => service.close());
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+  service.ledger.createRoom("demo", "/tmp/project");
+
+  const legacy = service.writerLeases.grant({
+    taskId: "legacy-external",
+    roomId: "demo",
+    workspace: "/tmp/project",
+    worktree: "/tmp/project-legacy-external",
+    writer: {
+      origin: "external",
+      provider: "codex",
+      actorId: "codex-legacy-seat",
+      displayName: "codex（legacy）",
+    },
+  });
+  const writableChild = service.writerDelegations.create({
+    parent: legacy.lease,
+    childProvider: "codex",
+    label: "legacy-write",
+    workspace: legacy.lease.worktree,
+  });
+  const readonlyChild = service.writerDelegations.create({
+    parent: legacy.lease,
+    childProvider: "claude",
+    label: "legacy-review",
+    workspace: legacy.lease.worktree,
+  });
+  const legacyRunId = "00000000-0000-4000-8000-000000000078";
+  service.writerLeases.beginRun(legacy.lease.taskId, legacyRunId, "legacy-gui");
+
+  assert.throws(() => service.assertWriterWrite({
+    taskId: legacy.lease.taskId,
+    roomId: "demo",
+    workspace: "/tmp/project",
+    epoch: legacy.lease.epoch,
+    capabilityToken: legacy.capabilityToken,
+    executedBy: legacy.lease.executedBy,
+  }), /NATIVE_EXTERNAL_WRITER_LEASE_UNSUPPORTED/u);
+  assert.throws(() => service.assertDelegatedWrite({
+    delegationId: writableChild.delegation.id,
+    taskId: legacy.lease.taskId,
+    roomId: "demo",
+    workspace: "/tmp/project",
+    capabilityToken: writableChild.capabilityToken!,
+    executedBy: writableChild.delegation.executedBy,
+  }), /NATIVE_EXTERNAL_WRITER_LEASE_UNSUPPORTED/u);
+  assert.throws(() => service.assertDelegatedRead({
+    delegationId: readonlyChild.delegation.id,
+    taskId: legacy.lease.taskId,
+    roomId: "demo",
+    workspace: "/tmp/project",
+    executedBy: readonlyChild.delegation.executedBy,
+  }), /NATIVE_EXTERNAL_WRITER_LEASE_UNSUPPORTED/u);
+
+  const managed = service.writerLeases.grant({
+    taskId: "managed-live",
+    roomId: "demo",
+    workspace: "/tmp/project",
+    worktree: "/tmp/project-managed-live",
+    writer: {
+      origin: "managed",
+      provider: "claude",
+      actorId: "managed-claude",
+      displayName: "claude（managed）",
+    },
+  });
+  const managedRunId = "00000000-0000-4000-8000-000000000079";
+  service.writerLeases.beginRun(managed.lease.taskId, managedRunId, "current-gui");
+
+  assert.equal(service.revokeUnrecoverableWriters(), 1);
+  assert.equal(service.writerLeases.current(legacy.lease.taskId), undefined);
+  assert.equal(service.writerLeases.hasActiveRun(legacy.lease.taskId), false);
+  assert.throws(
+    () => service.writerLeases.heartbeatRun(legacy.lease.taskId, legacyRunId, "legacy-gui"),
+    /WRITER_RUN_LOCK_LOST/u,
+  );
+  assert.equal(service.writerLeases.current(managed.lease.taskId)?.id, managed.lease.id);
+  assert.equal(service.writerLeases.hasActiveRun(managed.lease.taskId), true);
+  assert.deepEqual(
+    service.writerDelegations.list("demo")
+      .filter((delegation) => delegation.parentLeaseId === legacy.lease.id)
+      .map((delegation) => delegation.state),
+    ["revoked", "revoked"],
+  );
+  assert.equal(service.writerLeases.taskScope(legacy.lease.taskId)?.worktree, legacy.lease.worktree);
+  const revocation = service.audit.list({ roomId: "demo" })
+    .find((event) => event.action === "revoke-legacy-external");
+  assert.equal(revocation?.outcome, "succeeded");
+  assert.equal((revocation?.detail as { terminatedRun?: boolean }).terminatedRun, true);
+
+  service.writerLeases.finishRun(managed.lease.taskId, managedRunId, "current-gui");
+});
+
 test("service rejects cross-room removal and delivery impersonation", async (t) => {
   const data = await mkdtemp(join(tmpdir(), "orchestratory-collaboration-guard-"));
   const service = new CollaborationService(data);
@@ -673,18 +770,24 @@ test("service grants and switches Writer only to eligible room identities", asyn
   const external = service.registerExternal({ provider: "codex", workspace: source, hostPid: 7010 });
   await assert.rejects(service.grantWriter({
     taskId: "task-1", roomId: "demo", workspace: source,
-    candidate: { origin: "external", actorId: external.id },
+    candidate: { origin: "external", actorId: external.id } as never,
   }), /WRITER_CANDIDATE_NOT_ELIGIBLE/u);
   service.requestExternalJoin(external.id, "demo", source);
   const joined = service.approveExternalJoin({ ...ROOM_FIRST_JOIN, presenceId: external.id, roomId: "demo", workspace: source, label: "修復" });
+  const nativeView = service.roomView("demo", source).sessions.find((session) => session.id === joined.id);
+  assert.equal(nativeView?.executionClass, "native-full-trust");
+  assert.equal(nativeView?.capabilityAuthority, "host");
+  assert.equal(nativeView?.hostCapabilities, "unchanged");
+  await assert.rejects(service.grantWriter({
+    taskId: "task-1", roomId: "demo", workspace: source,
+    candidate: { origin: "external", actorId: external.id } as never,
+  }), /WRITER_CANDIDATE_NOT_ELIGIBLE/u);
   const granted = await service.grantWriter({
     taskId: "task-1", roomId: "demo", workspace: source,
-    candidate: { origin: "external", actorId: external.id },
+    candidate: { origin: "resident", provider: "codex" },
   });
-  assert.equal(granted.lease.writer.displayName, joined.displayName);
-  assert.match(granted.lease.executedBy, /^writer-companion-/u);
-  assert.ok(service.ledger.listAfter("demo", 0, 20).some((message) =>
-    message.text.includes("受管 Writer Companion") && message.text.includes("epoch 1")));
+  assert.equal(granted.lease.writer.displayName, "codex");
+  assert.equal(granted.lease.executedBy, "codex");
 
   const managed = service.createManaged({ roomId: "demo", workspace: source, provider: "claude", model: "claude-test", label: "審查" });
   const switched = service.switchWriter({
@@ -738,16 +841,7 @@ test("service grants and switches Writer only to eligible room identities", asyn
     candidate: { origin: "managed", actorId: "00000000-0000-4000-8000-000000000099" },
   }), /WRITER_CANDIDATE_NOT_ELIGIBLE/u);
 
-  const externalWriter = await service.grantWriter({
-    taskId: "task-2", roomId: "demo", workspace: source,
-    candidate: { origin: "external", actorId: external.id },
-  });
   service.removeExternal({ presenceId: external.id, roomId: "demo", workspace: source });
-  assert.equal(service.writerLeases.current("task-2"), undefined);
-  assert.throws(() => service.assertWriterWrite({
-    taskId: "task-2", roomId: "demo", workspace: source, epoch: externalWriter.lease.epoch,
-    capabilityToken: externalWriter.capabilityToken, executedBy: externalWriter.lease.executedBy,
-  }), /WRITER_LEASE_NOT_ACTIVE/u);
   service.completeWriter({
     taskId: "task-1", roomId: "demo", workspace: source,
     epoch: resumed.lease.epoch, checkpoint: "完成後保留 worktree",

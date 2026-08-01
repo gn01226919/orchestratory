@@ -64,6 +64,9 @@ Native host 是 Supervisor 與 coding runtime。Orchestratory 不代替它的工
 - GUI Managed policy 只能限制由 GUI 啟動及管理的 worker。
 - Native terminal 的 capability provenance 來自其 host，不能被 GUI join mode 或 Writer Lease 覆寫。
 - UI 必須清楚顯示兩種模式，不能用相同「Writer」標籤混淆。
+- Runtime 對 Native seat 固定回傳 `executionClass=native-full-trust`、`capabilityAuthority=host`、
+  `hostCapabilities=unchanged`；GUI Managed 固定回傳 managed policy provenance。
+- 舊 Writer Lease parser 與候選 API 不接受 `origin=external`；Native terminal 的寫入不經此舊降權路徑。
 
 ### E. Local ↔ External side effects
 
