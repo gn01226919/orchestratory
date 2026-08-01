@@ -64,9 +64,10 @@ Orchestratory 在單一使用者的 Mac 上協調一或多個原生 TUI Agent。
 | F12 | 惡意測試／dependency 破壞主機 | candidate、backup、host 原生 permission prompts、optional managed test mode | Native Full-Trust 執行任意 repo 程式即是主機 code execution |
 | F13 | Room／log 洩漏 source、個資或 token | bounded schema、redaction、minimal retention、no raw reasoning/session data | Redaction 無法辨識所有秘密；Agent 可在訊息中主動貼出 |
 | F14 | Web 頁面控制 localhost GUI | loopback、Host/Origin/CSRF/session checks、CSP | 瀏覽器、extension 或同帳號程序遭入侵 |
-| F15 | Provider／API 無限花費 | Owner 選擇 provider、API explicit opt-in、native host controls、usage telemetry | 不使用固定 thread ceiling；provider 自身或 Agent 仍可能持續呼叫 |
-| F16 | Runtime 尚未完成但 GUI 宣稱安全／可用 | capability negotiation、pending label、integration tests、truthful docs | 人工驗收仍可能漏掉版本不一致 |
-| F17 | 回應不確定的 transport retry 造成重複派工 | 同一 authenticated presence 使用 caller-stable UUID request ID、ledger idempotency、inbox source/request unique binding | MCP host 完全退出後會取得新 presence；跨 host lifetime 的 orphan recovery 仍需後續 stable seat identity／outbox。Caller 若換 ID，系統也不能判斷其意圖相同 |
+| F15 | Candidate mutation 回應遺失後被盲目重送 | MCP instructions 要求先 `candidate_status`；durable registry 可找回 task/checkpoint/completion prompt；canonical main 不被修改 | start/checkpoint 尚非 idempotent，complete retry 可能回 not-active；Phase 5 promotion 前必須補 durable request receipt 與 stable `clientRequestId` |
+| F16 | Provider／API 無限花費 | Owner 選擇 provider、API explicit opt-in、native host controls、usage telemetry | 不使用固定 thread ceiling；provider 自身或 Agent 仍可能持續呼叫 |
+| F17 | Runtime 尚未完成但 GUI 宣稱安全／可用 | capability negotiation、pending label、integration tests、truthful docs | 人工驗收仍可能漏掉版本不一致 |
+| F18 | 回應不確定的 transport retry 造成重複派工 | 同一 authenticated presence 使用 caller-stable UUID request ID、ledger idempotency、inbox source/request unique binding | MCP host 完全退出後會取得新 presence；跨 host lifetime 的 orphan recovery 仍需後續 stable seat identity／outbox。Caller 若換 ID，系統也不能判斷其意圖相同 |
 
 ## 6. STRIDE 摘要
 
@@ -121,3 +122,7 @@ Orchestratory 在單一使用者的 Mac 上協調一或多個原生 TUI Agent。
   管理，而不是硬切斷協作。
 - Provider 與遠端服務會處理收到的內容；本機 Orchestratory 無法消除其政策與基礎設施風險。
 - Main merge 以外的直接 host 操作仍依賴 Agent 規範與 provider 自有 permission UX。
+- Candidate mutation 目前沒有 request receipt；transport 結果不確定時只能先以 `candidate_status` 復原，
+  不可盲目重送。任何 main promotion 上線前，這項限制必須以 durable idempotency 修正。
+- Dirty-state 完整內容雜湊每次 inspection 共用 30 秒 deadline；極大或極慢檔案會 fail closed，要求 Owner
+  處理工作區狀態後重試，不會以 partial fingerprint 冒充穩定 snapshot。

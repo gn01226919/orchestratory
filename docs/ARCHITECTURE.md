@@ -91,7 +91,8 @@ thread，也不代表每位 Agent 已即時讀完所有訊息。
 
 - authenticated source seat；
 - target exact seat；
-- thread ID、reply-to、task 與 ledger reference；candidate linkage 由 Candidate Registry 階段加入；
+- thread ID、reply-to、task 與 ledger reference；UUID task ID 若對應 Candidate Registry，send 時重驗同一
+  Room／workspace，delivery 以該 task ID 保留 candidate linkage；
 - send、wait reply、reply-and-wait、reconnect 與 cancel；
 - 無固定 thread round ceiling。
 
@@ -100,10 +101,20 @@ thread，也不代表每位 Agent 已即時讀完所有訊息。
 建立及追蹤 task、base main、candidate path/HEAD、Agent branch、integration branch、dirty-state inventory、
 checkpoint、completion 與 retention。它不嘗試限制 Native Agent 的 filesystem scope。
 
+隔離開發分支目前已交付第一段 lifecycle：SQLite row-hash registry、Git candidate worktree、dirty main
+inventory（ignored 只保存數量與路徑指紋，不讀內容）、clean-commit checkpoint、completion preview、
+drift/status 與獨立 `refs/orchestratory/checkpoints/<task>/<checkpoint>` recovery ref。status 會解析並驗證
+ref 仍指向該 checkpoint commit；candidate branch 後續前進不會破壞舊復原點。Git diff 與 ignored
+inventory 採不保留內容的串流解析，大量檔案只會截斷明細清單並標示 truncated，不會因輸出 byte cap、
+固定 candidate 數量或預覽筆數而禁止 Agent 完成工作。
+
 ### 3.5 Completion Service
 
 Agent 宣告完成時建立穩定 checkpoint，彙整 diff、delete/rename、tests、main drift、conflicts、binary/
 large changes 與 recovery readiness，然後建立「是否 merge 到 main」的 Owner decision request。
+
+目前 MCP completion 已產生上述 preview 與 Owner-required 問句，但不含 approval token，也沒有 main
+mutation 工具；single-use snapshot-bound approval 從 3.6 Promotion Service 階段開始實作。
 
 ### 3.6 Promotion Service
 

@@ -36,6 +36,13 @@ import {
 } from "./writer-delegation.ts";
 import { WorktreeBroker } from "./worktree-broker.ts";
 import { CollaborationAuditLog, type AuditOutcome } from "./collaboration-audit.ts";
+import {
+  CandidateRegistry,
+  type CandidateCheckpoint,
+  type CandidateCompletion,
+  type CandidateTask,
+  type CandidateTaskStatus,
+} from "./candidate-registry.ts";
 
 export type WriterCandidate =
   | { origin: "resident"; provider: WriterProvider }
@@ -88,11 +95,15 @@ export class CollaborationService {
   readonly writerLeases: WriterLeaseStore;
   readonly writerDelegations: WriterDelegationStore;
   readonly audit: CollaborationAuditLog;
+  readonly candidates: CandidateRegistry;
   readonly #worktrees: WorktreeBroker;
   readonly #writerWorktrees: WriterWorktreeLifecycle | undefined;
   #closed = false;
 
-  constructor(dataDirectory: string, options: { writerWorktrees?: WriterWorktreeLifecycle } = {}) {
+  constructor(dataDirectory: string, options: {
+    writerWorktrees?: WriterWorktreeLifecycle;
+    maxCandidateFiles?: number;
+  } = {}) {
     this.ledger = new RoomLedger(dataDirectory);
     this.presence = new RoomPresenceStore(dataDirectory);
     this.inbox = new RoomInboxStore(dataDirectory);
@@ -100,6 +111,9 @@ export class CollaborationService {
     this.writerLeases = new WriterLeaseStore(dataDirectory);
     this.writerDelegations = new WriterDelegationStore(dataDirectory);
     this.audit = new CollaborationAuditLog(dataDirectory);
+    this.candidates = new CandidateRegistry(dataDirectory, {
+      ...(options.maxCandidateFiles === undefined ? {} : { maxFiles: options.maxCandidateFiles }),
+    });
     this.#worktrees = new WorktreeBroker(dataDirectory);
     this.#writerWorktrees = options.writerWorktrees;
   }
@@ -325,6 +339,12 @@ export class CollaborationService {
       );
     };
     if (!UUID_PATTERN.test(input.clientRequestId)) throw new Error("INVALID_CLIENT_REQUEST_ID");
+    if (input.taskId && UUID_PATTERN.test(input.taskId)) {
+      const candidate = this.candidates.get(input.taskId);
+      if (candidate && (candidate.roomId !== input.roomId || !this.#sameWorkspace(candidate.mainPath, input.workspace))) {
+        throw new Error("CANDIDATE_DELIVERY_SCOPE_MISMATCH");
+      }
+    }
     if ((input.threadId === undefined) !== (input.replyToDeliveryId === undefined)) {
       throw new Error("THREAD_CONTINUATION_FIELDS_MISMATCH");
     }
@@ -445,6 +465,122 @@ export class CollaborationService {
 
   externalActor(presenceId: string, roomId: string): string {
     return this.presence.actorFor(presenceId, roomId);
+  }
+
+  async startCandidate(input: {
+    presenceId: string;
+    roomId: string;
+    workspace: string;
+    task: string;
+    acceptanceCriteria?: string;
+  }): Promise<CandidateTask> {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    const actor = this.externalActor(input.presenceId, input.roomId);
+    const candidate = await this.candidates.start({
+      roomId: input.roomId,
+      mainPath: input.workspace,
+      task: input.task,
+      ...(input.acceptanceCriteria === undefined ? {} : { acceptanceCriteria: input.acceptanceCriteria }),
+    });
+    this.audit.append({
+      roomId: input.roomId,
+      taskId: candidate.taskId,
+      type: "candidate.started",
+      actor,
+      executedBy: actor,
+      action: "candidate-start",
+      path: candidate.candidatePath,
+      outcome: "succeeded",
+      detail: {
+        candidateId: candidate.candidateId,
+        candidateBranch: candidate.candidateBranch,
+        baseMainHead: candidate.baseMainHead,
+        mainDirtyRecorded: !candidate.baseline.clean,
+        mainMutation: false,
+      },
+    });
+    this.#candidateLedger(input.roomId, candidate.taskId,
+      `${actor} 已建立 candidate ${candidate.candidateId}（main 尚未修改）`, `candidate:${candidate.taskId}:started`);
+    return candidate;
+  }
+
+  async checkpointCandidate(input: {
+    presenceId: string;
+    roomId: string;
+    workspace: string;
+    taskId: string;
+    summary: string;
+  }): Promise<CandidateCheckpoint> {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    const actor = this.externalActor(input.presenceId, input.roomId);
+    const checkpoint = await this.candidates.checkpoint({
+      taskId: input.taskId,
+      roomId: input.roomId,
+      mainPath: input.workspace,
+      summary: input.summary,
+    });
+    this.audit.append({
+      roomId: input.roomId, taskId: input.taskId, type: "candidate.checkpointed",
+      actor, executedBy: actor, action: "candidate-checkpoint", outcome: "succeeded",
+      detail: { checkpointId: checkpoint.id, candidateHead: checkpoint.candidateHead, mainMutation: false },
+    });
+    this.#candidateLedger(input.roomId, input.taskId,
+      `${actor} 已建立 candidate checkpoint ${checkpoint.candidateHead.slice(0, 12)}（main 尚未修改）`,
+      `candidate:${input.taskId}:checkpoint:${checkpoint.id}`);
+    return checkpoint;
+  }
+
+  async completeCandidate(input: {
+    presenceId: string;
+    roomId: string;
+    workspace: string;
+    taskId: string;
+    summary: string;
+    tests?: unknown;
+    knownRisks?: unknown;
+  }): Promise<{ task: CandidateTask; completion: CandidateCompletion; checkpoint: CandidateCheckpoint }> {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    const actor = this.externalActor(input.presenceId, input.roomId);
+    const result = await this.candidates.complete({
+      taskId: input.taskId,
+      roomId: input.roomId,
+      mainPath: input.workspace,
+      summary: input.summary,
+      ...(input.tests === undefined ? {} : { tests: input.tests }),
+      ...(input.knownRisks === undefined ? {} : { knownRisks: input.knownRisks }),
+    });
+    this.audit.append({
+      roomId: input.roomId, taskId: input.taskId, type: "candidate.completed",
+      actor, executedBy: actor, action: "candidate-complete", path: result.task.candidatePath,
+      outcome: "succeeded",
+      detail: {
+        completionId: result.completion.id,
+        candidateHead: result.completion.preview.candidateHead,
+        mainHead: result.completion.preview.mainHead,
+        previewDigest: result.completion.previewDigest,
+        mergeDecision: "owner-required",
+        mainMutation: false,
+      },
+    });
+    this.#candidateLedger(input.roomId, input.taskId,
+      `${actor} 已完成 candidate；main 尚未修改，後續 merge/promotion 必須由 Owner 明確核准。`,
+      `candidate:${input.taskId}:completed:${result.completion.id}`);
+    return result;
+  }
+
+  async candidateStatus(input: {
+    presenceId: string;
+    roomId: string;
+    workspace: string;
+    taskId?: string;
+  }): Promise<CandidateTaskStatus[]> {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    this.externalActor(input.presenceId, input.roomId);
+    return await this.candidates.status({
+      roomId: input.roomId,
+      mainPath: input.workspace,
+      ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+    });
   }
 
   async waitExternal(input: { presenceId: string; roomId: string; timeoutMs?: number; signal?: AbortSignal }): Promise<ClaimedRoomDelivery | undefined> {
@@ -854,6 +990,7 @@ export class CollaborationService {
     this.#closed = true;
     const errors: unknown[] = [];
     for (const close of [
+      () => this.candidates.close(),
       () => this.audit.close(),
       () => this.writerDelegations.close(),
       () => this.writerLeases.close(),
@@ -870,11 +1007,25 @@ export class CollaborationService {
   #assertRoomWorkspace(roomId: string, workspace: string): void {
     const room = this.ledger.getRoom(roomId);
     if (!room) throw new Error("ROOM_NOT_FOUND");
-    if (room.workspace === workspace) return;
-    try {
-      if (realpathSync(room.workspace) === workspace) return;
-    } catch { /* the mismatch below remains fail-closed */ }
+    if (this.#sameWorkspace(room.workspace, workspace)) return;
     throw new Error("ROOM_WORKSPACE_MISMATCH");
+  }
+
+  #sameWorkspace(left: string, right: string): boolean {
+    if (left === right) return true;
+    try { return realpathSync(left) === realpathSync(right); } catch { return false; }
+  }
+
+  #candidateLedger(roomId: string, taskId: string, message: string, key: string): void {
+    try {
+      this.ledger.appendSystemIdempotent(roomId, message, key);
+    } catch (error) {
+      this.audit.append({
+        roomId, taskId, type: "candidate.ledger-notification-skipped", actor: "orchestratory",
+        action: "candidate-ledger-notification", outcome: "failed",
+        detail: { reason: error instanceof Error ? error.message : "ROOM_LEDGER_NOTIFICATION_FAILED" },
+      });
+    }
   }
 
   #assertManagedWriterLease(lease: WriterLease): void {

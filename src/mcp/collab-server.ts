@@ -428,6 +428,72 @@ export class CollabToolBroker {
               },
             },
           },
+          {
+            name: "candidate_start",
+            description:
+              "Create a durable Git candidate branch/worktree for this exact authenticated native terminal and record the current main HEAD plus any dirty main state. Native host capabilities remain unchanged; candidate is a recovery and merge boundary, not an OS capability sandbox. Dirty main files are preserved in place and are not copied into the candidate. This does not mutate, clean, stash, reset, merge, or push the canonical main branch/worktree, but it does add shared Git worktree/branch metadata. This mutation is not yet request-idempotent: if the MCP response is uncertain, call candidate_status before any retry and do not blindly resend.",
+            inputSchema: {
+              type: "object", additionalProperties: false,
+              required: ["mainPath", "task"],
+              properties: {
+                mainPath: { type: "string", minLength: 1, maxLength: 4_096 },
+                task: { type: "string", minLength: 1, maxLength: MAX_QUESTION_CHARS },
+                acceptanceCriteria: { type: "string", minLength: 1, maxLength: MAX_QUESTION_CHARS },
+                room: { type: "string", minLength: 1, maxLength: 48 },
+              },
+            },
+          },
+          {
+            name: "candidate_checkpoint",
+            description:
+              "Record a durable checkpoint ref for a clean, committed candidate HEAD owned by this Room/workspace. Uncommitted candidate changes are rejected so the checkpoint always names a recoverable Git snapshot. The canonical main branch/worktree is unchanged, but shared Git refs are mutated. This mutation is not yet request-idempotent: if the MCP response is uncertain, call candidate_status before any retry and do not blindly resend.",
+            inputSchema: {
+              type: "object", additionalProperties: false,
+              required: ["taskId", "summary"],
+              properties: {
+                taskId: { type: "string", minLength: 36, maxLength: 36 },
+                summary: { type: "string", minLength: 1, maxLength: 2_000 },
+              },
+            },
+          },
+          {
+            name: "candidate_complete",
+            description:
+              "Complete a clean, committed candidate and return a snapshot preview, tests, known risks, drift warnings, recovery ref, and the one owner-required merge question. Completion does not merge, promote, push, or mutate the canonical main branch/worktree, but it adds a shared Git recovery ref; a later snapshot-bound owner approval is mandatory. This mutation is not yet request-idempotent: if the response is uncertain, recover the stored completion and prompt with candidate_status instead of retrying candidate_complete.",
+            inputSchema: {
+              type: "object", additionalProperties: false,
+              required: ["taskId", "summary"],
+              properties: {
+                taskId: { type: "string", minLength: 36, maxLength: 36 },
+                summary: { type: "string", minLength: 1, maxLength: 4_000 },
+                tests: {
+                  type: "array", maxItems: 32,
+                  items: {
+                    type: "object", additionalProperties: false,
+                    required: ["command", "status"],
+                    properties: {
+                      command: { type: "string", minLength: 1, maxLength: 500 },
+                      status: { type: "string", enum: ["passed", "failed", "not-run"] },
+                      summary: { type: "string", minLength: 1, maxLength: 1_000 },
+                    },
+                  },
+                },
+                knownRisks: {
+                  type: "array", maxItems: 32,
+                  items: { type: "string", minLength: 1, maxLength: 1_000 },
+                },
+              },
+            },
+          },
+          {
+            name: "candidate_status",
+            description:
+              "Show candidate tasks for this exact authenticated Room/workspace, including checkpoints, live candidate/main HEADs, dirty state, recovery readiness, and whether a prior completion preview has become stale.",
+            inputSchema: {
+              type: "object", additionalProperties: false,
+              properties: { taskId: { type: "string", minLength: 36, maxLength: 36 } },
+            },
+          },
         );
       }
       tools.push(
@@ -510,6 +576,10 @@ export class CollabToolBroker {
     if (name === "room_join_request") return await this.#roomJoinRequest(asObject(input), options);
     if (name === "room_send") return await this.#roomSend(asObject(input), options);
     if (name === "room_await_reply") return await this.#roomAwaitReply(asObject(input), options);
+    if (name === "candidate_start") return await this.#candidateStart(asObject(input));
+    if (name === "candidate_checkpoint") return await this.#candidateCheckpoint(asObject(input));
+    if (name === "candidate_complete") return await this.#candidateComplete(asObject(input));
+    if (name === "candidate_status") return await this.#candidateStatus(asObject(input));
     if (name === "room_wait") return await this.#roomWait(asObject(input), options);
     if (name === "room_ack") return this.#roomAck(asObject(input));
     if (name === "room_reply") return await this.#roomReply(asObject(input));
@@ -765,6 +835,84 @@ export class CollabToolBroker {
       ...(options.signal ? { signal: options.signal } : {}),
     });
     return JSON.stringify(outcome ? { timeout: false, ...outcome } : { timeout: true });
+  }
+
+  async #candidateStart(input: JsonObject): Promise<string> {
+    this.#allowedKeys(input, ["mainPath", "task", "acceptanceCriteria", "room"], "UNKNOWN_CANDIDATE_START_ARGUMENT");
+    const { collaboration, presenceId, binding } = this.#peerSession();
+    if (typeof input.mainPath !== "string" || input.mainPath !== binding.workspace) {
+      throw new Error("CANDIDATE_MAIN_PATH_BINDING_MISMATCH");
+    }
+    if (input.room !== undefined && input.room !== binding.roomId) throw new Error("CANDIDATE_ROOM_BINDING_MISMATCH");
+    const task = requireQuestion(input.task);
+    const acceptanceCriteria = input.acceptanceCriteria === undefined
+      ? undefined
+      : requireQuestion(input.acceptanceCriteria);
+    const candidate = await collaboration.startCandidate({
+      presenceId, roomId: binding.roomId, workspace: binding.workspace, task,
+      ...(acceptanceCriteria === undefined ? {} : { acceptanceCriteria }),
+    });
+    return JSON.stringify({
+      candidate,
+      mainMutation: false,
+      mainMutationScope: "canonical-main-branch-and-worktree",
+      sharedGitMetadataMutation: true,
+      dirtyMainPolicy: "recorded-and-preserved-not-copied",
+      next: `Work only in candidatePath ${candidate.candidatePath}; commit changes before candidate_checkpoint or candidate_complete.`,
+    });
+  }
+
+  async #candidateCheckpoint(input: JsonObject): Promise<string> {
+    this.#allowedKeys(input, ["taskId", "summary"], "UNKNOWN_CANDIDATE_CHECKPOINT_ARGUMENT");
+    if (typeof input.taskId !== "string" || !UUID_PATTERN.test(input.taskId)) {
+      throw new Error("INVALID_CANDIDATE_TASK_ID");
+    }
+    if (typeof input.summary !== "string") throw new Error("INVALID_CANDIDATE_CHECKPOINT_SUMMARY");
+    const { collaboration, presenceId, binding } = this.#peerSession();
+    const checkpoint = await collaboration.checkpointCandidate({
+      presenceId, roomId: binding.roomId, workspace: binding.workspace,
+      taskId: input.taskId, summary: input.summary,
+    });
+    return JSON.stringify({
+      checkpoint,
+      mainMutation: false,
+      mainMutationScope: "canonical-main-branch-and-worktree",
+      sharedGitMetadataMutation: true,
+    });
+  }
+
+  async #candidateComplete(input: JsonObject): Promise<string> {
+    this.#allowedKeys(input, ["taskId", "summary", "tests", "knownRisks"], "UNKNOWN_CANDIDATE_COMPLETE_ARGUMENT");
+    if (typeof input.taskId !== "string" || !UUID_PATTERN.test(input.taskId)) {
+      throw new Error("INVALID_CANDIDATE_TASK_ID");
+    }
+    if (typeof input.summary !== "string") throw new Error("INVALID_CANDIDATE_COMPLETION_SUMMARY");
+    const { collaboration, presenceId, binding } = this.#peerSession();
+    const completed = await collaboration.completeCandidate({
+      presenceId, roomId: binding.roomId, workspace: binding.workspace,
+      taskId: input.taskId, summary: input.summary,
+      ...(input.tests === undefined ? {} : { tests: input.tests }),
+      ...(input.knownRisks === undefined ? {} : { knownRisks: input.knownRisks }),
+    });
+    return JSON.stringify({
+      ...completed,
+      mainMutation: false,
+      mainMutationScope: "canonical-main-branch-and-worktree",
+      sharedGitMetadataMutation: true,
+    });
+  }
+
+  async #candidateStatus(input: JsonObject): Promise<string> {
+    this.#allowedKeys(input, ["taskId"], "UNKNOWN_CANDIDATE_STATUS_ARGUMENT");
+    if (input.taskId !== undefined && (typeof input.taskId !== "string" || !UUID_PATTERN.test(input.taskId))) {
+      throw new Error("INVALID_CANDIDATE_TASK_ID");
+    }
+    const { collaboration, presenceId, binding } = this.#peerSession();
+    const candidates = await collaboration.candidateStatus({
+      presenceId, roomId: binding.roomId, workspace: binding.workspace,
+      ...(typeof input.taskId === "string" ? { taskId: input.taskId } : {}),
+    });
+    return JSON.stringify({ candidates });
   }
 
   async #roomWait(input: JsonObject, options: CollabCallOptions): Promise<string> {
@@ -1468,6 +1616,14 @@ export async function handleCollabMcpMessage(
           "   after room_reply or room_fail, immediately call room_wait again for the next assignment.",
           "   Closing the terminal or stdio removes the session and its standby approval. If the host",
           "   cancels the tool call, the GUI truthfully stops showing this exact seat as wakeable.",
+          "   For a modifying task, call candidate_start with the exact bound mainPath, then work in the",
+          "   returned candidatePath using the terminal's unchanged native tools. Commit candidate changes",
+          "   before candidate_checkpoint or candidate_complete. Candidate completion returns the exact",
+          "   snapshot preview and Owner-required merge question but cannot mutate main. Use its taskId on",
+          "   room_send to retain candidate linkage. Snapshot-bound main promotion is a later owner gate.",
+          "   Candidate mutations are not request-idempotent yet. If start/checkpoint/complete returns an",
+          "   uncertain transport outcome, call candidate_status first and never blindly resend; status can",
+          "   recover stored tasks, checkpoints, completion preview, and the Owner merge prompt.",
           "3. room_mention {target:'codex'|'claude'|'grok', text} — start a separate provider worker only;",
           "   do not use it when the user asked for an existing terminal seat.",
           "   reference earlier messages as #12 or #40-#45 and their content is injected",

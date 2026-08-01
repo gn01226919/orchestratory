@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -13,6 +15,8 @@ import { ProviderRegistry } from "../src/providers/registry.ts";
 import { WorkspacePolicy } from "../src/security/workspace-policy.ts";
 import { DEFAULT_HARD_LIMITS } from "../src/config.ts";
 import type { AgentAssignment, ProviderRequest, ProviderResult } from "../src/types.ts";
+
+const execFileAsync = promisify(execFile);
 
 function providerResult(
   assignment: AgentAssignment,
@@ -835,8 +839,11 @@ test("MCP exact terminal seats discover, send, await, and continue threads direc
   const codexBroker = makeBroker(codexService, codex.id);
   const claudeBroker = makeBroker(claudeService, claude.id);
   assert.deepEqual(
-    codexBroker.tools().slice(-6).map((tool) => tool.name),
-    ["room_send", "room_await_reply", "room_wait", "room_ack", "room_reply", "room_fail"],
+    codexBroker.tools().slice(-10).map((tool) => tool.name),
+    [
+      "room_send", "room_await_reply", "candidate_start", "candidate_checkpoint",
+      "candidate_complete", "candidate_status", "room_wait", "room_ack", "room_reply", "room_fail",
+    ],
   );
   const agents = JSON.parse(await codexBroker.call("list_agents", {})) as {
     terminalSeats: Array<{
@@ -992,6 +999,96 @@ test("MCP exact terminal seats discover, send, await, and continue threads direc
     /INVALID_ROOM_REPLY_WAIT_TIMEOUT/u,
   );
   assert.deepEqual(providerCalls, []);
+});
+
+test("native MCP candidate tools preserve main and end at an owner-required merge question", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "orchestratory-mcp-candidate-root-"));
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-mcp-candidate-data-"));
+  await execFileAsync("git", ["init", "-b", "main"], { cwd: root });
+  await writeFile(join(root, "README.md"), "main\n", "utf8");
+  await execFileAsync("git", ["add", "README.md"], { cwd: root });
+  await execFileAsync("git", [
+    "-c", "user.name=MCP Test", "-c", "user.email=test@example.invalid", "commit", "-m", "initial",
+  ], { cwd: root });
+  const service = new CollaborationService(data);
+  t.after(() => service.close());
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  service.ledger.createRoom("demo", root);
+  const seat = service.registerExternal({ provider: "codex", workspace: root, hostPid: 7_909 });
+  service.requestExternalJoin(seat.id, "demo", root);
+  service.approveExternalJoin({
+    presenceId: seat.id, roomId: "demo", workspace: root,
+    collaborationMode: "room-first", syncTurns: false, label: "candidate",
+  });
+  const broker = new CollabToolBroker({
+    providers: new ProviderRegistry([]),
+    workspaces: WorkspacePolicy.fromPaths([root]),
+    hardLimits: DEFAULT_HARD_LIMITS,
+    invoke: async () => { throw new Error("PROVIDER_MUST_NOT_RUN"); },
+    ledger: service.ledger,
+    collaboration: service,
+    resolvePresenceId: () => seat.id,
+    resolveActor: (roomId) => service.externalActor(seat.id, roomId),
+    resolveSessionRoom: () => ({
+      roomId: "demo", workspace: root, actor: "codex（candidate）",
+      collaborationMode: "room-first", syncTurns: false,
+    }),
+  });
+  const mainHead = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
+  const started = JSON.parse(await broker.call("candidate_start", {
+    mainPath: root, task: "MCP lifecycle", acceptanceCriteria: "main untouched", room: "demo",
+  })) as {
+    candidate: { taskId: string; candidatePath: string };
+    mainMutation: boolean;
+    mainMutationScope: string;
+    sharedGitMetadataMutation: boolean;
+  };
+  assert.equal(started.mainMutation, false);
+  assert.equal(started.mainMutationScope, "canonical-main-branch-and-worktree");
+  assert.equal(started.sharedGitMetadataMutation, true);
+  await writeFile(join(started.candidate.candidatePath, "candidate.txt"), "candidate\n", "utf8");
+  await execFileAsync("git", ["add", "candidate.txt"], { cwd: started.candidate.candidatePath });
+  await execFileAsync("git", [
+    "-c", "user.name=MCP Test", "-c", "user.email=test@example.invalid",
+    "commit", "-m", "candidate",
+  ], { cwd: started.candidate.candidatePath });
+  const checkpointed = JSON.parse(await broker.call("candidate_checkpoint", {
+    taskId: started.candidate.taskId, summary: "committed",
+  })) as { mainMutation: boolean; mainMutationScope: string; sharedGitMetadataMutation: boolean };
+  assert.equal(checkpointed.mainMutation, false);
+  assert.equal(checkpointed.mainMutationScope, "canonical-main-branch-and-worktree");
+  assert.equal(checkpointed.sharedGitMetadataMutation, true);
+  const completed = JSON.parse(await broker.call("candidate_complete", {
+    taskId: started.candidate.taskId,
+    summary: "ready",
+    tests: [{ command: "node --test", status: "passed" }],
+    knownRisks: ["synthetic"],
+  })) as {
+    completion: { mergeDecision: string; prompt: string; preview: { candidateHead: string } };
+    mainMutation: boolean;
+    mainMutationScope: string;
+    sharedGitMetadataMutation: boolean;
+  };
+  assert.equal(completed.mainMutation, false);
+  assert.equal(completed.mainMutationScope, "canonical-main-branch-and-worktree");
+  assert.equal(completed.sharedGitMetadataMutation, true);
+  assert.equal(completed.completion.mergeDecision, "owner-required");
+  assert.match(completed.completion.prompt, /是否要將.*merge 到 main/u);
+  const status = JSON.parse(await broker.call("candidate_status", {
+    taskId: started.candidate.taskId,
+  })) as { candidates: Array<{ status: string; live: { completionStale: boolean } }> };
+  assert.equal(status.candidates[0]?.status, "completed");
+  assert.equal(status.candidates[0]?.live.completionStale, false);
+  assert.equal((await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim(), mainHead);
+  await assert.rejects(
+    broker.call("candidate_start", { mainPath: join(root, "other"), task: "wrong binding" }),
+    /CANDIDATE_MAIN_PATH_BINDING_MISMATCH/u,
+  );
+  await assert.rejects(
+    broker.call("candidate_complete", { taskId: started.candidate.taskId, summary: "x", approve: true }),
+    /UNKNOWN_CANDIDATE_COMPLETE_ARGUMENT/u,
+  );
 });
 
 test("MCP notifications/cancelled abort an in-flight room_wait and clear wakeable state", async (t) => {

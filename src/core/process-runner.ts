@@ -14,6 +14,8 @@ export interface ProcessRequest {
   outputLimitBytes: number;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
+  /** Trusted in-process streaming parser. Streamed stdout is not retained or subject to the capture byte ceiling. */
+  stdoutConsumer?: (chunk: Buffer) => void;
   /** Test/embedded-code extension only; never populated from user or model input. */
   trustedExecutableRoots?: readonly string[];
 }
@@ -228,6 +230,8 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     let outputBytes = 0;
+    let capturedBytes = 0;
+    let consumerError: unknown;
     let terminationReason: ProcessResult["terminationReason"];
     let settled = false;
     let leaderClosed = false;
@@ -264,6 +268,10 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
       if (terminationReason && processGroupExists()) return;
       settled = true;
       cleanup();
+      if (consumerError) {
+        reject(consumerError);
+        return;
+      }
       resolvePromise({
         exitCode: closeCode,
         stdout: Buffer.concat(stdout).toString("utf8"),
@@ -314,13 +322,21 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
       }, 1_000);
     };
 
-    const consume = (target: Buffer[], chunk: Buffer): void => {
+    const consume = (target: Buffer[], chunk: Buffer, stream = false): void => {
       outputBytes += chunk.length;
-      if (outputBytes <= request.outputLimitBytes) target.push(chunk);
-      if (outputBytes > request.outputLimitBytes) terminate("output-limit");
+      if (stream && request.stdoutConsumer) {
+        try { request.stdoutConsumer(chunk); } catch (error) {
+          consumerError = error;
+          terminate("cancelled");
+        }
+        return;
+      }
+      capturedBytes += chunk.length;
+      if (capturedBytes <= request.outputLimitBytes) target.push(chunk);
+      if (capturedBytes > request.outputLimitBytes) terminate("output-limit");
     };
 
-    child.stdout.on("data", (chunk: Buffer) => consume(stdout, chunk));
+    child.stdout.on("data", (chunk: Buffer) => consume(stdout, chunk, true));
     child.stderr.on("data", (chunk: Buffer) => consume(stderr, chunk));
 
     const timeout = setTimeout(() => terminate("timeout"), request.timeoutMs);

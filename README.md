@@ -10,8 +10,8 @@ Security-first、local-first 的多模型 coding-agent orchestrator。預設透�
 > 主動詢問是否把該精確快照 merge 到 canonical main。完整規格見
 > [`docs/OWNER_DECISION_FULL_CONTROL.md`](docs/OWNER_DECISION_FULL_CONTROL.md)。
 >
-> **實作狀態：規格已更新；exact-seat peer phase 已在隔離開發分支通過 synthetic tests，整體 runtime
-> 尚未完成。** 已安裝版本仍是 legacy GUI → exact-seat 單向 inbox／read-only worker／Writer Lease；
+> **實作狀態：規格已更新；exact-seat peer、能力分流與 candidate lifecycle 已在隔離開發分支通過
+> synthetic tests，snapshot-bound main promotion 與整體 runtime 尚未完成。** 已安裝版本仍是 legacy GUI → exact-seat 單向 inbox／read-only worker／Writer Lease；
 > 尚未切換，也不是 vNext 對 Native terminal 的最終限制。
 
 Native terminal 與 GUI Managed 是兩條不同能力線：前者的 sandbox、approval、shell、filesystem、network、
@@ -204,9 +204,14 @@ Codex 結束畫面的 resume session UUID 會在未來入帳前遮蔽；既有 a
 目前已安裝版本的 `ask_*` 會建立新的唯讀 worker，外接 exact seat 主要由 GUI 單向派工。隔離開發
 分支已依 `docs/PROPOSAL_MCP_FIRST.md` 加入 `terminalSeats` discovery、authenticated `room_send`、
 delivery-scoped `room_await_reply`、stable request idempotency 與 participant/task-bound thread metadata，
-並以 20 輪與 transport reconnect 自動測試驗證沒有 8／16 回合上限；尚待真實 Codex＋Claude Code
-雙 MCP stdio host 驗收與安全切換；
-candidate completion 與 main merge decision 仍待實作。Worker 回覆不得宣稱成 live terminal 回覆。
+並以 20 輪與 transport reconnect 自動測試驗證沒有 8／16 回合上限。隔離分支另已加入
+`candidate_start`／`candidate_checkpoint`／`candidate_complete`／`candidate_status`：保留 dirty main、要求
+candidate checkpoint 是乾淨 commit、回傳 drift/diff/test/risk/recovery preview，並產生 Owner 必答的 merge
+問題；這些工具不改 canonical main branch/worktree，但 checkpoint 會建立 shared Git recovery ref。尚待真實
+Codex＋Claude Code 雙 MCP stdio host 驗收、安全切換，
+以及下一階段 snapshot-bound main merge decision／promotion。Worker 回覆不得宣稱成 live terminal 回覆。
+Candidate mutation 尚未 request-idempotent；transport 結果不確定時必須先用 `candidate_status` 找回結果，
+不可盲目重送。Durable request receipt 是 Phase 5 promotion 前的阻斷項。
 
 把 Claude Code 或 Codex 原生介面當 host，Orchestratory 提供唯讀 worker 工具：
 

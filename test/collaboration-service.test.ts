@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -330,6 +330,62 @@ test("exact terminal seats exchange authenticated multi-turn threads without pro
     /THREAD_CONTINUATION_FIELDS_MISMATCH/u,
   );
   assert.equal(codexProcess.ledger.getRoom("demo")?.messages, messagesBeforeRejectedRoutes);
+});
+
+test("exact native seat owns a durable candidate lifecycle while main remains untouched", async (t) => {
+  const source = await repository("orchestratory-candidate-service-source-");
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-candidate-service-data-"));
+  const service = new CollaborationService(data);
+  t.after(() => service.close());
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+  t.after(async () => await rm(source, { recursive: true, force: true }));
+  service.ledger.createRoom("demo", source);
+  const seat = service.registerExternal({ provider: "codex", workspace: source, hostPid: 7_777 });
+  service.requestExternalJoin(seat.id, "demo", source);
+  service.approveExternalJoin({
+    ...ROOM_FIRST_JOIN, presenceId: seat.id, roomId: "demo", workspace: source, label: "candidate",
+  });
+  await writeFile(join(source, "owner-draft.txt"), "preserve me\n", "utf8");
+  const mainHead = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: source })).stdout.trim();
+
+  const candidate = await service.startCandidate({
+    presenceId: seat.id, roomId: "demo", workspace: source,
+    task: "Implement without touching main", acceptanceCriteria: "owner draft survives",
+  });
+  assert.equal(candidate.baseline.clean, false);
+  await writeFile(join(candidate.candidatePath, "implemented.txt"), "candidate only\n", "utf8");
+  await execFileAsync("git", ["add", "implemented.txt"], { cwd: candidate.candidatePath });
+  await execFileAsync("git", [
+    "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+    "commit", "-m", "candidate implementation",
+  ], { cwd: candidate.candidatePath });
+  const checkpoint = await service.checkpointCandidate({
+    presenceId: seat.id, roomId: "demo", workspace: source,
+    taskId: candidate.taskId, summary: "committed checkpoint",
+  });
+  const completed = await service.completeCandidate({
+    presenceId: seat.id, roomId: "demo", workspace: source,
+    taskId: candidate.taskId, summary: "ready for owner",
+    tests: [{ command: "node --test", status: "passed" }], knownRisks: [],
+  });
+  assert.equal(checkpoint.candidateHead, completed.completion.preview.candidateHead);
+  assert.equal(completed.completion.mergeDecision, "owner-required");
+  assert.equal((await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: source })).stdout.trim(), mainHead);
+  assert.equal(await readFile(join(source, "owner-draft.txt"), "utf8"), "preserve me\n");
+  assert.equal((await service.candidateStatus({
+    presenceId: seat.id, roomId: "demo", workspace: source, taskId: candidate.taskId,
+  }))[0]?.status, "completed");
+  assert.deepEqual(
+    service.audit.list({ roomId: "demo", limit: 20 }).filter((event) => event.taskId === candidate.taskId)
+      .map((event) => event.type),
+    ["candidate.started", "candidate.checkpointed", "candidate.completed"],
+  );
+  const roomMessages = service.ledger.getRoom("demo")?.messages ?? 0;
+  assert.match(service.ledger.getRange("demo", 1, roomMessages).map((entry) => entry.text).join("\n"), /Owner 明確核准/u);
+  await assert.rejects(
+    service.candidateStatus({ presenceId: randomUUID(), roomId: "demo", workspace: source }),
+    /PRESENCE_NOT_FOUND/u,
+  );
 });
 
 test("target unregister races cannot leave a new exact-seat delivery active", async (t) => {

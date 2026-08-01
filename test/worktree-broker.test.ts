@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WorktreeBroker } from "../src/core/worktree-broker.ts";
@@ -56,6 +56,39 @@ test("rejects repository-local external Git filters", async (t) => {
     new WorktreeBroker(data).create(source, "00000000-0000-4000-8000-000000000002"),
     /UNSAFE_LOCAL_GIT_FILTER_OR_FSMONITOR_CONFIG/u,
   );
+});
+
+test("creates and re-inspects a candidate worktree at one exact main snapshot", async (t) => {
+  const source = await repository();
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-candidate-worktree-"));
+  t.after(async () => await rm(source, { recursive: true, force: true }));
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+  const candidateId = "00000000-0000-4000-8000-000000000777";
+  const head = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: source })).stdout.trim();
+  const broker = new WorktreeBroker(data);
+  const created = await broker.createCandidate(source, candidateId, head);
+  assert.equal(created.candidateId, candidateId);
+  assert.equal(created.sourceWorkspace, await realpath(source));
+  assert.equal(created.branch, `orchestratory/candidate-${candidateId}`);
+  assert.equal(created.headSha, head);
+  assert.deepEqual(await broker.inspectCandidate(candidateId), created);
+  assert.equal((await execFileAsync("git", ["branch", "--show-current"], { cwd: source })).stdout.trim(), "main");
+});
+
+test("candidate creation fails closed if main HEAD changed after inspection", async (t) => {
+  const source = await repository();
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-candidate-head-race-"));
+  t.after(async () => await rm(source, { recursive: true, force: true }));
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+  await assert.rejects(
+    new WorktreeBroker(data).createCandidate(
+      source,
+      "00000000-0000-4000-8000-000000000778",
+      "0".repeat(40),
+    ),
+    /CANDIDATE_MAIN_HEAD_CHANGED/u,
+  );
+  assert.equal((await execFileAsync("git", ["branch", "--show-current"], { cwd: source })).stdout.trim(), "main");
 });
 
 test("cleanup removes only a clean snapshot-matched worktree and retains its branch", async (t) => {

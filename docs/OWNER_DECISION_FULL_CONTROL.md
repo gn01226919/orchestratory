@@ -85,4 +85,5 @@ Candidate 不是 OS 強制 sandbox。擁有相同 macOS 使用者完整權限的
 4. 實作 snapshot-bound approval、main drift detection、promotion、verification 與 recovery。
 5. 最後更新 GUI／TUI 呈現並執行人工驗收。
 
-在 runtime 完成前，文件必須標示「目標規格／尚未實作」，不得把本決策誤報成目前已交付能力。
+文件必須逐階段標示「已實作／synthetic 已驗證／live 待驗收／尚未實作」，不得把 candidate lifecycle
+的自動證據誤報成 snapshot-bound promotion、已安裝 runtime 或真實雙 TUI 驗收已交付。

@@ -1,10 +1,11 @@
 # MVP 驗證矩陣
 
 > **vNext evidence notice（2026-08-01）：** exact-seat peer discovery/send/await/thread 已在隔離 development
-> branch 完成 synthetic multi-connection 驗證；另以雙 OS process 驗證 inbox migration 競態。尚未切換
+> branch 完成 synthetic multi-connection 驗證；candidate lifecycle 亦已完成 Git/SQLite/MCP synthetic
+> 驗證，另以雙 OS process 驗證 inbox migration 競態。尚未切換
 > 已安裝 MCP，也尚未完成真實 Codex＋Claude Code
 > host 驗收。下表其餘舊測試保留作為 GUI Managed 回歸證據，不得拿來冒充 Native Full-Trust、
-> candidate completion 或 main merge decision 已完成。
+> 已安裝 runtime 或 main merge decision 已完成。
 
 ## ADR-028 vNext 待驗證矩陣
 
@@ -14,8 +15,9 @@
 | Exact terminal seat discovery | 已實作／synthetic 已驗證；live 待驗收 | 兩個獨立 service connections／MCP brokers 能列出彼此，`providers` 與 `terminalSeats` 分離，self identity 正確；`test/collab-mcp.test.ts` |
 | Authenticated peer send/thread | 已實作／synthetic 已驗證；live 待驗收 | server-bound source、same Room/workspace、standby approval、UUID exact target、stable client request id、無 provider fallback、三席 hijack 拒絕、immutable reply prepare、delivery-scoped await、雙向 follow-up thread；`test/collab-mcp.test.ts`、`test/collaboration-service.test.ts`、`test/room-inbox.test.ts` |
 | Thread 無固定 round ceiling | 已實作／synthetic 已驗證；live 待驗收 | 同一 thread 自動驗證 20 輪仍延續；transport timeout 後重新 await／reply 不終止 thread；`test/collaboration-service.test.ts`、`test/collab-mcp.test.ts` |
-| Candidate lifecycle | 待實作／待驗證 | task/base/main/candidate/checkpoint/Agent branches 可追溯，保全既有 dirty state |
-| Task completion merge prompt | 待實作／待驗證 | 每個完成任務主動顯示 preview 並詢問是否 merge main |
+| Candidate lifecycle | 已實作／synthetic 已驗證；live 待驗收 | Git worktree＋row-hash SQLite 保存 task/base/main/candidate/checkpoint；dirty main 原地保留且不複製，ignored 只記數量／路徑指紋；每個 checkpoint 建立並驗證獨立 Git ref；超過舊 2 MiB ceiling 的 diff/dirty/untracked/ignored inventory 仍以串流精確計數；所有 changed content（含超過 50 MiB）在每次 inspection 共用 30 秒 deadline 內串流雜湊，逾時 fail closed；clean committed HEAD、跨程序狀態、篡改、realpath、unsafe filter、HEAD/dirty/ignored drift、deterministic TOCTOU 拒絕與 canonical main branch/worktree 不變測試；`candidate_status` 對同一查詢的 main snapshot 只讀一次；`test/candidate-registry.test.ts`、`test/worktree-broker.test.ts`、`test/process-runner.test.ts`、`test/git-broker.test.ts`、`test/collaboration-service.test.ts`、`test/collab-mcp.test.ts` |
+| Task completion merge prompt | 已實作／synthetic 已驗證；GUI/live 待驗收 | `candidate_complete` 直接詢問是否將精確 snapshot merge 到 main，並回傳 digest、diff/test/risk/conflict/drift/recovery ref 與 `owner-required`；目前不改 canonical main branch/worktree，但會建立 shared Git recovery ref；`test/candidate-registry.test.ts`、`test/collab-mcp.test.ts` |
+| Candidate mutation request idempotency | Phase 5 promotion 前阻斷 | Phase 4 可由 `candidate_status` 找回不確定回應後的 durable task/checkpoint/completion prompt，但 start/checkpoint 重送仍會新增 artifact、complete retry 可能 not-active；promotion 前需 required stable `clientRequestId`＋durable same-digest receipt/replay/crash reconcile |
 | Snapshot-bound approval | 待實作／待驗證 | replay、candidate drift、main drift、preview mismatch 全部拒絕 |
 | Promotion/recovery | 待實作／待驗證 | recovery point 可讀、conflict/scope expansion 重批、成功/失敗/rollback 可驗證 |
 | GUI Managed 隔離 | 待實作／待驗證 | Managed policy 不會改變已加入 Native terminal 的 capability |

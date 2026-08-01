@@ -9,7 +9,7 @@
 <style>:root{color-scheme:light dark;background:light-dark(rgb(255 255 255), rgb(24 24 24))}html,body{margin:0}body{box-sizing:border-box;padding:1rem;background:inherit}.migration-notice{box-sizing:border-box;max-width:736px;margin:0 auto 1rem;padding:.75rem 1rem;border:1px solid #d69e2e;border-radius:.75rem;font:14px/1.5 system-ui,sans-serif}.migration-notice strong{display:block}iframe{display:block;width:100%;max-width:736px;height:calc(100vh - 8rem);margin:0 auto;border:0}</style>
 </head>
 <body>
-<div class="migration-notice"><strong>vNext transition guide</strong>Native Full-Trust 與 terminal peer thread 已進入 vNext 實作；任何「external Writer／Writer Companion」舊規則均已停用。GUI Managed 仍使用受控 Writer 流程；candidate 任務終點 merge 詢問尚待後續階段實作。新版規格請見 docs/OWNER_DECISION_FULL_CONTROL.md。</div>
+<div class="migration-notice"><strong>vNext transition guide</strong>Native Full-Trust、terminal peer thread 與 candidate lifecycle 已進入隔離分支實作；任何「external Writer／Writer Companion」舊規則均已停用。GUI Managed 仍使用受控 Writer 流程；candidate completion 只產生 Owner-required 問句，不會修改 main，snapshot-bound promotion 尚待後續階段。新版規格請見 docs/OWNER_DECISION_FULL_CONTROL.md。</div>
 <iframe sandbox="allow-scripts" referrerpolicy="no-referrer" title="Orchestratory 互動操作導覽" srcdoc="&lt;!doctype html&gt;
 &lt;html lang=&quot;zh-Hant&quot;&gt;
 &lt;head&gt;

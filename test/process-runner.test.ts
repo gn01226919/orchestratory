@@ -35,6 +35,36 @@ test("terminates output flooding", async () => {
   assert.ok(result.outputBytes > 256);
 });
 
+test("streams trusted stdout without retaining it or tripping the capture ceiling", async () => {
+  const node = await resolveExecutable("node");
+  let bytes = 0;
+  const result = await runProcess({
+    executable: node,
+    args: ["-e", "process.stdout.write('x'.repeat(3000000))"],
+    cwd: process.cwd(),
+    timeoutMs: 2_000,
+    outputLimitBytes: 256,
+    stdoutConsumer: (chunk) => { bytes += chunk.length; },
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.terminationReason, undefined);
+  assert.equal(result.stdout, "");
+  assert.equal(result.outputBytes, 3_000_000);
+  assert.equal(bytes, 3_000_000);
+});
+
+test("a trusted stdout parser failure terminates and rejects the process", async () => {
+  const node = await resolveExecutable("node");
+  await assert.rejects(runProcess({
+    executable: node,
+    args: ["-e", "process.stdout.write('bad')"],
+    cwd: process.cwd(),
+    timeoutMs: 2_000,
+    outputLimitBytes: 256,
+    stdoutConsumer: () => { throw new Error("SYNTHETIC_STREAM_PARSE_FAILURE"); },
+  }), /SYNTHETIC_STREAM_PARSE_FAILURE/u);
+});
+
 test("terminates a process on timeout", async () => {
   const node = await resolveExecutable("node");
   const result = await runProcess({
