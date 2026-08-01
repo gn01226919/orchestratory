@@ -1,205 +1,297 @@
-# Orchestratory MCP-first 重構提案（設計審查稿）
+# Orchestratory MCP-first Native Full-Trust 規格
 
-狀態：實作追蹤中。M1、Room Ledger、GUI Room、M2 寫入安全鏈與 M3 跨程序安全基礎已完成；真實 provider／GUI 人工驗收與發布仍待 owner。
-日期：2026-07-16 初稿；2026-07-17 依實作狀態更新。初稿：Claude Code；後續審查與實作：Codex。
+狀態：**Accepted design / implementation pending**
 
----
+更新：2026-08-01
 
-## 0. 一句話總結
+依據：`OWNER_DECISION_FULL_CONTROL.md`、ADR-028
 
-停止把 Orchestratory 做成「自建聊天 host」；改成 **MCP-first 背景服務**——
-Claude Code／Codex 原生介面當 host（Manager pattern），Orchestratory 提供
-worker 工具與 workflow 引擎，Web 降級為監控與批准中心。
+本版取代原本「MCP 只提供唯讀 worker、terminal 只能由 GUI 單向交辦」的提案。既有 `ask_*` worker
+可保留，但不得冒充 live terminal-to-terminal collaboration。
 
-### 目前落地狀態
+## 1. 一句話總結
 
-| 里程碑 | 狀態 | 已驗證內容 |
-|---|---|---|
-| M1 唯讀 MCP workers | 完成 | 固定 tool schema、allowlist、bounded file contents、partial compare、固定 display actor、全域 provider governor |
-| Room 協作層 | 完成 | append-only 編號帳本、hash chain、GUI/TUI/MCP 讀寫、`@agent` 真正喚醒、跨程序 emergency stop |
-| M3 安全基礎 | 完成 | GUI daemon、allowlist 熱重載、owner-only 持久額度、共享 kill epoch、資料 integrity/inventory |
-| M2 寫入工作流 | 工程完成 | pending proposal、acceptance criteria、no-progress、multi-reviewer、Codex opt-in writer、fallback writer、RAM-only Dirty Snapshot、preview/scoped apply-back |
-| 發布／真實 provider 驗收 | 待 owner | daemon 重載、訂閱額度 smoke、Docker image、Git identity/license/commit/push/public release |
+Codex／Claude Code 原生 TUI 是具完整能力的 Supervisor／Worker；Orchestratory MCP 提供 exact-seat
+即時協作、Room Ledger、candidate 任務狀態與 main merge decision，而不是限制原生 coding tools。
 
-## 1. 現狀：今天已交付的內容（在既有架構上）
+## 2. 目前 runtime 與目標差距
 
-以下功能已完成並沿用到新架構；目前完整 suite 為 274/274 deterministic tests：
+目前已完成：Room membership、standby approval、`room_wait`、ack/reply/fail、GUI → exact-seat inbox、
+Room Ledger 與 read-only `ask_*` workers。
 
-| # | 交付 | 說明 | 在 MCP-first 中的角色 |
-|---|------|------|----------------------|
-| 1 | `SessionContextBroker`（`src/core/session-context.ts`） | 檔案清單用 `git ls-files --cached --others --exclude-standard` 產生（排除 ignored/敏感路徑，上限 400 檔／16 KiB）；讀檔重用 Workspace MCP 唯讀 `read_file`（逸出／symlink／hardlink／敏感路徑／binary／UTF-8／大小全部拒絕），單檔截 16 KiB、單輪總量 48 KiB | worker 工具的 context 注入器 |
-| 2 | 對話工具 `read_files`（編譯期固定、唯讀） | 每輪最多 2 次、每次 8 個路徑；單檔被拒只回 `READ_DENIED` 不中斷整批 | 由 host 原生檔案工具取代（host 自己讀專案）；worker 端保留 server-side 注入 |
-| 3 | `setMainAgent()`＋TUI `/model`＋Web `provider` 欄位 | 主代理可切 codex/claude/grok/fake 任一訂閱模型；切換保留歷史、不重設呼叫計數 | 驗證邏輯直接複用為 `ask_*` 工具的參數驗證 |
-| 4 | @提及＋比稿（`parseMentions`） | `@claude:model @grok 問題` 最多 3 個目標、去重、fail closed；@回合不解析 tool marker | 即 `compare_agents` 的實作核心 |
-| 5 | `diffView` 保留 worktree fallback | run 結束後從 retained worktree 即時產生 bounded diff（無新增持久化，ADR-021 不變） | 監控中心的變更檢視 |
-| 6 | GUI 全對話式重寫＋終端精密視覺 | 卡片流（提案卡→進度卡→完成卡）、石墨底＋#3ECF8E 單一 accent | 直接改造為 M3 監控/批准儀表板的殼 |
-| 7 | TUI `/advanced` 結束後返回對話；workflow 錯誤不再殺死 session | | 保留（TUI 降為輕量入口） |
+目前尚未完成：
 
-## 2. 診斷：為什麼現行「自建聊天 host」是死路
+- Terminal seat discovery；
+- authenticated terminal → terminal send；
+- thread/wait-reply/reply-and-wait；
+- candidate task lifecycle 與 completion checkpoint；
+- 任務完成後主動產生「是否 merge main」詢問；
+- snapshot-bound promotion approval、main drift、recovery 與 verify。
 
-1. **偽 function calling**：模型以單行 `ORCHESTRATOR_CALL: {...}` 文字標記模擬工具呼叫，脆弱且無法多輪工具編排。
-2. **無持久 session、無 streaming**：Codex 每輪都是新的 `exec --ephemeral` 程序、Claude 用 `--print --no-session-persistence`、Grok 用 `--no-memory`；使用者要等整個 CLI 程序結束才看到答案。
-3. **無 Supervisor 統整**：`ask_claude` 的答案直接顯示給使用者，主代理沒有機會比較、質疑、整理。
-4. **UI 永遠追不上 Claude Code**：自建聊天介面是在重造一個較差的 Claude Code。
+Runtime 完成前，MCP `tools/list` 不得宣稱下列 pending 工具已可用。
 
-## 3. 目標架構（Manager pattern）
+## 3. 身分與共同欄位
 
-```
-Claude Code / Codex 原生介面（host = Supervisor，持久 session、原生工具呼叫、streaming）
-        │  MCP (stdio JSON-RPC)
-        ▼
-Orchestratory MCP Server（orchestrator mcp）
-        ├─ list_agents            唯讀，發現可用 provider/model/workspace
-        ├─ ask_codex / ask_claude / ask_grok   唯讀 worker 單問（附受限專案 context）
-        ├─ compare_agents         唯讀，同題 2–3 模型並排
-        └─ coding_workflow (M2)   寫入型，沿用既有 approval＋worktree 引擎
-        │
-        ▼
-既有安全引擎（全部不變）：policy engine、workspace allowlist、scratch-cwd worker、
-Workspace MCP writer broker、worktree 隔離、approval nonce、預算硬上限、redaction、SQLite audit chain
-        │
-        ▼
-Web = 純監控與批准中心（M3）：誰在工作、子任務、事件流、diff、用量、批准
+每個 MCP session 建立 server-bound `presenceId`，工具 payload 不能指定 sender。共同 identity：
+
+```ts
+type Seat = {
+  seatId: string;
+  presenceId: string;
+  displayName: string;
+  kind: "native-terminal" | "managed" | "provider-worker";
+  provider?: string;
+  room: string;
+  workspace: string;
+  wakeable: boolean;
+  capabilitySource: "native-host" | "gui-managed" | "worker-profile";
+};
 ```
 
-要點：**host 本身就是 Supervisor**。工具結果天然回到 host 手上，由 host 比較衝突、
-追問、統整後才回答使用者——不需要在 orchestrator 內另建 Supervisor 狀態機。
+`native-host` 代表 Orchestratory 保留 host 原本能力；它不代表 server 授予整台 Mac 權限。
 
-## 4. M1 規格：`orchestrator mcp`（唯讀 worker 工具）
+## 4. 席位與 peer thread 工具
 
-### 4.1 Transport 與模式
+### `list_agents`（擴充）
 
-- stdio JSON-RPC，協定同既有 `workspace-mcp`（initialize / ping / tools/list / tools/call）。
-- 單行請求上限 1 MiB；未知 method／tool／欄位一律錯誤，不猜測。
-- Host 設定：`claude mcp add orchestrator -- orchestrator mcp --actor claude`（Codex 使用
-  `--actor codex`）。actor 是固定本機顯示身分，tool call 不可覆寫。
-
-### 4.2 工具與 schema（worker 全部唯讀；另有無執行權的 control-plane 提案工具）
-
-```
-list_agents
-  input:  {}（不接受任何欄位）
-  output: { providers: [{id, displayName, subscriptionModels, canWriteSubscription}],
-            workspaceRoots: [{id, label, path}] }
-
-ask_codex / ask_claude / ask_grok
-  input:  { question: string(1..20000),
-            workspace?: string,        // 省略時：唯一 allowlisted root；多個則錯誤
-            model?: string,            // 省略時：subscriptionModels[0]
-            files?: string[0..8] }     // 明確要求的 bounded UTF-8 text files
-  output: { provider, model, answer(≤8000), durationMs }
-
-compare_agents
-  input:  { question: string(1..20000),
-            targets: string[2..3],     // "claude" | "grok:grok-4.5" 形式，去重
-            workspace?: string,
-            files?: string[0..8] }
-  output: { answers: [{provider, model, answer, durationMs}], errors?: [...] }
-
-request_coding_workflow
-  input:  { task, acceptanceCriteria?, workspace?, profile?: "normal"|"long",
-            planner?, writer?, reviewers?: string[1] }
-  output: { request, approved:false, started:false, next }
-  effect: 只入列 owner-only pending metadata；不呼叫 provider、不建 worktree、不測試、不寫專案
+```ts
+input: {}
+output: {
+  providers: ProviderWorker[];
+  seats: Seat[];
+  workspaceRoots: WorkspaceRef[];
+}
 ```
 
-### 4.3 安全邊界（沿用，無新開口）
+`providers` 與 `seats` 必須分開，避免把新 worker 當成既有終端。
 
-- workspace 一律過 allowlist canonical 驗證；allowlist 空白 fail closed。
-- worker 一律 subscription CLI、read-only、空白 scratch cwd（ADR-019 不變）；
-  context 由 orchestrator 的 broker 注入 prompt（bounded、標示 untrusted）。
-- worker prompt 明確要求純文字、不得輸出 marker；回答經 redact＋safeSummary(8000)。
-- MCP server 保留程序內 hard limit；另以 owner-only SQLite governor 原子保存 24 小時真實
-  provider-call ceiling，重開 MCP／Web／TUI 不可重設。共享 kill epoch 支援跨程序停止。
-- 單次呼叫 timeout `min(600s, hardLimits.providerTimeoutMs)`、輸出量上限沿用 hard limits。
-- 不暴露任何寫入、Git、shell、network、approval 工具。
+### `room_list_seats`
 
-### 4.4 實作位置
+```ts
+input: { room?: string }
+output: { room: string; self: Seat; seats: Seat[] }
+```
 
-- 新檔 `src/mcp/collab-server.ts`：`CollabToolBroker`（可注入 invoke 供測試）＋
-  `runCollabMcpServer()`。
-- `main.ts` 新增 `mcp` 命令（建立 AppContext 後直接接管 stdio；stdout 只輸出 JSON-RPC）。
-- 測試 `test/collab-mcp.test.ts`：固定工具表、schema 拒絕、allowlist fail-closed、
-  呼叫上限、比稿 fan-out、model 驗證、unknown method。
+- 只列出目前 session 已加入之 Room 的可見席位。
+- 不回傳私有 lease、stdio/process、provider session 或 host secrets。
 
-## 5. M2 規格：goal loop 與 `coding_workflow` 工具
+### `room_send_to_seat`
 
-### 5.1 引擎升級（UI 無關，先做）
+```ts
+input: {
+  room?: string;
+  targetSeatId: string;
+  message: string;
+  threadId?: string;
+  replyTo?: string;
+  taskId?: string;
+  candidateId?: string;
+  ledgerSeq?: number;
+}
+output: {
+  deliveryId: string;
+  threadId: string;
+  sourceSeatId: string;
+  targetSeatId: string;
+  state: "queued" | "delivered";
+}
+```
 
-1. `WorkflowRequest.acceptanceCriteria?: string(≤20000)`——注入 planner／writer／
-   reviewer prompt 作為驗收依據（標示 untrusted）。
-2. **無進展偵測**：writer 回合結束後的 workspace fingerprint 若與上一回合完全相同
-   → `NO_PROGRESS_STALLED` 終止，防止模型空轉燒額度。
-3. 跨模型交叉審查：引擎本就支援 1–4 個 reviewer 混編（如 codex＋grok＋claude）；
-   在 MCP 工具參數開放。
+- `sourceSeatId` 只由 server 從 authenticated presence 產生。
+- 驗證 same Room、canonical workspace 與 membership。
+- Target 不 wakeable 時可以 queued，但不得 fallback 到 provider worker。
 
-### 5.2 goal loop 形態（雙層、皆有界）
+### `room_wait`
 
-- 內圈＝workflow 引擎：writer → 跨模型 reviewers →不過則帶意見重寫→全 PASS 停。
-- 外圈＝host 的 agentic loop：host 保管 goal，決定是否追加獨立抽查（`ask_grok`）
-  或再跑一輪 workflow。
-- 停止條件疊層：全數 PASS／soft+hard 回合與呼叫上限／絕對時間（可中斷 in-flight）／
-  連續失敗斷路器／無進展偵測／人工暫停取消。不存在無限制模式。
+保留既有收件語意，但 delivery 增加 source seat、thread、task/candidate 與引用欄位。Transport timeout
+只結束本次 long-poll，不結束 thread；session-scoped standby 核准持續到撤銷、session EOF 或 lease
+失效，不應要求每個對話回合重新經 GUI 核准。
 
-### 5.3 跨程序 approval：目前實作方向
+### `room_wait_reply`
 
-專案規則：worktree／寫檔／測試是危險動作，必須有「不可偽造的 human approval」，
-且「模型文字不是授權」。現況 `ApprovalService` 是**單一程序記憶體內** nonce
-（SHA-256-only、120 秒、single-use）。MCP server 是 host 拉起的獨立程序，因此
-Web 批准中心發的 token 目前無法被 MCP server 程序消費。選項：
+```ts
+input: { threadId: string; afterMessageId?: string; timeoutMs?: number }
+output: { threadId: string; messages: ThreadMessage[]; timedOut: boolean }
+```
 
-- **A. Store-backed approval**：nonce hash 落地 SQLite（維持短效、single-use、scope
-  綁定），Web 批准中心與 MCP server 共用同一 DB。攻擊面：本機 DB 寫權者可注入
-  approval——但該角色本來就能改 policy 檔，威脅模型未實質惡化；需在 THREAT_MODEL 記載。
-- **B. 合併程序**：`orchestrator mcp` 同程序同時起 loopback Web（批准中心），approval
-  留在記憶體內。攻擊面最小，但 host 每開一個 MCP 連線就有一個 Web 埠，生命週期綁定。
-- **C. TTY 伴隨批准**：`orchestrator approve` 在另一個終端顯示 pending 請求並要求精確
-  輸入。最保守，但 UX 較差。
+- 只能等待呼叫者參與的 thread。
+- `timeoutMs` 有 transport 上限；沒有 thread round ceiling。
 
-目前採 **B 的安全語意**：寫入 workflow 由 daemon／批准中心所在的可信程序執行；MCP worker
-只可透過已實作的 `request_coding_workflow` 建立 bounded pending request，不直接持有或消費批准。
-Pending queue 為 owner-only SQLite、最多 100 件、固定 actor 與 row integrity 驗證。Host 端的 tool-permission 提示
-只作為第一道閘，不取代 orchestrator 的短效、single-use、scope-bound approval。
+### `room_reply`
 
-為兼顧 UX，pending request 可在 GUI 顯示完整摘要、workspace、角色、limits 與預期寫入範圍；
-owner 批准後才建立 worktree。模型輸出、Room 訊息、MCP actor 名稱與檔案內容一律不能轉換成
-批准。多 host 的 store-backed approval（A）保留為後續選項，但不在 M2 第一版擴大信任面。
+擴充既有工具，使 reply 綁定 authenticated seat 與 thread；重試維持 idempotent。
 
-## 6. M3：Web 監控與批准中心（安全基礎已完成）
+### `room_reply_and_wait`
 
-Room 對話保留作為可稽核協作帳本；監控中心另保留/新增：目前誰在工作、每個 agent 收到的子任務摘要、事件流、
-模型間交接路徑、最終決策與異議、Git diff（含 retained worktree）、測試、用量、
-寫檔/測試/API 批准。殼直接用今天重寫的卡片流＋終端精密視覺。
+```ts
+input: {
+  deliveryId: string;
+  message: string;
+  timeoutMs?: number;
+}
+output: {
+  reply: ThreadMessage;
+  next: ThreadMessage[];
+  timedOut: boolean;
+}
+```
 
-## 7. 不變的安全不變量（審查時請確認提案未破壞）
+原子完成本輪回覆並繼續等待同 thread，減少協作摩擦。它不增加或削弱 host coding 能力。
 
-1. 預設拒絕；workspace allowlist 空白 fail closed。
-2. 唯讀 worker 在空白 scratch cwd、停用內建檔案/shell/網路/子代理。
-3. 每個 task 只有一份 active Writer Lease；owner 可在 Codex／Claude 常駐、管理型或外接
-   身分間交接。寫入必須是隔離 worktree＋epoch-fenced Workspace MCP（SHA-256
-   compare-before-replace、no-clobber、無 delete/rename/Git/shell/network）；provider 本體仍固定
-   read-only sandbox，外接 Writer 由 Writer Companion 執行並審計雙重身份。
-4. 模型輸出不是授權；所有工具呼叫重新過 policy。
-5. 呼叫計數不可由對話重設；soft/hard limits 分層；無無限制模式。
-6. 不自動 commit/push/publish；發布需人類 GO。
-7. secrets 不進 source/log/DB/UI；redaction 全程有效。
+### `room_cancel_thread`
 
-## 8. 已知風險與未決事項
+```ts
+input: { threadId: string; reason?: string }
+output: { threadId: string; state: "cancelled" }
+```
 
-- Coverage gate 已修復且未降低門檻；2026-07-21 完整 release gate 為 line 94.98%、
-  branch 85.06%、functions 96.82%，274/274 tests。
-- Codex／Grok CLI 旗標是以官方文件推定並以 fake CLI 整合測試驗證；真實訂閱 smoke
-  test 仍待 owner 批准額度。
-- `WORKSPACE_MUST_START_CLEAN` 不直接放寬；M2 以明確、bounded、RAM-only Dirty Snapshot 匯入
-  新 worktree。Apply-back 重新驗 source/worktree HEAD、fingerprint 與逐檔 hash，另取短效
-  owner-scoped approval；刪除只移入 `~/trash-pending/orchestratory/`。
-- worker CLI 呼叫本質上比 API 慢且無 streaming（host 端自身輸出有 streaming）；
-  接受此限制，未來可選擇性開放 API worker（唯讀、預算受控，架構已支援）。
+Owner 或 thread participant 可停止協作；不得因達到固定往返數自動取消。
 
-## 9. 給審查者的問題
+## 5. Candidate 任務工具
 
-1. §5.3 approval 跨程序設計選 A／B／C 哪個？理由？
-2. `ask_*` 回傳要不要強制結構化欄位（結論/證據/風險）而非自由文字？
-   （代價：CLI worker 無原生 structured output，需 prompt＋解析，失敗要 fail closed）
-3. compare_agents 上限 3 個目標是否足夠？
-4. M1 是否還缺 host 常用的唯讀工具？（例如 `get_run_status`、`list_worktrees`）
+### `candidate_start`
+
+```ts
+input: {
+  room?: string;
+  task: string;
+  acceptanceCriteria?: string;
+  mainPath: string;
+}
+output: {
+  taskId: string;
+  candidateId: string;
+  candidatePath: string;
+  mainPath: string;
+  baseMainHead: string;
+  status: "active";
+}
+```
+
+建立 candidate、inventory 與 recovery metadata。此工具不限制 Native Agent 對其他路徑的原生存取。
+
+### `candidate_checkpoint`
+
+```ts
+input: { taskId: string; summary: string }
+output: { checkpointId: string; candidateHead: string; createdAt: string }
+```
+
+### `candidate_complete`
+
+```ts
+input: {
+  taskId: string;
+  summary: string;
+  tests?: TestResult[];
+  knownRisks?: string[];
+}
+output: {
+  completionId: string;
+  candidateHead: string;
+  mainHead: string;
+  preview: MergePreview;
+  mergeDecision: "owner-required";
+  next: "Ask the owner whether to merge this candidate into main";
+}
+```
+
+完成時必須凍結 preview 並主動讓 GUI/TUI 詢問是否 merge；不自動 promotion。
+
+### `candidate_status`
+
+列出 active/completed/merged/rejected/retained 狀態、HEAD、Agent branches、thread 與 recovery readiness。
+
+## 6. Main merge 工具
+
+### `main_merge_preview`
+
+```ts
+input: { taskId: string; completionId: string }
+output: {
+  candidateHead: string;
+  mainHead: string;
+  files: FileChange[];
+  tests: TestResult[];
+  conflicts: Conflict[];
+  risks: string[];
+  recovery: RecoveryState;
+  previewDigest: string;
+  prompt: string;
+}
+```
+
+`prompt` 必須明確說明即將修改 canonical main，詢問 Owner 是否同意該精確快照。
+
+### `main_merge_request`
+
+```ts
+input: {
+  taskId: string;
+  completionId: string;
+  previewDigest: string;
+}
+output: { approvalRequestId: string; state: "pending-owner" }
+```
+
+Agent 只能建立請求，不能自行把文字回覆轉換成 approval token。
+
+### `main_merge_execute`
+
+由本機 GUI/TUI Owner action 或受保護 promotion service 消耗 single-use approval；一般 Agent tool 不
+直接接收可重放 token。執行前重驗 candidate/main HEAD、paths、preview digest 與 recovery readiness。
+
+若發生 drift、scope expansion 或未預覽 conflict：
+
+```ts
+output: {
+  state: "reapproval-required";
+  reason: string;
+  updatedPreview: MergePreview;
+}
+```
+
+成功只修改 main；不自動 push、publish、deploy 或 cleanup candidate。
+
+## 7. Provider worker 相容工具
+
+`ask_codex`、`ask_claude`、`ask_grok`、`compare_agents` 可繼續作為「新建 worker」工具。它們必須：
+
+- 在名稱、回傳與 Ledger provenance 上標示 `provider-worker`；
+- 不出現在 exact terminal seat 清單；
+- 不接收指定 terminal seat 的 fallback 工作；
+- 不作為 live Agent 間即時協作的唯一途徑。
+
+是否讓 GUI Managed worker read-only，是 GUI 模式選擇；不得據此限制 Native Full-Trust host。
+
+## 8. Server instructions 更新
+
+MCP initialize instructions 必須告知 host：
+
+1. 加入 Orchestratory 不改變 host 原生能力。
+2. 需要與既有 terminal 協作時，使用 seat/thread 工具，不使用 `ask_*` 冒充。
+3. Coding 任務預設在 candidate path 工作。
+4. 準備直接修改 canonical main 時，先說明並等待使用者同意。
+5. 任務完成後呼叫 `candidate_complete`，並主動詢問是否 merge main。
+6. 不設固定 thread 往返上限；timeout 後可繼續等待。
+
+## 9. 安全與一致性不變量
+
+- Native capability 不由 MCP join mode 升降。
+- Source identity server-bound；payload 不能偽造。
+- Exact target no fallback。
+- Same Room/workspace routing。
+- Thread 無固定 round ceiling。
+- Candidate completion 不等於 main approval。
+- Merge approval single-use、snapshot-bound；drift 必須重批。
+- Main merge 不包含 push/publish/deploy/cleanup。
+- Full-Trust 的同帳號繞過風險在 GUI、文件與 audit 中誠實揭露。
+
+## 10. 實作順序
+
+1. 擴充 inbox schema 與 CollaborationService，移除 sender=`you` 硬編碼。
+2. 新增 seat discovery、send、wait-reply、reply-and-wait 與 thread tests。
+3. 更新 GUI/TUI seat provenance 與 peer thread 顯示。
+4. 建立 Candidate Registry、completion checkpoint 與 merge prompt。
+5. 建立 snapshot-bound approval、promotion、main drift、recovery 與 rollback tests。
+6. 實際以兩個不同終端 Codex／Claude Code 完成端到端人工驗收。

@@ -1,5 +1,9 @@
 # 安全開發與驗證流程
 
+> **2026-08-01 normative update：** 開發流程以 ADR-028 與 `AGENTS.md` 為準。Provider、workspace、
+> command broker 的舊限制只適用 GUI Managed；Native Full-Trust 的必要安全測試改為 exact-seat identity、
+> peer thread、candidate/main snapshot、merge approval、drift、recovery 與 capability 不降級。
+
 ## 1. Toolchain
 
 - 使用當時仍受支援的 Node.js LTS，並以版本檔精確 pin。
@@ -27,6 +31,10 @@ packages/
   providers/
   persistence/
   security/
+  collaboration/
+  candidate/
+  promotion/
+  recovery/
 docs/
 tests/
   unit/

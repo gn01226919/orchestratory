@@ -1,5 +1,9 @@
 # Safe operations and removal
 
+> Current commands below describe the legacy runtime. Under ADR-028, candidate retention, completion preview,
+> main-merge approval, promotion recovery, and cleanup are separate operations. Rejecting a merge never authorizes
+> candidate cleanup, and main-merge approval never authorizes push, publish, deployment, or data purge.
+
 ## Inventory before mutation
 
 Run these read-only commands first:

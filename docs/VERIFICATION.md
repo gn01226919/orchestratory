@@ -1,7 +1,25 @@
 # MVP 驗證矩陣
 
+> **Legacy evidence notice（2026-08-01）：** 下表驗證的是目前受限 Writer／read-only worker runtime，
+> 不證明 ADR-028 的 Native Full-Trust、terminal peer thread、candidate completion 或 main merge decision
+> 已完成。舊測試保留作為 GUI Managed 回歸證據，不得再當成 Native terminal 的產品驗收條件。
+
+## ADR-028 vNext 待驗證矩陣
+
+| 範圍 | 狀態 | 必要證據 |
+|---|---|---|
+| 加入前後 Native capability 一致 | 待實作／待驗證 | Codex、Claude Code 分別驗證 filesystem/shell/Git/network/subagent 不被 Orchestratory 降權 |
+| Exact terminal seat discovery | 待實作／待驗證 | 兩個不同終端能列出彼此且與 provider worker 分離 |
+| Authenticated peer send/thread | 待實作／待驗證 | source 不可偽造、same Room/workspace、no fallback、多輪 reply-and-wait |
+| Thread 無固定 round ceiling | 待實作／待驗證 | 超過 16 輪仍延續；transport timeout/reconnect 不終止 thread |
+| Candidate lifecycle | 待實作／待驗證 | task/base/main/candidate/checkpoint/Agent branches 可追溯，保全既有 dirty state |
+| Task completion merge prompt | 待實作／待驗證 | 每個完成任務主動顯示 preview 並詢問是否 merge main |
+| Snapshot-bound approval | 待實作／待驗證 | replay、candidate drift、main drift、preview mismatch 全部拒絕 |
+| Promotion/recovery | 待實作／待驗證 | recovery point 可讀、conflict/scope expansion 重批、成功/失敗/rollback 可驗證 |
+| GUI Managed 隔離 | 待實作／待驗證 | Managed policy 不會改變已加入 Native terminal 的 capability |
+
 本表區分「程式已實作且有本機自動證據」與「需要 owner 額度、外部 runtime 或發布決策」。
-`已驗證` 不代表第三方認證或零風險；只代表表列測試在目前 source tree 通過。
+`已驗證` 不代表第三方認證或零風險；只代表下列表列 legacy 測試在目前 source tree 通過。
 
 | 範圍 | 狀態 | 可重現證據 | 尚待事項 |
 |---|---|---|---|

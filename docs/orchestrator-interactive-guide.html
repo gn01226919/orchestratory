@@ -6,9 +6,10 @@
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'none'; font-src 'none'; media-src 'none'; worker-src 'none'; connect-src 'none'; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>Orchestratory 互動操作導覽</title>
-<style>:root{color-scheme:light dark;background:light-dark(rgb(255 255 255), rgb(24 24 24))}html,body{margin:0}body{box-sizing:border-box;padding:1rem;background:inherit}iframe{display:block;width:100%;max-width:736px;height:calc(100vh - 2rem);margin:0 auto;border:0}</style>
+<style>:root{color-scheme:light dark;background:light-dark(rgb(255 255 255), rgb(24 24 24))}html,body{margin:0}body{box-sizing:border-box;padding:1rem;background:inherit}.migration-notice{box-sizing:border-box;max-width:736px;margin:0 auto 1rem;padding:.75rem 1rem;border:1px solid #d69e2e;border-radius:.75rem;font:14px/1.5 system-ui,sans-serif}.migration-notice strong{display:block}iframe{display:block;width:100%;max-width:736px;height:calc(100vh - 8rem);margin:0 auto;border:0}</style>
 </head>
 <body>
+<div class="migration-notice"><strong>Legacy runtime guide</strong>本頁示範的是 ADR-028 之前的受限 Writer／唯讀 worker 流程。Native Full-Trust、terminal peer thread、candidate 任務終點 merge 詢問尚未實作；新版規格請見 docs/OWNER_DECISION_FULL_CONTROL.md。</div>
 <iframe sandbox="allow-scripts" referrerpolicy="no-referrer" title="Orchestratory 互動操作導覽" srcdoc="&lt;!doctype html&gt;
 &lt;html lang=&quot;zh-Hant&quot;&gt;
 &lt;head&gt;
