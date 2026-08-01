@@ -244,6 +244,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
             writerLeases: collaboration.writerLeases.inventory(),
             writerDelegations: collaboration.writerDelegations.inventory(),
             collaborationAudit: collaboration.audit.inventory(),
+            candidates: collaboration.candidates.inventory(),
             providerCalls: app.providerCalls.status(),
             workflowRequests: app.workflowRequests.inventory(),
             retention: app.retention,
@@ -258,7 +259,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (command === "data" && args[1] === "integrity") {
       const { CollaborationService } = await import("./core/collaboration-service.ts");
       const collaboration = new CollaborationService(app.store.dataDirectory);
-      let roomReport, presenceReport, inboxReport, managedReport, writerReport, delegationReport, auditReport;
+      let roomReport, presenceReport, inboxReport, managedReport, writerReport, delegationReport, auditReport, candidateReport;
       try {
         roomReport = collaboration.ledger.integrity();
         presenceReport = collaboration.presence.integrity();
@@ -267,6 +268,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
         writerReport = collaboration.writerLeases.integrity();
         delegationReport = collaboration.writerDelegations.integrity();
         auditReport = collaboration.audit.integrity();
+        candidateReport = collaboration.candidates.integrity();
       } finally {
         collaboration.close();
       }
@@ -279,6 +281,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
         writerLeases: writerReport,
         writerDelegations: delegationReport,
         collaborationAudit: auditReport,
+        candidates: candidateReport,
         providerGovernor: app.providerCalls.integrity(),
         workflowRequests: app.workflowRequests.integrity(),
       };
@@ -301,6 +304,8 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
         !report.writerDelegations.rowsValid ||
         report.collaborationAudit.quickCheck !== "ok" ||
         !report.collaborationAudit.chainValid ||
+        report.candidates.quickCheck !== "ok" ||
+        !report.candidates.rowsValid ||
         !report.providerGovernor.stateValid ||
         !report.workflowRequests.hashesValid
       ) process.exitCode = 1;

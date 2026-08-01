@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
+import { open, readFile, stat, type FileHandle } from "node:fs/promises";
+import { StringDecoder } from "node:string_decoder";
 import { canonicalWorkspace, resolveExistingInside } from "../security/workspace.ts";
 import {
   minimalGitEnvironment,
@@ -20,6 +21,7 @@ export interface GitInspection {
 
 export const MAX_CHANGED_BYTES = 50 * 1024 * 1024;
 const MAX_UNTRACKED_REVIEW_FILE_BYTES = 65_536;
+const CONTENT_FINGERPRINT_TIMEOUT_MS = 30_000;
 const SENSITIVE_UNTRACKED_PATH = /(?:^|\/)(?:\.env(?:\.[^/]*)?|[^/]+\.(?:pem|key|p12|pfx))$/iu;
 
 export class GitBroker {
@@ -47,6 +49,98 @@ export class GitBroker {
     return paths;
   }
 
+  async #streamStdout(workspace: string, args: string[], consume: (chunk: Buffer) => void): Promise<void> {
+    const executable = await resolveExecutable("git");
+    const result = await runProcess({
+      executable,
+      args,
+      cwd: workspace,
+      timeoutMs: 30_000,
+      outputLimitBytes: 262_144,
+      env: minimalGitEnvironment(),
+      stdoutConsumer: consume,
+    });
+    if (result.exitCode !== 0 || result.terminationReason) throw new Error("GIT_COMMAND_FAILED");
+  }
+
+  async #statusInventory(workspace: string, fingerprint: ReturnType<typeof createHash>): Promise<{
+    changedPaths: string[];
+    untrackedPaths: string[];
+    summary: string;
+  }> {
+    const decoder = new StringDecoder("utf8");
+    const changedPaths: string[] = [];
+    const untrackedPaths: string[] = [];
+    const summary: string[] = [];
+    let pending = "";
+    let expectingRenameSource = false;
+    const token = (value: string): void => {
+      if (value.includes("\uFFFD")) throw new Error("UNSUPPORTED_GIT_PATH_ENCODING");
+      if (expectingRenameSource) {
+        if (!value) throw new Error("INVALID_GIT_STATUS_STREAM");
+        expectingRenameSource = false;
+        return;
+      }
+      if (value.length < 4 || value[2] !== " ") throw new Error("INVALID_GIT_STATUS_STREAM");
+      const code = value.slice(0, 2);
+      const path = value.slice(3);
+      if (!path) throw new Error("INVALID_GIT_STATUS_STREAM");
+      if (code === "!!") return;
+      changedPaths.push(path);
+      if (code === "??") untrackedPaths.push(path);
+      if (summary.length < 100) summary.push(`${code} ${JSON.stringify(path)}`);
+      expectingRenameSource = code.includes("R") || code.includes("C");
+    };
+    const consume = (chunk: Buffer): void => {
+      fingerprint.update(chunk);
+      pending += decoder.write(chunk);
+      for (;;) {
+        const boundary = pending.indexOf("\0");
+        if (boundary < 0) return;
+        token(pending.slice(0, boundary));
+        pending = pending.slice(boundary + 1);
+      }
+    };
+    await this.#streamStdout(workspace, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], consume);
+    pending += decoder.end();
+    if (pending.length > 0 || expectingRenameSource) throw new Error("INVALID_GIT_STATUS_STREAM");
+    return { changedPaths, untrackedPaths, summary: summary.join("\n") };
+  }
+
+  async #numstatLines(
+    workspace: string,
+    args: string[],
+    fingerprint: ReturnType<typeof createHash>,
+  ): Promise<number> {
+    const decoder = new StringDecoder("utf8");
+    let pending = "";
+    let lines = 0;
+    const token = (value: string): void => {
+      if (value.includes("\uFFFD")) throw new Error("UNSUPPORTED_GIT_PATH_ENCODING");
+      const firstTab = value.indexOf("\t");
+      const secondTab = firstTab < 0 ? -1 : value.indexOf("\t", firstTab + 1);
+      if (firstTab < 0 || secondTab < 0) return;
+      const added = value.slice(0, firstTab);
+      const removed = value.slice(firstTab + 1, secondTab);
+      if (/^\d+$/u.test(added)) lines += Number(added);
+      if (/^\d+$/u.test(removed)) lines += Number(removed);
+    };
+    const consume = (chunk: Buffer): void => {
+      fingerprint.update(chunk);
+      pending += decoder.write(chunk);
+      for (;;) {
+        const boundary = pending.indexOf("\0");
+        if (boundary < 0) return;
+        token(pending.slice(0, boundary));
+        pending = pending.slice(boundary + 1);
+      }
+    };
+    await this.#streamStdout(workspace, [...args, "-z"], consume);
+    pending += decoder.end();
+    if (pending.length > 0) throw new Error("INVALID_GIT_NUMSTAT_STREAM");
+    return lines;
+  }
+
   async #existingFile(workspace: string, path: string): Promise<{ absolute: string; size: number } | undefined> {
     try {
       const absolute = await resolveExistingInside(workspace, path);
@@ -59,46 +153,73 @@ export class GitBroker {
     }
   }
 
+  async #contentFingerprint(
+    workspace: string,
+    path: string,
+    deadlineMs: number,
+  ): Promise<{ size: number; digest: string } | undefined> {
+    let handle: FileHandle | undefined;
+    try {
+      const absolute = await resolveExistingInside(workspace, path);
+      handle = await open(absolute, "r");
+      const before = await handle.stat({ bigint: true });
+      if (!before.isFile()) return undefined;
+      if (before.nlink > 1) throw new Error("HARDLINK_CHANGED_FILE_DENIED");
+      const content = createHash("sha256");
+      const remainingMs = deadlineMs - Date.now();
+      if (remainingMs <= 0) throw new Error("GIT_CONTENT_FINGERPRINT_TIMEOUT");
+      const stream = handle.createReadStream({ autoClose: false });
+      const timeout = setTimeout(() => {
+        stream.destroy(new Error("GIT_CONTENT_FINGERPRINT_TIMEOUT"));
+      }, remainingMs);
+      timeout.unref();
+      try {
+        for await (const chunk of stream) content.update(chunk);
+      } finally {
+        clearTimeout(timeout);
+      }
+      const after = await handle.stat({ bigint: true });
+      if (
+        before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size ||
+        before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs
+      ) throw new Error("GIT_FILE_CHANGED_DURING_INSPECTION");
+      const size = Number(before.size);
+      if (!Number.isSafeInteger(size)) throw new Error("GIT_FILE_SIZE_UNSUPPORTED");
+      return { size, digest: content.digest("hex") };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    } finally {
+      await handle?.close();
+    }
+  }
+
   async inspect(workspaceInput: string): Promise<GitInspection> {
     const workspace = await canonicalWorkspace(workspaceInput);
     const root = (await this.#git(workspace, ["rev-parse", "--show-toplevel"], 16_384)).trim();
     if ((await canonicalWorkspace(root)) !== workspace) throw new Error("WORKSPACE_MUST_BE_GIT_ROOT");
-    const status = await this.#git(workspace, ["status", "--short", "--untracked-files=all"]);
-    const numstat = await this.#git(workspace, ["diff", "--no-ext-diff", "--numstat"]);
-    const cachedNumstat = await this.#git(workspace, ["diff", "--cached", "--no-ext-diff", "--numstat"]);
-    const trackedPaths = [
-      ...(await this.#paths(workspace, ["diff", "--name-only", "-z"])),
-      ...(await this.#paths(workspace, ["diff", "--cached", "--name-only", "-z"])),
-    ];
-    const untrackedPaths = await this.#paths(workspace, [
-      "ls-files",
-      "--others",
-      "--exclude-standard",
-      "-z",
-    ]);
-    const changedPaths = [...new Set([...trackedPaths, ...untrackedPaths])].sort();
-    let changedLines = 0;
-    for (const line of `${numstat}\n${cachedNumstat}`.split("\n")) {
-      const [added, removed] = line.split("\t");
-      if (/^\d+$/u.test(added ?? "")) changedLines += Number(added);
-      if (/^\d+$/u.test(removed ?? "")) changedLines += Number(removed);
-    }
+    const fingerprintHash = createHash("sha256").update("orchestratory.git-inspection.v2\0status\0");
+    const status = await this.#statusInventory(workspace, fingerprintHash);
+    fingerprintHash.update("\0numstat\0");
+    let changedLines = await this.#numstatLines(
+      workspace, ["diff", "--no-ext-diff", "--numstat"], fingerprintHash,
+    );
+    fingerprintHash.update("\0cached-numstat\0");
+    changedLines += await this.#numstatLines(
+      workspace, ["diff", "--cached", "--no-ext-diff", "--numstat"], fingerprintHash,
+    );
+    const untrackedPaths = status.untrackedPaths;
+    const changedPaths = [...new Set(status.changedPaths)].sort();
+    const contentFingerprintDeadline = Date.now() + CONTENT_FINGERPRINT_TIMEOUT_MS;
     let changedBytes = 0;
-    const fingerprintHash = createHash("sha256")
-      .update(status)
-      .update(numstat)
-      .update(cachedNumstat);
+    fingerprintHash.update("\0content\0");
     for (const path of changedPaths) {
       fingerprintHash.update(path).update("\0");
-      const file = await this.#existingFile(workspace, path);
+      const file = await this.#contentFingerprint(workspace, path, contentFingerprintDeadline);
       if (!file) continue;
       changedBytes += file.size;
-      fingerprintHash.update(String(file.size)).update("\0");
-      if (changedBytes <= MAX_CHANGED_BYTES) {
-        fingerprintHash.update(await readFile(file.absolute));
-      }
+      fingerprintHash.update(String(file.size)).update("\0").update(file.digest).update("\0");
     }
-    const statusLines = status.split("\n").filter(Boolean);
     return {
       root,
       clean: changedPaths.length === 0,
@@ -106,7 +227,7 @@ export class GitBroker {
       changedLines,
       changedBytes,
       untrackedFiles: untrackedPaths.length,
-      statusSummary: statusLines.slice(0, 100).join("\n"),
+      statusSummary: status.summary,
       fingerprint: fingerprintHash.digest("hex"),
     };
   }

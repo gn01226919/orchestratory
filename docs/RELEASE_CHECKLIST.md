@@ -29,8 +29,8 @@
 - [ ] GUI Managed policy 不會套用到 Native Full-Trust session。
 - [ ] Exact-seat source server-bound、same Room/workspace、target no-fallback 與 thread reconnect 測試通過。
 - [ ] Thread 超過 16 輪仍可延續；不存在固定產品 round ceiling。
-- [ ] Candidate/main canonical identity、dirty-state preservation、drift 與 TOCTOU 測試通過。
-- [ ] 每個 task completion 都建立 preview 並主動詢問是否 merge main。
+- [x] Candidate/main canonical identity、dirty-state preservation、drift 與 TOCTOU synthetic 測試通過。
+- [x] 每個 task completion 都建立 preview 並直接回傳 Owner-required merge 問句；canonical main branch/worktree 不變，shared Git 只新增 recovery ref。
 - [ ] Merge approval single-use、snapshot-bound；replay、candidate/main drift、scope expansion 全部要求重批。
 - [ ] Recovery point 已實際建立並驗證可讀；promotion partial failure 與 rollback 有可重現測試。
 - [ ] Prompt injection 不能偽造 Orchestratory identity、merge approval 或 control-plane scope。

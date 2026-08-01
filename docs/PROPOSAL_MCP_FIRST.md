@@ -111,8 +111,8 @@ output: {
 
 ### `room_wait`
 
-保留既有收件語意，但 delivery 增加 source seat、thread、task 與引用欄位；candidate linkage 由後續
-candidate lifecycle 階段加入。Transport timeout
+保留既有收件語意，但 delivery 增加 source seat、thread、task 與引用欄位；candidate lifecycle 已讓
+UUID task ID 在 send 時重驗 Candidate Registry 的 Room／workspace scope。Transport timeout
 只結束本次 long-poll，不結束 thread；session-scoped standby 核准持續到撤銷、session EOF 或 lease
 失效，不應要求每個對話回合重新經 GUI 核准。
 
@@ -163,7 +163,7 @@ Owner 或 thread participant 可停止協作；不得因達到固定往返數自
 
 ## 5. Candidate 任務工具
 
-### `candidate_start`
+### `candidate_start`（已實作）
 
 ```ts
 input: {
@@ -183,15 +183,16 @@ output: {
 ```
 
 建立 candidate、inventory 與 recovery metadata。此工具不限制 Native Agent 對其他路徑的原生存取。
+它會新增 shared Git branch/worktree metadata，但不改 canonical main branch/worktree。
 
-### `candidate_checkpoint`
+### `candidate_checkpoint`（已實作）
 
 ```ts
 input: { taskId: string; summary: string }
 output: { checkpointId: string; candidateHead: string; createdAt: string }
 ```
 
-### `candidate_complete`
+### `candidate_complete`（已實作；promotion 尚未實作）
 
 ```ts
 input: {
@@ -212,9 +213,17 @@ output: {
 
 完成時必須凍結 preview 並主動讓 GUI/TUI 詢問是否 merge；不自動 promotion。
 
-### `candidate_status`
+目前 `candidate_start`／`candidate_checkpoint`／`candidate_complete` 尚未提供 durable request idempotency。
+若 stdio／transport 回應不確定，Agent 必須先呼叫 `candidate_status` 找回 task、checkpoint、completion
+與原 Owner prompt，不得盲目重送。`candidate_start` 重送會建立額外 candidate，checkpoint 會新增 ref，
+而已成功的 complete 重送可能回 `CANDIDATE_NOT_ACTIVE`。這些 artifact 會保留且可見，canonical main
+branch/worktree 不會被覆寫；但 Phase 5 promotion 前必須補 required stable `clientRequestId`、durable
+request receipt、same-key/same-digest replay 與 crash reconciliation。
 
-列出 active/completed/merged/rejected/retained 狀態、HEAD、Agent branches、thread 與 recovery readiness。
+### `candidate_status`（已實作）
+
+目前列出 active/completed 狀態、checkpoint、live HEAD/dirty、completion stale 與 branch recovery
+readiness；merged/rejected/retained 與更完整的 Agent branch/thread 呈現由 promotion/GUI 階段補齊。
 
 ## 6. Main merge 工具
 

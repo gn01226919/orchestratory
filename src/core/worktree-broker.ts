@@ -25,6 +25,14 @@ export interface RetainedWorktree {
   headSha: string;
 }
 
+export interface CandidateWorktree {
+  candidateId: string;
+  workspace: string;
+  sourceWorkspace: string;
+  branch: string;
+  headSha: string;
+}
+
 export class WorktreeBroker {
   readonly #dataDirectory: string;
 
@@ -84,6 +92,52 @@ export class WorktreeBroker {
     const target = join(root, runId);
     await this.#git(source, ["worktree", "add", "--no-track", "-b", branch, target, baseSha]);
     return { workspace: await canonicalWorkspace(target), branch, baseSha };
+  }
+
+  async createCandidate(sourceInput: string, candidateId: string, expectedBaseSha: string): Promise<CandidateWorktree> {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(candidateId)) {
+      throw new Error("CANDIDATE_ID_INVALID");
+    }
+    if (!/^[0-9a-f]{40,64}$/u.test(expectedBaseSha)) throw new Error("CANDIDATE_BASE_HEAD_INVALID");
+    const source = await canonicalWorkspace(sourceInput);
+    const unsafeConfig = await this.#git(
+      source,
+      [
+        "config",
+        "--local",
+        "--name-only",
+        "--get-regexp",
+        "^(filter\\..*\\.(clean|smudge|process)|core\\.fsmonitor)$",
+      ],
+      new Set([0, 1]),
+    );
+    if (unsafeConfig.trim()) throw new Error("UNSAFE_LOCAL_GIT_FILTER_OR_FSMONITOR_CONFIG");
+    const currentHead = (await this.#git(source, ["rev-parse", "--verify", "HEAD^{commit}"])).trim();
+    if (currentHead !== expectedBaseSha) throw new Error("CANDIDATE_MAIN_HEAD_CHANGED");
+    const root = join(this.#dataDirectory, "candidates");
+    await mkdir(root, { recursive: true, mode: 0o700 });
+    await chmod(root, 0o700);
+    const target = join(root, candidateId);
+    const branch = `orchestratory/candidate-${candidateId}`;
+    await this.#git(source, ["worktree", "add", "--no-track", "-b", branch, target, expectedBaseSha]);
+    return await this.inspectCandidate(candidateId);
+  }
+
+  async inspectCandidate(candidateId: string): Promise<CandidateWorktree> {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(candidateId)) {
+      throw new Error("CANDIDATE_ID_INVALID");
+    }
+    const workspace = await canonicalWorkspace(join(this.#dataDirectory, "candidates", candidateId));
+    const branch = (await this.#git(workspace, ["branch", "--show-current"])).trim();
+    if (branch !== `orchestratory/candidate-${candidateId}`) throw new Error("CANDIDATE_BRANCH_MISMATCH");
+    const headSha = (await this.#git(workspace, ["rev-parse", "--verify", "HEAD^{commit}"])).trim();
+    if (!/^[0-9a-f]{40,64}$/u.test(headSha)) throw new Error("CANDIDATE_HEAD_INVALID");
+    const commonDirectory = (
+      await this.#git(workspace, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
+    ).trim();
+    const sourceWorkspace = await canonicalWorkspace(dirname(commonDirectory));
+    if (sourceWorkspace === workspace) throw new Error("CANDIDATE_SOURCE_MISMATCH");
+    return { candidateId, workspace, sourceWorkspace, branch, headSha };
   }
 
   async listRunIds(): Promise<string[]> {

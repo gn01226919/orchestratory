@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { link, mkdtemp, rm, truncate, writeFile } from "node:fs/promises";
+import { link, mkdtemp, open, rm, truncate, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GitBroker, MAX_CHANGED_BYTES } from "../src/core/git-broker.ts";
@@ -48,6 +48,28 @@ test("tracked same-size content changes alter the review fingerprint", async (t)
   assert.notEqual(second.fingerprint, first.fingerprint);
 });
 
+test("Git inspection includes a tracked deletion without trying to read the missing file", async (t) => {
+  const root = await repository();
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  await unlink(join(root, "README.md"));
+  const inspection = await new GitBroker().inspect(root);
+  assert.equal(inspection.clean, false);
+  assert.equal(inspection.changedFiles, 1);
+  assert.equal(inspection.changedBytes, 0);
+  assert.match(inspection.statusSummary, /README\.md/u);
+});
+
+test("Git inspection parses a NUL-delimited tracked rename as one current path", async (t) => {
+  const root = await repository();
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  await execFileAsync("git", ["mv", "README.md", "RENAMED.md"], { cwd: root });
+  const inspection = await new GitBroker().inspect(root);
+  assert.equal(inspection.changedFiles, 1);
+  assert.equal(inspection.untrackedFiles, 0);
+  assert.equal(inspection.changedBytes, Buffer.byteLength("synthetic\n"));
+  assert.match(inspection.statusSummary, /RENAMED\.md/u);
+});
+
 test("untracked review rejects sensitive paths and oversized files", async (t) => {
   const sensitive = await repository();
   const oversized = await repository();
@@ -65,12 +87,22 @@ test("untracked review rejects sensitive paths and oversized files", async (t) =
   await assert.rejects(broker.inspect(hardlinked), /HARDLINK_CHANGED_FILE_DENIED/u);
 });
 
-test("Git inspection reports the fixed changed-byte safety ceiling", async (t) => {
+test("Git inspection fully fingerprints content beyond the changed-byte safety ceiling", async (t) => {
   const root = await repository();
   t.after(async () => await rm(root, { recursive: true, force: true }));
   const path = join(root, "oversized.bin");
   await writeFile(path, "x", "utf8");
   await truncate(path, MAX_CHANGED_BYTES + 1);
-  const inspection = await new GitBroker().inspect(root);
-  assert.equal(inspection.changedBytes, MAX_CHANGED_BYTES + 1);
+  const broker = new GitBroker();
+  const first = await broker.inspect(root);
+  assert.equal(first.changedBytes, MAX_CHANGED_BYTES + 1);
+  const handle = await open(path, "r+");
+  try {
+    await handle.write(Buffer.from("y"), 0, 1, MAX_CHANGED_BYTES);
+  } finally {
+    await handle.close();
+  }
+  const second = await broker.inspect(root);
+  assert.equal(second.changedBytes, first.changedBytes);
+  assert.notEqual(second.fingerprint, first.fingerprint);
 });
