@@ -1,179 +1,151 @@
 # 產品需求與驗收條件
 
+狀態：**Native Full-Trust 目標規格；runtime 尚未完成**
+
+依據：`OWNER_DECISION_FULL_CONTROL.md`、ADR-028
+
+本版取代過去要求所有模型唯讀、禁止 shell／Git／network、單一 Writer Lease 與固定最大 Agent
+往返輪數的需求。舊能力可保留給 GUI Managed，但不得限制原生 TUI Agent。
+
 ## 1. 產品範圍
 
-建立一個本機多 agent orchestrator，管理官方 coding CLI 與選配 API provider，支援規劃、實作、審查、測試及條件式迴圈，同時以可驗證的 policy engine 限制權限、成本、時間與資料流。
+Orchestratory 是本機多 Agent 協作器：讓多個原生 Codex／Claude Code 等終端 session 保留完整能力，
+同時透過 Room Ledger、exact-seat thread、candidate workspace、checkpoint、main merge 核准與 recovery
+一起完成任務。
 
-## 2. Provider 與模型
+產品不是 provider 的替代聊天 host，也不是把 Agent 關進低能力 sandbox 的 policy engine。
 
-### 2.1 訂閱模式
+## 2. 執行模式
 
-第一版支援：
+### 2.1 Native Full-Trust
 
-- OpenAI Codex CLI 的官方非互動介面。
-- Anthropic Claude Code CLI 的官方 print/headless 介面。
-- xAI Grok Build CLI 的官方 headless 介面。
+- 外接 TUI／MCP terminal seat 的預設模式。
+- 不改寫 provider host 原本授予的 filesystem、shell、Git、network、plugin 或 subagent 能力。
+- 不強制 read-only provider flags、Workspace MCP 唯一寫入、Writer Companion 或 Writer Lease。
+- 不限制 Agent 只能存取 allowlisted workspace；allowlist 只用來識別 Room、candidate 與 canonical main。
+- 不設 Agent thread 固定最大往返輪數。
+- Orchestratory 不主動啟用 host 的 skip-permissions 或等價升權旗標。
 
-必要行為：
+### 2.2 GUI Managed
 
-- 使用者先在各 CLI 完成官方登入。
-- Orchestrator 只檢查「可否正常執行」，不讀取憑證內容。
-- CLI 不可用、額度耗盡或登入失效時，workflow 安全停止並通知使用者。
-- 不得自動改用 API。
+- Owner 可在 GUI 對 managed worker 選擇 read-only、writer 或 full-trust。
+- 既有 bounded worker、Writer Lease、Workspace MCP 與 worktree workflow 可繼續作為 managed 選項。
+- GUI Managed policy 不能溯及或降級外接 Native Full-Trust session。
 
-### 2.2 API 模式
+## 3. Agent 身分與即時協作
 
-- 初始狀態為 disabled。
-- 可逐 provider 切換，不要求全域切換。
-- 啟用前顯示 provider、model、預算、資料傳輸範圍與確認資訊。
-- API secrets 不出現在前端、log、SQLite 或 crash report。
-- 每次、workflow、日、月預算均為必填硬限制。
-- API fallback 必須逐次由人類明確批准。
-- 第一個安全版本的 API agent 僅能擔任 Planner 或 Reviewer。通過寫入沙箱驗證的 Codex／Claude
-  訂閱 adapter 可由 owner 指派為 task-scoped Writer，必須在隔離 worktree 中且只能使用內建
-  Workspace MCP broker。Grok/API Writer 保持停用；未來開放前需獨立 sandbox 與 threat review。
+- `list_agents` 必須同時列出 provider workers 與目前已加入 Room 的 exact terminal seats，並清楚區分。
+- Exact seat 身分至少包含不可偽造的 presence/seat ID、display name、provider、session、Room、workspace、
+  wakeable 狀態與支援能力。
+- 同一 Room 及 canonical workspace 的 seats 能直接建立 thread、傳訊、引用、等待、回覆、失敗、取消
+  與恢復等待。
+- Terminal sender 必須以其 authenticated presence 入帳；不得硬編碼為 `you`。
+- 指定 exact seat 時不得 fallback 到同 provider 常駐 worker，也不得新開一個唯讀 worker 冒充回覆。
+- Ledger 保存共享進度；thread/inbox 提供即時協作。訊息需能引用 task、candidate 與 ledger seq。
+- Transport long-poll 可有 timeout、撤銷與重連；thread 不因 timeout 結束，也沒有固定回合數 ceiling。
+- Agent 回覆後若任務未結束，可以原子地「回覆並繼續等待」，避免每一輪重新經 GUI 批准。
 
-### 2.3 模型選擇
+## 4. Candidate 任務模型
 
-- TUI 與 Web UI 必須提供 provider/model selector。
-- 優先透過官方 CLI 支援的 discovery 命令取得模型列表。
-- 無 discovery 時允許手動 model ID，但需格式驗證與確認。
-- 角色與模型不得寫死；profile 只提供預設值。
+每項會修改專案的協作任務必須建立：
 
-## 3. Agent 角色與工作流程
+- task ID 與 Room ID；
+- canonical main path 與建立時 main HEAD；
+- 獨立 candidate path 與 candidate ID；
+- Agent branches 或等價的可追溯 checkpoint；
+- 建立前的 main／dirty state inventory；
+- recovery metadata 與保存狀態。
 
-預設角色：
+Candidate 是預設修改目的地，但不是 OS 權限 sandbox。Agent 可讀取或操作整台 Mac；協作器只要求
+Agent 在準備修改 canonical main 時觸發 main boundary protocol。
 
-- Planner：唯讀，產出計畫與驗收條件。
-- Writer：每個 task 唯一持有 active epoch-fenced lease 的主寫入者；可交接，並可派一層同
-  provider 可寫子 Agent（與父 Writer 共用 task worktree、由持久化鎖序列執行）或跨 provider
-  唯讀子 Agent。
-- Reviewer：唯讀，檢查 correctness、安全與需求符合度。
-- Tester：只能啟動核准的測試命令並回報結果。
+多 Agent 可以使用不同 candidate、同一 candidate 下不同 branch，或經 Owner 選擇共享整合 branch。
+產品不得用「每個 task 只能有一個 Writer」取代正常的 Git 衝突檢查與協作協調。
 
-工作流程必須支援：
+## 5. 任務完成與 main merge
 
-- 有向節點與條件邊。
-- 序列與受控平行 reviewer。
-- 依測試、review 結果返回 writer。
-- max rounds、max calls、timeout、budget 與 circuit breaker。
-- pause、resume、cancel、human approval。
-- 崩潰後從安全 checkpoint 恢復。
+### 5.1 完成條件
 
-平行 reviewer 只能讀取同一 immutable snapshot；不得平行寫入。
+當執行 Agent 宣告 acceptance criteria 已完成，Orchestratory 必須凍結一個 candidate completion
+checkpoint，彙整：
 
-## 4. TUI、Web 與 CLI
+- candidate/base/main HEAD；
+- changed／added／deleted／renamed files；
+- diff 摘要與完整可檢視 diff；
+- 已執行與未執行的測試；
+- merge conflict、main drift、large/binary、權限與刪除風險；
+- recovery point 與 rollback 說明。
 
-### 4.1 TUI
+### 5.2 主動詢問
 
-執行 `orchestrator` 直接開啟終端機互動介面。至少提供：
+每個任務完成後必須主動詢問：
 
-- 啟動即建立以 Codex 為主代理的 RAM-only 自然語言 session；一般輸入不需要指令前綴。
-- 只有 `/help`、`/agents`、`/status`、`/new`、`/gui`、`/advanced`、`/exit` 等本機操作使用斜線前綴，斜線指令不得傳給模型。
-- Sub-agents 以固定白名單 tools 註冊；主代理可以自動選擇唯讀工具，但任何寫入型 workflow 仍需人類 scoped approval。
-- Workflow 採三段式資訊層級：工具提案、執行確認、與開始後的獨立即時儀表板。
-- Allowlist 空白時停止並顯示唯一修正動作；只有一個已授權專案時預選該專案，不以 home directory 作預設。
-- Web 可用原生資料夾 picker 或手動路徑新增單一 Git root；必須先顯示 canonical 安全 preview，
-  封鎖 broad／sensitive／unsafe root，再以短效 single-use 精確確認及 confirm-time TOCTOU 重驗寫入
-  owner-only policy。不得讓 Agent 透過聊天或 request queue 自行擴大 workspace。
-- 專案與 workflow profile 選擇。
-- 任務輸入。
-- agent/provider/model 選擇。
-- 訂閱/API 模式顯示與切換。
-- 即時狀態、事件、訊息、diff、測試與用量頁籤。
-- 暫停、繼續、批准、拒絕、終止。
-- 清楚顯示目前有效軟限制與不可由 UI 解除的硬限制。
-- 執行中以單鍵切換 Activity、Messages、Diff、Tests、Usage；取消採短時間內二次按鍵確認。
+> 是否將這個 candidate 的精確完成快照 merge／promote 到 main？
 
-### 4.2 Web UI
+此詢問不可被 commit、review PASS、Room membership、standby approval、GUI Writer 選擇或先前任務的
+批准取代。
 
-- 由 `orchestrator web` 啟動。
-- v1 僅監聽 loopback address。
-- 使用每次啟動產生的高熵 session secret 與 SameSite cookie。
-- 必須防止 CSRF、WebSocket/SSE cross-origin 濫用與 DNS rebinding。
-- 不得將 provider secret 傳送到 browser。
+### 5.3 核准語意
 
-### 4.3 非互動模式
+- Approval 必須 single-use、短效且 snapshot-bound。
+- Scope 至少包含 Owner、task、candidate path/HEAD、main path/HEAD、operation 與 preview digest。
+- Candidate 或 main 發生 drift 時，approval 自動失效並重新詢問。
+- 若 merge 過程需要超出預覽的新刪除、衝突解決或其他 main 修改，必須停止並重新說明範圍。
+- Owner 拒絕或暫緩時，candidate 預設保留，不刪除、不 merge。
+- 成功後驗證實際 main HEAD、工作樹與變更清單，並保存 audit/recovery record。
 
-- 支援結構化輸入與 JSONL/事件輸出。
-- 非互動模式不得隱含批准危險操作。
-- 無 TTY 時，所有需要人類批准的步驟都必須 fail closed 或進入 paused 狀態。
+### 5.4 Agent 直接越界
 
-### 4.4 Room 協作模式
+Agent 準備自行在 shell 中修改 canonical main 時，也必須先主動提及將離開 candidate 修改邊界、說明
+精確動作與風險，並取得使用者同意。一般 main 讀取不需要此核准。
 
-- 新 MCP session 只在它主動呼叫 `room_join_request` 時提出加入申請；啟動終端或載入 MCP 本身不得
-  自動加入、讀取或記錄 Room。
-- GUI Owner 核准精確 session 時必須明確選擇 `room-first` 或 `seat-only`，並獨立決定是否透過已安裝的
-  structured hooks 同步該 session 的可見 user／assistant turns。Agent 不得自行選擇或變更模式。
-- 加入核准只建立 Room membership，不得隱含授予待命。已加入的精確 session 呼叫 `room_wait` 時，
-  GUI 必須顯示獨立、session-scoped 的待命申請；Owner 核准後同一個 tool call 才能成為可喚醒狀態。
-- `room_wait` 必須有硬上限，且在 Owner 撤銷、client cancellation、stdio EOF、presence lease 過期或
-  timeout 時結束。GUI 只有在 active wait 存在時才能顯示可喚醒；不得建立替身或 fallback Agent。
-- 待命未核准時，新 GUI 精確席位交辦必須 fail closed。已核准但 active wait 暫時結束時可保留該
-  exact-session inbox 的既有 queued 工作，但 UI 不得宣稱已喚醒。
-- `room-first` 必須由 server 以 exact session＋Room＋canonical workspace 強制：所有經 Orchestratory
-  `ask_*`／`compare_agents` 發起的跨 Agent 呼叫，呼叫前讀取有界最新帳本，並將 prompt、生命週期與
-  回覆 append 到同一帳本；多 Agent compare 依帳本順序執行，後一位能讀到前一位已完成回覆。
-- `seat-only` 保留精確 GUI inbox／值班席位，但 standalone `ask_*`／`compare_agents` 可以不入 Room。
-- 每次 room-first worker call 必須回報明確的 `readThroughSeq`；呼叫進行中新增的訊息不得宣稱已讀。
-- 保證只涵蓋經 Orchestratory MCP broker 的協作。Provider 原生、繞過 MCP 的 subagent／host 協作無法
-  被攔截，UI 與文件不得宣稱已完整入帳。
+## 6. Provider 與 MCP
 
-## 5. 限制與長時間模式
+- 優先使用使用者已登入的官方 CLI，不讀取或複製其 session token。
+- MCP server 提供 control-plane 與 collaboration tools，不取代 host 的原生 coding tools。
+- Room 工具契約見 `PROPOSAL_MCP_FIRST.md`；peer-seat tools 是下一階段必做，不得以既有 `ask_*`
+  worker 代替。
+- Provider worker 工具可以保留，但必須標示它們是新建 worker，而非 live terminal seat。
+- API 模式是否啟用、費用與資料傳送仍由 Owner 明確決定；不得自動 fallback 或自動付費。
 
-限制分為：
+## 7. GUI 與狀態呈現
 
-- Soft limits：可在 TUI/Web 修改，例如一般 workflow 的輪數與時間。
-- Hard limits：只能修改本機設定檔並重啟；前端與 agent 不得覆蓋。
+- GUI 必須明確區分：Native Full-Trust terminal、GUI Managed worker、provider worker、Owner 與 system。
+- 能力標籤必須顯示來源是 native host 或 managed policy，不能以「已加入 Room」推斷權限。
+- GUI 顯示 candidate/main 路徑、task、HEAD、Agent branches、thread、完成狀態與待 merge 決定。
+- Main merge 使用獨立畫面與批准，不與 join、standby、writer 或 message send 共用按鈕／nonce。
+- Runtime 未完成的功能必須顯示 pending，不得用示意 UI 冒充已執行。
 
-硬限制至少涵蓋：
+## 8. Recovery 與資料保護
 
-- 同時 workflow 數。
-- 單次 provider timeout。
-- workflow 絕對最長時間。
-- 絕對最大 provider calls。
-- 最大子程序數與輸出 bytes。
-- 最大修改檔案數與 diff 大小。
-- 最大連續錯誤與重試。
-- API 絕對預算。
+- 建立 candidate 前記錄 main HEAD、working tree、untracked/ignored inventory 與必要 metadata。
+- Promotion 前建立可驗證 recovery point；備份失敗時不得宣稱可安全 merge。
+- 偵測未經流程的 main HEAD、refs、working tree、hooks、mode 或刪除變化並立即警示。
+- 監控在 Full-Trust 下屬 best-effort；UI 與文件必須說明同帳號 Agent 技術上可停止或繞過它。
+- 不自動刪除 candidate。Cleanup 是與 merge 分離的 preview/approval 操作。
+- 建議整合 APFS snapshot、Time Machine 或外部備份，但不得把未驗證的外部備份宣稱成 recovery 保證。
 
-長時間模式可以提高或移除部分 soft limits，但不得取消 hard limits、kill switch、timeout、circuit breaker、workspace jail 與批准控制。
+## 9. 隱私與外部副作用
 
-## 6. Workspace 與 Git
+- Secrets 不得進入 Room、audit、source、log、DB、fixture 或 UI。
+- Orchestratory 不攔截或重用 provider 認證。
+- 自動 push、公開 repository、release、package publish、deployment、付費 API 與遠端寫入仍需精確
+  使用者授權；main merge 核准不包含這些動作。
+- Loopback GUI 預設不對外開放。遠端 seat 另依 Remote Room threat model 實作。
 
-- 使用者明確選擇 allowlisted workspace root。
-- 所有讀寫都必須停留在 canonical workspace root。
-- 預設禁止追蹤 symlink；若未來支援，必須有不可逸出的驗證。
-- 啟動前記錄 repository 狀態，不得覆蓋既有未提交變更。
-- 每輪建立可識別 checkpoint；checkpoint 不等於自動 commit 或 push。
-- 回復操作需人類批准，且不得使用破壞性 Git 指令。
-- v1 不要求 GitHub，且永不自動 push。
-- 可選 worktree 模式為每個 workflow 建立固定 base SHA 的本機 branch/worktree；建立需明確
-  確認，完成後不自動 merge、push、刪 branch 或 cleanup。
+## 10. 驗收條件
 
-## 7. 持久化與隱私
+目標版本完成前，必須證明：
 
-- 使用本機 SQLite 儲存最小必要 metadata。
-- 預設不持久化完整 prompt、模型 reasoning、原始 stdout/stderr 或檔案內容。
-- 需要除錯內容時才可採 opt-in、短 retention、明確警告與可一鍵清除；v1 尚未提供 raw debug
-  capture，因此任何啟用要求必須 fail closed，不得默默保存內容或假裝受 retention 保護。
-- DB、log 與 session 檔案使用 owner-only 權限。
-- 提供資料 inventory、retention 設定與安全刪除流程。
-- 不依賴 Supabase 或其他雲端資料庫。
-
-## 8. 安全驗收條件
-
-發布 MVP 前必須證明：
-
-1. 惡意 repository 指令不能提高 agent 權限。
-2. 模型輸出不能繞過 command/path/policy validation。
-3. Symlink 與路徑編碼無法逸出 workspace。
-4. Web 介面無法被非 loopback origin 控制。
-5. Secrets 不會進入 log、DB、UI、trace、Git 或 build artifact。
-6. Soft-limit bypass 不能修改 hard limits。
-7. API 模式不能在未確認時啟用或自動加值。
-8. Provider/CLI 掛起、超大輸出或重複失敗會被終止。
-9. Cancel 能終止整個 process tree，而非只停止父程序。
-10. 在乾淨 clone 中可重現建置與測試。
-
-各項目前實作、測試證據與需 owner 批准的驗證分界見 `VERIFICATION.md`。
+1. 兩個不同原生終端 seat 能彼此發現並在不建立替代 worker 的情況下多輪協作。
+2. Sender、target、Room、workspace 與 thread 無法被另一 seat 偽造或跨界使用。
+3. Agent 原生 coding 能力在加入 Orchestratory 前後一致；協作器不暗中降權。
+4. 任務完成時必定產生 candidate completion checkpoint 並主動詢問是否 merge 到 main。
+5. 未核准、核准 replay、candidate drift、main drift 或 preview mismatch 都不能由 promotion service 修改 main。
+6. Owner 拒絕 merge 後 candidate 仍可恢復工作或稍後重新提出。
+7. Merge conflict 或新增刪除範圍會停止並要求新的說明／核准。
+8. Merge 成功、失敗與 rollback 都有可驗證紀錄。
+9. Thread 沒有固定往返上限；transport timeout 後可延續同一 thread。
+10. GUI Managed 限制不會套用到 Native Full-Trust terminal。
+11. 文件與 GUI 誠實揭露 Full-Trust 同帳號程序可繞過應用層邊界的殘餘風險。
+12. 現有 secrets、loopback Web、identity、audit 與供應鏈保護沒有因模式切換而失效。

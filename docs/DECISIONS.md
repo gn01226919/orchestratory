@@ -1,5 +1,26 @@
 # 架構決策紀錄
 
+> **Normative status update（2026-08-01）：** ADR-028 是目前最高優先產品決策。
+> 下表標示的舊規則已被取代；保留原文只為歷史追溯，不得再當成 Native Full-Trust 的實作要求。
+
+| 舊 ADR | 目前狀態 | ADR-028 後的適用範圍 |
+|---|---|---|
+| ADR-004／004A | 部分取代 | 原生 TUI 仍是主要 host；「模型只能提案、不能取得工具權限」不適用 Native Full-Trust |
+| ADR-005 | 部分取代 | 用量／API hard limits 可保留；不得用它限制 Native terminal thread 或原生工具能力 |
+| ADR-006 | **已取代** | Native 模式不再強制單一 Writer；GUI Managed 可保留 lease |
+| ADR-007 | **已取代** | Broker 不再是 Native Agent 唯一 filesystem／Git／process／network 路徑 |
+| ADR-011 | 部分取代 | Candidate 成為預設；任務終點必須詢問是否 merge main，不自動 push／cleanup |
+| ADR-012 | 部分取代 | GUI/API managed worker 可維持限制；Native terminal 不受此限 |
+| ADR-013 | 部分取代 | Managed test profile 可保留；Native host 測試不強制 container |
+| ADR-015 | **已取代** | Workspace allowlist 用於 Room/candidate/main 身分，不限制 Native Agent 整台 Mac 存取 |
+| ADR-019 | **已取代** | Read-only scratch／Workspace MCP 唯一寫入只適用 GUI Managed |
+| ADR-022 | **已取代** | Native terminal 不再由 Orchestratory 強制唯讀；provenance/redaction 原則保留 |
+| ADR-023 | **已取代** | Writer Lease／Companion 只保留給 GUI Managed，不限制 Native terminal／subagent |
+| ADR-024 | 擴充 | Exact inbox 與 no-fallback 保留，新增 terminal-to-terminal sender/thread |
+| ADR-025 | 部分取代 | GUI managed 授權保留；task completion 後的 main merge 必須是獨立決定 |
+| ADR-026 | 部分取代 | Room/recording 選擇保留；不得用 join mode 升降 Native capability |
+| ADR-027 | 擴充 | Membership/standby 分離保留；reply-and-wait 不逐回合重批，thread 無固定回合上限 |
+
 ## ADR-001：Local-first
 
 **決策：** v1 完全在使用者本機執行，不依賴 Supabase、遠端 orchestrator 或公開 Web service。
@@ -263,3 +284,47 @@ wait。待命未核准時拒絕新的精確席位交辦。終端必須在每次 
 **風險與回滾：** 部分 MCP client 可能自行施加低於四小時的 request timeout；此時 active wait
 結束後 GUI 必須立即顯示不可喚醒，不能延長或冒充。若需回滾，只能縮短 bounded wait 或恢復每次
 `room_wait` 的核准；不得回到「加入即待命」或用同 provider 新回合代收。
+
+## ADR-028：Native Full-Trust、Peer Thread 與 Candidate → Main Merge Decision
+
+**狀態：Accepted / Normative**
+
+**日期：2026-08-01**
+
+**Owner 決策：** Orchestratory 採用「完整控制優先」。由原生 Codex／Claude Code 等 TUI host 執行
+的 terminal Agent，加入 Orchestratory 前後必須保留 host 原本提供的完整能力。Orchestratory 不對
+它加上 read-only、workspace jail、Writer Lease、Workspace MCP 唯一寫入、subagent 禁止、network
+禁止或固定 thread 往返上限，也不主動替它啟用 provider 的全域 skip-permissions。
+
+每項修改型任務預設建立 candidate workspace。Candidate 是成果與 canonical main 的工作分流，
+不是限制 Agent 整台 Mac 權限的 OS sandbox。Agent 準備直接修改 main 時，必須主動說明將離開
+candidate 修改邊界、列出精確路徑、操作、diff、風險與復原點，並等待使用者同意。
+
+任務完成時，系統必須凍結 candidate completion checkpoint，顯示 candidate/main HEAD、diff、測試、
+刪除、衝突、main drift 與 recovery readiness，然後主動詢問：
+
+> 是否將這個 candidate 的精確完成快照 merge／promote 到 main？
+
+核准只適用一次，綁定 task、candidate path/HEAD、main path/HEAD、operation 與 preview digest。任何
+drift、scope expansion 或未預覽 conflict 都使核准失效並要求重新預覽。拒絕或暫緩時保留 candidate；
+成功 merge 後不自動 push、publish、deploy 或 cleanup。
+
+已加入同一 Room/canonical workspace 的 exact terminal seats 必須能彼此發現、直接傳訊、引用、等待、
+回覆與持續 thread。Sender identity 由 authenticated presence 綁定，不得硬編碼成 `you`；指定 exact
+seat 時不得 fallback 到同 provider 常駐 worker。Transport wait 可以 timeout/reconnect，但 thread 不設
+8、16 或其他固定最大往返輪數。
+
+GUI Managed 是另一個明確模式，可由 Owner 選擇 read-only、writer 或 full-trust，並沿用 Writer
+Lease、Workspace MCP 等控制。Managed policy 不得暗中套用到 Native Full-Trust terminal。
+
+**理由：** 使用者採用協作器是為了放大多個原生 Agent 的協作與因應能力。如果協作器讓 Agent 比
+單獨使用原生 TUI 更受限，就失去產品價值。將風險控制集中在 candidate/main 分流、任務終點決定、
+快照、備份與復原，可以保留能力並降低誤刪或錯誤套入主線的影響。
+
+**誠實限制：** 同一 macOS 帳號下具完整權限的 Agent 可以繞過 Orchestratory，直接修改 main、刪除
+備份或停止監控。因此 Native Full-Trust 是 behavior + monitoring + recovery 邊界，不是不可繞過的
+安全 sandbox。若需要強制 main 保護，必須另採不同 OS 身分、root-owned guardian、唯讀 volume 或
+外部不可變備份，且不得在 Native Full-Trust 名義下偷偷降權。
+
+**取代與擴充：** 本 ADR 依本文件開頭矩陣取代 ADR-004A、005、006、007、011、012、013、015、
+019、022、023、025、026、027 的衝突部分，並擴充 ADR-024 的 exact inbox/no-fallback 設計。

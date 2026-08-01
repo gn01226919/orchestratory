@@ -2,6 +2,9 @@
 
 此清單適用於首次公開 GitHub、每個 release、套件發布與可執行檔分發。任一必要項未通過即禁止發布。
 
+> ADR-028 導入期間，舊有 read-only／Writer Lease 測試只能代表 GUI Managed。任何版本若宣稱
+> Native Full-Trust ready，還必須完成本文件 C 節新增的 peer thread、candidate/main 與 recovery gate。
+
 ## A. 人類授權
 
 - [x] 使用者明確批准建立 sanitized Private GitHub repository 並首次 push；未批准公開或 npm publish。
@@ -19,18 +22,25 @@
 - [ ] Git author email 符合使用者的公開隱私偏好。
 - [ ] 若曾發現秘密，已先撤銷/輪替，再清理 history 並重新掃描。
 
-## C. 程式安全
+## C. 程式安全與 Native Full-Trust 誠實性
 
-- [ ] 無 `shell: true`、eval、任意 executable path 或未驗證 plugin loading。
-- [ ] Workspace canonicalization、symlink、特殊檔案與 TOCTOU 測試通過。
-- [ ] Command allowlist、argv schema、timeout、output limit 與 process-tree cleanup 通過。
-- [ ] Prompt injection 不能提高權限或取得秘密。
-- [ ] Long-run/API mode 不能繞過 hard limits。
+- [ ] Orchestratory control-plane／promotion service 無 `shell: true`、eval、未驗證動態命令或 actor spoof。
+- [ ] Native terminal 加入前後的 host capability 相同；Orchestratory 不自動升權或降權。
+- [ ] GUI Managed policy 不會套用到 Native Full-Trust session。
+- [ ] Exact-seat source server-bound、same Room/workspace、target no-fallback 與 thread reconnect 測試通過。
+- [ ] Thread 超過 16 輪仍可延續；不存在固定產品 round ceiling。
+- [ ] Candidate/main canonical identity、dirty-state preservation、drift 與 TOCTOU 測試通過。
+- [ ] 每個 task completion 都建立 preview 並主動詢問是否 merge main。
+- [ ] Merge approval single-use、snapshot-bound；replay、candidate/main drift、scope expansion 全部要求重批。
+- [ ] Recovery point 已實際建立並驗證可讀；promotion partial failure 與 rollback 有可重現測試。
+- [ ] Prompt injection 不能偽造 Orchestratory identity、merge approval 或 control-plane scope。
+- [ ] API mode 不能未經 Owner 啟用、fallback 或自動付費。
 - [ ] API fallback、auto top-up 與危險 auto-approval 預設關閉。
 - [ ] Web 僅 loopback，Host/Origin/CSRF/session/CSP 測試通過。
 - [ ] TUI control-sequence sanitization 測試通過。
 - [ ] TUI setup fail-closed、bounded dashboard render 與二次取消確認測試通過。
 - [ ] Log/DB/UI secret canary 測試通過。
+- [ ] GUI、README 與 help 明示 Full-Trust 同帳號程序可繞過應用層 main 邊界，不宣稱 OS sandbox。
 
 ## D. 品質與供應鏈
 

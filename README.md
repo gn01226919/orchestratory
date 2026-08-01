@@ -4,6 +4,30 @@ Security-first、local-first 的多模型 coding-agent orchestrator。預設透�
 
 > 目前處於未發布的安全預覽階段。先用測試 repository 驗證，不要把 Web 介面暴露到公開網路。
 
+> **vNext Owner Decision（2026-08-01）：Native Full-Trust。** 原生 Codex／Claude Code TUI Agent
+> 加入 Orchestratory 後保留 host 原本完整能力；協作器不再以唯讀、Writer Lease、workspace jail
+> 或固定 thread 回合數限制外接終端。每項修改任務預設在 candidate workspace 協作，任務完成時
+> 主動詢問是否把該精確快照 merge 到 canonical main。完整規格見
+> [`docs/OWNER_DECISION_FULL_CONTROL.md`](docs/OWNER_DECISION_FULL_CONTROL.md)。
+>
+> **實作狀態：規格已更新，runtime 尚未完成。** 下方描述的 read-only worker、Writer Lease 與
+> GUI → exact-seat 單向 inbox 是目前 legacy runtime，不是 vNext 對 Native terminal 的最終限制。
+
+## vNext 核心行為
+
+- Native Full-Trust terminal 保留原生 filesystem、shell、Git、network、plugin 與 subagent 能力；
+  Orchestratory 不升權也不降權。
+- 同一 Room 的 exact terminal seats 能彼此發現、直接傳訊、等待、回覆並持續同一 thread；指定席位
+  不 fallback 到常駐 worker，thread 不設固定最大往返輪數。
+- 每項修改任務建立 task/candidate/base-main checkpoint；多 Agent 可使用各自 branch 或 integration
+  branch 協作。
+- 任務完成時顯示 diff、測試、刪除、衝突、main drift 與 recovery point，主動詢問是否 merge main。
+- Merge 核准只適用一次並綁定 candidate/main HEAD 與 preview；任一 drift 都必須重新詢問。
+- GUI Managed 可另外提供 read-only／writer／full-trust 選擇，舊有 Writer Lease 與 Workspace MCP
+  只保留在此模式。
+- Candidate 是 recovery-first 工作分流，不是不可突破的 OS sandbox；同帳號 Full-Trust Agent 仍可
+  技術上繞過應用層邊界，產品不得宣稱強制隔離。
+
 ## 目標介面
 
 ```text
@@ -26,7 +50,11 @@ orchestrator data retention set --terminal-days 30 --max-runs 500 # TTY 確認�
 orchestrator data purge     # 只產生不可變 preview；加 --execute 後才逐次確認
 ```
 
-## 安全預設
+## 現行 legacy runtime 安全預設（非 vNext Native 規格）
+
+本節記錄目前程式仍在執行的舊架構，方便遷移與回歸測試。其中對 provider shell、filesystem、
+Writer Lease、workspace 與回合數的限制，已由 ADR-028 對 Native Full-Trust terminal 取代；只可保留
+給 GUI Managed，不得再當成全產品不變量。
 
 - 每個 task 同時只有一份 active Writer Lease；Writer 可由 owner 在 resident、managed 或已核准的
   external 席位之間交接。每次交接必須帶 checkpoint 並遞增不可回收的 epoch，舊 Writer 與其子
@@ -140,7 +168,7 @@ append-only 帳本最新處開始，每次向前載入最多 100 則；切換房
 各自保存獨立的 RAM-only 對話內容；真實 provider calls 由 owner-only SQLite 保存 24 小時全域
 計數，因此新對話、切換 workspace/model 或重開 TUI／GUI／MCP 都不會把 hard ceiling 歸零。
 
-### 原生終端加入 Room（macOS）
+### 現行 legacy：原生終端加入 Room（macOS）
 
 已先在專案執行 `orchestrator room init` 且 workspace 仍在 allowlist 時，可從同一專案目錄啟動：
 
@@ -165,7 +193,11 @@ Grok 固定 plan mode、空 tools、無 web/subagents/memory。逐字稿只在 R
 每個 TUI turn 的 token 或 provider-call 數，因此不應用來取代有完整 governor 的自動 workflow。
 Codex 結束畫面的 resume session UUID 會在未來入帳前遮蔽；既有 append-only 訊息不會被靜默改寫。
 
-### MCP-first 協作（建議的主要用法）
+### 現行 legacy：MCP-first 協作
+
+目前 `ask_*` 會建立新的唯讀 worker，外接 exact seat 主要由 GUI 單向派工。vNext 必須依
+`docs/PROPOSAL_MCP_FIRST.md` 新增 seat discovery、authenticated peer send、thread/wait-reply、
+candidate completion 與 main merge decision；在完成前不可把 worker 回覆宣稱成 live terminal 回覆。
 
 把 Claude Code 或 Codex 原生介面當 host，Orchestratory 提供唯讀 worker 工具：
 
@@ -302,6 +334,18 @@ binary 或總 context 超限時 fail closed；模式篩選仍不是秘密偵測�
 第一次使用可直接以瀏覽器開啟 `docs/orchestrator-interactive-guide.html`。這份離線互動教程分成
 開始、GUI、Agents、Room、安全寫入與排錯六章；其中所有按鈕都是演示，不會啟動 provider、
 消耗訂閱額度或修改專案。
+
+## V2 待辦
+
+V2 規劃加入 **Remote Room Seat（Orchestratory Satellite）**：讓另一台電腦上的外部 Agent
+透過本機 MCP connector 與獨立 Remote Room Gateway，申請加入指定 Room 並參與共享帳本討論。
+第一階段只提供遠端唯讀討論席位與 exact-seat inbox，不開放本機 workspace、Writer、approval、
+provider 額度或管理權限，也不會把目前的 loopback GUI 直接暴露到網路。
+
+完整範圍、非目標、里程碑與安全 Gate 見 `docs/V2_ROADMAP.md`。
+
+Remote Room 是不同裝置與不同信任邊界；目前 roadmap 保留為待重新審查草案，不會用來反向限制
+本機 Native Full-Trust terminal。
 
 ## 已驗證範圍
 
