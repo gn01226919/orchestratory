@@ -17,6 +17,7 @@ import {
   RoomInboxStore,
   type ClaimedRoomDelivery,
   type RoomDelivery,
+  type RoomDeliveryOutcome,
 } from "./room-inbox.ts";
 import { safeSummary } from "../security/redact.ts";
 import { realpathSync } from "node:fs";
@@ -40,6 +41,8 @@ export type WriterCandidate =
   | { origin: "resident"; provider: WriterProvider }
   | { origin: "managed"; actorId: string }
   | { origin: "external"; actorId: string };
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 function ledgerSummary(value: string, maxLength = 320): string {
   return safeSummary(value, maxLength).replace(/[\r\n\t]+/gu, " ");
@@ -101,6 +104,7 @@ export class CollaborationService {
 
   roomView(roomId: string, workspace: string): CollaborationRoomView {
     this.#assertRoomWorkspace(roomId, workspace);
+    this.#reconcileUnavailableDeliveries(roomId, workspace, "SEAT_OFFLINE");
     const sessions = this.presence.list(workspace, roomId);
     return {
       sessions: sessions
@@ -125,8 +129,7 @@ export class CollaborationService {
 
   reconcileExternalPresence(roomId: string, workspace: string): RoomDelivery[] {
     this.#assertRoomWorkspace(roomId, workspace);
-    const sessions = this.presence.list(workspace, roomId);
-    return this.inbox.failUnavailable(roomId, sessions.map((session) => session.id));
+    return this.#reconcileUnavailableDeliveries(roomId, workspace, "SEAT_OFFLINE");
   }
 
   requestExternalJoin(presenceId: string, roomId: string, workspace: string): PresenceInfo {
@@ -215,8 +218,17 @@ export class CollaborationService {
       throw new Error("PRESENCE_NOT_JOINED");
     }
     this.#revokeWriterIdentity(input.presenceId, "外接席位已由 Owner 移除");
+    const pending = this.inbox.list(input.roomId).filter(
+      (delivery) => delivery.targetPresenceId === input.presenceId,
+    );
     const left = this.presence.leave(input.presenceId, input.roomId);
-    this.inbox.failTarget(input.presenceId, "SEAT_REMOVED_BY_OWNER");
+    for (const delivery of pending) {
+      this.inbox.failDeliveryIfTargetUnavailable({
+        deliveryId: delivery.id,
+        targetPresenceId: input.presenceId,
+        reason: "SEAT_REMOVED_BY_OWNER",
+      });
+    }
     this.ledger.appendSystem(input.roomId, `${before.displayName ?? before.provider} 已離開辦公室`);
     return left;
   }
@@ -259,6 +271,159 @@ export class CollaborationService {
     }
   }
 
+  postBetweenExternals(input: {
+    roomId: string;
+    workspace: string;
+    sourcePresenceId: string;
+    targetPresenceId: string;
+    text: string;
+    threadId?: string;
+    replyToDeliveryId?: string;
+    clientRequestId: string;
+    taskId?: string;
+  }): {
+    message: RoomMessage;
+    source: PresenceInfo;
+    target: PresenceInfo;
+    delivery: RoomDelivery;
+    dispatch: { wakeMode: "active-tool-pull"; wakeable: boolean; immediate: boolean };
+  } {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    if (typeof input.text !== "string" || input.text.trim().length < 1) {
+      throw new Error("INVALID_PRESENCE_MESSAGE");
+    }
+    const source = this.presence.get(input.sourcePresenceId);
+    const target = this.presence.get(input.targetPresenceId);
+    if (
+      !source || source.workspace !== input.workspace || !source.joined ||
+      source.roomId !== input.roomId || !source.displayName
+    ) throw new Error("SOURCE_AGENT_OFFLINE");
+    if (
+      !target || target.workspace !== input.workspace || !target.joined ||
+      target.roomId !== input.roomId || !target.displayName
+    ) throw new Error("TARGET_AGENT_OFFLINE");
+    if (source.id === target.id) throw new Error("ROOM_DELIVERY_SELF_TARGET");
+    if (!target.standbyApproved) throw new Error("TARGET_AGENT_STANDBY_NOT_APPROVED");
+    const sourceAvailable = (): boolean => {
+      const current = this.presence.get(source.id);
+      return Boolean(
+        current?.workspace === input.workspace && current.joined &&
+        current.roomId === input.roomId && current.displayName === source.displayName,
+      );
+    };
+    const targetAvailable = (): boolean => {
+      const current = this.presence.get(target.id);
+      return Boolean(
+        current?.workspace === input.workspace && current.joined &&
+        current.roomId === input.roomId && current.displayName === target.displayName &&
+        current.standbyApproved,
+      );
+    };
+    if (!UUID_PATTERN.test(input.clientRequestId)) throw new Error("INVALID_CLIENT_REQUEST_ID");
+    if ((input.threadId === undefined) !== (input.replyToDeliveryId === undefined)) {
+      throw new Error("THREAD_CONTINUATION_FIELDS_MISMATCH");
+    }
+    if (input.replyToDeliveryId !== undefined) {
+      const previous = this.inbox.get(input.replyToDeliveryId);
+      if (!previous) throw new Error("REPLY_TO_DELIVERY_NOT_FOUND");
+      if (previous.roomId !== input.roomId) throw new Error("THREAD_ROOM_MISMATCH");
+      if (!previous.sourcePresenceId) throw new Error("THREAD_PARTICIPANT_MISMATCH");
+      const participants = new Set([previous.sourcePresenceId, previous.targetPresenceId]);
+      if (!participants.has(source.id) || !participants.has(target.id)) throw new Error("THREAD_PARTICIPANT_MISMATCH");
+      if (input.threadId !== undefined && input.threadId !== previous.threadId) throw new Error("THREAD_ID_MISMATCH");
+      if ((previous.taskId ?? null) !== (input.taskId ?? null)) throw new Error("THREAD_TASK_MISMATCH");
+    }
+    const message = this.ledger.appendIdempotent(
+      input.roomId,
+      source.displayName,
+      `@${target.displayName} ${input.text}`,
+      `peer-send:${source.id}:${input.clientRequestId}`,
+    );
+    try {
+      if (!sourceAvailable()) throw new Error("SOURCE_AGENT_OFFLINE");
+      if (!targetAvailable()) throw new Error("TARGET_AGENT_OFFLINE");
+      const delivery = this.inbox.enqueue({
+        message,
+        sourcePresenceId: source.id,
+        sourceDisplayName: source.displayName,
+        targetPresenceId: target.id,
+        targetDisplayName: target.displayName,
+        ...(input.threadId ? { threadId: input.threadId } : {}),
+        ...(input.replyToDeliveryId ? { replyToDeliveryId: input.replyToDeliveryId } : {}),
+        clientRequestId: input.clientRequestId,
+        ...(input.taskId ? { taskId: input.taskId } : {}),
+      });
+      if (!sourceAvailable()) {
+        this.inbox.cancel(delivery.id);
+        throw new Error("SOURCE_AGENT_OFFLINE");
+      }
+      if (!targetAvailable()) {
+        this.inbox.failDeliveryIfTargetUnavailable({
+          deliveryId: delivery.id,
+          targetPresenceId: target.id,
+          reason: "SEAT_OFFLINE_DURING_SEND",
+        });
+        throw new Error("TARGET_AGENT_OFFLINE");
+      }
+      const wakeable = this.inbox.isListening(target.id, input.roomId);
+      return {
+        message,
+        source,
+        target,
+        delivery,
+        dispatch: { wakeMode: "active-tool-pull", wakeable, immediate: wakeable },
+      };
+    } catch (error) {
+      try {
+        this.ledger.appendSystem(
+          input.roomId,
+          `⚠ #${message.seq} 無法由 ${source.displayName} 投遞給 ${target.displayName}：${safeSummary(
+            error instanceof Error ? error.message : "DELIVERY_FAILED",
+            160,
+          )}`,
+        );
+      } catch { /* preserve the original delivery failure */ }
+      throw error;
+    }
+  }
+
+  async waitForExternalReply(input: {
+    presenceId: string;
+    deliveryId: string;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  }): Promise<RoomDeliveryOutcome | undefined> {
+    const delivery = this.inbox.get(input.deliveryId);
+    if (!delivery || delivery.sourcePresenceId !== input.presenceId) {
+      throw new Error("DELIVERY_NOT_FOUND");
+    }
+    this.presence.actorFor(input.presenceId, delivery.roomId);
+    const canContinue = () => {
+      const source = this.presence.get(input.presenceId);
+      if (!source?.joined || source.roomId !== delivery.roomId) return false;
+      const target = this.presence.get(delivery.targetPresenceId);
+      if (
+        !target?.joined || target.roomId !== delivery.roomId ||
+        target.workspace !== source.workspace || target.displayName !== delivery.targetDisplayName
+      ) {
+        this.inbox.failDeliveryIfTargetUnavailable({
+          deliveryId: delivery.id,
+          targetPresenceId: delivery.targetPresenceId,
+          reason: "TARGET_SEAT_OFFLINE_DURING_REPLY_WAIT",
+        });
+      }
+      return true;
+    };
+    return await this.inbox.waitForReply({
+      sourcePresenceId: input.presenceId,
+      deliveryId: input.deliveryId,
+      ledger: this.ledger,
+      ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+      ...(input.signal ? { signal: input.signal } : {}),
+      canContinue,
+    });
+  }
+
   registerExternal(input: PresenceRegistration): PresenceInfo {
     return this.presence.register(input);
   }
@@ -269,8 +434,8 @@ export class CollaborationService {
 
   unregisterExternal(presenceId: string, reason = "SEAT_OFFLINE"): void {
     this.#revokeWriterIdentity(presenceId, `外接席位已離線：${ledgerSummary(reason, 160)}`);
-    this.inbox.failTarget(presenceId, reason);
     this.presence.unregister(presenceId);
+    this.inbox.failTarget(presenceId, reason);
   }
 
   externalActor(presenceId: string, roomId: string): string {
@@ -289,6 +454,26 @@ export class CollaborationService {
     };
     if (!approved()) throw new Error("PRESENCE_STANDBY_NOT_APPROVED");
     return await this.inbox.wait({ ...input, ledger: this.ledger, canContinue: approved });
+  }
+
+  #reconcileUnavailableDeliveries(roomId: string, workspace: string, reason: string): RoomDelivery[] {
+    const failed: RoomDelivery[] = [];
+    const observed = this.inbox.list(roomId);
+    for (const delivery of observed) {
+      if (!["queued", "delivered", "read", "working"].includes(delivery.state)) continue;
+      const target = this.presence.get(delivery.targetPresenceId);
+      if (
+        target?.joined && target.roomId === roomId && target.workspace === workspace &&
+        target.displayName === delivery.targetDisplayName
+      ) continue;
+      const reconciled = this.inbox.failDeliveryIfTargetUnavailable({
+        deliveryId: delivery.id,
+        targetPresenceId: delivery.targetPresenceId,
+        reason,
+      });
+      if (reconciled) failed.push(reconciled);
+    }
+    return failed;
   }
 
   ackExternal(input: { presenceId: string; deliveryId: string; leaseToken: string; phase: "read" | "working" }): RoomDelivery {

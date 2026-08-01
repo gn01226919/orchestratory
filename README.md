@@ -10,8 +10,9 @@ Security-first、local-first 的多模型 coding-agent orchestrator。預設透�
 > 主動詢問是否把該精確快照 merge 到 canonical main。完整規格見
 > [`docs/OWNER_DECISION_FULL_CONTROL.md`](docs/OWNER_DECISION_FULL_CONTROL.md)。
 >
-> **實作狀態：規格已更新，runtime 尚未完成。** 下方描述的 read-only worker、Writer Lease 與
-> GUI → exact-seat 單向 inbox 是目前 legacy runtime，不是 vNext 對 Native terminal 的最終限制。
+> **實作狀態：規格已更新；exact-seat peer phase 已在隔離開發分支通過 synthetic tests，整體 runtime
+> 尚未完成。** 已安裝版本仍是 legacy GUI → exact-seat 單向 inbox／read-only worker／Writer Lease；
+> 尚未切換，也不是 vNext 對 Native terminal 的最終限制。
 
 ## vNext 核心行為
 
@@ -195,9 +196,12 @@ Codex 結束畫面的 resume session UUID 會在未來入帳前遮蔽；既有 a
 
 ### 現行 legacy：MCP-first 協作
 
-目前 `ask_*` 會建立新的唯讀 worker，外接 exact seat 主要由 GUI 單向派工。vNext 必須依
-`docs/PROPOSAL_MCP_FIRST.md` 新增 seat discovery、authenticated peer send、thread/wait-reply、
-candidate completion 與 main merge decision；在完成前不可把 worker 回覆宣稱成 live terminal 回覆。
+目前已安裝版本的 `ask_*` 會建立新的唯讀 worker，外接 exact seat 主要由 GUI 單向派工。隔離開發
+分支已依 `docs/PROPOSAL_MCP_FIRST.md` 加入 `terminalSeats` discovery、authenticated `room_send`、
+delivery-scoped `room_await_reply`、stable request idempotency 與 participant/task-bound thread metadata，
+並以 20 輪與 transport reconnect 自動測試驗證沒有 8／16 回合上限；尚待真實 Codex＋Claude Code
+雙 MCP stdio host 驗收與安全切換；
+candidate completion 與 main merge decision 仍待實作。Worker 回覆不得宣稱成 live terminal 回覆。
 
 把 Claude Code 或 Codex 原生介面當 host，Orchestratory 提供唯讀 worker 工具：
 
@@ -357,7 +361,7 @@ Remote Room 是不同裝置與不同信任邊界；目前 roadmap 保留為待�
 - scoped/expiring/single-use approval、digest-pinned tester、checkpoint 指紋恢復。
 - Workspace allowlist、retention preview/purge rollback、worktree cleanup snapshot、SQLite migration/audit-chain tamper detection。
 - CycloneDX SBOM、deterministic fuzz smoke、SHA-pinned least-privilege CI 與離線乾淨 package snapshot。
-- 目前 274 個 deterministic tests；line 94.98%、branch 85.06%、functions 96.82%，門檻由指令阻擋。
+- 目前 289 個 deterministic tests；line 95.21%、branch 85.17%、functions 96.78%，門檻由指令阻擋。
 
 已完成受控唯讀 Codex 與 managed Claude 的最小 live smoke；真實 Writer 寫入、Grok、付費 API、
 container image 與任何額外額度操作仍需 owner 明確批准。

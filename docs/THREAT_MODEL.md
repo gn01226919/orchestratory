@@ -55,8 +55,8 @@ Orchestratory 在單一使用者的 Mac 上協調一或多個原生 TUI Agent。
 | F03 | 詢問後 candidate 或 main 改變 | confirm-time HEAD、tree、dirty-state、inode/fingerprint 重驗 | 重驗與 Git 操作間仍可能有同帳號 TOCTOU |
 | F04 | Merge 隱含新刪除、rename 或 conflict resolution | 完整 preview、risk summary、scope expansion stop、重新核准 | Git／diff 分析 bug 可能漏報；需可恢復備份 |
 | F05 | 兩個 Agent 覆蓋彼此工作 | per-agent branch/candidate、thread coordination、Git conflict detection、checkpoint | Agent 可選擇共享同一 working tree，仍可能產生非 Git 覆蓋 |
-| F06 | Exact-seat 訊息被偽造成 Owner 或其他 Agent | authenticated presence、source server-side binding、Room/workspace checks、no fallback | MCP host 或本機 identity store 被同帳號篡改後不可強保證 |
-| F07 | 指定 terminal 工作被改送常駐 worker | exact target ID、no-fallback invariant、delivery receipt、UI provenance | Terminal offline 時工作只能 queued／failed，不能保證即時完成 |
+| F06 | Exact-seat 訊息被偽造成 Owner／其他 Agent，或第三席插入既有 thread | authenticated presence、source server-side binding、Room/workspace、reply-to participant/task binding、server-generated thread root、no fallback | MCP host 或本機 identity store 被同帳號篡改後不可強保證 |
+| F07 | 指定 terminal 工作被改送常駐 worker，或 source/target unregister race 留下幽靈 queue／無人 await 的工作 | exact target ID、no-fallback invariant、presence delete-first、ledger/enqueue 前後雙端 reconciliation、delivery receipt、UI provenance | Terminal offline 時工作只能 failed／cancelled／拒絕，不能保證即時完成；跨 store 線性化仍靠 reconciliation 而非單一交易 |
 | F08 | 固定回合 ceiling 中斷協作 | thread 無 round ceiling、transport wait 可重連、explicit cancel | 無限活躍 thread 仍可能耗用儲存／注意力，需 retention 而非對話上限 |
 | F09 | Repo prompt 要求讀取或外傳 secrets | 系統規範、host 原生批准、secret redaction、audit minimization | Full-Trust Agent 技術上能讀取／傳送；Orchestratory 無法強制阻止 |
 | F10 | Candidate 或 backup 被誤刪 | checkpoint、Git object verification、separate recovery copy、cleanup approval | 同帳號 Agent 可刪除所有可寫副本；外部備份才有較強恢復性 |
@@ -66,6 +66,7 @@ Orchestratory 在單一使用者的 Mac 上協調一或多個原生 TUI Agent。
 | F14 | Web 頁面控制 localhost GUI | loopback、Host/Origin/CSRF/session checks、CSP | 瀏覽器、extension 或同帳號程序遭入侵 |
 | F15 | Provider／API 無限花費 | Owner 選擇 provider、API explicit opt-in、native host controls、usage telemetry | 不使用固定 thread ceiling；provider 自身或 Agent 仍可能持續呼叫 |
 | F16 | Runtime 尚未完成但 GUI 宣稱安全／可用 | capability negotiation、pending label、integration tests、truthful docs | 人工驗收仍可能漏掉版本不一致 |
+| F17 | 回應不確定的 transport retry 造成重複派工 | 同一 authenticated presence 使用 caller-stable UUID request ID、ledger idempotency、inbox source/request unique binding | MCP host 完全退出後會取得新 presence；跨 host lifetime 的 orphan recovery 仍需後續 stable seat identity／outbox。Caller 若換 ID，系統也不能判斷其意圖相同 |
 
 ## 6. STRIDE 摘要
 

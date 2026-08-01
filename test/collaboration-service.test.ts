@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { randomUUID } from "node:crypto";
 import { CollaborationService } from "../src/core/collaboration-service.ts";
 
 const execFileAsync = promisify(execFile);
@@ -110,6 +111,450 @@ test("GUI, TUI and MCP service instances share one exact-seat ledger sequence", 
   assert.equal(gui.roomView("demo", "/tmp/project").sessions[0]?.standbyApproved, false);
   mcp.unregisterExternal(external.id, "test finished");
   assert.equal(gui.reconcileExternalPresence("demo", "/tmp/project").length, 0);
+});
+
+test("exact terminal seats exchange authenticated multi-turn threads without provider fallback", async (t) => {
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-peer-thread-"));
+  const codexProcess = new CollaborationService(data);
+  const claudeProcess = new CollaborationService(data);
+  t.after(() => codexProcess.close());
+  t.after(() => claudeProcess.close());
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+
+  codexProcess.ledger.createRoom("demo", "/tmp/project");
+  const codex = codexProcess.registerExternal({
+    provider: "codex", workspace: "/tmp/project", hostPid: 7201,
+  });
+  const claude = claudeProcess.registerExternal({
+    provider: "claude", workspace: "/tmp/project", hostPid: 7202,
+  });
+  for (const seat of [codex, claude]) {
+    codexProcess.requestExternalJoin(seat.id, "demo", "/tmp/project");
+    codexProcess.approveExternalJoin({
+      ...ROOM_FIRST_JOIN,
+      presenceId: seat.id,
+      roomId: "demo",
+      workspace: "/tmp/project",
+      label: seat.provider,
+    });
+    codexProcess.requestExternalStandby(seat.id, "demo", "/tmp/project");
+    codexProcess.approveExternalStandby(seat.id, "demo", "/tmp/project");
+  }
+
+  const firstRequestId = randomUUID();
+  const firstInput = {
+    roomId: "demo",
+    workspace: "/tmp/project",
+    sourcePresenceId: codex.id,
+    targetPresenceId: claude.id,
+    clientRequestId: firstRequestId,
+    text: "請檢查登入修正",
+    taskId: "login-task",
+  };
+  const first = codexProcess.postBetweenExternals(firstInput);
+  const firstRetry = codexProcess.postBetweenExternals(firstInput);
+  assert.equal(firstRetry.delivery.id, first.delivery.id);
+  assert.equal(firstRetry.message.seq, first.message.seq);
+  const claudeWait = claudeProcess.waitExternal({
+    presenceId: claude.id, roomId: "demo", timeoutMs: 1_000,
+  });
+  assert.equal(first.message.author, "codex（codex）");
+  assert.equal(first.delivery.sourcePresenceId, codex.id);
+  assert.equal(first.delivery.sourceDisplayName, "codex（codex）");
+  assert.equal(first.delivery.targetPresenceId, claude.id);
+
+  const claimedByClaude = await claudeWait;
+  assert.ok(claimedByClaude);
+  assert.equal(claimedByClaude.sourcePresenceId, codex.id);
+  assert.equal(claimedByClaude.threadId, first.delivery.threadId);
+  claudeProcess.ackExternal({
+    presenceId: claude.id, deliveryId: claimedByClaude.id,
+    leaseToken: claimedByClaude.leaseToken, phase: "read",
+  });
+  claudeProcess.ackExternal({
+    presenceId: claude.id, deliveryId: claimedByClaude.id,
+    leaseToken: claimedByClaude.leaseToken, phase: "working",
+  });
+  await claudeProcess.replyExternal({
+    presenceId: claude.id,
+    deliveryId: claimedByClaude.id,
+    leaseToken: claimedByClaude.leaseToken,
+    text: "已檢查，請補一個回歸測試",
+  });
+  const firstOutcome = await codexProcess.waitForExternalReply({
+    presenceId: codex.id, deliveryId: first.delivery.id, timeoutMs: 1_000,
+  });
+  assert.equal(firstOutcome?.delivery.state, "replied");
+  assert.equal(firstOutcome?.reply?.author, "claude（claude）");
+
+  const followUp = claudeProcess.postBetweenExternals({
+    roomId: "demo",
+    workspace: "/tmp/project",
+    sourcePresenceId: claude.id,
+    targetPresenceId: codex.id,
+    clientRequestId: randomUUID(),
+    text: "回歸測試補好了嗎？",
+    threadId: first.delivery.threadId,
+    replyToDeliveryId: first.delivery.id,
+    taskId: "login-task",
+  });
+  const codexWait = codexProcess.waitExternal({
+    presenceId: codex.id, roomId: "demo", timeoutMs: 1_000,
+  });
+  assert.equal(followUp.delivery.threadId, first.delivery.threadId);
+  assert.equal(followUp.delivery.replyToDeliveryId, first.delivery.id);
+  const claimedByCodex = await codexWait;
+  assert.ok(claimedByCodex);
+  assert.equal(claimedByCodex.sourcePresenceId, claude.id);
+  assert.equal(claimedByCodex.threadId, first.delivery.threadId);
+  await assert.rejects(
+    claudeProcess.waitForExternalReply({
+      presenceId: codex.id, deliveryId: followUp.delivery.id, timeoutMs: 1,
+    }),
+    /DELIVERY_NOT_FOUND/u,
+  );
+  codexProcess.ackExternal({
+    presenceId: codex.id, deliveryId: claimedByCodex.id,
+    leaseToken: claimedByCodex.leaseToken, phase: "read",
+  });
+  codexProcess.ackExternal({
+    presenceId: codex.id, deliveryId: claimedByCodex.id,
+    leaseToken: claimedByCodex.leaseToken, phase: "working",
+  });
+  await codexProcess.replyExternal({
+    presenceId: codex.id,
+    deliveryId: claimedByCodex.id,
+    leaseToken: claimedByCodex.leaseToken,
+    text: "已補回歸測試",
+  });
+  assert.equal((await claudeProcess.waitForExternalReply({
+    presenceId: claude.id, deliveryId: followUp.delivery.id, timeoutMs: 1_000,
+  }))?.delivery.state, "replied");
+
+  let previous = followUp.delivery;
+  for (let turn = 3; turn <= 20; turn += 1) {
+    const codexIsSource = turn % 2 === 1;
+    const sourceService = codexIsSource ? codexProcess : claudeProcess;
+    const targetService = codexIsSource ? claudeProcess : codexProcess;
+    const sourceSeat = codexIsSource ? codex : claude;
+    const targetSeat = codexIsSource ? claude : codex;
+    const sent = sourceService.postBetweenExternals({
+      roomId: "demo",
+      workspace: "/tmp/project",
+      sourcePresenceId: sourceSeat.id,
+      targetPresenceId: targetSeat.id,
+      clientRequestId: randomUUID(),
+      text: `無固定上限驗收第 ${turn} 輪`,
+      threadId: first.delivery.threadId,
+      replyToDeliveryId: previous.id,
+      taskId: "login-task",
+    });
+    const claimed = await targetService.waitExternal({
+      presenceId: targetSeat.id, roomId: "demo", timeoutMs: 1_000,
+    });
+    assert.ok(claimed);
+    targetService.ackExternal({
+      presenceId: targetSeat.id, deliveryId: claimed.id,
+      leaseToken: claimed.leaseToken, phase: "read",
+    });
+    targetService.ackExternal({
+      presenceId: targetSeat.id, deliveryId: claimed.id,
+      leaseToken: claimed.leaseToken, phase: "working",
+    });
+    await targetService.replyExternal({
+      presenceId: targetSeat.id,
+      deliveryId: claimed.id,
+      leaseToken: claimed.leaseToken,
+      text: `第 ${turn} 輪已回覆`,
+    });
+    const outcome = await sourceService.waitForExternalReply({
+      presenceId: sourceSeat.id, deliveryId: sent.delivery.id, timeoutMs: 1_000,
+    });
+    assert.equal(outcome?.delivery.state, "replied");
+    assert.equal(sent.delivery.threadId, first.delivery.threadId);
+    previous = sent.delivery;
+  }
+  const grok = codexProcess.registerExternal({
+    provider: "grok", workspace: "/tmp/project", hostPid: 7203,
+  });
+  codexProcess.requestExternalJoin(grok.id, "demo", "/tmp/project");
+  codexProcess.approveExternalJoin({
+    ...ROOM_FIRST_JOIN,
+    presenceId: grok.id,
+    roomId: "demo",
+    workspace: "/tmp/project",
+    label: grok.provider,
+  });
+  codexProcess.requestExternalStandby(grok.id, "demo", "/tmp/project");
+  codexProcess.approveExternalStandby(grok.id, "demo", "/tmp/project");
+  const messagesBeforeRejectedRoutes = codexProcess.ledger.getRoom("demo")?.messages;
+  assert.throws(
+    () => codexProcess.postBetweenExternals({
+      roomId: "demo",
+      workspace: "/tmp/project",
+      sourcePresenceId: grok.id,
+      targetPresenceId: codex.id,
+      clientRequestId: randomUUID(),
+      text: "第三席不可插入既有 thread",
+      threadId: first.delivery.threadId,
+      replyToDeliveryId: previous.id,
+      taskId: "login-task",
+    }),
+    /THREAD_PARTICIPANT_MISMATCH/u,
+  );
+  assert.throws(
+    () => codexProcess.postBetweenExternals({
+      roomId: "demo",
+      workspace: "/tmp/project",
+      sourcePresenceId: codex.id,
+      targetPresenceId: claude.id,
+      clientRequestId: randomUUID(),
+      text: "不可偷換 task",
+      threadId: first.delivery.threadId,
+      replyToDeliveryId: previous.id,
+      taskId: "different-task",
+    }),
+    /THREAD_TASK_MISMATCH/u,
+  );
+  assert.throws(
+    () => codexProcess.postBetweenExternals({
+      roomId: "demo",
+      workspace: "/tmp/project",
+      sourcePresenceId: codex.id,
+      targetPresenceId: claude.id,
+      clientRequestId: randomUUID(),
+      text: "reply-to 不能省略 thread ID",
+      replyToDeliveryId: previous.id,
+      taskId: "login-task",
+    }),
+    /THREAD_CONTINUATION_FIELDS_MISMATCH/u,
+  );
+  assert.equal(codexProcess.ledger.getRoom("demo")?.messages, messagesBeforeRejectedRoutes);
+});
+
+test("target unregister races cannot leave a new exact-seat delivery active", async (t) => {
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-peer-offline-race-"));
+  const senderProcess = new CollaborationService(data);
+  const targetProcess = new CollaborationService(data);
+  t.after(() => senderProcess.close());
+  t.after(() => targetProcess.close());
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+  senderProcess.ledger.createRoom("demo", "/tmp/project");
+  const sender = senderProcess.registerExternal({
+    provider: "codex", workspace: "/tmp/project", hostPid: 7401,
+  });
+  const admit = (seat: ReturnType<CollaborationService["registerExternal"]>) => {
+    senderProcess.requestExternalJoin(seat.id, "demo", "/tmp/project");
+    senderProcess.approveExternalJoin({
+      ...ROOM_FIRST_JOIN,
+      presenceId: seat.id,
+      roomId: "demo",
+      workspace: "/tmp/project",
+      label: seat.provider,
+    });
+    senderProcess.requestExternalStandby(seat.id, "demo", "/tmp/project");
+    senderProcess.approveExternalStandby(seat.id, "demo", "/tmp/project");
+  };
+  admit(sender);
+
+  const firstTarget = targetProcess.registerExternal({
+    provider: "claude", workspace: "/tmp/project", hostPid: 7402,
+  });
+  admit(firstTarget);
+  const append = senderProcess.ledger.appendIdempotent.bind(senderProcess.ledger);
+  senderProcess.ledger.appendIdempotent = (...args) => {
+    const message = append(...args);
+    targetProcess.unregisterExternal(firstTarget.id);
+    return message;
+  };
+  assert.throws(
+    () => senderProcess.postBetweenExternals({
+      roomId: "demo",
+      workspace: "/tmp/project",
+      sourcePresenceId: sender.id,
+      targetPresenceId: firstTarget.id,
+      clientRequestId: randomUUID(),
+      text: "append 後 target 離線",
+    }),
+    /TARGET_AGENT_OFFLINE/u,
+  );
+  senderProcess.ledger.appendIdempotent = append;
+  assert.equal(senderProcess.presence.get(firstTarget.id), undefined);
+  assert.equal(senderProcess.inbox.list("demo").some((item) => item.targetPresenceId === firstTarget.id), false);
+
+  const secondTarget = targetProcess.registerExternal({
+    provider: "claude", workspace: "/tmp/project", hostPid: 7403,
+  });
+  admit(secondTarget);
+  const enqueue = senderProcess.inbox.enqueue.bind(senderProcess.inbox);
+  senderProcess.inbox.enqueue = (...args) => {
+    const delivery = enqueue(...args);
+    targetProcess.unregisterExternal(secondTarget.id);
+    return delivery;
+  };
+  assert.throws(
+    () => senderProcess.postBetweenExternals({
+      roomId: "demo",
+      workspace: "/tmp/project",
+      sourcePresenceId: sender.id,
+      targetPresenceId: secondTarget.id,
+      clientRequestId: randomUUID(),
+      text: "enqueue 後 target 離線",
+    }),
+    /TARGET_AGENT_OFFLINE/u,
+  );
+  senderProcess.inbox.enqueue = enqueue;
+  const raced = senderProcess.inbox.list("demo").find((item) => item.targetPresenceId === secondTarget.id);
+  assert.equal(raced?.state, "failed");
+  assert.equal(senderProcess.inbox.list("demo").some(
+    (item) => item.targetPresenceId === secondTarget.id && ["queued", "delivered", "read", "working"].includes(item.state),
+  ), false);
+
+  const thirdTarget = targetProcess.registerExternal({
+    provider: "claude", workspace: "/tmp/project", hostPid: 7404,
+  });
+  admit(thirdTarget);
+  senderProcess.ledger.appendIdempotent = (...args) => {
+    const message = append(...args);
+    targetProcess.unregisterExternal(sender.id);
+    return message;
+  };
+  assert.throws(
+    () => senderProcess.postBetweenExternals({
+      roomId: "demo",
+      workspace: "/tmp/project",
+      sourcePresenceId: sender.id,
+      targetPresenceId: thirdTarget.id,
+      clientRequestId: randomUUID(),
+      text: "append 後 source 離線",
+    }),
+    /SOURCE_AGENT_OFFLINE/u,
+  );
+  senderProcess.ledger.appendIdempotent = append;
+  assert.equal(senderProcess.inbox.list("demo").some((item) => item.targetPresenceId === thirdTarget.id), false);
+
+  const secondSender = senderProcess.registerExternal({
+    provider: "codex", workspace: "/tmp/project", hostPid: 7405,
+  });
+  admit(secondSender);
+  senderProcess.inbox.enqueue = (...args) => {
+    const delivery = enqueue(...args);
+    targetProcess.unregisterExternal(secondSender.id);
+    return delivery;
+  };
+  assert.throws(
+    () => senderProcess.postBetweenExternals({
+      roomId: "demo",
+      workspace: "/tmp/project",
+      sourcePresenceId: secondSender.id,
+      targetPresenceId: thirdTarget.id,
+      clientRequestId: randomUUID(),
+      text: "enqueue 後 source 離線",
+    }),
+    /SOURCE_AGENT_OFFLINE/u,
+  );
+  senderProcess.inbox.enqueue = enqueue;
+  const sourceRaced = senderProcess.inbox.list("demo").find(
+    (item) => item.sourcePresenceId === secondSender.id && item.targetPresenceId === thirdTarget.id,
+  );
+  assert.equal(sourceRaced?.state, "cancelled");
+});
+
+test("abnormal target death is reconciled by reply wait and room visibility without presence polling", async (t) => {
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-peer-crash-reconcile-"));
+  const service = new CollaborationService(data);
+  t.after(() => service.close());
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+  service.ledger.createRoom("demo", "/tmp/project");
+  const admit = (provider: "codex" | "claude", hostPid: number) => {
+    const seat = service.registerExternal({ provider, workspace: "/tmp/project", hostPid });
+    service.requestExternalJoin(seat.id, "demo", "/tmp/project");
+    service.approveExternalJoin({
+      ...ROOM_FIRST_JOIN,
+      presenceId: seat.id,
+      roomId: "demo",
+      workspace: "/tmp/project",
+      label: provider,
+    });
+    service.requestExternalStandby(seat.id, "demo", "/tmp/project");
+    service.approveExternalStandby(seat.id, "demo", "/tmp/project");
+    return seat;
+  };
+  const source = admit("codex", 7501);
+  const waitTarget = admit("claude", 7502);
+  const waiting = service.postBetweenExternals({
+    roomId: "demo",
+    workspace: "/tmp/project",
+    sourcePresenceId: source.id,
+    targetPresenceId: waitTarget.id,
+    clientRequestId: randomUUID(),
+    text: "target crash should fail during reply wait",
+  });
+
+  service.presence.unregister(waitTarget.id);
+  const outcome = await service.waitForExternalReply({
+    presenceId: source.id,
+    deliveryId: waiting.delivery.id,
+    timeoutMs: 1_000,
+  });
+  assert.equal(outcome?.delivery.state, "failed");
+  assert.equal(outcome?.delivery.failReason, "TARGET_SEAT_OFFLINE_DURING_REPLY_WAIT");
+
+  const visibleTarget = admit("claude", 7503);
+  const visible = service.postBetweenExternals({
+    roomId: "demo",
+    workspace: "/tmp/project",
+    sourcePresenceId: source.id,
+    targetPresenceId: visibleTarget.id,
+    clientRequestId: randomUUID(),
+    text: "target crash should fail when room becomes visible",
+  });
+  service.presence.unregister(visibleTarget.id);
+  const reconciled = service.roomView("demo", "/tmp/project").deliveries.find(
+    (delivery) => delivery.id === visible.delivery.id,
+  );
+  assert.equal(reconciled?.state, "failed");
+  assert.equal(reconciled?.failReason, "SEAT_OFFLINE");
+
+  const raceTarget = admit("claude", 7504);
+  const oldDelivery = service.postBetweenExternals({
+    roomId: "demo",
+    workspace: "/tmp/project",
+    sourcePresenceId: source.id,
+    targetPresenceId: raceTarget.id,
+    clientRequestId: randomUUID(),
+    text: "only the delivery observed before rejoin may fail",
+  });
+  service.presence.leave(raceTarget.id, "demo");
+  const preciseFail = service.inbox.failDeliveryIfTargetUnavailable.bind(service.inbox);
+  let newDelivery: ReturnType<CollaborationService["postBetweenExternals"]> | undefined;
+  service.inbox.failDeliveryIfTargetUnavailable = (input) => {
+    if (!newDelivery) {
+      service.requestExternalJoin(raceTarget.id, "demo", "/tmp/project");
+      service.approveExternalJoin({
+        ...ROOM_FIRST_JOIN,
+        presenceId: raceTarget.id,
+        roomId: "demo",
+        workspace: "/tmp/project",
+        label: "claude",
+      });
+      service.requestExternalStandby(raceTarget.id, "demo", "/tmp/project");
+      service.approveExternalStandby(raceTarget.id, "demo", "/tmp/project");
+      newDelivery = service.postBetweenExternals({
+        roomId: "demo",
+        workspace: "/tmp/project",
+        sourcePresenceId: source.id,
+        targetPresenceId: raceTarget.id,
+        clientRequestId: randomUUID(),
+        text: "new work after exact-seat rejoin must survive stale reconciliation",
+      });
+    }
+    return preciseFail(input);
+  };
+  const raceView = service.roomView("demo", "/tmp/project");
+  service.inbox.failDeliveryIfTargetUnavailable = preciseFail;
+  assert.equal(raceView.deliveries.find((item) => item.id === oldDelivery.delivery.id)?.state, "failed");
+  assert.equal(raceView.deliveries.find((item) => item.id === newDelivery?.delivery.id)?.state, "queued");
 });
 
 test("managed and external seats cannot claim the same room display identity", async (t) => {

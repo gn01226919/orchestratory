@@ -1,17 +1,19 @@
 # MVP 驗證矩陣
 
-> **Legacy evidence notice（2026-08-01）：** 下表驗證的是目前受限 Writer／read-only worker runtime，
-> 不證明 ADR-028 的 Native Full-Trust、terminal peer thread、candidate completion 或 main merge decision
-> 已完成。舊測試保留作為 GUI Managed 回歸證據，不得再當成 Native terminal 的產品驗收條件。
+> **vNext evidence notice（2026-08-01）：** exact-seat peer discovery/send/await/thread 已在隔離 development
+> branch 完成 synthetic multi-connection 驗證；另以雙 OS process 驗證 inbox migration 競態。尚未切換
+> 已安裝 MCP，也尚未完成真實 Codex＋Claude Code
+> host 驗收。下表其餘舊測試保留作為 GUI Managed 回歸證據，不得拿來冒充 Native Full-Trust、
+> candidate completion 或 main merge decision 已完成。
 
 ## ADR-028 vNext 待驗證矩陣
 
 | 範圍 | 狀態 | 必要證據 |
 |---|---|---|
 | 加入前後 Native capability 一致 | 待實作／待驗證 | Codex、Claude Code 分別驗證 filesystem/shell/Git/network/subagent 不被 Orchestratory 降權 |
-| Exact terminal seat discovery | 待實作／待驗證 | 兩個不同終端能列出彼此且與 provider worker 分離 |
-| Authenticated peer send/thread | 待實作／待驗證 | source 不可偽造、same Room/workspace、no fallback、多輪 reply-and-wait |
-| Thread 無固定 round ceiling | 待實作／待驗證 | 超過 16 輪仍延續；transport timeout/reconnect 不終止 thread |
+| Exact terminal seat discovery | 已實作／synthetic 已驗證；live 待驗收 | 兩個獨立 service connections／MCP brokers 能列出彼此，`providers` 與 `terminalSeats` 分離，self identity 正確；`test/collab-mcp.test.ts` |
+| Authenticated peer send/thread | 已實作／synthetic 已驗證；live 待驗收 | server-bound source、same Room/workspace、standby approval、UUID exact target、stable client request id、無 provider fallback、三席 hijack 拒絕、immutable reply prepare、delivery-scoped await、雙向 follow-up thread；`test/collab-mcp.test.ts`、`test/collaboration-service.test.ts`、`test/room-inbox.test.ts` |
+| Thread 無固定 round ceiling | 已實作／synthetic 已驗證；live 待驗收 | 同一 thread 自動驗證 20 輪仍延續；transport timeout 後重新 await／reply 不終止 thread；`test/collaboration-service.test.ts`、`test/collab-mcp.test.ts` |
 | Candidate lifecycle | 待實作／待驗證 | task/base/main/candidate/checkpoint/Agent branches 可追溯，保全既有 dirty state |
 | Task completion merge prompt | 待實作／待驗證 | 每個完成任務主動顯示 preview 並詢問是否 merge main |
 | Snapshot-bound approval | 待實作／待驗證 | replay、candidate drift、main drift、preview mismatch 全部拒絕 |
@@ -55,7 +57,7 @@
 | MCP terminal presence／GUI membership／session-scoped standby／wake truthfulness | 已驗證（synthetic＋HTTP＋Chrome live smoke） | owner-only SQLite schema v5、per-process UUID、canonical workspace exact match、5s heartbeat/15s lease、EOF unregister；`room_join_request` 只建立 GUI membership 申請，加入後 `room_wait` 另建立 exact-session 待命申請；Owner 核准後只有 active long-poll 是 `wakeable: true`，待命未核准時新交辦 fail closed，核准但 inactive 時 UI 誠實標示不可即時喚醒；待命 wait 上限四小時，Owner 撤銷、MCP cancellation、EOF 或 lease expiry 都會結束；無 provider fallback／替身。`test/room-presence.test.ts`、`test/room-inbox.test.ts`、`test/collab-mcp.test.ts`、`test/collaboration-service.test.ts`、`test/web.test.ts`。2026-07-23 Chrome 在 `orchestratory` 精確 Room 實測：加入申請→GUI membership 核准→`room_wait` 待命申請→GUI 待命核准→`wakeable`→GUI `@codex6` 精確收件／ack／回覆 `GUI_ROOM_WAIT_OK`→回覆後重新待命；GUI 撤銷立即令 open wait 回傳 `ROOM_STANDBY_REVOKED`，終端 stdio 關閉後 5 秒內人物與授權自動移除。2026-07-22 另已驗證跨專案切換不顯示該席位 | MCP client 可能自行施加低於四小時的 request timeout；任何 client-side 結束都必須由 Agent 再次呼叫 `room_wait`。完全 idle 的既有 host 不能接受 server-initiated turn；真正不依賴 external pull 的 GUI wake 使用分離的受控即時 Agent。既有 MCP child 必須由 host 重開才會載入新 tool schema |
 | MCP Room collaboration mode | 已驗證（synthetic＋HTTP＋Chrome live smoke） | join 缺 mode／sync、未知 mode、跨 workspace 皆 fail closed；owner mode 與 turn sync 可獨立設定且 idempotent join 不可偷換；room-first `ask_*`／`compare_agents` 強制讀取 bound Room snapshot、append mention/lifecycle/reply、回傳 `readThroughSeq`，多 Agent 依序且後者能讀前者；seat-only standalone 不入帳；多 allowlist root 省略 workspace 仍使用精確 binding；`test/room-presence.test.ts`、`test/collab-mcp.test.ts`、`test/web.test.ts`。2026-07-22 Chrome 在精確專案 Room 分別核准 room-first＋turn sync off 與 seat-only＋turn sync on；兩個 zero-quota fake worker 的 room-first compare 依序入帳且第二次 cursor 包含第一個 reply，seat-only compare 前後 ledger count 不變；切換其他專案 Room 時兩個席位皆不可見，console 無 error | 只涵蓋 Orchestratory MCP broker；provider 原生 subagent 無法攔截。Structured hook turn sync 仍須 owner 另行安裝官方 CLI hooks，且不擷取 hidden reasoning／raw tools |
 | Room mention 等待生命週期 | 已驗證（synthetic＋HTTP＋Browser live smoke） | `room_mention` 在真實 provider call 前追加綁定 mention reference 的「回應處理中」system event；GUI 只對 start 且尚無 reply/failure/cancel/clear 的 mention 顯示等待；backend cancel 不把 start event 誤當 resolved；`room_post` 的 provider-prefixed `@mention` 會 fail closed 並要求 `room_mention`；`test/collab-mcp.test.ts`、`test/web.test.ts`；Browser 驗證歷史 plain-text mention 重載後不再顯示幽靈等待 | 這是 append-only UI 狀態修正，不刪除、改寫或偽造既有帳本訊息；舊版進行中但未留 start event 的呼叫在重載後不顯示等待，但 provider timeout/failure 仍會正常入帳 |
-| MCP 精確席位收件匣 | 已驗證（synthetic＋跨程序） | `queued→delivered→read→working→replied/failed/cancelled`、`room_wait/ack/reply/fail`、私有 lease token、斷線不誤耗重試、已讀後 bounded retry、取消、離線 fail、idempotent crash recovery、無 provider fallback；`test/room-inbox.test.ts`、`test/collab-mcp.test.ts`、`test/collaboration-service.test.ts` | 真實外接 CLI 必須自行持續呼叫 bounded `room_wait`；待命未核准時新交辦拒絕，核准但沒有 active wait 時 GUI 只標示未值班，不宣稱即時喚醒 |
+| MCP 精確席位收件匣 | 已驗證（synthetic＋跨程序） | `queued→delivered→read→working→replied/failed/cancelled`、`room_wait/ack/reply/fail`、私有 lease token、斷線不誤耗重試、已讀後 bounded retry、取消、離線 fail、idempotent crash recovery、無 provider fallback；schema v4 保存 authenticated source/thread/reply-to，v3 既有 row 交易遷移並以 delivery ID 建立 legacy thread；`test/room-inbox.test.ts`、`test/collab-mcp.test.ts`、`test/collaboration-service.test.ts` | 真實外接 CLI 必須自行持續呼叫 bounded `room_wait`；待命未核准時新交辦拒絕，核准但沒有 active wait 時 GUI 只標示未值班，不宣稱即時喚醒；已安裝 MCP 尚未切換 vNext |
 | Writer Lease／Writer Companion／子 Agent | 已驗證（synthetic＋跨程序 Workspace MCP＋Chrome live smoke） | resident/managed/external 可選 Writer、task-scoped monotonic epoch、checkpoint 交接、精確 GUI cancel、外接 Writer 雙重身份、HMAC technical audit、每次 mutation 重新 fencing；同 provider 子 Agent 與父 Writer 共用 task worktree 並由跨程序鎖序列執行，跨 provider 唯讀、禁止再轉派、父 lease 切換即撤銷；第二個 GUI 保留仍有 heartbeat 的 live run，只撤銷沒有活鎖且 capability 無法恢復的 lease；`test/writer-lease.test.ts`、`test/writer-delegation.test.ts`、`test/collaboration-audit.test.ts`、`test/workspace-mcp.test.ts`、`test/collaboration-service.test.ts`、`test/web.test.ts`；2026-07-22 Chrome 對 resident Codex 完成 grant、實際 provider 回覆、checkpoint、風險確認與零變更 apply-back，帳本有 Writer lifecycle 且主工作樹保持乾淨 | 寫入 capability 只在啟動該 run 的 daemon RAM；其他 GUI 不能取得或冒用。真實非零檔案 mutation／apply-back 與 child executor 點擊仍需獨立、可回復的人工驗收 |
 | Room 受控即時 Agents | 已驗證（synthetic＋HTTP＋Claude live smoke） | 外接終端與受控即時席位分離；API 明示 `managed-provider-call`/`wakeable: true`；owner-only `managed-room-agents.sqlite`、0600、strict schema、row hash、每房 12 席上限、room/workspace exact binding、獨立 display identity、per-seat single in-flight/cancel、共用 provider quota、read-only prompt；`test/managed-room-agent.test.ts`、`test/web.test.ts` 驗證建立、列出、獨立作者回覆與移除；受控 Claude live smoke 以同一 managed seat identity 回覆後成功移除，精確訊息 metadata 不列入可發布文件 | 每次喚醒目前是注入有界帳本尾段的無狀態 provider turn，不保證 provider-native session continuity；不得冒充既有外接 CLI session |
 | Room GUI 導航、歷史、辦公室與 Writer 交辦 | 已驗證（HTTP／程式層／Browser） | 首頁整塊可點擊直播／歷史入口、room id URL 保留、最新起算每頁 100 則向前分頁與 allowlist；四個可點擊工位、環境光、桌面細節、Orbie 瞳孔／表情與六種固定休閒活動。2026-07-17 Browser 在 4391 驗證：點 Codex 只預填 `@codex` 並顯示內嵌 Agent 卡、歷史 backlog 不誤報新通知、任務中心只讀、日夜／安靜／休閒／全螢幕 fallback 可切換，1440×753 無水平溢位；Miso 四足與 Byte 雙足在 190ms 前後所有取樣 limb/body transforms 均改變、近遠腳反相，角色在地板範圍內且 console 無錯；真實工作 DND、目前角色、完成／失敗動畫由 `test/web.test.ts` 的 HTML／JS／CSS contract 覆蓋；Writer 面板的候選、grant/switch/run/cancel/complete 與 child executor 路由由 HTTP 整合測試覆蓋；2026-07-22 Chrome 實際點擊 Writer grant、run、checkpoint、complete 與零變更 apply-back | child executor 與非零檔案 apply-back 尚未做 Browser live smoke；寵物、休閒與顯示偏好只操作目前 DOM／RAM；真實 provider workflow 未為視覺動畫額外啟動 |
@@ -67,8 +69,8 @@
 
 ## 目前自動證據
 
-- 280/280 deterministic tests。
-- 最新最終 gate：line 95.17%、branch 85.06%、functions 96.81%；gate 分別為 90%、85%、90%。
+- 289/289 deterministic tests。
+- 最新最終 gate：line 95.21%、branch 85.17%、functions 96.78%；gate 分別為 90%、85%、90%。
 - 測試不使用真實 credentials、真實私人 repository、模型額度或付費 API。
 - CycloneDX SBOM 為 3 components，SHA-256 `ea620ec658783639ce0d9dcf64dccc4bf1ccda69d4b5c43f95491891e4b9f99a`。
 - 完整 npm dependency audit（含 dev toolchain）0 vulnerabilities；offline committed-HEAD clean clone與
