@@ -157,11 +157,14 @@ canonical exact root 或 descendant 可執行 workflow。
 
 ## ADR-019：Provider CLI 與 Workspace capability 分離（由 ADR-023 細化）
 
-**決策：** 所有 provider CLI 都在空白 scratch cwd 執行並停用 built-in filesystem、shell、
-network、subagent 與 plugin。Task-scoped Writer 可由 owner 在 Codex／Claude 常駐、管理型或外接
-身分間切換，但 provider 本體仍強制 read-only sandbox，寫入只能透過 task／worktree／
-executor／epoch 綁定的 Workspace MCP tools。外接 Writer 由 Writer Companion 代為執行；Grok/API
-Writer 保持停用。
+**舊決策（已由 ADR-028 對 Native terminal 取代）：** ~~所有 provider CLI 都在空白 scratch cwd
+執行並停用 built-in filesystem、shell、network、subagent 與 plugin。Task-scoped Writer 可由 owner
+在 Codex／Claude 常駐、管理型或外接身分間切換，但 provider 本體仍強制 read-only sandbox，寫入
+只能透過 task／worktree／executor／epoch 綁定的 Workspace MCP tools。外接 Writer 由 Writer
+Companion 代為執行；Grok/API Writer 保持停用。~~
+
+**vNext replacement：** 上述限制只保留給 GUI Managed／legacy worker。Native terminal 的 capability
+authority 在 host；join、standby 與 Room mode 都不得改寫或降低 host 能力，也不再列入 Writer Lease 候選。
 
 **理由：** CLI 的「唯讀」權限不必然代表不能讀取 workspace 外檔案。把 provider cwd 與實際
 workspace 分開，再用 text-only、hash-bound、無 delete/shell/network 的 broker 縮小 blast radius。
@@ -187,9 +190,12 @@ Workflow absolute deadline 由獨立 timer 直接 abort provider/test process tr
 
 ## ADR-022：原生 PTY Room bridge 預設關閉且不冒充結構化 turn
 
-**決策：** macOS 僅允許 owner 以 mode 0600 的精確 capability gate 啟用 Codex/Grok PTY bridge。
-Provider、argv 與唯讀模式固定，不接受額外 flags、不經 shell。Capture 只保存 RAM bounded tail，
-入帳作者固定為 `codex-terminal`／`grok-terminal` 並標明混合畫面。
+**舊決策（已由 ADR-028 取代）：** ~~macOS 僅允許 owner 以 mode 0600 的精確 capability gate 啟用
+Codex/Grok PTY bridge。Provider、argv 與唯讀模式固定，不接受額外 flags、不經 shell。Capture 只保存
+RAM bounded tail，入帳作者固定為 `codex-terminal`／`grok-terminal` 並標明混合畫面。~~
+
+**vNext replacement：** Orchestratory 不包裝或降權既有 Native Codex／Claude Code host；MCP 只提供
+協作控制面。Legacy PTY bridge 可留作 GUI Managed 相容功能，不得冒充 Native Full-Trust 路徑。
 
 **理由：** 原生 TUI 對使用者最熟悉，但 PTY stream 同時含輸入、輸出與 redraw，不能可靠切割為
 agent turn；provider 自有設定也不等於 Orchestratory approval。預設關閉、固定唯讀 capability 與
@@ -200,9 +206,10 @@ agent turn；provider 自有設定也不等於 Orchestratory approval。預設�
 
 ## ADR-023：Task-scoped Writer Lease、Writer Companion 與單層委派
 
-**決策：** 每個 task 同時只有一份 active Writer Lease，綁定 room、workspace、worktree、executor
-與單調遞增 epoch。Owner 可在 resident、managed、external 身分間交接；外接身分的受控寫入由
-Writer Companion 執行，Room 帳本自然語言揭露代理關係，HMAC technical audit 保存
+**決策：** 每個 GUI Managed task 同時只有一份 active Writer Lease，綁定 room、workspace、worktree、executor
+與單調遞增 epoch。~~Owner 可在 resident、managed、external 身分間交接；外接身分的受控寫入由
+Writer Companion 執行。~~ vNext 只允許 resident／GUI Managed 候選；Native external 不進入此路徑。
+Room 帳本自然語言揭露代理關係，HMAC technical audit 保存
 `on_behalf_of`、`executed_by` 與 `lease_epoch`。同 provider child 與父 Writer 共用 task
 worktree，並由持久化 run lock 序列執行；跨 provider child 唯讀。Codex／Claude 使用 revocable
 read-only Workspace MCP；Grok 只讀控制面生成的 bounded Git snapshot，不取得 worktree 或

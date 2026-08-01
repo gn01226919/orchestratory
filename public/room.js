@@ -398,7 +398,7 @@ function renderPresencePanel() {
       label.textContent = session.displayName || `${session.provider} 申請 ${index + 1}`;
       const detail = document.createElement("small");
       detail.textContent = session.joined
-        ? `${session.client || "MCP"} · ${session.collaborationMode === "room-first" ? "全程帳本協作" : "僅加入房間"} · ${session.syncTurns ? "終端對話同步" : "終端對話不入帳"} · ${
+        ? `Native Full-Trust · host 能力不變 · ${session.client || "MCP"} · ${session.collaborationMode === "room-first" ? "全程帳本協作" : "僅加入房間"} · ${session.syncTurns ? "終端對話同步" : "終端對話不入帳"} · ${
             session.listening
               ? "room-wait 待命中，可由 GUI 喚醒"
               : session.standbyRequested && !session.standbyApproved
@@ -557,8 +557,8 @@ function renderManagedAgents() {
       name.textContent = agent.displayName;
       const detail = document.createElement("small");
       detail.textContent = agent.busy
-        ? "受控即時 Agent · 回覆中（請勿打擾）"
-        : `受控即時 Agent · ${agent.model} · GUI 可直接喚醒`;
+        ? "GUI Managed · 回覆中（請勿打擾）"
+        : `GUI Managed · 對話唯讀 · ${agent.model} · Writer 需另行授權`;
       identity.append(dot, name, detail);
       identity.addEventListener("click", () => focusAgentComposer(agent.displayName));
       const action = document.createElement("button");
@@ -1190,7 +1190,8 @@ function providerInfo(agent) {
     model: managed?.model || session?.model || capability?.subscriptionModels?.[0] || capability?.suggestedModels?.[0] || fallback.model,
     access: agent === "you"
       ? fallback.access
-      : managed ? "受控即時 Agent · 唯讀"
+      : managed ? "GUI Managed · 對話唯讀／Writer 另行授權"
+      : session ? "Native Full-Trust · host-controlled"
       : providerId === "codex" && capability?.canWriteSubscription
         ? "唯讀／實驗性 Writer"
         : capability?.canWriteSubscription ? "受控 Writer" : fallback.access,

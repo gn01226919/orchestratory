@@ -9,6 +9,10 @@ export type ManagedAgentProvider = "codex" | "claude" | "grok";
 export interface ManagedRoomAgent {
   id: string;
   kind: "managed-subagent";
+  executionClass: "gui-managed";
+  capabilityAuthority: "orchestratory";
+  conversationAccess: "read-only";
+  writeAccess: "owner-writer-lease-required";
   roomId: string;
   workspace: string;
   provider: ManagedAgentProvider;
@@ -248,6 +252,10 @@ export class ManagedRoomAgentStore {
     return {
       id: publicFields.id,
       kind: "managed-subagent",
+      executionClass: "gui-managed",
+      capabilityAuthority: "orchestratory",
+      conversationAccess: "read-only",
+      writeAccess: "owner-writer-lease-required",
       roomId: row.room_id,
       workspace: row.workspace,
       provider: row.provider,

@@ -9,7 +9,7 @@
 <style>:root{color-scheme:light dark;background:light-dark(rgb(255 255 255), rgb(24 24 24))}html,body{margin:0}body{box-sizing:border-box;padding:1rem;background:inherit}.migration-notice{box-sizing:border-box;max-width:736px;margin:0 auto 1rem;padding:.75rem 1rem;border:1px solid #d69e2e;border-radius:.75rem;font:14px/1.5 system-ui,sans-serif}.migration-notice strong{display:block}iframe{display:block;width:100%;max-width:736px;height:calc(100vh - 8rem);margin:0 auto;border:0}</style>
 </head>
 <body>
-<div class="migration-notice"><strong>Legacy runtime guide</strong>本頁示範的是 ADR-028 之前的受限 Writer／唯讀 worker 流程。Native Full-Trust、terminal peer thread、candidate 任務終點 merge 詢問尚未實作；新版規格請見 docs/OWNER_DECISION_FULL_CONTROL.md。</div>
+<div class="migration-notice"><strong>vNext transition guide</strong>Native Full-Trust 與 terminal peer thread 已進入 vNext 實作；任何「external Writer／Writer Companion」舊規則均已停用。GUI Managed 仍使用受控 Writer 流程；candidate 任務終點 merge 詢問尚待後續階段實作。新版規格請見 docs/OWNER_DECISION_FULL_CONTROL.md。</div>
 <iframe sandbox="allow-scripts" referrerpolicy="no-referrer" title="Orchestratory 互動操作導覽" srcdoc="&lt;!doctype html&gt;
 &lt;html lang=&quot;zh-Hant&quot;&gt;
 &lt;head&gt;
@@ -1103,7 +1103,7 @@ orchestrator room hooks --provider codex --install&lt;/code&gt;&lt;/pre&gt;
       &lt;div class=&quot;card wide&quot;&gt;&lt;h3&gt;席位與權限比較&lt;/h3&gt;&lt;table class=&quot;trouble-table&quot;&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;席位&lt;/th&gt;&lt;th&gt;GUI @ 行為&lt;/th&gt;&lt;th&gt;能力與限制&lt;/th&gt;&lt;/tr&gt;&lt;/thead&gt;&lt;tbody&gt;&lt;tr&gt;&lt;td&gt;You&lt;/td&gt;&lt;td&gt;代表本機使用者，不喚醒模型&lt;/td&gt;&lt;td&gt;每個房間唯一，不會因多開終端而複製&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;常駐 Codex／Claude／Grok&lt;/td&gt;&lt;td&gt;立即建立受限制的 provider 回合&lt;/td&gt;&lt;td&gt;依角色與 quota；寫檔仍要 Writer Lease 核准&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;外接 MCP 終端&lt;/td&gt;&lt;td&gt;待命已核准且 active room_wait 時精確喚醒&lt;/td&gt;&lt;td&gt;加入與待命分開核准；完全 idle 的既有 MCP host 不能由 server 發起新 turn。加入 Room 不升權也不降權，工作不會改派同名常駐模型&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td&gt;受控即時 Agent&lt;/td&gt;&lt;td&gt;GUI 可立即喚醒精確席位&lt;/td&gt;&lt;td&gt;獨立名稱、可取消、共用 quota；不冒充外接終端，可被 owner 選為 Writer 或子執行者，實際寫入仍受 lease 與 worktree 限制&lt;/td&gt;&lt;/tr&gt;&lt;/tbody&gt;&lt;/table&gt;&lt;/div&gt;
       &lt;div class=&quot;card&quot;&gt;&lt;h3&gt;人物狀態與工作內容&lt;/h3&gt;&lt;p&gt;DND／⛔ 表示正在工作；卡片顯示目前角色與任務摘要。完成、失敗、待命、通知與未讀數量都來自既有事件或帳本，不是額外批准。點人物只會選取與預填 @，仍要按「送出」。&lt;/p&gt;&lt;/div&gt;
       &lt;div class=&quot;card&quot;&gt;&lt;h3&gt;桌位、休閒與夥伴&lt;/h3&gt;&lt;p&gt;加入成員時辦公室可擴編；桌位可拖曳重新排列。閒置人物會伸展、看文件、喝水或休息；Miso 貓與 Byte 恐龍會在地板巡邏並有腳步／表情動畫。這些都只在瀏覽器 DOM／CSS 執行，不讀帳本、不呼叫 provider。&lt;/p&gt;&lt;/div&gt;
-      &lt;div class=&quot;card wide&quot;&gt;&lt;h3&gt;任務、通知與「交給 Writer」&lt;/h3&gt;&lt;p&gt;右側任務與通知可查看等待、執行、完成或失敗狀態。「交給 Writer」只建立待核准提案，workspace 由目前房間反查；它不會立即寫檔。owner 可在 GUI 選常駐、管理型或外接席位擔任 Writer，也可指定子執行者；按 &lt;code&gt;RUN&lt;/code&gt; 且通過安全檢查後，才授予單一 Writer Lease 並進入隔離 worktree。&lt;/p&gt;&lt;/div&gt;
+      &lt;div class=&quot;card wide&quot;&gt;&lt;h3&gt;任務、通知與「交給 Writer」&lt;/h3&gt;&lt;p&gt;右側任務與通知可查看等待、執行、完成或失敗狀態。「交給 Writer」只建立待核准提案，workspace 由目前房間反查；它不會立即寫檔。owner 可在 GUI 選 resident 或管理型席位擔任 Writer，也可指定子執行者；Native external terminal 不在此候選清單。按 &lt;code&gt;RUN&lt;/code&gt; 且通過安全檢查後，才授予單一 Writer Lease 並進入隔離 worktree。&lt;/p&gt;&lt;/div&gt;
     &lt;/div&gt;
   &lt;/section&gt;
 
@@ -1120,7 +1120,7 @@ orchestrator room hooks --provider codex --install&lt;/code&gt;&lt;/pre&gt;
       &lt;div class=&quot;card wide&quot;&gt;
         &lt;h3&gt;Writer Lease：由 owner 選擇，沒有自動 fallback&lt;/h3&gt;
         &lt;div class=&quot;lease-grid&quot;&gt;
-          &lt;div&gt;&lt;label class=&quot;form-label&quot; for=&quot;writer-task-id&quot;&gt;任務識別&lt;input class=&quot;form-control&quot; id=&quot;writer-task-id&quot; value=&quot;demo-task-17&quot;&gt;&lt;/label&gt;&lt;label class=&quot;form-label&quot; for=&quot;writer-origin&quot;&gt;Writer 候選&lt;select class=&quot;form-select&quot; id=&quot;writer-origin&quot;&gt;&lt;option value=&quot;resident&quot;&gt;常駐 Codex&lt;/option&gt;&lt;option value=&quot;managed&quot;&gt;管理型 Codex（前端）&lt;/option&gt;&lt;option value=&quot;external&quot;&gt;外接 Codex（前端終端）&lt;/option&gt;&lt;/select&gt;&lt;/label&gt;&lt;label class=&quot;form-label&quot; for=&quot;writer-child-provider&quot;&gt;子執行者 provider&lt;select class=&quot;form-select&quot; id=&quot;writer-child-provider&quot;&gt;&lt;option value=&quot;codex&quot;&gt;Codex（同 provider）&lt;/option&gt;&lt;option value=&quot;claude&quot;&gt;Claude（跨 provider）&lt;/option&gt;&lt;option value=&quot;grok&quot;&gt;Grok（跨模型唯讀）&lt;/option&gt;&lt;/select&gt;&lt;/label&gt;&lt;div class=&quot;viz-row&quot;&gt;&lt;button class=&quot;btn btn-primary&quot; id=&quot;writer-grant&quot; type=&quot;button&quot;&gt;授予 Lease&lt;/button&gt;&lt;button class=&quot;btn&quot; id=&quot;writer-switch&quot; type=&quot;button&quot;&gt;切換 Writer&lt;/button&gt;&lt;button class=&quot;btn&quot; id=&quot;writer-child&quot; type=&quot;button&quot;&gt;建立子執行者&lt;/button&gt;&lt;button class=&quot;btn btn-ghost&quot; id=&quot;writer-complete&quot; type=&quot;button&quot;&gt;完成並檢視風險&lt;/button&gt;&lt;/div&gt;&lt;/div&gt;
+          &lt;div&gt;&lt;label class=&quot;form-label&quot; for=&quot;writer-task-id&quot;&gt;任務識別&lt;input class=&quot;form-control&quot; id=&quot;writer-task-id&quot; value=&quot;demo-task-17&quot;&gt;&lt;/label&gt;&lt;label class=&quot;form-label&quot; for=&quot;writer-origin&quot;&gt;Writer 候選&lt;select class=&quot;form-select&quot; id=&quot;writer-origin&quot;&gt;&lt;option value=&quot;resident&quot;&gt;常駐 Codex&lt;/option&gt;&lt;option value=&quot;managed&quot;&gt;管理型 Codex（前端）&lt;/option&gt;&lt;/select&gt;&lt;/label&gt;&lt;label class=&quot;form-label&quot; for=&quot;writer-child-provider&quot;&gt;子執行者 provider&lt;select class=&quot;form-select&quot; id=&quot;writer-child-provider&quot;&gt;&lt;option value=&quot;codex&quot;&gt;Codex（同 provider）&lt;/option&gt;&lt;option value=&quot;claude&quot;&gt;Claude（跨 provider）&lt;/option&gt;&lt;option value=&quot;grok&quot;&gt;Grok（跨模型唯讀）&lt;/option&gt;&lt;/select&gt;&lt;/label&gt;&lt;div class=&quot;viz-row&quot;&gt;&lt;button class=&quot;btn btn-primary&quot; id=&quot;writer-grant&quot; type=&quot;button&quot;&gt;授予 Lease&lt;/button&gt;&lt;button class=&quot;btn&quot; id=&quot;writer-switch&quot; type=&quot;button&quot;&gt;切換 Writer&lt;/button&gt;&lt;button class=&quot;btn&quot; id=&quot;writer-child&quot; type=&quot;button&quot;&gt;建立子執行者&lt;/button&gt;&lt;button class=&quot;btn btn-ghost&quot; id=&quot;writer-complete&quot; type=&quot;button&quot;&gt;完成並檢視風險&lt;/button&gt;&lt;/div&gt;&lt;/div&gt;
           &lt;div class=&quot;lease-result&quot; id=&quot;writer-result&quot; aria-live=&quot;polite&quot;&gt;&lt;strong&gt;尚未授予 Writer Lease&lt;/strong&gt;&lt;br&gt;GUI 的選擇只是候選；仍需 RUN、workspace 驗證與隔離 worktree。&lt;/div&gt;
         &lt;/div&gt;
         &lt;p class=&quot;text-muted&quot;&gt;每個 task 同時只有一份 active lease，綁定 room、workspace、task worktree、epoch 與短效 capability。切換必須帶目前 epoch 與 checkpoint；舊能力和所有子委派立即撤銷。候選離線、移除或完成也會撤銷，不會偷偷改派。&lt;/p&gt;
@@ -1132,7 +1132,7 @@ orchestrator room hooks --provider codex --install&lt;/code&gt;&lt;/pre&gt;
           &lt;div class=&quot;viz-row&quot;&gt;&lt;button class=&quot;btn btn-primary&quot; id=&quot;writer-apply&quot; type=&quot;button&quot;&gt;回寫主專案&lt;/button&gt;&lt;span class=&quot;text-small text-muted&quot; id=&quot;writer-apply-status&quot; aria-live=&quot;polite&quot;&gt;目前只有 retained task worktree 被改動。&lt;/span&gt;&lt;/div&gt;
         &lt;/div&gt;
       &lt;/div&gt;
-      &lt;div class=&quot;card&quot;&gt;&lt;h3&gt;外接 Writer 的雙重身分&lt;/h3&gt;&lt;p&gt;外接終端保留自己的名稱與任務上下文（&lt;code&gt;onBehalfOf&lt;/code&gt;），但不直接取得 Workspace MCP 寫入 token；受管 &lt;strong&gt;Writer Companion&lt;/strong&gt; 在隔離 worktree 代為執行（&lt;code&gt;executedBy&lt;/code&gt;）。帳本與 audit 同時記住「代表誰」和「實際由誰執行」。&lt;/p&gt;&lt;/div&gt;
+      &lt;div class=&quot;card&quot;&gt;&lt;h3&gt;Native external 不進入 Writer Lease&lt;/h3&gt;&lt;p&gt;外接終端保留 host 原生沙盒、核准、shell、filesystem、network 與 subagent 能力；Orchestratory 的 join、standby 與協作模式不會降權。歷史 external Writer Companion capability 在升級時強制撤銷，但保留 worktree 與 audit 供 owner 檢視。&lt;/p&gt;&lt;/div&gt;
       &lt;div class=&quot;card&quot;&gt;&lt;h3&gt;子執行者與 Reviewer&lt;/h3&gt;&lt;p&gt;同 provider 子 Agent 與父 Writer 共用同一個 task worktree，取得 fenced write capability；SQLite task run lock 搭配 5 秒 heartbeat，會跨 GUI 程序序列化父 Writer、同 provider 子 Agent 與 sibling。跨 provider Codex／Claude 透過可撤銷的唯讀 Workspace MCP 檢查同一 worktree；Grok 完全不接觸 worktree，也沒有 Read／Glob／Grep 或其他 filesystem tools，只接收控制面產生的 bounded Git snapshot，並在空白 scratch 內審查。敏感或過大的 untracked 內容會 fail closed。子 Agent 不能再委派；父 lease 切換、完成、撤銷或席位移除時，子委派全部失效。&lt;/p&gt;&lt;/div&gt;
       &lt;div class=&quot;card wide office-warning&quot;&gt;&lt;h3&gt;Writer 完成 ≠ 主專案已修改&lt;/h3&gt;&lt;p&gt;「完成」只把 lease 標成 completed、撤銷能力，並保留 task worktree 供 owner 審核。GUI 會先用自然語言說明風險，再列出每個寫入／刪除檔案與 bytes；只有完整輸入 &lt;code&gt;APPLY WRITER &amp;lt;taskId&amp;gt; TO PROJECT&lt;/code&gt;，且重新驗證仍一致，task 才會先持久化為 &lt;code&gt;applying&lt;/code&gt; 再回寫來源專案。套用成功後標記為 &lt;code&gt;applied&lt;/code&gt;；若在套用後、標記前中斷，任務維持 fail-closed applying，不能重新授予 Writer。&lt;/p&gt;&lt;/div&gt;
       &lt;div class=&quot;card wide&quot;&gt;&lt;h3&gt;不會偷偷發生的事&lt;/h3&gt;&lt;div class=&quot;viz-row&quot;&gt;&lt;span class=&quot;viz-badge&quot;&gt;不自動 merge&lt;/span&gt;&lt;span class=&quot;viz-badge&quot;&gt;不自動 commit&lt;/span&gt;&lt;span class=&quot;viz-badge&quot;&gt;不自動 push&lt;/span&gt;&lt;span class=&quot;viz-badge&quot;&gt;不自動刪 worktree&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;
@@ -1470,7 +1470,7 @@ orchestrator room hooks --provider codex --install&lt;/code&gt;&lt;/pre&gt;
       let activeWriterTask = null;
       let reviewWriterTask = null;
       const appliedWriterTasks = new Set();
-      const writerLabels = { resident: &quot;常駐 Codex&quot;, managed: &quot;管理型 Codex（前端）&quot;, external: &quot;外接 Codex（前端終端）&quot; };
+      const writerLabels = { resident: &quot;常駐 Codex&quot;, managed: &quot;管理型 Codex（前端）&quot; };
       function showWriter(title, detail) {
         writerResult.textContent = &quot;&quot;;
         const strong = document.createElement(&quot;strong&quot;);
@@ -1492,9 +1492,7 @@ orchestrator room hooks --provider codex --install&lt;/code&gt;&lt;/pre&gt;
         writerEpoch += 1;
         activeWriter = selected;
         activeWriterTask = isSwitch ? activeWriterTask : requestedTask;
-        const identity = selected === &quot;external&quot;
-          ? &quot;onBehalfOf = 外接 Codex（前端終端）；executedBy = Writer Companion。外接席位保留任務人格，寫入由受管 companion 在隔離 worktree 執行。&quot;
-          : `executedBy = ${writerLabels[selected]}；此席位直接在核准的隔離 worktree 執行。`;
+        const identity = `executedBy = ${writerLabels[selected]}；此 GUI Managed 席位直接在核准的隔離 worktree 執行。`;
         showWriter(`${isSwitch ? &quot;已切換&quot; : &quot;已授予&quot;} Lease · ${activeWriterTask} · epoch ${writerEpoch}`, `${identity} capability 只對此 task、workspace、共享 task worktree 與 epoch 有效。`);
       }
       root.querySelector(&quot;#writer-grant&quot;).addEventListener(&quot;click&quot;, () =&gt; grantWriter(false));

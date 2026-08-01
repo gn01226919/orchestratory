@@ -39,8 +39,7 @@ import { CollaborationAuditLog, type AuditOutcome } from "./collaboration-audit.
 
 export type WriterCandidate =
   | { origin: "resident"; provider: WriterProvider }
-  | { origin: "managed"; actorId: string }
-  | { origin: "external"; actorId: string };
+  | { origin: "managed"; actorId: string };
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
@@ -51,6 +50,9 @@ function ledgerSummary(value: string, maxLength = 320): string {
 export interface CollaborationRoomView {
   sessions: Array<PresenceInfo & {
     kind: "external-pull";
+    executionClass: "native-full-trust";
+    capabilityAuthority: "host";
+    hostCapabilities: "unchanged";
     wakeMode: "active-tool-pull";
     listening: boolean;
     wakeable: boolean;
@@ -115,6 +117,9 @@ export class CollaborationService {
           return {
             ...session,
             kind: "external-pull" as const,
+            executionClass: "native-full-trust" as const,
+            capabilityAuthority: "host" as const,
+            hostCapabilities: "unchanged" as const,
             wakeMode: "active-tool-pull" as const,
             listening,
             wakeable: listening,
@@ -503,7 +508,10 @@ export class CollaborationService {
       throw new Error("MANAGED_AGENT_DISPLAY_NAME_IN_USE");
     }
     const agent = this.managedAgents.create(input);
-    this.ledger.appendSystem(input.roomId, `${agent.displayName} 受控即時 Agent 已建立`);
+    this.ledger.appendSystem(
+      input.roomId,
+      `${agent.displayName} GUI Managed Agent 已建立（對話唯讀；寫入需另行 Owner Writer 授權）`,
+    );
     return agent;
   }
 
@@ -641,8 +649,11 @@ export class CollaborationService {
     executedBy: string;
   }): WriterLease {
     this.#assertRoomWorkspace(input.roomId, input.workspace);
+    const current = this.writerLeases.current(input.taskId);
+    if (current?.writer.origin === "external") throw new Error("NATIVE_EXTERNAL_WRITER_LEASE_UNSUPPORTED");
     const lease = this.writerLeases.assertWrite(input);
     if (lease.roomId !== input.roomId || lease.workspace !== input.workspace) throw new Error("WRITER_TASK_SCOPE_MISMATCH");
+    this.#assertManagedWriterLease(lease);
     return lease;
   }
 
@@ -712,6 +723,7 @@ export class CollaborationService {
     if (!parent || parent.roomId !== input.roomId || parent.workspace !== input.workspace) {
       throw new Error("DELEGATION_PARENT_LEASE_STALE");
     }
+    this.#assertManagedWriterLease(parent);
     return this.writerDelegations.assertWrite({
       delegationId: input.delegationId,
       parentLease: parent,
@@ -732,6 +744,7 @@ export class CollaborationService {
     if (!parent || parent.roomId !== input.roomId || parent.workspace !== input.workspace) {
       throw new Error("DELEGATION_PARENT_LEASE_STALE");
     }
+    this.#assertManagedWriterLease(parent);
     return this.writerDelegations.assertRead({
       delegationId: input.delegationId,
       parentLease: parent,
@@ -788,28 +801,46 @@ export class CollaborationService {
     let revoked = 0;
     for (const room of this.ledger.listRooms()) {
       for (const lease of this.writerLeases.list(room.id)) {
-        if (lease.state !== "active" || this.writerLeases.hasActiveRun(lease.taskId)) continue;
+        if (lease.state !== "active") continue;
+        const legacyExternal = lease.writer.origin === "external";
+        if (!legacyExternal && this.writerLeases.hasActiveRun(lease.taskId)) continue;
+        const revocationReason = legacyExternal
+          ? "vNext：Native external terminal 保留 host authority，不再使用 Writer Lease；舊 capability 已強制撤銷"
+          : reason;
         let stale: WriterLease;
+        let terminatedRun = false;
         try {
-          stale = this.writerLeases.revoke({
-            taskId: lease.taskId,
-            epoch: lease.epoch,
-            checkpoint: reason,
-          });
+          if (legacyExternal) {
+            const result = this.writerLeases.revokeLegacyExternal({
+              taskId: lease.taskId,
+              epoch: lease.epoch,
+              checkpoint: revocationReason,
+            });
+            stale = result.lease;
+            terminatedRun = result.terminatedRun;
+          } else {
+            stale = this.writerLeases.revoke({
+              taskId: lease.taskId,
+              epoch: lease.epoch,
+              checkpoint: revocationReason,
+            });
+          }
         } catch (error) {
           if (error instanceof Error && error.message === "WRITER_TASK_ALREADY_RUNNING") continue;
           throw error;
         }
-        this.#revokeDelegations(stale, reason);
+        this.#revokeDelegations(stale, revocationReason);
         this.audit.append({
           roomId: stale.roomId, taskId: stale.taskId, type: "writer.revoked",
           actor: "you", onBehalfOf: stale.onBehalfOf, executedBy: stale.executedBy,
-          leaseEpoch: stale.epoch, action: "revoke-unrecoverable", outcome: "succeeded",
-          detail: { reason: ledgerSummary(reason) },
+          leaseEpoch: stale.epoch,
+          action: legacyExternal ? "revoke-legacy-external" : "revoke-unrecoverable",
+          outcome: "succeeded",
+          detail: { reason: ledgerSummary(revocationReason), terminatedRun },
         });
         this.ledger.appendSystemIdempotent(
           stale.roomId,
-          `${stale.writer.displayName} 的 Writer 權限已撤銷：${ledgerSummary(reason)}`,
+          `${stale.writer.displayName} 的 Writer 權限已撤銷：${ledgerSummary(revocationReason)}`,
           `writer:lease:${stale.id}:revoked`,
         );
         revoked += 1;
@@ -846,6 +877,10 @@ export class CollaborationService {
     throw new Error("ROOM_WORKSPACE_MISMATCH");
   }
 
+  #assertManagedWriterLease(lease: WriterLease): void {
+    if (lease.writer.origin === "external") throw new Error("NATIVE_EXTERNAL_WRITER_LEASE_UNSUPPORTED");
+  }
+
   #assertSeatDelivery(presenceId: string, deliveryId: string): RoomDelivery {
     const delivery = this.inbox.get(deliveryId);
     if (!delivery || delivery.targetPresenceId !== presenceId) throw new Error("DELIVERY_NOT_FOUND");
@@ -872,16 +907,7 @@ export class CollaborationService {
         displayName: agent.displayName,
       };
     }
-    const presence = this.presence.get(candidate.actorId);
-    if (!presence?.joined || presence.roomId !== roomId || presence.workspace !== workspace || !presence.displayName) {
-      throw new Error("WRITER_CANDIDATE_NOT_ELIGIBLE");
-    }
-    return {
-      origin: "external",
-      provider: presence.provider,
-      actorId: presence.id,
-      displayName: presence.displayName,
-    };
+    throw new Error("WRITER_CANDIDATE_NOT_ELIGIBLE");
   }
 
   #recordWriterGrant(lease: WriterLease): void {

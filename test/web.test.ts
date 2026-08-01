@@ -12,6 +12,7 @@ import { GitBroker } from "../src/core/git-broker.ts";
 import { WorktreeBroker } from "../src/core/worktree-broker.ts";
 import { RoomPresenceStore } from "../src/core/room-presence.ts";
 import { RoomLedger } from "../src/core/room-ledger.ts";
+import { CollaborationService } from "../src/core/collaboration-service.ts";
 import type { ProviderAdapter } from "../src/providers/provider.ts";
 
 const execFileAsync = promisify(execFile);
@@ -668,6 +669,9 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
       joined: boolean;
       requested: boolean;
       kind: string;
+      executionClass: string;
+      capabilityAuthority: string;
+      hostCapabilities: string;
       wakeMode: string;
       wakeable: boolean;
     }>;
@@ -676,6 +680,9 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.equal(availableBody.sessions[0]?.joined, false);
   assert.equal(availableBody.sessions[0]?.requested, true);
   assert.equal(availableBody.sessions[0]?.kind, "external-pull");
+  assert.equal(availableBody.sessions[0]?.executionClass, "native-full-trust");
+  assert.equal(availableBody.sessions[0]?.capabilityAuthority, "host");
+  assert.equal(availableBody.sessions[0]?.hostCapabilities, "unchanged");
   assert.equal(availableBody.sessions[0]?.wakeMode, "active-tool-pull");
   assert.equal(availableBody.sessions[0]?.wakeable, false);
   assert.equal("hostPid" in (availableBody.sessions[0] ?? {}), false);
@@ -712,6 +719,9 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
       syncTurns: boolean;
       standbyRequested: boolean;
       standbyApproved: boolean;
+      executionClass: string;
+      capabilityAuthority: string;
+      hostCapabilities: string;
     };
   };
   assert.equal(joinedPresenceBody.session.displayName, "codex（前端 2）");
@@ -719,6 +729,9 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.equal(joinedPresenceBody.session.syncTurns, true);
   assert.equal(joinedPresenceBody.session.standbyRequested, false);
   assert.equal(joinedPresenceBody.session.standbyApproved, false);
+  assert.equal(joinedPresenceBody.session.executionClass, "native-full-trust");
+  assert.equal(joinedPresenceBody.session.capabilityAuthority, "host");
+  assert.equal(joinedPresenceBody.session.hostCapabilities, "unchanged");
   const joined = await fetch(`${server.url}/api/rooms/presence?room=presence-demo`, {
     headers: { Cookie: cookie },
   });
@@ -830,6 +843,10 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
     agent: {
       id: string;
       kind: string;
+      executionClass: string;
+      capabilityAuthority: string;
+      conversationAccess: string;
+      writeAccess: string;
       displayName: string;
       wakeMode: string;
       wakeable: boolean;
@@ -837,6 +854,10 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
     };
   };
   assert.equal(managedCreateBody.agent.kind, "managed-subagent");
+  assert.equal(managedCreateBody.agent.executionClass, "gui-managed");
+  assert.equal(managedCreateBody.agent.capabilityAuthority, "orchestratory");
+  assert.equal(managedCreateBody.agent.conversationAccess, "read-only");
+  assert.equal(managedCreateBody.agent.writeAccess, "owner-writer-lease-required");
   assert.equal(managedCreateBody.agent.displayName, "claude（即時審查）");
   assert.equal(managedCreateBody.agent.wakeMode, "managed-provider-call");
   assert.equal(managedCreateBody.agent.wakeable, true);
@@ -878,6 +899,7 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   };
   assert.ok(writerCandidatesBody.candidates.some((candidate) =>
     candidate.origin === "resident" && candidate.provider === "claude" && candidate.eligible));
+  assert.equal(writerCandidatesBody.candidates.some((candidate) => candidate.origin === "external"), false);
   const joinedExternalCannotWrite = await fetch(`${server.url}/api/rooms/writers/grant`, {
     method: "POST", headers: csrfHeaders,
     body: JSON.stringify({
@@ -886,6 +908,50 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
     }),
   });
   assert.equal(joinedExternalCannotWrite.status, 400);
+  const legacyExternalService = new CollaborationService(app.store.dataDirectory);
+  const legacyExternalLease = legacyExternalService.writerLeases.grant({
+    taskId: "legacy-external-web-run",
+    roomId: "presence-demo",
+    workspace: await realpath(workspace),
+    worktree: join(await realpath(workspace), ".legacy-external-web-run"),
+    writer: {
+      origin: "external",
+      provider: "codex",
+      actorId: availableSession.id,
+      displayName: "codex（legacy）",
+    },
+  });
+  const legacyExternalDelegation = legacyExternalService.writerDelegations.create({
+    parent: legacyExternalLease.lease,
+    childProvider: "claude",
+    label: "legacy-review",
+    workspace: legacyExternalLease.lease.worktree,
+  });
+  const legacyExternalRun = await fetch(`${server.url}/api/rooms/writers/run`, {
+    method: "POST",
+    headers: csrfHeaders,
+    body: JSON.stringify({
+      room: "presence-demo",
+      taskId: "legacy-external-web-run",
+      task: "must remain blocked after upgrade",
+    }),
+  });
+  assert.equal(legacyExternalRun.status, 400);
+  assert.deepEqual(await legacyExternalRun.json(), { error: "NATIVE_EXTERNAL_WRITER_LEASE_UNSUPPORTED" });
+  const legacyExternalDelegatedRun = await fetch(`${server.url}/api/rooms/writers/delegations/run`, {
+    method: "POST",
+    headers: csrfHeaders,
+    body: JSON.stringify({
+      room: "presence-demo",
+      taskId: legacyExternalLease.lease.taskId,
+      delegationId: legacyExternalDelegation.delegation.id,
+      task: "must not invoke a delegated provider after upgrade",
+    }),
+  });
+  assert.equal(legacyExternalDelegatedRun.status, 400);
+  assert.deepEqual(await legacyExternalDelegatedRun.json(), { error: "NATIVE_EXTERNAL_WRITER_LEASE_UNSUPPORTED" });
+  assert.equal(legacyExternalService.revokeUnrecoverableWriters("test cleanup"), 1);
+  legacyExternalService.close();
   for (const candidate of [
     null,
     { origin: "resident", provider: "claude", extra: true },
@@ -1181,6 +1247,10 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
     body: JSON.stringify({ room: "presence-demo", presenceId: availableSession.id }),
   });
   assert.equal(leavePresence.status, 200);
+  const leavePresenceBody = (await leavePresence.json()) as { session: Record<string, unknown> };
+  assert.equal(leavePresenceBody.session.executionClass, "native-full-trust");
+  assert.equal(leavePresenceBody.session.capabilityAuthority, "host");
+  assert.equal(leavePresenceBody.session.hostCapabilities, "unchanged");
   const offlinePresencePost = await fetch(`${server.url}/api/rooms/presence/post`, {
     method: "POST",
     headers: csrfHeaders,
@@ -1214,11 +1284,11 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomHtml, /⌘ Enter 立即送出/u);
   assert.match(roomHtml, /id="managed-agent-create"/u);
   assert.match(roomHtml, /受控即時 Agent/u);
-  assert.match(roomHtml, /「全程帳本協作」或「僅加入房間」/u);
-  assert.match(roomHtml, /獨立決定是否同步此終端可見對話/u);
+  assert.match(roomHtml, /外接終端＝Native Full-Trust/u);
+  assert.match(roomHtml, /不會改變 host 原有的 sandbox/u);
+  assert.match(roomHtml, /待命，這也只控制協作收件，不是能力授權/u);
+  assert.match(roomHtml, /GUI Managed/u);
   assert.match(roomHtml, /原生旁路無法攔截/u);
-  assert.match(roomHtml, /關閉終端會自動移除 session 與待命授權/u);
-  assert.match(roomHtml, /不建立替身 Agent/u);
   assert.match(roomHtml, /id="writer-run-cancel"/u);
   assert.match(roomHtml, /共用目前 task worktree 並由系統序列執行/u);
   assert.doesNotMatch(roomHtml, /(?:src|href)="https?:\/\//u);
@@ -1248,6 +1318,9 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomScript, /核准 room-wait 待命/u);
   assert.match(roomScript, /撤銷 room-wait 待命/u);
   assert.match(roomScript, /全程帳本協作/u);
+  assert.match(roomScript, /Native Full-Trust · host 能力不變/u);
+  assert.match(roomScript, /Native Full-Trust · host-controlled/u);
+  assert.match(roomScript, /GUI Managed · 對話唯讀/u);
   assert.match(roomScript, /終端對話同步/u);
   assert.match(roomScript, /room-wait 待命中，可由 GUI 喚醒/u);
   assert.match(roomScript, /已申請 room-wait，等待 Owner 核准/u);

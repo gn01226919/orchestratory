@@ -89,11 +89,11 @@ function writerCandidate(value: unknown): WriterCandidate {
     }
     return { origin: "resident", provider: candidate.provider };
   }
-  if (candidate.origin === "managed" || candidate.origin === "external") {
+  if (candidate.origin === "managed") {
     if (Object.keys(candidate).some((key) => key !== "origin" && key !== "actorId") || typeof candidate.actorId !== "string") {
       throw new Error("INVALID_WRITER_CANDIDATE");
     }
-    return { origin: candidate.origin, actorId: candidate.actorId };
+    return { origin: "managed", actorId: candidate.actorId };
   }
   throw new Error("INVALID_WRITER_CANDIDATE");
 }
@@ -465,11 +465,6 @@ export async function startWebServer(
               displayName: agent.displayName, eligible: eligible(agent.provider),
               ...(eligible(agent.provider) ? {} : { reason: "此 provider 目前沒有通過寫入沙箱驗證" }),
             })),
-            ...view.sessions.filter((session) => session.joined && session.displayName).map((session) => ({
-              origin: "external", provider: session.provider, actorId: session.id,
-              displayName: session.displayName, eligible: eligible(session.provider),
-              ...(eligible(session.provider) ? {} : { reason: "此 provider 目前沒有通過寫入沙箱驗證" }),
-            })),
           ],
           busyLeaseIds: [...writerRunControllers.keys()],
         });
@@ -810,7 +805,7 @@ export async function startWebServer(
               throw new Error("PRESENCE_DISPLAY_NAME_IN_USE");
             }
           }
-          const joined = collaboration.approveExternalJoin({
+          collaboration.approveExternalJoin({
             presenceId: value.presenceId,
             roomId: value.room,
             workspace,
@@ -818,6 +813,10 @@ export async function startWebServer(
             syncTurns: value.syncTurns,
             ...(typeof value.label === "string" ? { label: value.label } : {}),
           });
+          const joined = collaboration.roomView(value.room, workspace).sessions.find(
+            (session) => session.id === value.presenceId,
+          );
+          if (!joined) throw new Error("PRESENCE_NOT_FOUND");
           json(response, 200, { session: joined });
           return;
         }
@@ -835,7 +834,14 @@ export async function startWebServer(
           const workspace = await app.workspaces.assertAllowed(info.workspace);
           abortWriterIdentity(value.room, value.presenceId, "EXTERNAL_WRITER_REMOVED");
           const left = collaboration.removeExternal({ presenceId: value.presenceId, roomId: value.room, workspace });
-          json(response, 200, { session: left });
+          json(response, 200, {
+            session: {
+              ...left,
+              executionClass: "native-full-trust",
+              capabilityAuthority: "host",
+              hostCapabilities: "unchanged",
+            },
+          });
           return;
         }
         if (
@@ -1126,9 +1132,7 @@ export async function startWebServer(
           const candidate = writerCandidate(value.candidate);
           const candidateProvider = candidate.origin === "resident"
             ? candidate.provider
-            : candidate.origin === "managed"
-              ? managedAgents.get(candidate.actorId)?.provider
-              : presence.get(candidate.actorId)?.provider;
+            : managedAgents.get(candidate.actorId)?.provider;
           if (!candidateProvider || !app.providers.canWrite(candidateProvider, "subscription")) {
             throw new Error("WRITER_CANDIDATE_WRITE_NOT_ALLOWED");
           }
@@ -1157,9 +1161,7 @@ export async function startWebServer(
           const candidate = writerCandidate(value.candidate);
           const candidateProvider = candidate.origin === "resident"
             ? candidate.provider
-            : candidate.origin === "managed"
-              ? managedAgents.get(candidate.actorId)?.provider
-              : presence.get(candidate.actorId)?.provider;
+            : managedAgents.get(candidate.actorId)?.provider;
           if (!candidateProvider || !app.providers.canWrite(candidateProvider, "subscription")) {
             throw new Error("WRITER_CANDIDATE_WRITE_NOT_ALLOWED");
           }
@@ -1223,6 +1225,7 @@ export async function startWebServer(
             || delegation.parentEpoch !== parent.epoch || delegation.taskId !== value.taskId) {
             throw new Error("DELEGATION_NOT_ACTIVE");
           }
+          if (parent.writer.origin === "external") throw new Error("NATIVE_EXTERNAL_WRITER_LEASE_UNSUPPORTED");
           const capabilityToken = delegationCapabilities.get(delegation.id);
           if (delegation.access === "write" && !capabilityToken) {
             throw new Error("DELEGATION_CAPABILITY_UNAVAILABLE_AFTER_RESTART");
@@ -1439,6 +1442,7 @@ export async function startWebServer(
           const workspace = await app.workspaces.assertAllowed(info.workspace);
           const lease = collaboration.writerLeases.current(value.taskId);
           if (!lease || lease.roomId !== value.room || lease.workspace !== workspace) throw new Error("WRITER_LEASE_NOT_ACTIVE");
+          if (lease.writer.origin === "external") throw new Error("NATIVE_EXTERNAL_WRITER_LEASE_UNSUPPORTED");
           const capabilityToken = writerCapabilities.get(lease.id);
           if (!capabilityToken) throw new Error("WRITER_CAPABILITY_UNAVAILABLE_AFTER_RESTART");
           if (writerRunControllers.has(lease.id)) throw new Error("WRITER_TASK_ALREADY_RUNNING");
@@ -1446,9 +1450,8 @@ export async function startWebServer(
           const provider = app.providers.get(lease.writer.provider);
           if (!provider.capabilities.canWriteSubscription) throw new Error("WRITER_CANDIDATE_WRITE_NOT_ALLOWED");
           const managed = lease.writer.origin === "managed" ? managedAgents.get(lease.writer.actorId) : undefined;
-          const external = lease.writer.origin === "external" ? presence.get(lease.writer.actorId) : undefined;
           const suggested = provider.capabilities.subscriptionModels;
-          const requestedModel = managed?.model ?? external?.model;
+          const requestedModel = managed?.model;
           const model = requestedModel && suggested.includes(requestedModel)
             ? requestedModel
             : suggested[0] ?? "default";

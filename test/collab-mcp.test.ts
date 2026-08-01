@@ -167,12 +167,21 @@ test("room_join_request only proposes this terminal for the matching room", asyn
   assert.match(String(joinTool?.description ?? ""), /Normally pass only room/u);
   assert.match(String(joinTool?.description ?? ""), /approvalTimeoutMs defaults to 30000/u);
   assert.match(String(joinTool?.description ?? ""), /separate GUI standby request/u);
+  assert.match(String(joinTool?.description ?? ""), /never changes the host's sandbox/u);
   const result = JSON.parse(await broker.call("room_join_request", { room: "demo" })) as {
     requested: boolean;
     joined: boolean;
     recording: boolean;
   };
-  assert.deepEqual(result, { requested: true, joined: false, recording: false, room: "demo" });
+  assert.deepEqual(result, {
+    requested: true,
+    joined: false,
+    executionClass: "native-full-trust",
+    capabilityAuthority: "host",
+    hostCapabilities: "unchanged",
+    recording: false,
+    room: "demo",
+  });
   assert.deepEqual(requests, [{ roomId: "demo", workspace: root }]);
   assert.equal(ledger.getRoom("demo")?.messages, messagesBefore);
   assert.equal(calls.length, 0);
@@ -238,6 +247,9 @@ test("room_join_request returns after membership approval without silently start
   assert.equal(result.requested, true);
   assert.equal(result.joined, true);
   assert.equal(result.duty, "standby-approval-required");
+  assert.equal((result as Record<string, unknown>).executionClass, "native-full-trust");
+  assert.equal((result as Record<string, unknown>).capabilityAuthority, "host");
+  assert.equal((result as Record<string, unknown>).hostCapabilities, "unchanged");
   assert.equal(inbox.list("demo")[0]?.ledgerSeq, mention.seq);
   assert.deepEqual(calls, []);
 });
@@ -261,6 +273,9 @@ test("room_join_request times out fail-closed and validates both bounded waits",
   assert.deepEqual(timedOut, {
     requested: true,
     joined: false,
+    executionClass: "native-full-trust",
+    capabilityAuthority: "host",
+    hostCapabilities: "unchanged",
     recording: false,
     room: "demo",
     duty: "approval-timeout",
@@ -824,10 +839,20 @@ test("MCP exact terminal seats discover, send, await, and continue threads direc
     ["room_send", "room_await_reply", "room_wait", "room_ack", "room_reply", "room_fail"],
   );
   const agents = JSON.parse(await codexBroker.call("list_agents", {})) as {
-    terminalSeats: Array<{ id: string; displayName: string; self: boolean }>;
+    terminalSeats: Array<{
+      id: string;
+      displayName: string;
+      self: boolean;
+      executionClass: string;
+      capabilityAuthority: string;
+      hostCapabilities: string;
+    }>;
   };
   assert.deepEqual(agents.terminalSeats.map((seat) => seat.id), [codex.id, claude.id]);
   assert.equal(agents.terminalSeats.find((seat) => seat.id === codex.id)?.self, true);
+  assert.ok(agents.terminalSeats.every((seat) => seat.executionClass === "native-full-trust"));
+  assert.ok(agents.terminalSeats.every((seat) => seat.capabilityAuthority === "host"));
+  assert.ok(agents.terminalSeats.every((seat) => seat.hostCapabilities === "unchanged"));
 
   const sent = JSON.parse(await codexBroker.call("room_send", {
     targetPresenceId: claude.id,
@@ -1042,6 +1067,14 @@ test("MCP transport returns bounded protocol metadata and ignores notifications"
   await handleCollabMcpMessage(broker, { jsonrpc: "2.0", id: 4, method: "unknown" }, inflight, emit);
 
   assert.equal((emitted[0]?.result as { protocolVersion: string }).protocolVersion, "2024-11-05");
+  assert.match(
+    String((emitted[0]?.result as { instructions?: string }).instructions),
+    /This terminal is Native Full-Trust/u,
+  );
+  assert.match(
+    String((emitted[0]?.result as { instructions?: string }).instructions),
+    /capability authority stays with the host/u,
+  );
   assert.equal((emitted[1]?.result as { protocolVersion: string }).protocolVersion, "test-version");
   assert.deepEqual(emitted[2]?.result, {});
   assert.equal(Array.isArray((emitted[3]?.result as { tools: unknown[] }).tools), true);

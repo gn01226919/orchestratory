@@ -37,11 +37,11 @@
           <span>＋ 新增 Agents</span><b id="agent-request-count" hidden>0</b>
         </button>
         <section id="agent-requests-panel" class="agent-requests-panel" hidden aria-label="Agent 加入與待命申請">
-          <p><b>外接終端分兩步授權</b>：<code>room_join_request</code> 只申請加入這個房間；加入後，終端呼叫 <code>room_wait</code> 才會在這裡提出待命申請。Owner 核准待命後，只有同一個終端 session 正在掛起 <code>room_wait</code> 時可由 GUI 即時喚醒。關閉終端會自動移除 session 與待命授權；不建立替身 Agent。加入時仍可選擇「全程帳本協作」或「僅加入房間」，並獨立決定是否同步此終端可見對話；原生旁路無法攔截。</p>
+          <p><b>外接終端＝Native Full-Trust</b>：<code>room_join_request</code> 只申請加入房間，不會改變 host 原有的 sandbox、approval、工具、檔案、shell、network 或 subagent 能力；能力仍由 Codex／Claude Code host 掌管。加入後呼叫 <code>room_wait</code> 才會另行申請待命，這也只控制協作收件，不是能力授權。原生旁路無法攔截。</p>
           <div id="sidebar-presence-list" class="office-presence-list"></div>
           <form id="managed-agent-create" class="managed-agent-create">
             <b>受控即時 Agent</b>
-            <small>由 Orchestratory 啟動 · GUI 可主動喚醒 · 可重複對話 · 唯讀</small>
+            <small>GUI Managed · 由 Orchestratory 啟動 · 對話唯讀 · 寫入需另行 Owner Writer 授權</small>
             <label for="managed-agent-provider">模型來源</label>
             <select id="managed-agent-provider">
               <option value="codex">Codex</option>

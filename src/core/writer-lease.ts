@@ -257,6 +257,48 @@ export class WriterLeaseStore {
     }
   }
 
+  /**
+   * Upgrade-only revocation for historical external Writer leases.
+   *
+   * Native terminal seats no longer participate in Writer Lease. An older GUI
+   * may nevertheless have left both an active lease and a live run heartbeat in
+   * this database. Revoke both in one transaction so a surviving capability can
+   * never keep writing merely because the old run still appears healthy.
+   */
+  revokeLegacyExternal(input: {
+    taskId: string;
+    epoch: number;
+    checkpoint: string;
+  }): { lease: WriterLease; terminatedRun: boolean } {
+    this.#assertOpen();
+    if (!Number.isSafeInteger(input.epoch) || input.epoch < 1) throw new Error("WRITER_EPOCH_INVALID");
+    const checkpoint = validText(input.checkpoint, "WRITER_CHECKPOINT_REQUIRED", 1_024);
+    const now = this.#now();
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      const task = this.#task(validTask(input.taskId));
+      if (!task?.active_lease_id) throw new Error("WRITER_LEASE_NOT_ACTIVE");
+      this.#assertTask(task);
+      const current = this.#lease(task.active_lease_id);
+      if (!current || current.state !== "active" || current.epoch !== input.epoch) throw new Error("WRITER_EPOCH_STALE");
+      this.#assertLease(current);
+      if (current.writer_origin !== "external") throw new Error("WRITER_LEGACY_EXTERNAL_REQUIRED");
+      const deletedRun = this.#db.prepare("DELETE FROM writer_task_runs WHERE task_id=?").run(task.task_id);
+      const revoked = this.#leaseMutation(current, { state: "revoked", revoked_at_ms: now, checkpoint });
+      this.#replaceLease(current, revoked);
+      const nextTask = this.#taskMutation(task, { active_lease_id: null, updated_at_ms: now });
+      this.#replaceTask(task, nextTask);
+      const terminatedRun = Number(deletedRun.changes) > 0;
+      if (terminatedRun) this.#event(task.task_id, current.epoch, "writer-run-policy-revoked", now, checkpoint);
+      this.#event(task.task_id, current.epoch, "writer-revoked", now, checkpoint);
+      this.#db.exec("COMMIT");
+      return { lease: this.#public(revoked, nextTask), terminatedRun };
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   revokeByActor(actorIdValue: string, checkpointValue: string): WriterLease[] {
     this.#assertOpen();
     const actorId = validText(actorIdValue, "WRITER_IDENTITY_INVALID", 96);

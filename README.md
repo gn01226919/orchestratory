@@ -14,6 +14,10 @@ Security-first、local-first 的多模型 coding-agent orchestrator。預設透�
 > 尚未完成。** 已安裝版本仍是 legacy GUI → exact-seat 單向 inbox／read-only worker／Writer Lease；
 > 尚未切換，也不是 vNext 對 Native terminal 的最終限制。
 
+Native terminal 與 GUI Managed 是兩條不同能力線：前者的 sandbox、approval、shell、filesystem、network、
+subagents 與工具完全由 Codex／Claude Code host 掌管，Room join／standby 只授權協作，不是降權；後者才由
+Orchestratory 提供唯讀對話與另行 Owner 核准的受控 Writer。Native terminal 不會被列入舊 Writer Lease 候選。
+
 ## vNext 核心行為
 
 - Native Full-Trust terminal 保留原生 filesystem、shell、Git、network、plugin 與 subagent 能力；
@@ -57,13 +61,14 @@ orchestrator data purge     # 只產生不可變 preview；加 --execute 後才�
 Writer Lease、workspace 與回合數的限制，已由 ADR-028 對 Native Full-Trust terminal 取代；只可保留
 給 GUI Managed，不得再當成全產品不變量。
 
-- 每個 task 同時只有一份 active Writer Lease；Writer 可由 owner 在 resident、managed 或已核准的
-  external 席位之間交接。每次交接必須帶 checkpoint 並遞增不可回收的 epoch，舊 Writer 與其子
+- 每個 GUI Managed task 同時只有一份 active Writer Lease；Writer 可由 owner 在 resident 或 managed
+  席位之間交接。Native external terminal 不列入此候選清單，而是保留 host 原生能力並使用 vNext
+  candidate lifecycle。每次交接必須帶 checkpoint 並遞增不可回收的 epoch，舊 Writer 與其子
   Agent 的寫入能力立即失效。
 - Workspace allowlist 預設為空；新 workflow 必須位於人類明確加入的 canonical root，否則 fail closed。
 - 可明確批准每個 workflow 建立獨立 Git branch/worktree；不自動 merge、push 或清理。
 - 只有通過 provider 寫入沙箱驗證的 Codex／Claude 訂閱 adapter 能被 GUI 選為 Writer；Grok 與
-  API adapter 目前保持唯讀。無論 Writer 顯示為常駐、管理型或外接席位，受控寫入都只能發生在
+  API adapter 目前保持唯讀。Resident／GUI Managed Writer 的受控寫入只能發生在
   task 綁定的隔離 worktree。
 - Live Writer 的 provider process 在空白 scratch cwd 執行，內建 shell／檔案／網路工具全部停用；只能透過本機 Workspace MCP broker 列檔、讀 UTF-8 text、逐層建目錄及原子寫檔。
 - MCP 寫入必須提供剛讀取內容的 SHA-256；新檔採 no-clobber 建立，不提供刪除、rename、Git、shell、網路或敏感路徑工具。
@@ -284,9 +289,10 @@ Room 的兩個 textarea 採 macOS 鍵盤習慣：單按 Enter 換行，1.6 秒�
 `Shift+Enter` 或 `Option+Enter` 始終換行，`Command+Enter` 立即送出。IME 組字確認、長按 key repeat、
 光標／內容改變與失焦都會解除雙 Enter 狀態，避免中文選字或編輯多行文字時誤送。
 
-Writer 可在 GUI 依 task 隨時指派或交接。外接席位成為 Writer 時，由受控 Writer Companion 代為
-執行；Room 帳本用自然語言標示「由誰代表誰執行」，技術 HMAC audit 另保存 `on_behalf_of`、
-`executed_by` 與 `lease_epoch`，不冒充原生終端程序。Writer 可派一層子 Agent：同 provider 子
+Writer 可在 GUI 依 task 隨時指派或交接 resident／GUI Managed 席位。~~舊版允許外接
+席位透過 Writer Companion 代為執行。~~ vNext 的 Native external terminal 保留 host 原生能力，
+不進入 Writer Lease／Companion 路徑；升級時會強制撤銷歷史 external lease、run heartbeat 與子委派，
+但保留 task worktree 與 audit 供 owner 檢視。Writer 可派一層子 Agent：同 provider 子
 Agent 與父 Writer 共用同一 task worktree，並由持久化 task lock 跨 GUI 程序序列執行；跨
 provider 子 Agent 只能讀。Codex／Claude 的跨 provider 審查走可撤銷唯讀 Workspace MCP；Grok
 只取得控制面產生的 bounded Git snapshot，在空白 scratch 且沒有 filesystem tools 的程序中審查。
@@ -361,7 +367,7 @@ Remote Room 是不同裝置與不同信任邊界；目前 roadmap 保留為待�
 - scoped/expiring/single-use approval、digest-pinned tester、checkpoint 指紋恢復。
 - Workspace allowlist、retention preview/purge rollback、worktree cleanup snapshot、SQLite migration/audit-chain tamper detection。
 - CycloneDX SBOM、deterministic fuzz smoke、SHA-pinned least-privilege CI 與離線乾淨 package snapshot。
-- 目前 289 個 deterministic tests；line 95.21%、branch 85.17%、functions 96.78%，門檻由指令阻擋。
+- 目前 290 個 deterministic tests；line 95.23%、branch 85.13%、functions 96.80%，門檻由指令阻擋。
 
 已完成受控唯讀 Codex 與 managed Claude 的最小 live smoke；真實 Writer 寫入、Grok、付費 API、
 container image 與任何額外額度操作仍需 owner 明確批准。
@@ -373,9 +379,9 @@ container image 與任何額外額度操作仍需 owner 明確批准。
 - Worktree 只隔離 working directory，仍共用來源 repository 的 Git object database/refs，不等同 container 或 VM。
 - Reviewer 的 immutable 保證目前由同一份 captured context 加 workspace 前後指紋守衛提供；本機其他程序仍可能形成 TOCTOU 殘餘風險。
 - Claude Workspace MCP 的 protocol、path、hash/no-clobber 與 fake CLI 整合已驗證；真實 Claude Code Writer 是否完整接受目前 CLI/MCP 參數仍待使用者批准後以訂閱額度 smoke test。
-- Codex／Claude 常駐、管理型或外接身分都可被 owner 選為 task-scoped Writer；寫入仍只能經
-  read-only provider sandbox 外的 Workspace MCP、隔離 worktree 與 lease epoch fencing。真實寫檔 smoke
-  需 owner 明確批准訂閱額度；Grok/API Writer 保持停用。
+- GUI Managed legacy workflow 只允許 Codex／Claude resident 或 managed 身分成為 task-scoped Writer；
+  Native external terminal 不在候選清單，也不會被 Writer Lease 降權。真實 GUI Managed 寫檔 smoke
+  仍需 owner 明確批准訂閱額度；Grok/API Writer 保持停用。
 - Raw debug capture 尚未實作；設定為 true 會直接拒絕啟動，而不是假裝啟用 retention 保護。
 - Node 22 的內建 `node:sqlite` 仍會顯示 experimental warning。
 - GUI 的 HTTP/安全整合測試與 Browser 視覺流程已通過；2026-07-22 受控 Chrome 實機驗證了

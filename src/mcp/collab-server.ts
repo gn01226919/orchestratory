@@ -45,6 +45,11 @@ const REFERENCE_PATTERN = /#(\d{1,6})(?:-(\d{1,6}))?/gu;
 const MAX_REFERENCED_MESSAGES = 60;
 const ROOM_TAIL_MESSAGES = 12;
 const MAX_JOIN_APPROVAL_WAIT_MS = 120_000;
+const NATIVE_TERMINAL_CAPABILITY = {
+  executionClass: "native-full-trust",
+  capabilityAuthority: "host",
+  hostCapabilities: "unchanged",
+} as const;
 const DEFAULT_JOIN_APPROVAL_WAIT_MS = 30_000;
 const MAX_STANDBY_WAIT_MS = 4 * 60 * 60 * 1_000;
 const DEFAULT_STANDBY_WAIT_MS = MAX_STANDBY_WAIT_MS;
@@ -378,7 +383,7 @@ export class CollabToolBroker {
       tools.push({
         name: "room_join_request",
         description:
-          "Ask the local owner to admit this exact MCP terminal and choose its server-enforced collaboration mode: room-first routes Orchestratory ask/compare calls through the bound ledger; seat-only leaves standalone collaboration outside the ledger. The owner separately chooses whether supported structured hooks mirror visible user/assistant turns. This tool returns as soon as Room membership is approved; it does not silently start duty. Then immediately call room_wait, which creates a separate GUI standby request for this exact session. Normally pass only room. approvalTimeoutMs defaults to 30000 and must be <=120000. Never substitute a shell command.",
+          "Ask the local owner to admit this exact native MCP terminal and choose its collaboration mode: room-first routes only Orchestratory ask/compare calls through the bound ledger; seat-only leaves them standalone. Joining never changes the host's sandbox, approval policy, tools, filesystem, shell, network, subagents, or other native capabilities; capability authority remains with the host. The owner separately chooses whether supported structured hooks mirror visible user/assistant turns. This tool returns as soon as Room membership is approved; it does not silently start duty. Then immediately call room_wait, which creates a separate GUI standby request for this exact session. Normally pass only room. approvalTimeoutMs defaults to 30000 and must be <=120000. Never substitute a shell command.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -603,7 +608,13 @@ export class CollabToolBroker {
     const workspace = await this.#workspaces.assertAllowed(room.workspace);
     this.#requestRoomJoin(roomId, workspace);
     if (!this.#waitForRoomJoin) {
-      return JSON.stringify({ requested: true, joined: false, recording: false, room: roomId });
+      return JSON.stringify({
+        requested: true,
+        joined: false,
+        ...NATIVE_TERMINAL_CAPABILITY,
+        recording: false,
+        room: roomId,
+      });
     }
     const approvalTimeoutMs = input.approvalTimeoutMs === undefined
       ? DEFAULT_JOIN_APPROVAL_WAIT_MS
@@ -629,6 +640,7 @@ export class CollabToolBroker {
       return JSON.stringify({
         requested: true,
         joined: false,
+        ...NATIVE_TERMINAL_CAPABILITY,
         recording: false,
         room: roomId,
         duty: "approval-timeout",
@@ -641,6 +653,7 @@ export class CollabToolBroker {
     return JSON.stringify({
       requested: true,
       joined: true,
+      ...NATIVE_TERMINAL_CAPABILITY,
       recording: binding ? binding.syncTurns : true,
       ...(binding
         ? { collaborationMode: binding.collaborationMode, syncTurns: binding.syncTurns }
@@ -1057,6 +1070,9 @@ export class CollabToolBroker {
           standbyApproved: session.standbyApproved,
           wakeable: session.wakeable,
           self: session.id === selfId,
+          executionClass: session.executionClass,
+          capabilityAuthority: session.capabilityAuthority,
+          hostCapabilities: session.hostCapabilities,
         }))
       : [];
     return JSON.stringify({
@@ -1427,6 +1443,10 @@ export async function handleCollabMcpMessage(
           "   Before the first post, use room_join_request and wait for the owner to approve",
           "   this exact terminal in the GUI. The owner chooses room-first or seat-only and",
           "   independently chooses visible-turn sync. Unjoined terminals are never recorded.",
+          "   This terminal is Native Full-Trust: Orchestratory never changes the host sandbox,",
+          "   approvals, tools, filesystem, shell, network, subagents, or provider-native settings.",
+          "   Join and standby approval authorize collaboration only; capability authority stays with the host.",
+          "   GUI Managed agents are a separate class and may use Orchestratory read-only/Writer controls.",
           "   In room-first, ask_* and compare_agents are server-routed through this session's",
           "   exact Room/workspace ledger. Native provider subagents that bypass Orchestratory MCP",
           "   cannot be intercepted; do not claim that those calls were ledgered.",
