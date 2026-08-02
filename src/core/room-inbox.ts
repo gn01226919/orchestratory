@@ -84,8 +84,9 @@ type LegacyV3DeliveryRow = Omit<DeliveryRow,
 type LegacyV1DeliveryRow = Omit<LegacyV3DeliveryRow,
   "reply_author" | "reply_input_hash" | "completion_token_hash"
 >;
+type InterimV4DeliveryRow = Omit<DeliveryRow, "client_request_id">;
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 const ROOM_PATTERN = /^[a-z][a-z0-9-]{0,47}$/u;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const HASH_PATTERN = /^[0-9a-f]{64}$/u;
@@ -97,6 +98,14 @@ const MAX_WAIT_MS = 4 * 60 * 60 * 1_000;
 const WAIT_POLL_MS = 150;
 const SQLITE_STARTUP_RETRY_MS = 3_000;
 const SQLITE_STARTUP_POLL_MS = 25;
+const DELIVERY_COLUMNS = [
+  "id", "room_id", "ledger_seq", "ledger_hash", "source_presence_id",
+  "source_display_name", "target_presence_id", "target_display_name", "thread_id",
+  "reply_to_delivery_id", "client_request_id", "state", "attempt", "max_attempts",
+  "lease_token", "lease_expires_at_ms", "cancel_requested", "reply_key", "reply_author",
+  "reply_input_hash", "completion_token_hash", "reply_ledger_seq", "fail_reason", "task_id",
+  "created_at_ms", "updated_at_ms", "row_hash",
+].join(",");
 
 function rowHash(row: Omit<DeliveryRow, "row_hash">): string {
   return createHash("sha256").update(JSON.stringify([
@@ -116,6 +125,18 @@ function legacyV3RowHash(row: Omit<LegacyV3DeliveryRow, "row_hash">): string {
     row.lease_expires_at_ms, row.cancel_requested, row.reply_key, row.reply_author,
     row.reply_input_hash, row.completion_token_hash, row.reply_ledger_seq,
     row.fail_reason, row.task_id, row.created_at_ms, row.updated_at_ms,
+  ]), "utf8").digest("hex");
+}
+
+function interimV4RowHash(row: Omit<InterimV4DeliveryRow, "row_hash">): string {
+  return createHash("sha256").update(JSON.stringify([
+    row.id, row.room_id, row.ledger_seq, row.ledger_hash, row.source_presence_id,
+    row.source_display_name, row.target_presence_id, row.target_display_name,
+    row.thread_id, row.reply_to_delivery_id, row.state, row.attempt, row.max_attempts,
+    row.lease_token, row.lease_expires_at_ms, row.cancel_requested, row.reply_key,
+    row.reply_author, row.reply_input_hash, row.completion_token_hash,
+    row.reply_ledger_seq, row.fail_reason, row.task_id, row.created_at_ms,
+    row.updated_at_ms,
   ]), "utf8").digest("hex");
 }
 
@@ -224,14 +245,24 @@ export class RoomInboxStore {
   readonly #db: DatabaseSync;
   readonly #now: () => number;
   readonly #deliveryLeaseMs: number;
+  readonly #testOnlyMigrationFailureAfterRows: number | undefined;
   #closed = false;
 
-  constructor(dataDirectory: string, options: { now?: () => number; deliveryLeaseMs?: number } = {}) {
+  constructor(dataDirectory: string, options: {
+    now?: () => number;
+    deliveryLeaseMs?: number;
+    testOnlyMigrationFailureAfterRows?: number;
+  } = {}) {
     this.path = join(dataDirectory, "room-inbox.sqlite");
     this.#now = options.now ?? Date.now;
     this.#deliveryLeaseMs = options.deliveryLeaseMs ?? DEFAULT_DELIVERY_LEASE_MS;
+    this.#testOnlyMigrationFailureAfterRows = options.testOnlyMigrationFailureAfterRows;
     if (!Number.isSafeInteger(this.#deliveryLeaseMs) || this.#deliveryLeaseMs < 5_000 || this.#deliveryLeaseMs > 300_000) {
       throw new Error("INVALID_DELIVERY_LEASE");
+    }
+    if (this.#testOnlyMigrationFailureAfterRows !== undefined &&
+      (!Number.isSafeInteger(this.#testOnlyMigrationFailureAfterRows) || this.#testOnlyMigrationFailureAfterRows < 1)) {
+      throw new Error("INVALID_TEST_MIGRATION_FAILURE_POINT");
     }
     this.#db = openOwnerDatabase(this.path);
     try {
@@ -248,6 +279,7 @@ export class RoomInboxStore {
         else if (version === 1) this.#migrateV2();
         else if (version === 2) this.#migrateV3();
         else if (version === 3) this.#migrateV4();
+        else if (version === 4) this.#migrateV5();
       }
       if (this.#db.prepare("PRAGMA foreign_key_check").all().length > 0) throw new Error("ROOM_INBOX_FOREIGN_KEY_VIOLATION");
       this.#verifyRows();
@@ -336,7 +368,7 @@ export class RoomInboxStore {
           waiter_token TEXT NOT NULL,
           expires_at_ms INTEGER NOT NULL
         );
-        PRAGMA user_version = 4;
+        PRAGMA user_version = 5;
       `);
       this.#db.exec("COMMIT");
     } catch (error) {
@@ -484,6 +516,185 @@ export class RoomInboxStore {
         ALTER TABLE room_deliveries_v4 RENAME TO room_deliveries;
         CREATE INDEX room_deliveries_target_queue ON room_deliveries(target_presence_id, room_id, state, created_at_ms);
         PRAGMA user_version = 4;
+        COMMIT;
+      `);
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  #migrateV5(): void {
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      if (this.#schemaVersion() !== 4) {
+        this.#db.exec("COMMIT");
+        return;
+      }
+      const canonicalColumns = [
+        "id", "room_id", "ledger_seq", "ledger_hash", "source_presence_id",
+        "source_display_name", "target_presence_id", "target_display_name", "thread_id",
+        "reply_to_delivery_id", "client_request_id", "state", "attempt", "max_attempts",
+        "lease_token", "lease_expires_at_ms", "cancel_requested", "reply_key", "reply_author",
+        "reply_input_hash", "completion_token_hash", "reply_ledger_seq", "fail_reason", "task_id",
+        "created_at_ms", "updated_at_ms", "row_hash",
+      ];
+      const interimColumns = [
+        "id", "room_id", "ledger_seq", "ledger_hash", "target_presence_id",
+        "target_display_name", "state", "attempt", "max_attempts", "lease_token",
+        "lease_expires_at_ms", "cancel_requested", "reply_key", "reply_author",
+        "reply_input_hash", "completion_token_hash", "reply_ledger_seq", "fail_reason",
+        "task_id", "created_at_ms", "updated_at_ms", "row_hash", "source_presence_id",
+        "source_display_name", "thread_id", "reply_to_delivery_id",
+      ];
+      type ColumnInfo = {
+        cid: number;
+        name: string;
+        type: string;
+        notnull: number;
+        dflt_value: string | null;
+        pk: number;
+      };
+      const actual = this.#db.prepare("PRAGMA table_info(room_deliveries)").all() as unknown as ColumnInfo[];
+      const integerColumns = new Set([
+        "ledger_seq", "attempt", "max_attempts", "lease_expires_at_ms", "cancel_requested",
+        "reply_ledger_seq", "created_at_ms", "updated_at_ms",
+      ]);
+      const required = new Set([
+        "room_id", "ledger_seq", "ledger_hash", "target_presence_id", "target_display_name",
+        "state", "attempt", "max_attempts", "cancel_requested", "created_at_ms",
+        "updated_at_ms", "row_hash",
+      ]);
+      const exactLayout = (columns: string[], requireThread: boolean): boolean => {
+        if (actual.length !== columns.length) return false;
+        return actual.every((column, index) => {
+          const name = columns[index];
+          if (column.cid !== index || column.name !== name) return false;
+          const expectedType = integerColumns.has(column.name) ? "INTEGER" : "TEXT";
+          const expectedRequired = required.has(column.name) || (requireThread && column.name === "thread_id");
+          const expectedDefault = ["attempt", "cancel_requested"].includes(column.name) ? "0" : null;
+          return column.type.toUpperCase() === expectedType &&
+            column.notnull === (expectedRequired ? 1 : 0) &&
+            column.dflt_value === expectedDefault && column.pk === (column.name === "id" ? 1 : 0);
+        });
+      };
+      const tableSql = String((this.#db.prepare(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='room_deliveries'",
+      ).get() as { sql?: string } | undefined)?.sql ?? "").replace(/\s+/gu, " ").toLowerCase();
+      const targetIndexSql = String((this.#db.prepare(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name='room_deliveries_target_queue'",
+      ).get() as { sql?: string } | undefined)?.sql ?? "").replace(/\s+/gu, " ").toLowerCase();
+      const indexes = this.#db.prepare("PRAGMA index_list(room_deliveries)").all() as unknown as Array<{
+        unique: number;
+        origin: string;
+        partial: number;
+      }>;
+      const triggerCount = Number((this.#db.prepare(
+        "SELECT COUNT(*) AS count FROM sqlite_master WHERE type='trigger' AND tbl_name='room_deliveries'",
+      ).get() as { count: number }).count);
+      const targetIndexValid = /^create index room_deliveries_target_queue on room_deliveries\s*\(\s*target_presence_id\s*,\s*room_id\s*,\s*state\s*,\s*created_at_ms\s*\)$/u.test(targetIndexSql);
+      const indexShape = (uniqueConstraints: number): boolean =>
+        indexes.length === uniqueConstraints + 2 &&
+        indexes.filter((index) => index.origin === "c" && index.unique === 0 && index.partial === 0).length === 1 &&
+        indexes.filter((index) => index.origin === "u" && index.unique === 1 && index.partial === 0).length === uniqueConstraints &&
+        indexes.filter((index) => index.origin === "pk" && index.unique === 1 && index.partial === 0).length === 1;
+      const ledgerUnique = /unique\s*\(\s*room_id\s*,\s*ledger_seq\s*,\s*target_presence_id\s*\)/u.test(tableSql);
+      const sourceUnique = /unique\s*\(\s*source_presence_id\s*,\s*client_request_id\s*\)/u.test(tableSql);
+      const leaseCheck = /check\s*\(\s*\(\s*lease_token is null\s*\)\s*=\s*\(\s*lease_expires_at_ms is null\s*\)\s*\)/u.test(tableSql);
+      const sourceCheck = /check\s*\(\s*\(\s*source_presence_id is null\s*\)\s*=\s*\(\s*source_display_name is null\s*\)\s*\)/u.test(tableSql);
+      const stateCheck = /check\s*\(\s*state in\s*\(\s*'queued'\s*,\s*'delivered'\s*,\s*'read'\s*,\s*'working'\s*,\s*'replied'\s*,\s*'failed'\s*,\s*'cancelled'\s*\)\s*\)/u.test(tableSql);
+      const attemptCheck = /check\s*\(\s*attempt between 0 and 100\s*\)/u.test(tableSql);
+      const maxAttemptsCheck = /check\s*\(\s*max_attempts between 1 and 10\s*\)/u.test(tableSql);
+      const cancelCheck = /check\s*\(\s*cancel_requested in\s*\(\s*0\s*,\s*1\s*\)\s*\)/u.test(tableSql);
+      const commonChecks = stateCheck && attemptCheck && maxAttemptsCheck && cancelCheck && leaseCheck;
+      const canonical = exactLayout(canonicalColumns, true) && targetIndexValid && indexShape(2) &&
+        ledgerUnique && sourceUnique && commonChecks && sourceCheck && triggerCount === 0;
+      const interim = exactLayout(interimColumns, false) && targetIndexValid && indexShape(1) &&
+        ledgerUnique && !sourceUnique && commonChecks && !sourceCheck && triggerCount === 0;
+      if (!canonical && !interim) throw new Error("ROOM_INBOX_SCHEMA_V4_UNRECOGNIZED");
+
+      const migratedRows: DeliveryRow[] = [];
+      if (canonical) {
+        const rows = this.#db.prepare("SELECT * FROM room_deliveries ORDER BY rowid").all() as unknown as DeliveryRow[];
+        for (const row of rows) {
+          this.#assertRow(row);
+          migratedRows.push(row);
+        }
+      } else {
+        const rows = this.#db.prepare("SELECT * FROM room_deliveries ORDER BY rowid").all() as unknown as InterimV4DeliveryRow[];
+        for (const row of rows) {
+          const { row_hash: actualHash, ...hashable } = row;
+          if (!HASH_PATTERN.test(actualHash) || interimV4RowHash(hashable) !== actualHash) {
+            throw new Error("ROOM_INBOX_ROW_TAMPERED");
+          }
+          const hashableV5: Omit<DeliveryRow, "row_hash"> = {
+            ...hashable,
+            client_request_id: null,
+          };
+          const migrated = { ...hashableV5, row_hash: rowHash(hashableV5) };
+          this.#assertRow(migrated);
+          migratedRows.push(migrated);
+        }
+      }
+
+      this.#db.exec(`
+        CREATE TABLE room_deliveries_v5 (
+          id TEXT PRIMARY KEY,
+          room_id TEXT NOT NULL,
+          ledger_seq INTEGER NOT NULL,
+          ledger_hash TEXT NOT NULL,
+          source_presence_id TEXT,
+          source_display_name TEXT,
+          target_presence_id TEXT NOT NULL,
+          target_display_name TEXT NOT NULL,
+          thread_id TEXT NOT NULL,
+          reply_to_delivery_id TEXT,
+          client_request_id TEXT,
+          state TEXT NOT NULL CHECK (state IN ('queued','delivered','read','working','replied','failed','cancelled')),
+          attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt BETWEEN 0 AND 100),
+          max_attempts INTEGER NOT NULL CHECK (max_attempts BETWEEN 1 AND 10),
+          lease_token TEXT,
+          lease_expires_at_ms INTEGER,
+          cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0,1)),
+          reply_key TEXT,
+          reply_author TEXT,
+          reply_input_hash TEXT,
+          completion_token_hash TEXT,
+          reply_ledger_seq INTEGER,
+          fail_reason TEXT,
+          task_id TEXT,
+          created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          row_hash TEXT NOT NULL,
+          UNIQUE(room_id, ledger_seq, target_presence_id),
+          UNIQUE(source_presence_id, client_request_id),
+          CHECK ((lease_token IS NULL) = (lease_expires_at_ms IS NULL)),
+          CHECK ((source_presence_id IS NULL) = (source_display_name IS NULL))
+        );
+      `);
+      const insert = this.#db.prepare(`INSERT INTO room_deliveries_v5
+        (id,room_id,ledger_seq,ledger_hash,source_presence_id,source_display_name,target_presence_id,target_display_name,thread_id,reply_to_delivery_id,client_request_id,state,attempt,max_attempts,lease_token,lease_expires_at_ms,cancel_requested,reply_key,reply_author,reply_input_hash,completion_token_hash,reply_ledger_seq,fail_reason,task_id,created_at_ms,updated_at_ms,row_hash)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+      let insertedRows = 0;
+      for (const row of migratedRows) {
+        insert.run(
+          row.id, row.room_id, row.ledger_seq, row.ledger_hash, row.source_presence_id,
+          row.source_display_name, row.target_presence_id, row.target_display_name, row.thread_id,
+          row.reply_to_delivery_id, row.client_request_id, row.state, row.attempt, row.max_attempts,
+          row.lease_token, row.lease_expires_at_ms, row.cancel_requested, row.reply_key,
+          row.reply_author, row.reply_input_hash, row.completion_token_hash, row.reply_ledger_seq,
+          row.fail_reason, row.task_id, row.created_at_ms, row.updated_at_ms, row.row_hash,
+        );
+        insertedRows += 1;
+        if (insertedRows === this.#testOnlyMigrationFailureAfterRows) {
+          throw new Error("ROOM_INBOX_MIGRATION_TEST_FAILURE");
+        }
+      }
+      this.#db.exec(`
+        DROP TABLE room_deliveries;
+        ALTER TABLE room_deliveries_v5 RENAME TO room_deliveries;
+        CREATE INDEX room_deliveries_target_queue ON room_deliveries(target_presence_id, room_id, state, created_at_ms);
+        PRAGMA user_version = 5;
         COMMIT;
       `);
     } catch (error) {
@@ -1160,7 +1371,7 @@ export class RoomInboxStore {
   }
 
   #verifyRows(): void {
-    const rows = this.#db.prepare("SELECT * FROM room_deliveries").all() as unknown as DeliveryRow[];
+    const rows = this.#db.prepare(`SELECT ${DELIVERY_COLUMNS} FROM room_deliveries`).all() as unknown as DeliveryRow[];
     for (const row of rows) this.#assertRow(row);
   }
 }

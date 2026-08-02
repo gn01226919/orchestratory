@@ -3,10 +3,12 @@ import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import {
   cp,
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   stat,
   writeFile,
@@ -14,6 +16,7 @@ import {
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureOwnerOnlyDirectory, writeIdempotentArtifact } from "./release-artifact.mjs";
+import { installRuntimeArtifact } from "./install-runtime.mjs";
 
 const execFileAsync = promisify(execFile);
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -171,7 +174,7 @@ try {
     type: manifest.type,
     engines: manifest.engines,
     bin: manifest.bin,
-    files: manifest.files.filter((path) => !path.endsWith(".d.mts")),
+    files: [...manifest.files.filter((path) => !path.endsWith(".d.mts")), "runtime-manifest.json"],
     scripts: {
       start: manifest.scripts?.start,
       doctor: manifest.scripts?.doctor,
@@ -182,11 +185,18 @@ try {
   if (Object.values(runtimeManifest.scripts).some((value) => typeof value !== "string" || !value)) {
     throw new Error("RUNTIME_PACKAGE_SCRIPT_MISSING");
   }
-  await writeFile(
-    resolve(packageSource, "package.json"),
-    `${JSON.stringify(runtimeManifest, null, 2)}\n`,
-    { encoding: "utf8", mode: 0o600 },
-  );
+  await Promise.all([
+    writeFile(
+      resolve(packageSource, "package.json"),
+      `${JSON.stringify(runtimeManifest, null, 2)}\n`,
+      { encoding: "utf8", mode: 0o600 },
+    ),
+    writeFile(
+      resolve(packageSource, "runtime-manifest.json"),
+      `${JSON.stringify({ formatVersion: 1, sourceCommit: sourceHead.stdout.trim() }, null, 2)}\n`,
+      { encoding: "utf8", mode: 0o600 },
+    ),
+  ]);
 
   const typeScriptSources = publishedPaths
     .filter((path) => path.startsWith("src/") && path.endsWith(".ts"))
@@ -227,6 +237,41 @@ try {
     await writeFile(binPath, rewritten, "utf8");
   }
 
+  const runtimeFiles = [];
+  const inventoryRuntime = async (directory) => {
+    for (const item of await readdir(directory, { withFileTypes: true })) {
+      const path = resolve(directory, item.name);
+      const local = relative(packageSource, path).split(sep).join("/");
+      if (item.isSymbolicLink()) throw new Error(`RUNTIME_INVENTORY_SYMLINK:${local}`);
+      if (item.isDirectory()) {
+        await inventoryRuntime(path);
+        continue;
+      }
+      if (!item.isFile()) throw new Error(`RUNTIME_INVENTORY_SPECIAL_FILE:${local}`);
+      if (local === "runtime-manifest.json") continue;
+      const content = await readFile(path);
+      runtimeFiles.push({
+        path: local,
+        sha256: createHash("sha256").update(content).digest("hex"),
+        size: content.length,
+      });
+    }
+  };
+  await inventoryRuntime(packageSource);
+  runtimeFiles.sort((left, right) => left.path.localeCompare(right.path));
+  if (runtimeFiles.length < 1 || runtimeFiles.length > 1_000) {
+    throw new Error("RUNTIME_INVENTORY_SIZE_INVALID");
+  }
+  await writeFile(
+    resolve(packageSource, "runtime-manifest.json"),
+    `${JSON.stringify({
+      formatVersion: 1,
+      sourceCommit: sourceHead.stdout.trim(),
+      files: runtimeFiles,
+    }, null, 2)}\n`,
+    { encoding: "utf8", mode: 0o600 },
+  );
+
   const artifactDirectory = resolve(staging, "artifact");
   await mkdir(artifactDirectory, { recursive: true });
   const artifactResult = await run(
@@ -241,11 +286,11 @@ try {
     throw new Error("INVALID_PACKAGE_ARTIFACT");
   }
   const artifactPaths = artifactFiles.map((entry) => entry.path).sort();
-  const expectedArtifactPaths = publishedPaths.flatMap((path) => {
+  const expectedArtifactPaths = [...publishedPaths.flatMap((path) => {
     if (path.endsWith(".d.mts")) return [];
     if (path.startsWith("src/") && path.endsWith(".ts")) return [path.replace(/\.ts$/u, ".js")];
     return [path];
-  }).sort();
+  }), "runtime-manifest.json"].sort();
   if (JSON.stringify(artifactPaths) !== JSON.stringify(expectedArtifactPaths)) {
     throw new Error("PACKAGE_ARTIFACT_INVENTORY_MISMATCH");
   }
@@ -254,21 +299,34 @@ try {
     throw new Error("PACKAGE_ARTIFACT_PATH_ESCAPE");
   }
 
-  const installation = resolve(staging, "installation");
-  await mkdir(installation, { recursive: true });
-  await writeFile(resolve(installation, "package.json"), "{\"private\":true}\n", { mode: 0o600 });
-  await run(
-    "npm",
-    ["install", "--offline", "--ignore-scripts", "--no-package-lock", artifactPath],
-    installation,
-    180_000,
-  );
+  await chmod(artifactPath, 0o600);
+  const artifactBytes = await readFile(artifactPath);
+  const artifactDigest = createHash("sha256").update(artifactBytes).digest("hex");
+  const checksumPath = `${artifactPath}.sha256`;
+  await writeFile(checksumPath, `${artifactDigest}  ${artifactFilename}\n`, { mode: 0o600 });
+  const runtimeRoot = resolve(staging, "runtime-root");
+  const installedRuntime = await installRuntimeArtifact({
+    artifact: artifactPath,
+    checksum: checksumPath,
+    runtimeRoot,
+  });
+  if (installedRuntime.digest !== artifactDigest || installedRuntime.reused) {
+    throw new Error("RUNTIME_INSTALL_RESULT_INVALID");
+  }
+  const installation = resolve(runtimeRoot, `sha256-${artifactDigest}`);
   const installedPackage = resolve(installation, "node_modules", manifest.name);
   const installedManifest = JSON.parse(await readFile(resolve(installedPackage, "package.json"), "utf8"));
+  const installedRuntimeManifest = JSON.parse(
+    await readFile(resolve(installedPackage, "runtime-manifest.json"), "utf8"),
+  );
   if ("private" in installedManifest || "publishConfig" in installedManifest ||
       JSON.stringify(Object.keys(installedManifest.scripts ?? {}).sort()) !==
         JSON.stringify(["doctor", "start", "web"])) {
     throw new Error("RUNTIME_PACKAGE_MANIFEST_INVALID");
+  }
+  if (installedRuntimeManifest.formatVersion !== 1 ||
+      installedRuntimeManifest.sourceCommit !== sourceHead.stdout.trim()) {
+    throw new Error("RUNTIME_PROVENANCE_MANIFEST_INVALID");
   }
   for (const path of artifactPaths.filter((path) => /\.(?:js|mjs)$/u.test(path))) {
     await run("node", ["--check", resolve(installedPackage, path)], installation, 30_000);
@@ -302,7 +360,6 @@ try {
   if (retainArtifact) {
     await ensureOwnerOnlyDirectory(resolve(root, "dist"));
     await ensureOwnerOnlyDirectory(releaseDirectory);
-    const artifactBytes = await readFile(artifactPath);
     const digest = createHash("sha256").update(artifactBytes).digest("hex");
     const commit = cloneHead.stdout.trim().slice(0, 12);
     if (!/^[A-Za-z0-9._-]+\.tgz$/u.test(artifactFilename)) {

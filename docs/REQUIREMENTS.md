@@ -151,3 +151,7 @@ Agent 準備自行在 shell 中修改 canonical main 時，也必須先主動提
 10. GUI Managed 限制不會套用到 Native Full-Trust terminal。
 11. 文件與 GUI 誠實揭露 Full-Trust 同帳號程序可繞過應用層邊界的殘餘風險。
 12. 現有 secrets、loopback Web、identity、audit 與供應鏈保護沒有因模式切換而失效。
+13. 正式 daemon 的 backend 與 Web assets 必須來自同一個 digest-pinned compiled runtime；不得由
+    npm-link 或 Git working tree 現讀任一檔案。GUI bootstrap 必須驗證 UI protocol，不相容時停用變更操作。
+14. SQLite migration 必須辨識精確舊 schema fingerprint、先驗 row integrity、在單一交易內重建，
+    未知或中途失敗時 rollback；正式切換前保存 WAL-safe DB backup 與相容舊 runtime。

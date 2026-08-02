@@ -525,6 +525,7 @@ export async function startWebServer(
           if (Array.isArray(parsed)) pendingWorkspaceRequests = parsed as typeof pendingWorkspaceRequests;
         } catch { /* no pending file yet */ }
         json(response, 200, {
+          roomUiProtocol: 2,
           csrf,
           pendingWorkspaceRequests,
           pendingWorkflowRequests: app.workflowRequests.listPending(),

@@ -68,6 +68,7 @@ Orchestratory 在單一使用者的 Mac 上協調一或多個原生 TUI Agent。
 | F16 | Provider／API 無限花費 | Owner 選擇 provider、API explicit opt-in、native host controls、usage telemetry | 不使用固定 thread ceiling；provider 自身或 Agent 仍可能持續呼叫 |
 | F17 | Runtime 尚未完成但 GUI 宣稱安全／可用 | capability negotiation、pending label、integration tests、truthful docs | 人工驗收仍可能漏掉版本不一致 |
 | F18 | 回應不確定的 transport retry 造成重複派工 | 同一 authenticated presence 使用 caller-stable UUID request ID、ledger idempotency、inbox source/request unique binding | MCP host 完全退出後會取得新 presence；跨 host lifetime 的 orphan recovery 仍需後續 stable seat identity／outbox。Caller 若換 ID，系統也不能判斷其意圖相同 |
+| F19 | 長駐舊 backend 從開發 repo 現讀新版 Web asset，或中途 migration 讓 DB 同時不相容新舊 runtime | digest-pinned physical release、source daemon install 拒絕、backend/UI protocol、精確 schema fingerprint、交易 migration、WAL-safe DB＋舊 runtime 成對備份 | 同帳號程序仍可修改 release/data；正式切換與 rollback 程序必須逐次驗證 digest、plist、DB integrity 與 ledger receipts |
 
 ## 6. STRIDE 摘要
 

@@ -257,6 +257,7 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   const bootstrap = await fetch(`${server.url}/api/bootstrap`, { headers: { Cookie: cookie } });
   assert.equal(bootstrap.status, 200);
   const bootstrapBody = (await bootstrap.json()) as {
+    roomUiProtocol: number;
     csrf: string;
     testerProfiles: Array<{ id: string }>;
     recoverableCheckpoints: Array<{ runId: string }>;
@@ -264,6 +265,7 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
     providerCallUsage: { calls: number; maxCalls: number; killEpoch: number };
     pendingWorkflowRequests: Array<{ id: string; status: string; task: string }>;
   };
+  assert.equal(bootstrapBody.roomUiProtocol, 2);
   assert.ok(bootstrapBody.csrf.length > 20);
   assert.equal(bootstrapBody.testerProfiles[0]?.id, "synthetic-tests");
   assert.equal(bootstrapBody.recoverableCheckpoints[0]?.runId, restoreRunId);

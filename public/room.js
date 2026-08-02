@@ -1,4 +1,5 @@
 const page = new URL(window.location.href);
+const ROOM_UI_PROTOCOL = 2;
 const state = {
   csrf: "",
   room: "",
@@ -863,6 +864,7 @@ async function refreshRoomCatalog() {
 
 async function bootstrap() {
   const boot = await api("/api/bootstrap");
+  if (boot.roomUiProtocol !== ROOM_UI_PROTOCOL) throw new Error("UI_PROTOCOL_MISMATCH_RESTART_REQUIRED");
   state.csrf = boot.csrf;
   await refreshOfficeControlPlane(boot);
   const rooms = await refreshRoomCatalog();
@@ -2387,6 +2389,32 @@ byId("office-chat-form").addEventListener("submit", async (event) => {
 });
 
 bootstrap().catch((error) => {
+  const select = byId("room-select");
+  select.textContent = "";
+  select.append(new Option("載入失敗；正式資料未變更", ""));
+  select.disabled = true;
+  for (const id of ["post-input", "office-chat-input", "room-search"]) {
+    const input = byId(id);
+    if (input) input.disabled = true;
+  }
+  for (const id of ["summarize", "rec-toggle", "stop-all", "office-chat-send"]) {
+    const button = byId(id);
+    if (button) button.disabled = true;
+  }
+  const ledger = byId("ledger");
+  if (ledger) {
+    ledger.textContent = "";
+    const notice = document.createElement("div");
+    notice.className = "empty";
+    const title = document.createElement("b");
+    title.textContent = "Room 載入失敗";
+    const detail = document.createElement("span");
+    detail.textContent = String(error.message || "UNKNOWN");
+    const recovery = document.createElement("small");
+    recovery.textContent = "系統已停用發言操作；帳本資料沒有因此被刪除。";
+    notice.append(title, detail, recovery);
+    ledger.append(notice);
+  }
   byId("connection").textContent = `載入失敗：${error.message}`;
   byId("connection").className = "conn error";
 });
