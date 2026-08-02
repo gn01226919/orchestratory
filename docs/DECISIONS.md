@@ -335,3 +335,23 @@ Lease、Workspace MCP 等控制。Managed policy 不得暗中套用到 Native Fu
 
 **取代與擴充：** 本 ADR 依本文件開頭矩陣取代 ADR-004A、005、006、007、011、012、013、015、
 019、022、023、025、026、027 的衝突部分，並擴充 ADR-024 的 exact inbox/no-fallback 設計。
+
+## ADR-029：正式 daemon 使用 digest-pinned runtime，migration 與舊 binary 成對復原
+
+**狀態：Accepted / Normative**
+
+**日期：2026-08-02**
+
+**決策：** macOS LaunchAgent 不得指向 Git working tree、TypeScript source 或 npm-link。正式服務只能
+由已通過 release gate 的 tgz 安裝到 artifact digest 識別的實體目錄，backend 與 public assets 一起
+切換；Room GUI 另以 bootstrap protocol 拒絕混版。Source checkout 執行 `daemon install` 必須 fail closed。
+
+任何持久資料 schema cutover 前，保存 SQLite online backup、plist、舊 release source/artifact 與 digest。
+Migration 只接受精確已知 schema/index/CHECK fingerprint 與有效 row hash，在單一 `BEGIN IMMEDIATE`
+交易內重建；未知 variant、內容/ledger receipt 不一致或任何 SQL 失敗都 rollback。正式驗收後仍保留
+上一 binary＋DB recovery set，不做自動清理。
+
+**理由：** 長駐 Node backend 會把模組留在記憶體，但舊 Web server 可在 request 時重新讀取磁碟上的
+public asset。若正式安裝直接連著開發 repo，就可能形成舊 backend＋新 frontend；開發中的中途 schema
+也可能先改到正式 DB。版本與資料成對切割，才能讓 candidate/main 分流之外也有可靠的 runtime/data
+復原邊界。

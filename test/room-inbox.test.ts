@@ -30,7 +30,75 @@ const secondSeat = "22222222-2222-4222-8222-222222222222";
 const thirdSeat = "33333333-3333-4333-8333-333333333333";
 const execFileAsync = promisify(execFile);
 
-test("schema v3 deliveries migrate transactionally into v4 threads", async (t) => {
+async function convertDeliveryToInterimV4(
+  path: string,
+  deliveryId: string,
+): Promise<void> {
+  const raw = new DatabaseSync(path);
+  const current = raw.prepare("SELECT * FROM room_deliveries WHERE id = ?")
+    .get(deliveryId) as Record<string, string | number | null>;
+  const interimHash = createHash("sha256").update(JSON.stringify([
+    current.id, current.room_id, current.ledger_seq, current.ledger_hash,
+    current.source_presence_id, current.source_display_name, current.target_presence_id,
+    current.target_display_name, current.thread_id, current.reply_to_delivery_id,
+    current.state, current.attempt, current.max_attempts, current.lease_token,
+    current.lease_expires_at_ms, current.cancel_requested, current.reply_key,
+    current.reply_author, current.reply_input_hash, current.completion_token_hash,
+    current.reply_ledger_seq, current.fail_reason, current.task_id,
+    current.created_at_ms, current.updated_at_ms,
+  ]), "utf8").digest("hex");
+  raw.exec(`
+    BEGIN IMMEDIATE;
+    ALTER TABLE room_deliveries RENAME TO room_deliveries_v5;
+    CREATE TABLE room_deliveries (
+      id TEXT PRIMARY KEY, room_id TEXT NOT NULL, ledger_seq INTEGER NOT NULL,
+      ledger_hash TEXT NOT NULL, target_presence_id TEXT NOT NULL,
+      target_display_name TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('queued','delivered','read','working','replied','failed','cancelled')),
+      attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt BETWEEN 0 AND 100),
+      max_attempts INTEGER NOT NULL CHECK (max_attempts BETWEEN 1 AND 10),
+      lease_token TEXT, lease_expires_at_ms INTEGER,
+      cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0,1)),
+      reply_key TEXT, reply_author TEXT, reply_input_hash TEXT,
+      completion_token_hash TEXT, reply_ledger_seq INTEGER, fail_reason TEXT,
+      task_id TEXT, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL,
+      row_hash TEXT NOT NULL, source_presence_id TEXT, source_display_name TEXT,
+      thread_id TEXT, reply_to_delivery_id TEXT,
+      UNIQUE(room_id, ledger_seq, target_presence_id),
+      CHECK ((lease_token IS NULL) = (lease_expires_at_ms IS NULL))
+    );
+  `);
+  const interimValues = [
+    current.id, current.room_id, current.ledger_seq, current.ledger_hash,
+    current.target_presence_id, current.target_display_name, current.state,
+    current.attempt, current.max_attempts, current.lease_token, current.lease_expires_at_ms,
+    current.cancel_requested, current.reply_key, current.reply_author,
+    current.reply_input_hash, current.completion_token_hash, current.reply_ledger_seq,
+    current.fail_reason, current.task_id, current.created_at_ms, current.updated_at_ms,
+    interimHash, current.source_presence_id, current.source_display_name,
+    current.thread_id, current.reply_to_delivery_id,
+  ];
+  if (interimValues.some((value) => value === undefined)) throw new Error("INVALID_INTERIM_FIXTURE");
+  raw.prepare(`INSERT INTO room_deliveries
+    (id,room_id,ledger_seq,ledger_hash,target_presence_id,target_display_name,state,
+     attempt,max_attempts,lease_token,lease_expires_at_ms,cancel_requested,reply_key,
+     reply_author,reply_input_hash,completion_token_hash,reply_ledger_seq,fail_reason,
+     task_id,created_at_ms,updated_at_ms,row_hash,source_presence_id,source_display_name,
+     thread_id,reply_to_delivery_id)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(...interimValues as Array<string | number | null>);
+  raw.exec(`
+    DROP TABLE room_deliveries_v5;
+    CREATE INDEX room_deliveries_target_queue
+      ON room_deliveries(target_presence_id, room_id, state, created_at_ms);
+    PRAGMA user_version = 4;
+    COMMIT;
+  `);
+  raw.close();
+  await chmod(path, 0o600);
+}
+
+test("schema v3 deliveries migrate transactionally into v5 threads", async (t) => {
   const data = await mkdtemp(join(tmpdir(), "orchestratory-inbox-v3-"));
   t.after(async () => await rm(data, { recursive: true, force: true }));
   const ledger = new RoomLedger(data);
@@ -109,7 +177,7 @@ test("schema v3 deliveries migrate transactionally into v4 threads", async (t) =
 
   const migrated = new RoomInboxStore(data);
   t.after(() => migrated.close());
-  assert.deepEqual(migrated.integrity(), { schemaVersion: 4, quickCheck: "ok", stateValid: true });
+  assert.deepEqual(migrated.integrity(), { schemaVersion: 5, quickCheck: "ok", stateValid: true });
   assert.equal(migrated.get(delivery.id)?.threadId, delivery.id);
   assert.equal(migrated.get(delivery.id)?.sourcePresenceId, undefined);
   const migratedSchema = new DatabaseSync(path, { readOnly: true });
@@ -120,6 +188,231 @@ test("schema v3 deliveries migrate transactionally into v4 threads", async (t) =
   migratedSchema.close();
   assert.equal(thread.notnull, 1);
   assert.match(ddl.sql, /source_presence_id IS NULL[\s\S]*source_display_name IS NULL/u);
+});
+
+test("interim v4 inbox migrates transactionally without discarding exact-seat rows", async (t) => {
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-inbox-interim-v4-"));
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+  const ledger = new RoomLedger(data);
+  ledger.createRoom("demo", "/tmp/project");
+  const store = new RoomInboxStore(data);
+  const delivery = store.enqueue({
+    message: ledger.append("demo", "codex1", "@claude1 preserve this delivery"),
+    sourcePresenceId: firstSeat,
+    sourceDisplayName: "codex1",
+    targetPresenceId: secondSeat,
+    targetDisplayName: "claude1",
+    taskId: "interim-v4-task",
+  });
+  const path = store.path;
+  store.close();
+  ledger.close();
+
+  const raw = new DatabaseSync(path);
+  const current = raw.prepare("SELECT * FROM room_deliveries WHERE id = ?").get(delivery.id) as Record<string, unknown>;
+  const interimHash = createHash("sha256").update(JSON.stringify([
+    current.id, current.room_id, current.ledger_seq, current.ledger_hash,
+    current.source_presence_id, current.source_display_name, current.target_presence_id,
+    current.target_display_name, current.thread_id, current.reply_to_delivery_id,
+    current.state, current.attempt, current.max_attempts, current.lease_token,
+    current.lease_expires_at_ms, current.cancel_requested, current.reply_key,
+    current.reply_author, current.reply_input_hash, current.completion_token_hash,
+    current.reply_ledger_seq, current.fail_reason, current.task_id,
+    current.created_at_ms, current.updated_at_ms,
+  ]), "utf8").digest("hex");
+  raw.exec(`
+    BEGIN IMMEDIATE;
+    ALTER TABLE room_deliveries RENAME TO room_deliveries_v5;
+    CREATE TABLE room_deliveries (
+      id TEXT PRIMARY KEY, room_id TEXT NOT NULL, ledger_seq INTEGER NOT NULL,
+      ledger_hash TEXT NOT NULL, target_presence_id TEXT NOT NULL,
+      target_display_name TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('queued','delivered','read','working','replied','failed','cancelled')),
+      attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt BETWEEN 0 AND 100),
+      max_attempts INTEGER NOT NULL CHECK (max_attempts BETWEEN 1 AND 10),
+      lease_token TEXT, lease_expires_at_ms INTEGER,
+      cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0,1)),
+      reply_key TEXT, reply_author TEXT, reply_input_hash TEXT,
+      completion_token_hash TEXT, reply_ledger_seq INTEGER, fail_reason TEXT,
+      task_id TEXT, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL,
+      row_hash TEXT NOT NULL, source_presence_id TEXT, source_display_name TEXT,
+      thread_id TEXT, reply_to_delivery_id TEXT,
+      UNIQUE(room_id, ledger_seq, target_presence_id),
+      CHECK ((lease_token IS NULL) = (lease_expires_at_ms IS NULL))
+    );
+  `);
+  raw.prepare(`INSERT INTO room_deliveries
+    (id,room_id,ledger_seq,ledger_hash,target_presence_id,target_display_name,state,
+     attempt,max_attempts,lease_token,lease_expires_at_ms,cancel_requested,reply_key,
+     reply_author,reply_input_hash,completion_token_hash,reply_ledger_seq,fail_reason,
+     task_id,created_at_ms,updated_at_ms,row_hash,source_presence_id,source_display_name,
+     thread_id,reply_to_delivery_id)
+    SELECT id,room_id,ledger_seq,ledger_hash,target_presence_id,target_display_name,state,
+     attempt,max_attempts,lease_token,lease_expires_at_ms,cancel_requested,reply_key,
+     reply_author,reply_input_hash,completion_token_hash,reply_ledger_seq,fail_reason,
+     task_id,created_at_ms,updated_at_ms,?,source_presence_id,source_display_name,
+     thread_id,reply_to_delivery_id
+    FROM room_deliveries_v5 WHERE id=?`).run(interimHash, delivery.id);
+  raw.exec(`
+    DROP TABLE room_deliveries_v5;
+    CREATE INDEX room_deliveries_target_queue
+      ON room_deliveries(target_presence_id, room_id, state, created_at_ms);
+    PRAGMA user_version = 4;
+    COMMIT;
+  `);
+  const eventCountBefore = Number((raw.prepare(
+    "SELECT COUNT(*) AS count FROM room_delivery_events",
+  ).get() as { count: number }).count);
+  raw.prepare(`INSERT INTO room_wait_leases (presence_id, room_id, waiter_token, expires_at_ms)
+    VALUES (?, ?, ?, ?)`).run(thirdSeat, "demo", "interim-waiter", Date.now() + 60_000);
+  raw.prepare("UPDATE room_deliveries SET target_display_name = ? WHERE id = ?")
+    .run("tampered", delivery.id);
+  raw.close();
+  await chmod(path, 0o600);
+
+  assert.throws(() => new RoomInboxStore(data), /ROOM_INBOX_ROW_TAMPERED/u);
+  const restored = new DatabaseSync(path);
+  restored.prepare("UPDATE room_deliveries SET target_display_name = ? WHERE id = ?")
+    .run("claude1", delivery.id);
+  restored.close();
+
+  const migrated = new RoomInboxStore(data);
+  t.after(() => migrated.close());
+  assert.deepEqual(migrated.integrity(), { schemaVersion: 5, quickCheck: "ok", stateValid: true });
+  assert.equal(migrated.get(delivery.id)?.sourcePresenceId, firstSeat);
+  assert.equal(migrated.get(delivery.id)?.sourceDisplayName, "codex1");
+  assert.equal(migrated.get(delivery.id)?.targetPresenceId, secondSeat);
+  assert.equal(migrated.get(delivery.id)?.threadId, delivery.threadId);
+  assert.equal(migrated.get(delivery.id)?.clientRequestId, undefined);
+  const migratedSchema = new DatabaseSync(path, { readOnly: true });
+  const columns = migratedSchema.prepare("PRAGMA table_info(room_deliveries)").all() as Array<{ name: string }>;
+  const version = migratedSchema.prepare("PRAGMA user_version").get() as { user_version: number };
+  const eventCountAfter = Number((migratedSchema.prepare(
+    "SELECT COUNT(*) AS count FROM room_delivery_events",
+  ).get() as { count: number }).count);
+  const waitCountAfter = Number((migratedSchema.prepare(
+    "SELECT COUNT(*) AS count FROM room_wait_leases WHERE waiter_token = 'interim-waiter'",
+  ).get() as { count: number }).count);
+  migratedSchema.close();
+  assert.equal(version.user_version, 5);
+  assert.equal(columns.some((column) => column.name === "client_request_id"), true);
+  assert.equal(eventCountAfter, eventCountBefore);
+  assert.equal(waitCountAfter, 1);
+});
+
+test("canonical v4 rebuilds into v5 while unknown v4 variants roll back fail-closed", async (t) => {
+  const canonicalData = await mkdtemp(join(tmpdir(), "orchestratory-inbox-canonical-v4-"));
+  const unknownData = await mkdtemp(join(tmpdir(), "orchestratory-inbox-unknown-v4-"));
+  t.after(async () => await Promise.all([
+    rm(canonicalData, { recursive: true, force: true }),
+    rm(unknownData, { recursive: true, force: true }),
+  ]));
+
+  const canonical = new RoomInboxStore(canonicalData);
+  canonical.close();
+  const canonicalRaw = new DatabaseSync(join(canonicalData, "room-inbox.sqlite"));
+  canonicalRaw.exec("PRAGMA user_version = 4;");
+  canonicalRaw.close();
+  const upgraded = new RoomInboxStore(canonicalData);
+  assert.deepEqual(upgraded.integrity(), { schemaVersion: 5, quickCheck: "ok", stateValid: true });
+  upgraded.close();
+
+  const unknown = new RoomInboxStore(unknownData);
+  unknown.close();
+  const unknownPath = join(unknownData, "room-inbox.sqlite");
+  const unknownRaw = new DatabaseSync(unknownPath);
+  unknownRaw.exec("ALTER TABLE room_deliveries ADD COLUMN unexpected TEXT; PRAGMA user_version = 4;");
+  unknownRaw.close();
+  assert.throws(() => new RoomInboxStore(unknownData), /ROOM_INBOX_SCHEMA_V4_UNRECOGNIZED/u);
+  const rolledBack = new DatabaseSync(unknownPath, { readOnly: true });
+  const version = rolledBack.prepare("PRAGMA user_version").get() as { user_version: number };
+  const temporary = rolledBack.prepare(
+    "SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='room_deliveries_v5'",
+  ).get() as { count: number };
+  rolledBack.close();
+  assert.equal(version.user_version, 4);
+  assert.equal(temporary.count, 0);
+});
+
+test("an interim v4 insert failure rolls back the complete migration", async (t) => {
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-inbox-v4-rollback-"));
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+  const ledger = new RoomLedger(data);
+  ledger.createRoom("demo", "/tmp/project");
+  const store = new RoomInboxStore(data);
+  const delivery = store.enqueue({
+    message: ledger.append("demo", "you", "@codex1 rollback"),
+    targetPresenceId: firstSeat,
+    targetDisplayName: "codex1",
+  });
+  const path = store.path;
+  store.close();
+  ledger.close();
+  await convertDeliveryToInterimV4(path, delivery.id);
+
+  const before = new DatabaseSync(path, { readOnly: true });
+  const beforeRow = before.prepare("SELECT row_hash FROM room_deliveries WHERE id = ?")
+    .get(delivery.id) as { row_hash: string };
+  const beforeEvents = Number((before.prepare(
+    "SELECT COUNT(*) AS count FROM room_delivery_events",
+  ).get() as { count: number }).count);
+  before.close();
+
+  assert.throws(
+    () => new RoomInboxStore(data, { testOnlyMigrationFailureAfterRows: 1 }),
+    /ROOM_INBOX_MIGRATION_TEST_FAILURE/u,
+  );
+  const after = new DatabaseSync(path, { readOnly: true });
+  const version = after.prepare("PRAGMA user_version").get() as { user_version: number };
+  const afterRow = after.prepare("SELECT row_hash FROM room_deliveries WHERE id = ?")
+    .get(delivery.id) as { row_hash: string };
+  const afterEvents = Number((after.prepare(
+    "SELECT COUNT(*) AS count FROM room_delivery_events",
+  ).get() as { count: number }).count);
+  const temporary = Number((after.prepare(
+    "SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='room_deliveries_v5'",
+  ).get() as { count: number }).count);
+  after.close();
+  assert.equal(version.user_version, 4);
+  assert.equal(afterRow.row_hash, beforeRow.row_hash);
+  assert.equal(afterEvents, beforeEvents);
+  assert.equal(temporary, 0);
+});
+
+test("two OS processes can migrate the exact interim v4 inbox concurrently", async (t) => {
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-inbox-interim-race-"));
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+  const ledger = new RoomLedger(data);
+  ledger.createRoom("demo", "/tmp/project");
+  const store = new RoomInboxStore(data);
+  const delivery = store.enqueue({
+    message: ledger.append("demo", "you", "@codex1 concurrent interim migration"),
+    targetPresenceId: firstSeat,
+    targetDisplayName: "codex1",
+  });
+  const path = store.path;
+  store.close();
+  ledger.close();
+  await convertDeliveryToInterimV4(path, delivery.id);
+  const before = new DatabaseSync(path, { readOnly: true });
+  const expected = before.prepare("SELECT thread_id FROM room_deliveries WHERE id = ?")
+    .get(delivery.id) as { thread_id: string };
+  before.close();
+
+  const moduleUrl = new URL("../src/core/room-inbox.ts", import.meta.url).href;
+  const script = `import { RoomInboxStore } from ${JSON.stringify(moduleUrl)};
+    const store = new RoomInboxStore(process.argv[1]);
+    process.stdout.write(String(store.inventory().schemaVersion));
+    store.close();`;
+  const results = await Promise.all([
+    execFileAsync(process.execPath, ["--input-type=module", "-e", script, data]),
+    execFileAsync(process.execPath, ["--input-type=module", "-e", script, data]),
+  ]);
+  assert.deepEqual(results.map(({ stdout }) => stdout), ["5", "5"]);
+  const migrated = new RoomInboxStore(data);
+  assert.equal(migrated.get(delivery.id)?.threadId, expected.thread_id);
+  assert.deepEqual(migrated.integrity(), { schemaVersion: 5, quickCheck: "ok", stateValid: true });
+  migrated.close();
 });
 
 test("two OS processes can open and migrate the same v3 inbox concurrently", async (t) => {
@@ -167,10 +460,10 @@ test("two OS processes can open and migrate the same v3 inbox concurrently", asy
     execFileAsync(process.execPath, ["--input-type=module", "-e", script, data]),
     execFileAsync(process.execPath, ["--input-type=module", "-e", script, data]),
   ]);
-  assert.deepEqual(results.map(({ stdout }) => stdout), ["4", "4"]);
+  assert.deepEqual(results.map(({ stdout }) => stdout), ["5", "5"]);
   const migrated = new RoomInboxStore(data);
   t.after(() => migrated.close());
-  assert.deepEqual(migrated.integrity(), { schemaVersion: 4, quickCheck: "ok", stateValid: true });
+  assert.deepEqual(migrated.integrity(), { schemaVersion: 5, quickCheck: "ok", stateValid: true });
 });
 
 test("exact-seat delivery moves through every receipt state and reply is idempotent", async (t) => {
@@ -747,7 +1040,7 @@ test("public inbox boundaries reject malformed or ambiguous delivery operations"
     /THREAD_CONTINUATION_FIELDS_MISMATCH/u,
   );
   assert.equal(inbox.inventory().deliveries, 2);
-  assert.deepEqual(inbox.integrity(), { schemaVersion: 4, quickCheck: "ok", stateValid: true });
+  assert.deepEqual(inbox.integrity(), { schemaVersion: 5, quickCheck: "ok", stateValid: true });
 
   await assert.rejects(
     inbox.wait({ presenceId: firstSeat, roomId: "demo", timeoutMs: 0, ledger }),

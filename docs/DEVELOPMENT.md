@@ -110,6 +110,9 @@ Source manifest 保持 `private: true`，並把 `publishConfig.registry` 固定�
 release gate 相同的 clean-clone、tgz、離線安裝、CLI 與正負 audit 驗證，並把候選 tgz 與 SHA-256
 寫入 owner-only、Git ignored 的 `dist/release/`。任何 push、registry publish 或 release upload 仍需
 owner 對版本、package ownership 與發布範圍另行明確核准。
+開發 checkout／`npm link` 可用於 CLI 測試，但不得安裝 LaunchAgent；`daemon install` 只接受 release
+builder 產生的 `src/main.js` runtime。RC 必須使用資料副本與不同 loopback port，不能用開發程序先開啟
+正式 SQLite schema。
 
 ## 6. Dependency policy
 

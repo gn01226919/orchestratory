@@ -183,10 +183,19 @@ Native capability 回答「host 原本允許 Agent 做什麼」；merge approval
 
 ## 7. 導入相容性
 
-隔離 development branch 已把 inbox 擴充為 schema v4，支援 authenticated source、thread、reply-to、
+隔離 development branch 已把 inbox 擴充為 schema v5，支援 authenticated source、thread、reply-to、
 durable send idempotency、`list_agents.terminalSeats`、`room_send` 與 `room_await_reply`；synthetic
 multi-connection peer tests、20 輪 thread、transport reconnect、三席 hijack negative test，以及雙 OS process
-migration race 已通過。真實兩個 MCP stdio host 的 cross-provider 驗收仍待執行。
+migration race已通過。v5 另能以精確 schema/index/CHECK fingerprint 辨識並原子修復缺少
+`client_request_id` 的中途 v4；未知 v4 仍 fail closed。真實兩個 MCP stdio host 的 cross-provider
+驗收仍待執行。
 已安裝 runtime 尚未切換，`ask_*` 仍是分離的唯讀 worker，Writer 路徑仍受 legacy lease 與 Workspace
 MCP 限制。導入 ADR-028 時必須使用 feature/capability negotiation，直到真實 peer thread、candidate
 completion 與 promotion 全部通過驗收，GUI 才能標示 Native Full-Trust workflow ready。
+
+### 7.1 正式 runtime 與開發樹分離
+
+macOS LaunchAgent 必須指向由已驗證 tgz 安裝出的 physical compiled runtime。該目錄以 artifact
+SHA-256／commit 識別，不能是 repo、npm-link 或其他 symlink；同一 runtime 內的 backend 與 public
+assets 一起切換。GUI `/api/bootstrap` 回傳 Room UI protocol，前端不相容時顯示復原錯誤並停用發言。
+Cutover 保留上一個 runtime、plist 與 WAL-safe SQLite backup，使 binary＋data 能成對 rollback。

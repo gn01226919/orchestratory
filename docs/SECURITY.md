@@ -109,6 +109,10 @@ Orchestratory 承諾：
 ## 11. 供應鏈與發布
 
 - Dependency、CI action 與 release artifact 維持 pin、SBOM、secret/history scan 與人工 release gate。
+- 正式 LaunchAgent 只能指向 SHA-256 已驗證、實體安裝的 compiled runtime；拒絕 TypeScript checkout、
+  npm-link 與 Git working tree。Backend 與 Web assets 必須來自同一 release，並以 UI protocol fail closed。
+- Schema migration 前保存 SQLite online backup 與相容舊 runtime；只接受已知 schema/index/CHECK
+  fingerprint 與有效 row hash，未知變體、ledger receipt 不一致或交易失敗都不得切換正式服務。
 - Main merge approval 不構成 Git push、GitHub PR、公開 repository 或 release 授權。
 - 文件必須同時標示 target spec、runtime status 與殘餘風險。
 

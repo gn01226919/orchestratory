@@ -27,6 +27,27 @@ These read-only diagnostics may run while the GUI daemon is active. Every SQLite
 run store, waits up to three seconds for a short concurrent writer before failing closed. A lock that outlives
 that bound is not bypassed: let the active workflow or maintenance command finish, then retry sequentially.
 
+## Daemon release and schema cutover
+
+Never install the login daemon from a source checkout or `npm link`. A supported cutover uses a clean committed
+HEAD, `npm run build:package`, the verified `.tgz.sha256`, and an offline install into an owner-only directory whose
+name includes that digest. Resolve the installed `src/main.js` and every parent with `lstat`/`realpath`; the runtime,
+package root and LaunchAgent target must not be symlinks or paths inside the repository.
+
+Before opening a newer schema, create SQLite online backups for every database so committed WAL pages are included.
+Also retain the previous LaunchAgent plist and compatible runtime source/artifact. Verify every backup with
+`PRAGMA quick_check`, expected schema/version and critical row counts. Test migration against a separate copied data
+directory and loopback RC port first. Production cutover then follows this order:
+
+1. stop workflows and all processes that can write Orchestratory stores;
+2. take and verify a final WAL-safe backup;
+3. install/verify the immutable release and update the LaunchAgent to its physical `src/main.js`;
+4. start once, verify database integrity, Room UI protocol, room/message counts and delivery/receipt references;
+5. keep the read-only rescue viewer and previous binary+DB recovery set until owner acceptance.
+
+A failed migration must leave its original `user_version`, rows and auxiliary tables intact. Do not delete a
+delivery, reset a database or copy only the main `.sqlite` file to make the GUI start.
+
 `data purge` without `--execute` is preview-only. It excludes active runs and any run with a retained
 worktree. No scheduled or automatic purge exists. In v1, the purge applies only to terminal workflow runs;
 Room/presence/inbox/Writer/audit stores remain persistent for traceability and are listed by inventory rather

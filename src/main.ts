@@ -1,11 +1,11 @@
 import { stdin, stdout, stderr } from "node:process";
 import { homedir } from "node:os";
 import { execPath } from "node:process";
-import { basename, join, resolve } from "node:path";
+import { basename, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
-import { randomUUID } from "node:crypto";
-import { realpath } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { runDoctor } from "./doctor.ts";
 import { safeSummary } from "./security/redact.ts";
 import { helpText } from "./help.ts";
@@ -28,6 +28,118 @@ function parsePort(args: string[]): number {
   const value = Number(args[index + 1]);
   if (!Number.isInteger(value) || value < 0 || value > 65_535) throw new Error("INVALID_PORT");
   return value;
+}
+
+export async function daemonRuntimeEntry(
+  moduleUrl: string,
+  options: { runtimeRoot?: string; uid?: number } = {},
+): Promise<string> {
+  const runtimeRoot = resolve(options.runtimeRoot ?? join(
+    homedir(), "Library", "Application Support", "Orchestratory Runtime",
+  ));
+  const entry = resolve(fileURLToPath(moduleUrl));
+  const physicalRoot = await realpath(runtimeRoot).catch(() => "");
+  const physicalEntry = await realpath(entry).catch(() => "");
+  if (physicalRoot !== runtimeRoot || physicalEntry !== entry) {
+    throw new Error("DAEMON_INSTALL_REQUIRES_PHYSICAL_RELEASE_RUNTIME");
+  }
+  const local = relative(runtimeRoot, entry);
+  if (!local || local === ".." || local.startsWith(`..${sep}`)) {
+    throw new Error("DAEMON_INSTALL_REQUIRES_RELEASE_RUNTIME");
+  }
+  const parts = local.split(sep);
+  const digestName = parts[0] ?? "";
+  if (
+    parts.length !== 5 || !/^sha256-[0-9a-f]{64}$/u.test(digestName) ||
+    parts[1] !== "node_modules" || parts[2] !== "orchestratory" ||
+    parts[3] !== "src" || parts[4] !== "main.js"
+  ) throw new Error("DAEMON_INSTALL_REQUIRES_RELEASE_RUNTIME");
+
+  const expectedUid = options.uid ?? process.getuid?.();
+  if (!Number.isSafeInteger(expectedUid)) throw new Error("DAEMON_RUNTIME_OWNER_UNAVAILABLE");
+  const digestDirectory = join(runtimeRoot, digestName);
+  const packageRoot = join(digestDirectory, "node_modules", "orchestratory");
+  const paths = [
+    { path: runtimeRoot, directory: true },
+    { path: digestDirectory, directory: true },
+    { path: join(digestDirectory, "node_modules"), directory: true },
+    { path: packageRoot, directory: true },
+    { path: join(packageRoot, "src"), directory: true },
+    { path: join(packageRoot, "public"), directory: true },
+    { path: entry, directory: false },
+    { path: join(packageRoot, "public", "room.js"), directory: false },
+    { path: join(packageRoot, "public", "room.html"), directory: false },
+    { path: join(packageRoot, "runtime-manifest.json"), directory: false, maxBytes: 256 * 1_024 },
+    { path: join(digestDirectory, "runtime-install.json"), directory: false, maxBytes: 4_096 },
+  ];
+  for (const item of paths) {
+    const info = await lstat(item.path).catch(() => undefined);
+    if (
+      !info || info.isSymbolicLink() || info.uid !== expectedUid || (info.mode & 0o022) !== 0 ||
+      (item.directory ? !info.isDirectory() : !info.isFile())
+    ) throw new Error("DAEMON_RUNTIME_PATH_UNSAFE");
+    if (!item.directory && item.maxBytes !== undefined && (info.size < 1 || info.size > item.maxBytes)) {
+      throw new Error("DAEMON_RUNTIME_MANIFEST_INVALID");
+    }
+  }
+  const source = JSON.parse(await readFile(join(packageRoot, "runtime-manifest.json"), "utf8")) as unknown;
+  const installed = JSON.parse(await readFile(join(digestDirectory, "runtime-install.json"), "utf8")) as unknown;
+  const validSource = source && typeof source === "object" &&
+    (source as { formatVersion?: unknown }).formatVersion === 1 &&
+    typeof (source as { sourceCommit?: unknown }).sourceCommit === "string" &&
+    /^[0-9a-f]{40}$/u.test((source as { sourceCommit: string }).sourceCommit) &&
+    Array.isArray((source as { files?: unknown }).files);
+  const validInstall = installed && typeof installed === "object" &&
+    (installed as { formatVersion?: unknown }).formatVersion === 1 &&
+    (installed as { artifactSha256?: unknown }).artifactSha256 === digestName.slice("sha256-".length) &&
+    (installed as { sourceCommit?: unknown }).sourceCommit ===
+      (source as { sourceCommit?: unknown }).sourceCommit;
+  if (!validSource || !validInstall) throw new Error("DAEMON_RUNTIME_MANIFEST_INVALID");
+
+  type RuntimeFile = { path: string; sha256: string; size: number };
+  const declared = (source as { files: RuntimeFile[] }).files;
+  if (declared.length < 1 || declared.length > 1_000) throw new Error("DAEMON_RUNTIME_MANIFEST_INVALID");
+  const expectedPaths = new Set<string>();
+  let totalBytes = 0;
+  for (const file of declared) {
+    if (
+      !file || typeof file.path !== "string" || file.path === "runtime-manifest.json" ||
+      file.path.startsWith("/") || file.path.split("/").includes("..") ||
+      !/^[0-9a-f]{64}$/u.test(file.sha256) || !Number.isSafeInteger(file.size) ||
+      file.size < 0 || file.size > 16 * 1024 * 1024 || expectedPaths.has(file.path)
+    ) throw new Error("DAEMON_RUNTIME_MANIFEST_INVALID");
+    expectedPaths.add(file.path);
+    totalBytes += file.size;
+    if (totalBytes > 32 * 1024 * 1024) throw new Error("DAEMON_RUNTIME_MANIFEST_INVALID");
+    const path = resolve(packageRoot, file.path);
+    const localPath = relative(packageRoot, path);
+    if (!localPath || localPath === ".." || localPath.startsWith(`..${sep}`)) {
+      throw new Error("DAEMON_RUNTIME_MANIFEST_INVALID");
+    }
+    const info = await lstat(path).catch(() => undefined);
+    if (
+      !info?.isFile() || info.isSymbolicLink() || info.uid !== expectedUid || info.nlink !== 1 ||
+      (info.mode & 0o022) !== 0 || info.size !== file.size
+    ) throw new Error("DAEMON_RUNTIME_INVENTORY_MISMATCH");
+    const digest = createHash("sha256").update(await readFile(path)).digest("hex");
+    if (digest !== file.sha256) throw new Error("DAEMON_RUNTIME_INVENTORY_MISMATCH");
+  }
+  const observed: string[] = [];
+  const walk = async (directory: string): Promise<void> => {
+    for (const item of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, item.name);
+      const localPath = relative(packageRoot, path).split(sep).join("/");
+      if (item.isSymbolicLink()) throw new Error("DAEMON_RUNTIME_PATH_UNSAFE");
+      if (item.isDirectory()) await walk(path);
+      else if (item.isFile() && localPath !== "runtime-manifest.json") observed.push(localPath);
+      else if (!item.isFile()) throw new Error("DAEMON_RUNTIME_PATH_UNSAFE");
+    }
+  };
+  await walk(packageRoot);
+  if (observed.length !== expectedPaths.size || observed.some((path) => !expectedPaths.has(path))) {
+    throw new Error("DAEMON_RUNTIME_INVENTORY_MISMATCH");
+  }
+  return entry;
 }
 
 export async function main(args = process.argv.slice(2)): Promise<void> {
@@ -375,7 +487,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       const { promisify } = await import("node:util");
       const run = promisify(execFile);
       if (sub === "install") {
-        const entry = fileURLToPath(new URL("./main.ts", import.meta.url));
+        const entry = await daemonRuntimeEntry(import.meta.url);
         const nodeDir = execPath.replace(/\/[^/]+$/u, "");
         const fullPath = (process.env.PATH ?? `${nodeDir}:/usr/bin:/bin:/usr/sbin:/sbin`)
           .replace(/&/gu, "&amp;").replace(/</gu, "&lt;").replace(/>/gu, "&gt;");

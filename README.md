@@ -138,7 +138,10 @@ npm run doctor           # 不消耗模型額度的 CLI 版本檢查
 ```
 
 若要在任何終端機直接使用 `orchestrator`，只把 link 建在使用者擁有且已列入 `PATH` 的 npm
-prefix；不要使用 `sudo npm link` 或放寬 `/usr/local` 權限。
+prefix；不要使用 `sudo npm link` 或放寬 `/usr/local` 權限。`npm link` 只適合開發 CLI，不能安裝
+登入常駐 daemon：`orchestrator daemon install` 會拒絕直接從 TypeScript source checkout 啟動。
+正式 daemon 必須由 `npm run build:package` 產生、SHA-256 已驗證並安裝在獨立 digest 目錄的 compiled
+runtime 啟動；LaunchAgent 不得指向 Git working tree 或 npm-link symlink。
 
 首次執行 workflow 前必須明確加入最小必要 root：
 
