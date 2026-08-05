@@ -91,6 +91,16 @@ function asObject(value: unknown): JsonObject {
   return value as JsonObject;
 }
 
+/**
+ * Candidate mutations are idempotent per clientRequestId. The seat is deliberately not part of the
+ * key: a presence lease expiring re-mints the seat display name, which is exactly the outage a retry
+ * has to survive. Replay still requires the operation, room and input digest to match.
+ */
+function requireCandidateRequestId(value: unknown): string {
+  if (typeof value !== "string" || !UUID_PATTERN.test(value)) throw new Error("INVALID_CANDIDATE_CLIENT_REQUEST_ID");
+  return value;
+}
+
 function requireQuestion(value: unknown): string {
   if (typeof value !== "string") throw new Error("INVALID_QUESTION");
   const question = value.trim();
@@ -431,11 +441,12 @@ export class CollabToolBroker {
           {
             name: "candidate_start",
             description:
-              "Create a durable Git candidate branch/worktree for this exact authenticated native terminal and record the current main HEAD plus any dirty main state. Native host capabilities remain unchanged; candidate is a recovery and merge boundary, not an OS capability sandbox. Dirty main files are preserved in place and are not copied into the candidate. This does not mutate, clean, stash, reset, merge, or push the canonical main branch/worktree, but it does add shared Git worktree/branch metadata. This mutation is not yet request-idempotent: if the MCP response is uncertain, call candidate_status before any retry and do not blindly resend.",
+              "Create a durable Git candidate branch/worktree for this exact authenticated native terminal and record the current main HEAD plus any dirty main state. Native host capabilities remain unchanged; candidate is a recovery and merge boundary, not an OS capability sandbox. Dirty main files are preserved in place and are not copied into the candidate. This does not mutate, clean, stash, reset, merge, or push the canonical main branch/worktree, but it does add shared Git worktree/branch metadata. This mutation is request-idempotent: send one stable UUID clientRequestId per logical call and reuse the exact same value on every retry. Retry semantics: an identical retry returns the same result without creating a second artifact. CANDIDATE_REQUEST_IN_FLIGHT means that key is executing right now — wait briefly and retry it. CANDIDATE_REQUEST_RECOVERING means an earlier attempt left a half-created candidate that is still inside its recovery grace — retry the same key later, and if it then answers CANDIDATE_REQUEST_FAILED_RETRY_WITH_NEW_KEY, mint a new clientRequestId. CANDIDATE_REQUEST_FAILED_RETRY_WITH_NEW_KEY means the attempt was judged failed — mint a new key. CANDIDATE_REQUEST_TASK_NO_LONGER_ACTIVE means the task this key created has moved on — call candidate_status instead of retrying. CANDIDATE_REQUEST_RECEIPT_MISSING and CANDIDATE_REQUEST_ROW_TAMPERED mean the ledger row disagrees with durable state — call candidate_status and mint a new key. Reusing a key with different input fails closed. Default rule for ANY error not named here: do not blindly retry — call candidate_status to learn the real state first.",
             inputSchema: {
               type: "object", additionalProperties: false,
-              required: ["mainPath", "task"],
+              required: ["clientRequestId", "mainPath", "task"],
               properties: {
+                clientRequestId: { type: "string", minLength: 36, maxLength: 36 },
                 mainPath: { type: "string", minLength: 1, maxLength: 4_096 },
                 task: { type: "string", minLength: 1, maxLength: MAX_QUESTION_CHARS },
                 acceptanceCriteria: { type: "string", minLength: 1, maxLength: MAX_QUESTION_CHARS },
@@ -446,11 +457,12 @@ export class CollabToolBroker {
           {
             name: "candidate_checkpoint",
             description:
-              "Record a durable checkpoint ref for a clean, committed candidate HEAD owned by this Room/workspace. Uncommitted candidate changes are rejected so the checkpoint always names a recoverable Git snapshot. The canonical main branch/worktree is unchanged, but shared Git refs are mutated. This mutation is not yet request-idempotent: if the MCP response is uncertain, call candidate_status before any retry and do not blindly resend.",
+              "Record a durable checkpoint ref for a clean, committed candidate HEAD owned by this Room/workspace. Uncommitted candidate changes are rejected so the checkpoint always names a recoverable Git snapshot. The canonical main branch/worktree is unchanged, but shared Git refs are mutated. This mutation is request-idempotent: send one stable UUID clientRequestId per logical call and reuse the exact same value on every retry. Retry semantics: an identical retry returns the same result without creating a second artifact. CANDIDATE_REQUEST_IN_FLIGHT means that key is executing right now — wait briefly and retry it. CANDIDATE_REQUEST_FAILED_RETRY_WITH_NEW_KEY means the attempt was judged failed — mint a new key. CANDIDATE_REQUEST_RECEIPT_MISSING and CANDIDATE_REQUEST_ROW_TAMPERED mean the ledger row disagrees with durable state — call candidate_status and mint a new key. Reusing a key with different input fails closed. Default rule for ANY error not named here: do not blindly retry — call candidate_status to learn the real state first.",
             inputSchema: {
               type: "object", additionalProperties: false,
-              required: ["taskId", "summary"],
+              required: ["clientRequestId", "taskId", "summary"],
               properties: {
+                clientRequestId: { type: "string", minLength: 36, maxLength: 36 },
                 taskId: { type: "string", minLength: 36, maxLength: 36 },
                 summary: { type: "string", minLength: 1, maxLength: 2_000 },
               },
@@ -459,11 +471,12 @@ export class CollabToolBroker {
           {
             name: "candidate_complete",
             description:
-              "Complete a clean, committed candidate and return a snapshot preview, tests, known risks, drift warnings, recovery ref, and the one owner-required merge question. Completion does not merge, promote, push, or mutate the canonical main branch/worktree, but it adds a shared Git recovery ref; a later snapshot-bound owner approval is mandatory. This mutation is not yet request-idempotent: if the response is uncertain, recover the stored completion and prompt with candidate_status instead of retrying candidate_complete.",
+              "Complete a clean, committed candidate and return a snapshot preview, tests, known risks, drift warnings, recovery ref, and the one owner-required merge question. Completion does not merge, promote, push, or mutate the canonical main branch/worktree, but it adds a shared Git recovery ref; a later snapshot-bound owner approval is mandatory. This mutation is request-idempotent: send one stable UUID clientRequestId per logical call and reuse the exact same value on every retry. Retry semantics: an identical retry returns the same result without creating a second artifact. CANDIDATE_REQUEST_IN_FLIGHT means that key is executing right now — wait briefly and retry it. CANDIDATE_REQUEST_FAILED_RETRY_WITH_NEW_KEY means the attempt was judged failed — mint a new key. CANDIDATE_REQUEST_RECEIPT_MISSING and CANDIDATE_REQUEST_ROW_TAMPERED mean the ledger row disagrees with durable state — call candidate_status and mint a new key. Reusing a key with different input fails closed. Default rule for ANY error not named here: do not blindly retry — call candidate_status to learn the real state first.",
             inputSchema: {
               type: "object", additionalProperties: false,
-              required: ["taskId", "summary"],
+              required: ["clientRequestId", "taskId", "summary"],
               properties: {
+                clientRequestId: { type: "string", minLength: 36, maxLength: 36 },
                 taskId: { type: "string", minLength: 36, maxLength: 36 },
                 summary: { type: "string", minLength: 1, maxLength: 4_000 },
                 tests: {
@@ -838,7 +851,8 @@ export class CollabToolBroker {
   }
 
   async #candidateStart(input: JsonObject): Promise<string> {
-    this.#allowedKeys(input, ["mainPath", "task", "acceptanceCriteria", "room"], "UNKNOWN_CANDIDATE_START_ARGUMENT");
+    this.#allowedKeys(input, ["clientRequestId", "mainPath", "task", "acceptanceCriteria", "room"], "UNKNOWN_CANDIDATE_START_ARGUMENT");
+    const clientRequestId = requireCandidateRequestId(input.clientRequestId);
     const { collaboration, presenceId, binding } = this.#peerSession();
     if (typeof input.mainPath !== "string" || input.mainPath !== binding.workspace) {
       throw new Error("CANDIDATE_MAIN_PATH_BINDING_MISMATCH");
@@ -849,7 +863,7 @@ export class CollabToolBroker {
       ? undefined
       : requireQuestion(input.acceptanceCriteria);
     const candidate = await collaboration.startCandidate({
-      presenceId, roomId: binding.roomId, workspace: binding.workspace, task,
+      presenceId, clientRequestId, roomId: binding.roomId, workspace: binding.workspace, task,
       ...(acceptanceCriteria === undefined ? {} : { acceptanceCriteria }),
     });
     return JSON.stringify({
@@ -863,14 +877,15 @@ export class CollabToolBroker {
   }
 
   async #candidateCheckpoint(input: JsonObject): Promise<string> {
-    this.#allowedKeys(input, ["taskId", "summary"], "UNKNOWN_CANDIDATE_CHECKPOINT_ARGUMENT");
+    this.#allowedKeys(input, ["clientRequestId", "taskId", "summary"], "UNKNOWN_CANDIDATE_CHECKPOINT_ARGUMENT");
+    const clientRequestId = requireCandidateRequestId(input.clientRequestId);
     if (typeof input.taskId !== "string" || !UUID_PATTERN.test(input.taskId)) {
       throw new Error("INVALID_CANDIDATE_TASK_ID");
     }
     if (typeof input.summary !== "string") throw new Error("INVALID_CANDIDATE_CHECKPOINT_SUMMARY");
     const { collaboration, presenceId, binding } = this.#peerSession();
     const checkpoint = await collaboration.checkpointCandidate({
-      presenceId, roomId: binding.roomId, workspace: binding.workspace,
+      presenceId, clientRequestId, roomId: binding.roomId, workspace: binding.workspace,
       taskId: input.taskId, summary: input.summary,
     });
     return JSON.stringify({
@@ -882,14 +897,15 @@ export class CollabToolBroker {
   }
 
   async #candidateComplete(input: JsonObject): Promise<string> {
-    this.#allowedKeys(input, ["taskId", "summary", "tests", "knownRisks"], "UNKNOWN_CANDIDATE_COMPLETE_ARGUMENT");
+    this.#allowedKeys(input, ["clientRequestId", "taskId", "summary", "tests", "knownRisks"], "UNKNOWN_CANDIDATE_COMPLETE_ARGUMENT");
+    const clientRequestId = requireCandidateRequestId(input.clientRequestId);
     if (typeof input.taskId !== "string" || !UUID_PATTERN.test(input.taskId)) {
       throw new Error("INVALID_CANDIDATE_TASK_ID");
     }
     if (typeof input.summary !== "string") throw new Error("INVALID_CANDIDATE_COMPLETION_SUMMARY");
     const { collaboration, presenceId, binding } = this.#peerSession();
     const completed = await collaboration.completeCandidate({
-      presenceId, roomId: binding.roomId, workspace: binding.workspace,
+      presenceId, clientRequestId, roomId: binding.roomId, workspace: binding.workspace,
       taskId: input.taskId, summary: input.summary,
       ...(input.tests === undefined ? {} : { tests: input.tests }),
       ...(input.knownRisks === undefined ? {} : { knownRisks: input.knownRisks }),
@@ -1621,9 +1637,18 @@ export async function handleCollabMcpMessage(
           "   before candidate_checkpoint or candidate_complete. Candidate completion returns the exact",
           "   snapshot preview and Owner-required merge question but cannot mutate main. Use its taskId on",
           "   room_send to retain candidate linkage. Snapshot-bound main promotion is a later owner gate.",
-          "   Candidate mutations are not request-idempotent yet. If start/checkpoint/complete returns an",
-          "   uncertain transport outcome, call candidate_status first and never blindly resend; status can",
-          "   recover stored tasks, checkpoints, completion preview, and the Owner merge prompt.",
+          "   Candidate mutations are request-idempotent. Mint one stable UUID clientRequestId per logical",
+          "   start/checkpoint/complete and reuse that exact value on any retry: an identical retry returns",
+          "   the same result instead of creating a second candidate, ref, or completion, and reusing the",
+          "   key with different input fails closed. CANDIDATE_REQUEST_IN_FLIGHT means that key is still",
+          "   executing — wait briefly and retry it. CANDIDATE_REQUEST_RECOVERING means an earlier attempt",
+          "   left a half-created candidate still inside its recovery grace — retry the same key later.",
+          "   CANDIDATE_REQUEST_FAILED_RETRY_WITH_NEW_KEY means the attempt was judged failed — mint a new",
+          "   clientRequestId. CANDIDATE_REQUEST_TASK_NO_LONGER_ACTIVE, CANDIDATE_REQUEST_RECEIPT_MISSING",
+          "   and CANDIDATE_REQUEST_ROW_TAMPERED all mean: stop retrying and call candidate_status.",
+          "   RECOVERING and TASK_NO_LONGER_ACTIVE come from candidate_start only. Default rule for any",
+          "   error not listed here: do NOT blindly retry — call candidate_status to learn the real state.",
+          "   candidate_status remains the audit and lookup entry.",
           "3. room_mention {target:'codex'|'claude'|'grok', text} — start a separate provider worker only;",
           "   do not use it when the user asked for an existing terminal seat.",
           "   reference earlier messages as #12 or #40-#45 and their content is injected",

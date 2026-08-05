@@ -213,12 +213,46 @@ output: {
 
 完成時必須凍結 preview 並主動讓 GUI/TUI 詢問是否 merge；不自動 promotion。
 
-目前 `candidate_start`／`candidate_checkpoint`／`candidate_complete` 尚未提供 durable request idempotency。
-若 stdio／transport 回應不確定，Agent 必須先呼叫 `candidate_status` 找回 task、checkpoint、completion
-與原 Owner prompt，不得盲目重送。`candidate_start` 重送會建立額外 candidate，checkpoint 會新增 ref，
-而已成功的 complete 重送可能回 `CANDIDATE_NOT_ACTIVE`。這些 artifact 會保留且可見，canonical main
-branch/worktree 不會被覆寫；但 Phase 5 promotion 前必須補 required stable `clientRequestId`、durable
-request receipt、same-key/same-digest replay 與 crash reconciliation。
+`candidate_start`／`candidate_checkpoint`／`candidate_complete` 均**要求** stable UUID `clientRequestId`，
+每個邏輯呼叫一組、重試時必須沿用完全相同的值。若 stdio／transport 回應不確定，Agent 直接以同一組
+`clientRequestId` 重送即可：同 key 同 digest 會回傳同一個結果，不會建立第二個 candidate、checkpoint ref
+或 completion。同 key 搭配不同 operation、room 或 input 會以 `CANDIDATE_REQUEST_IDEMPOTENCY_CONFLICT`
+fail closed 且不執行任何 mutation。
+
+識別碼（taskId／candidateId／checkpointId／completionId）在 reserve 階段即鑄造並持久化，程序在 mutation
+中途崩潰後的重試會沿用同一組識別碼而收斂；答案一律從 durable state 重建，而非回放快取的 payload。
+`candidate_status` 仍是查詢與稽核入口，但不再是重試前的必要步驟。canonical main branch/worktree 在上述
+任何路徑都不會被覆寫。
+
+重試時可能遇到下列狀態碼，每一個都有明確的下一步：
+
+| 狀態碼 | 意義 | 下一步 |
+|---|---|---|
+| `CANDIDATE_REQUEST_IN_FLIGHT` | 同一把 key **此刻正在執行**。由記憶體內精確鎖判定，非時間窗。 | 稍候以**同一把 key** 重試 |
+| `CANDIDATE_REQUEST_RECOVERING` | 先前嘗試留下半建立的 candidate，仍在 `CREATING_RECOVERY_GRACE_MS`（5 分鐘）回收寬限內，或其建立者程序仍存活。**這一項由 wall clock 與建立者的 pid liveness 共同決定**，與記憶體鎖無關；等待是有界的，且寬限過後同一把 key 會收斂到原本那個 candidate，不需要鑄新 key。 | 稍後以同一把 key 重試；若之後回 `FAILED_RETRY_WITH_NEW_KEY` 則改鑄新 key |
+| `CANDIDATE_REQUEST_FAILED_RETRY_WITH_NEW_KEY` | 該 key 的嘗試已被判定失敗。 | **鑄造新的 `clientRequestId`**，不要對舊 key 重試 |
+| `CANDIDATE_REQUEST_TASK_NO_LONGER_ACTIVE` | 這把 key 建立的 task 已離開 `active`（已完成／已處置）。 | 改呼叫 `candidate_status`，不要重試 |
+| `CANDIDATE_REQUEST_RECEIPT_MISSING` | ledger 記為成功但 durable artifact 不存在。 | 呼叫 `candidate_status` 釐清後鑄新 key |
+| `CANDIDATE_REQUEST_ROW_TAMPERED` | 該列完整性驗證失敗，只毒化這把 key。 | 鑄造新 key；其他 key 不受影響 |
+| `CANDIDATE_REQUEST_IDEMPOTENCY_CONFLICT` | 同 key 但 operation／room／input 不同。 | 檢查呼叫端邏輯；未執行任何 mutation |
+
+跨程序併發另有兩點須知：每個 MCP seat 是獨立 OS process，記憶體鎖只涵蓋自己那一個；跨 process 的同 key
+競賽由 reservation 的不透明 `owner_token` 擋下（不從時鐘推導，且**每一個帳本寫入都必須帶 token**），輸家收到的可能是下游儲存層的原始錯誤訊息而非上述穩定碼。**未列於上表的錯誤一律不要盲目重試——先呼叫 `candidate_status` 確認真實狀態。**
+
+本次呼叫自己建立、且未產生任何 durable artifact 就中止的嘗試（例如 candidate worktree 不 clean）會刪除該
+保留，因此同一把 key 可以立即重用。**採用他人保留的嘗試不適用**：該保留可能已擁有 candidate row、worktree
+或 recovery ref，因此即使當次沒產生成果也會留下 `pending` 列。recovery ref 建立失敗會記為 `failed`，即使當次
+沒有產生任何成果。`CANDIDATE_REQUEST_RECOVERING` 與 `CANDIDATE_REQUEST_TASK_NO_LONGER_ACTIVE` 只由
+`candidate_start` 產生。
+
+帳本沒有 TTL 也沒有 prune：每一筆已結算的請求都保留該列，好讓遲到的重試仍能被回答。成長由合法呼叫量決定
+（格式錯誤或未知 taskId 不會增長帳本），並由 `inventory()` 的 `requests`／`requestsPending` 曝露。
+
+**Key 的範圍是 room，不是 seat。** `client_request_id` 單獨作為主鍵，`actor` 只記錄不參與比對。這是刻意的：
+presence lease 逾時後重連會重鑄 seat display name，若把它放進 key，斷線重連後的重試——也就是這個機制唯一
+存在的理由——反而會鑄出第二個 candidate。殘餘風險是同一 Room 內若有席位取得他人的 `clientRequestId`，
+可觸發一次 replay 並看到同一份結果；Room 成員資格本身即為授權邊界，且 replay 只能取回與原請求完全相同的
+內容，無法變更任何狀態。
 
 ### `candidate_status`（已實作）
 

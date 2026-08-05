@@ -213,8 +213,10 @@ candidate checkpoint 是乾淨 commit、回傳 drift/diff/test/risk/recovery pre
 問題；這些工具不改 canonical main branch/worktree，但 checkpoint 會建立 shared Git recovery ref。尚待真實
 Codex＋Claude Code 雙 MCP stdio host 驗收、安全切換，
 以及下一階段 snapshot-bound main merge decision／promotion。Worker 回覆不得宣稱成 live terminal 回覆。
-Candidate mutation 尚未 request-idempotent；transport 結果不確定時必須先用 `candidate_status` 找回結果，
-不可盲目重送。Durable request receipt 是 Phase 5 promotion 前的阻斷項。
+Candidate mutation 已具 durable request idempotency：三個工具都要求 stable UUID `clientRequestId`，
+transport 結果不確定時以同一把 key 重送即可收斂，不會產生第二個 candidate、checkpoint ref 或 completion；
+跨 OS process 的同 key 併發由 reservation 的不透明 owner token 擋下。
+`candidate_status` 仍是查詢與稽核入口，但不再是重試前的必要步驟。
 
 把 Claude Code 或 Codex 原生介面當 host，Orchestratory 提供唯讀 worker 工具：
 

@@ -469,6 +469,7 @@ export class CollaborationService {
 
   async startCandidate(input: {
     presenceId: string;
+    clientRequestId: unknown;
     roomId: string;
     workspace: string;
     task: string;
@@ -477,6 +478,8 @@ export class CollaborationService {
     this.#assertRoomWorkspace(input.roomId, input.workspace);
     const actor = this.externalActor(input.presenceId, input.roomId);
     const candidate = await this.candidates.start({
+      actor,
+      clientRequestId: input.clientRequestId,
       roomId: input.roomId,
       mainPath: input.workspace,
       task: input.task,
@@ -506,6 +509,7 @@ export class CollaborationService {
 
   async checkpointCandidate(input: {
     presenceId: string;
+    clientRequestId: unknown;
     roomId: string;
     workspace: string;
     taskId: string;
@@ -514,6 +518,8 @@ export class CollaborationService {
     this.#assertRoomWorkspace(input.roomId, input.workspace);
     const actor = this.externalActor(input.presenceId, input.roomId);
     const checkpoint = await this.candidates.checkpoint({
+      actor,
+      clientRequestId: input.clientRequestId,
       taskId: input.taskId,
       roomId: input.roomId,
       mainPath: input.workspace,
@@ -532,6 +538,7 @@ export class CollaborationService {
 
   async completeCandidate(input: {
     presenceId: string;
+    clientRequestId: unknown;
     roomId: string;
     workspace: string;
     taskId: string;
@@ -542,6 +549,8 @@ export class CollaborationService {
     this.#assertRoomWorkspace(input.roomId, input.workspace);
     const actor = this.externalActor(input.presenceId, input.roomId);
     const result = await this.candidates.complete({
+      actor,
+      clientRequestId: input.clientRequestId,
       taskId: input.taskId,
       roomId: input.roomId,
       mainPath: input.workspace,
