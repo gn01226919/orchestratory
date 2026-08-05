@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { request as httpRequest } from "node:http";
+import { runInNewContext } from "node:vm";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
@@ -9,6 +10,8 @@ import { basename, join } from "node:path";
 import { createAppContext } from "../src/app.ts";
 import { startWebServer } from "../src/ui/web.ts";
 import { GitBroker } from "../src/core/git-broker.ts";
+import { isNoCostProvider } from "../src/providers/billing.ts";
+import { ALL_PROVIDER_IDS } from "../src/providers/selection.ts";
 import { WorktreeBroker } from "../src/core/worktree-broker.ts";
 import { RoomPresenceStore } from "../src/core/room-presence.ts";
 import { RoomLedger } from "../src/core/room-ledger.ts";
@@ -1402,6 +1405,52 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(appScript, /function restoreProposalCard\(/u);
   assert.match(appScript, /const snapshotApproved = Boolean\(snapshot\) && window\.confirm\(/u);
   assert.match(appScript, /已取消，主專案與安全分支都沒有變更。/u);
+
+  // ── P0-3: the main-workspace apply-back must carry the same friction as room.js ──
+  // The old flow wrote into the main project behind a single window.confirm: no risk level,
+  // no change content, no phrase. Two write-into-main paths, one strict and one loose, damage
+  // trust more than either level of strictness on its own.
+  assert.doesNotMatch(appScript, /協作完成，是否把安全分支套用回主專案/u);
+  assert.doesNotMatch(appScript, /confirmation: "APPLY BACK TO SOURCE"/u);
+  // Ceiling, not a spot check: the three remaining native confirms are other findings
+  // (chat consent, run consent, dirty-snapshot import). A fourth one must fail this test.
+  assert.equal((appScript.match(/window\.confirm\(/gu) ?? []).length, 3);
+  // The highest-risk dialog must not open itself and burn the 120s preview TTL unasked.
+  assert.doesNotMatch(appScript, /setTimeout\(\(\) => \{ void card\.autoApplyBack/u);
+  assert.match(appScript, /要寫回主專案時按「套用回主專案」/u);
+
+  const applyBackStart = appScript.indexOf("apply-back approval dialog (main workspace)");
+  assert.ok(applyBackStart > 0, "app.js must carry the main-workspace apply-back approval dialog");
+  const applyBackScript = appScript.slice(applyBackStart);
+  // No native dialog may gate this path either: they can be permanently silenced, they freeze
+  // the page, and a TTL countdown is physically impossible underneath them.
+  assert.doesNotMatch(applyBackScript, /window\.(?:alert|confirm|prompt)\s*\(/u);
+  assert.doesNotMatch(applyBackScript, /(?<![.\w])(?:alert|confirm|prompt)\s*\(/u);
+  // Same semantic phrase as room.js, bilingual, carrying no identifier to transcribe.
+  assert.match(applyBackScript, /const APPLY_BACK_CONFIRMATION_PHRASE = "MERGE INTO MAIN";/u);
+  assert.match(applyBackScript, /const APPLY_BACK_API_CONFIRMATION = "APPLY BACK TO SOURCE";/u);
+  // Risk reasons are listed one by one; a bare level would hide a 200-file overwrite.
+  assert.match(applyBackScript, /preview\.risk\.reasons/u);
+  assert.match(applyBackScript, /風險原因 · Risk reason/u);
+  // Scroll-gate plus the type-to-enable input, wired to both scroll and details toggle.
+  assert.match(applyBackScript, /byId\("apply-back-diff"\)\.addEventListener\("scroll"/u);
+  assert.match(applyBackScript, /byId\("apply-back-diff"\)\.addEventListener\("toggle"/u);
+  assert.match(applyBackScript, /if \(input\.value !== gate\.inputValue\) input\.value = gate\.inputValue;/u);
+  assert.match(applyBackScript, /input\.disabled = gate\.inputDisabled;/u);
+  assert.match(applyBackScript, /confirmButton\.disabled = gate\.confirmDisabled;/u);
+  // Blocking section above the change content, TTL countdown, cancel takes default focus.
+  assert.match(applyBackScript, /blocking\.hidden = view\.blockers\.length === 0;/u);
+  assert.match(applyBackScript, /setInterval\(tickApplyBackTtl, 1000\)/u);
+  assert.match(applyBackScript, /已逾時 · expired/u);
+  assert.match(applyBackScript, /byId\("apply-back-cancel"\)\.focus\(\);/u);
+  // The change content itself, and a failure to load it is a blocker rather than a hint.
+  assert.match(applyBackScript, /kind=diff/u);
+  assert.match(applyBackScript, /看不到要寫回什麼就不可核准/u);
+  // A refused apply-back discards the preview so the whole gate has to be passed again.
+  assert.match(applyBackScript, /view\.preview = null;\n {4}view\.diffState = "idle";/u);
+  // It reuses the existing .workspace-onboarding / .merge-approval component, not a new one.
+  assert.match(applyBackScript, /"workspace-onboarding merge-approval"/u);
+  assert.match(applyBackScript, /"workspace-onboarding-card merge-approval-card"/u);
   const roomStylesResponse = await fetch(`${server.url}/styles.css`);
   assert.equal(roomStylesResponse.status, 200);
   const roomStyles = await roomStylesResponse.text();
@@ -1420,6 +1469,11 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomStyles, /\.conn \.conn-action/u);
   assert.match(roomStyles, /\.presence-stage\.is-waiting/u);
   assert.match(roomStyles, /\.office-notification-action/u);
+  // The apply-back dialog shares the merge-approval rules instead of duplicating them.
+  assert.match(roomStyles, /#merge-approval-confirm-area, #apply-back-confirm-area/u);
+  assert.match(roomStyles, /#merge-approval-confirmation, #apply-back-confirmation/u);
+  assert.match(roomStyles, /#merge-approval-restore, #apply-back-restore/u);
+  assert.match(roomStyles, /\.apply-back-diff-text/u);
 
   // ── Phase 5-3 bar item 6: the merge-into-main approval dialog ──────────────
   // The highest-risk pending action gets the same global count badge as agent requests.
@@ -1969,4 +2023,218 @@ test("Web dashboard cancels only the exact active Writer run", async (t) => {
   assert.equal(cancelled.status, 200, await cancelled.clone().text());
   assert.equal((await running).status, 400);
   assert.equal(cancelObserved, true);
+});
+
+/*
+ * PITFALLS #83: asserting that a source line exists proves nothing about whether it ever runs.
+ * The apply-back gate is therefore written as a DOM-free block that this test actually executes,
+ * so every claim below is about behaviour. The repository has no DOM runner (D-006), so the
+ * DOM wiring around this block still needs manual browser acceptance.
+ */
+test("Main-workspace apply-back gate behaves correctly when executed", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const start = source.indexOf("/* @pure-start apply-back-gate");
+  const end = source.indexOf("/* @pure-end apply-back-gate */");
+  assert.ok(start > 0 && end > start, "public/app.js must expose the DOM-free apply-back gate block");
+  const block = source.slice(start, end);
+  // Executing a slice only proves behaviour if the slice really is free of DOM, network and timers.
+  // Matched on use, not on the words themselves, so bilingual copy may still say "window".
+  assert.doesNotMatch(
+    block,
+    /(?:\b(?:document|window|navigator|localStorage|state)\s*\.|\b(?:fetch|byId|api|setInterval|setTimeout|require|import)\s*\()/u,
+  );
+
+  const gate = runInNewContext(
+    `${block}\n({ applyBackGate, applyBackBlockers, applyBackScrolledToBottom, applyBackRisk,`
+    + " formatApplyBackCountdown, formatApplyBackBytes, APPLY_BACK_CONFIRMATION_PHRASE });",
+    Object.create(null) as object,
+    { timeout: 2_000 },
+  ) as {
+    applyBackGate: (view: unknown) => {
+      ready: boolean;
+      inputDisabled: boolean;
+      inputValue: string;
+      confirmDisabled: boolean;
+      hint: string;
+    };
+    applyBackBlockers: (view: unknown) => string[];
+    applyBackScrolledToBottom: (metrics: unknown) => boolean;
+    applyBackRisk: (preview: unknown, blockerCount: number) => { key: string; text: string };
+    formatApplyBackCountdown: (ms: number) => string;
+    formatApplyBackBytes: (bytes: unknown) => string;
+    APPLY_BACK_CONFIRMATION_PHRASE: string;
+  };
+
+  // The phrase is the same semantic one room.js uses, and carries no identifier to transcribe.
+  assert.equal(gate.APPLY_BACK_CONFIRMATION_PHRASE, "MERGE INTO MAIN");
+
+  const passing = { blockers: [], scrolled: true, decided: false, typed: "MERGE INTO MAIN" };
+  const open = gate.applyBackGate(passing);
+  assert.equal(open.ready, true);
+  assert.equal(open.inputDisabled, false);
+  assert.equal(open.confirmDisabled, false);
+
+  // Scroll-gate: without having reached the bottom the input is disabled and its value is wiped,
+  // so a phrase typed before the content was read cannot survive into an approval.
+  const unread = gate.applyBackGate({ ...passing, scrolled: false });
+  assert.equal(unread.ready, false);
+  assert.equal(unread.inputDisabled, true);
+  assert.equal(unread.inputValue, "");
+  assert.equal(unread.confirmDisabled, true);
+  assert.match(unread.hint, /捲到底/u);
+
+  // A blocking item holds both controls down even when everything else is satisfied.
+  const blocked = gate.applyBackGate({ ...passing, blockers: ["衝突"] });
+  assert.equal(blocked.inputDisabled, true);
+  assert.equal(blocked.inputValue, "");
+  assert.equal(blocked.confirmDisabled, true);
+  assert.match(blocked.hint, /阻擋區/u);
+
+  // An already decided apply-back cannot be decided a second time.
+  const decided = gate.applyBackGate({ ...passing, decided: true });
+  assert.equal(decided.confirmDisabled, true);
+  assert.equal(decided.inputDisabled, true);
+  assert.match(decided.hint, /已經有結果/u);
+
+  // Near misses must not open the gate.
+  for (const typed of ["", "merge into main", "MERGE INTO MAIN ", " MERGE INTO MAIN", "MERGE  INTO MAIN", "MERGE INTO MAI"]) {
+    assert.equal(gate.applyBackGate({ ...passing, typed }).confirmDisabled, true, typed);
+  }
+  // Missing and malformed inputs fail closed rather than open.
+  assert.equal(gate.applyBackGate(undefined).confirmDisabled, true);
+  assert.equal(gate.applyBackGate({}).confirmDisabled, true);
+
+  // Scroll detection, including the 4px tolerance and unusable metrics.
+  assert.equal(gate.applyBackScrolledToBottom({ scrollTop: 0, clientHeight: 100, scrollHeight: 400 }), false);
+  assert.equal(gate.applyBackScrolledToBottom({ scrollTop: 200, clientHeight: 100, scrollHeight: 400 }), false);
+  assert.equal(gate.applyBackScrolledToBottom({ scrollTop: 297, clientHeight: 100, scrollHeight: 400 }), true);
+  assert.equal(gate.applyBackScrolledToBottom({ scrollTop: 300, clientHeight: 100, scrollHeight: 400 }), true);
+  // Content shorter than the viewport is already at the bottom.
+  assert.equal(gate.applyBackScrolledToBottom({ scrollTop: 0, clientHeight: 400, scrollHeight: 120 }), true);
+  assert.equal(gate.applyBackScrolledToBottom(null), false);
+  assert.equal(gate.applyBackScrolledToBottom({}), false);
+
+  const now = Date.parse("2026-01-01T00:00:00.000Z");
+  const preview = {
+    id: "preview",
+    expiresAt: new Date(now + 60_000).toISOString(),
+    files: 2,
+    changes: [{ path: "a" }, { path: "b" }],
+    risk: { level: "medium", reasons: ["1 個既有檔案內容將被覆寫"] },
+  };
+  // A complete, unexpired preview with loaded content blocks nothing.
+  assert.equal(gate.applyBackBlockers({ preview, diffState: "loaded", applying: false, now }).length, 0);
+  assert.equal(gate.applyBackGate({ ...passing, blockers: [] }).confirmDisabled, false);
+  // Every one of these is a blocker, and each one alone keeps the gate shut.
+  const cases: Array<[string, unknown]> = [
+    ["no preview", { preview: null, diffState: "loaded", now }],
+    ["expired preview", { preview: { ...preview, expiresAt: new Date(now - 1).toISOString() }, diffState: "loaded", now }],
+    ["unparsable expiry", { preview: { ...preview, expiresAt: "not-a-date" }, diffState: "loaded", now }],
+    ["change content failed", { preview, diffState: "failed", now }],
+    ["change content still loading", { preview, diffState: "loading", now }],
+    ["truncated change list", { preview: { ...preview, files: 5 }, diffState: "loaded", now }],
+    ["already applying", { preview, diffState: "loaded", applying: true, now }],
+  ];
+  for (const [name, view] of cases) {
+    const blockers = gate.applyBackBlockers(view);
+    assert.ok(blockers.length > 0, name);
+    assert.equal(gate.applyBackGate({ ...passing, blockers }).confirmDisabled, true, name);
+    assert.equal(gate.applyBackGate({ ...passing, blockers }).inputDisabled, true, name);
+  }
+
+  // Risk level: any blocker forces HIGH, and an unknown or missing level fails closed to HIGH.
+  assert.equal(gate.applyBackRisk({ risk: { level: "low" } }, 0).key, "low");
+  assert.equal(gate.applyBackRisk({ risk: { level: "medium" } }, 0).key, "medium");
+  assert.equal(gate.applyBackRisk({ risk: { level: "high" } }, 0).key, "high");
+  assert.equal(gate.applyBackRisk({ risk: { level: "low" } }, 1).key, "high");
+  assert.equal(gate.applyBackRisk({ risk: { level: "toString" } }, 0).key, "high");
+  assert.equal(gate.applyBackRisk({ risk: {} }, 0).key, "high");
+  assert.equal(gate.applyBackRisk(null, 0).key, "high");
+  assert.match(gate.applyBackRisk({ risk: { level: "medium" } }, 0).text, /中風險 · MEDIUM/u);
+
+  // The countdown room.js proved window.prompt could never show.
+  assert.equal(gate.formatApplyBackCountdown(125_000), "02:05");
+  assert.equal(gate.formatApplyBackCountdown(0), "00:00");
+  assert.equal(gate.formatApplyBackCountdown(-5_000), "00:00");
+  assert.equal(gate.formatApplyBackBytes(512), "512 B");
+  assert.equal(gate.formatApplyBackBytes(2_048), "2.0 KB");
+  assert.equal(gate.formatApplyBackBytes("nope"), "—");
+});
+
+/*
+ * The GUI used to hard-code "everything except fake costs quota". When the local
+ * loopback provider became a selectable planner/reviewer, that line started telling
+ * the owner their no-cost run would spend subscription quota — the exact opposite of
+ * why they picked it. The browser cannot import the TypeScript billing table, so the
+ * mirrored constant is compared against it here: drift fails this test.
+ */
+test("the dashboard bundle stays in sync with the provider billing table", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const match = source.match(/const NO_COST_PROVIDER_IDS = Object\.freeze\((\[[^\]]*\])\)/u);
+  assert.ok(match?.[1], "NO_COST_PROVIDER_IDS literal not found in public/app.js");
+  const mirrored = JSON.parse(match[1]) as string[];
+  assert.deepEqual(mirrored, ALL_PROVIDER_IDS.filter((id) => isNoCostProvider(id)));
+  // The list must exist exactly once: a second hard-coded copy is what caused the bug.
+  assert.equal(source.includes('provider !== "fake"'), false);
+  assert.equal(source.includes('item.provider !== "fake"'), false);
+  assert.equal(source.includes('team.writer.provider === "fake"'), false);
+});
+
+/*
+ * And the copy itself, executed rather than grepped: picking only no-cost providers
+ * must produce no quota warning at all, not a softer one.
+ */
+test("no-cost provider selections produce no subscription-quota copy", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const start = source.indexOf("/* @pure-start provider-cost");
+  const end = source.indexOf("/* @pure-end provider-cost */");
+  assert.ok(start >= 0 && end > start, "public/app.js must expose the DOM-free provider-cost block");
+  const block = source.slice(start, end);
+  assert.doesNotMatch(
+    block,
+    /(?:\b(?:document|window|navigator|localStorage|state)\s*\.|\b(?:fetch|byId|api|setInterval|setTimeout)\s*\()/u,
+  );
+  const cost = runInNewContext(
+    `${block}\n({ isNoCostProvider, teamUsesPaidQuota, quotaFactValue, runConsentMessage, chatConsentMessage,`
+    + " NO_COST_PROVIDER_IDS });",
+    Object.create(null) as object,
+    { timeout: 2_000 },
+  ) as {
+    isNoCostProvider: (id: unknown) => boolean;
+    teamUsesPaidQuota: (members: unknown) => boolean;
+    quotaFactValue: (members: unknown) => string;
+    runConsentMessage: (members: unknown) => string;
+    chatConsentMessage: (id: unknown) => string;
+    NO_COST_PROVIDER_IDS: readonly string[];
+  };
+
+  for (const id of ALL_PROVIDER_IDS) {
+    assert.equal(cost.isNoCostProvider(id), isNoCostProvider(id), id);
+  }
+  // An id the browser has never heard of is treated as billed, never as free.
+  for (const unknown of ["", "future-provider", undefined, null, 42]) {
+    assert.equal(cost.isNoCostProvider(unknown), false, String(unknown));
+  }
+
+  const local = { provider: "local" };
+  const fake = { provider: "fake" };
+  const codex = { provider: "codex" };
+  // The exact combination the reviewer drove in a real browser: planner and reviewer
+  // local, writer fake. No dialog at all, and the fact row says the quota is not used.
+  const noCostTeam = [local, fake, local];
+  assert.equal(cost.teamUsesPaidQuota(noCostTeam), false);
+  assert.equal(cost.runConsentMessage(noCostTeam), "");
+  assert.equal(cost.quotaFactValue(noCostTeam), "不使用");
+  // One billed member anywhere in the team brings the warning back, with the quota wording.
+  for (const team of [[codex, fake, local], [local, codex, local], [local, fake, codex]]) {
+    assert.equal(cost.teamUsesPaidQuota(team), true);
+    assert.match(cost.runConsentMessage(team), /訂閱額度/u);
+    assert.equal(cost.quotaFactValue(team), "訂閱");
+  }
+  // Same rule for the conversation's first call.
+  assert.equal(cost.chatConsentMessage("local"), "");
+  assert.equal(cost.chatConsentMessage("fake"), "");
+  assert.match(cost.chatConsentMessage("codex"), /訂閱額度/u);
+  assert.match(cost.chatConsentMessage("claude"), /訂閱額度/u);
+  assert.match(cost.chatConsentMessage("unknown"), /訂閱額度/u);
 });
