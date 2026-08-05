@@ -207,54 +207,149 @@ Phase 5-1 在**沒有通過標準**的情況下跑了十輪對抗式審查，十
 測試涵蓋。**仍然是手動驗收**，只是現在有東西會在它過期時叫你。真正的修補是 DOM 測試執行器（D-006，
 待 Owner 裁決：新增執行期相依＋SBOM 變更）。
 
-## Phase 5-5 通過標準（開工前先訂，2026-08-06）
+## Phase 5-5 通過標準（開工前先訂，2026-08-06；**同日修訂 v2**）
 
 **5-5 是第一個真的寫入 canonical main 的操作。** 前面每一階段失敗的代價是浪費一個 worktree；
-從這裡開始，失敗的代價是 Owner 的主專案。標準先訂的理由不是儀式：5-1 沒有先訂，跑了十一輪，
-因為終點線每一輪都往後移一點。
+從這裡開始，失敗的代價是 Owner 的主專案。
 
-**審查員只准對照下列清單裁決。** 認為標準本身有漏洞是獨立的一項發現，要分開講，不得拿來當不通過的理由。
+**v2 修訂的理由**：v1 寫好後、實作開工前，派了一位審查員專門攻擊這份標準本身
+（做法源自 5-4 的教訓——5-4 的標準也是開工前先訂的，仍有三項是靠措辭漏洞過關）。
+它在臨時 repo 上用真實 git 跑出三個實測，證明 v1 **可以被完整滿足、同時弄壞 Owner 的主專案**：
+
+- **實測 A**：main 的 `git status --porcelain` **完全乾淨**（滿足 v1 的「工作樹不乾淨時拒絕」），
+  `git merge` 仍**靜默覆蓋** Owner 的 ignored 檔案內容，零警告零衝突。
+- **實測 B**：接著用 `git reset --hard <前一個 HEAD>` 回滾——那個檔案**直接消失**，
+  不是還原成原內容。v1 第 4 項的「工作樹回到操作前的狀態」用最自然的實作方式**證明做不到**，
+  而 v1 列的四種失敗測試沒有一種會設置出這個情境。
+- **實測 C**：在 `pre-merge-commit` hook 執行中 `kill -9` 掉 git。結果 **HEAD 沒動、沒有 `MERGE_HEAD`、
+  `git merge --abort` 用不了**，但 **index 與工作樹已被完整改寫**，`git status` 顯示成一般的
+  「Changes to be committed」——**與 Owner 自己 stage 的工作在位元層級無法區分**。
+  隨後一次無關的 `git commit` 把那次半套用的 merge **靜默包了進去**。
+  這正是不變式宣稱不存在的狀態，而 v1 的四個中斷點照字面測**會給出綠燈**。
+
+另已實測：**candidate worktree 可經 `git config --local` 直接寫進 main 的 `.git/config`**
+（linked worktree 共用 common dir）。因此一個 Native Full-Trust 終端 agent 可以在 preview 之後、
+promotion 之前設定 `core.hooksPath` 指向 candidate 內的檔案，**promotion 會以 Owner 身分、
+無沙箱、無逾時執行它**。5-5 是第一個執行 `.git` 內程式碼的階段，這是它引入的新信任邊界。
+
+**審查員只准對照下列清單裁決。** 認為標準仍有漏洞是獨立的一項發現，要分開講。
 
 ### 不變式
 
-一次 promotion 的結果只能是兩者之一：**完整套用到 main 並被記錄**，或 **main 與 candidate 都回到操作前的狀態**。
-不存在「部分套用而且沒有人知道」的中間態。系統在任何崩潰點重啟後，都必須能明確說出
-**已套用 ／ 未套用 ／ 需要人工檢查**三者之一——**「需要人工檢查」是合格答案，「我不知道但幫你重試一次」不是。**
+一次 promotion 的結果只能是兩者之一：**完整套用到 main 並被記錄**，或
+**main 與 candidate 都回到操作前的狀態並被記錄**。不存在「部分套用而且沒有人知道」的中間態。
 
-### 通過標準（六項，全部成立才算通過）
+**在對 main 執行第一個會寫入的 Git 指令之前，必須先持久化一筆 `promoting` 意圖紀錄**，內含：
+approvalId、pre-HEAD、**pre-index 指紋、pre-工作樹指紋（含 ignored 路徑與其內容雜湊）**、
+以及將被執行的 hook 清單與其內容雜湊。任何崩潰點重啟後，系統只從 durable 狀態重建答案，
+並回報**已套用／未套用／需要人工檢查**三者之一。
+**「需要人工檢查」是合格答案，「我不確定，所以幫你重試一次」不是。**
 
-1. **只有仍描述現況的核准能寫入 main。** 消耗核准與寫入 main 必須是同一個不可分割的決定：
-   「核准已消耗但 main 沒被寫」與「main 已被寫但核准沒被消耗」在**任何**崩潰點都不得存在。
-   須以真實中止證明（見第 2 項），不得只用單元測試模擬。
+**重啟後的 reconciliation 一律唯讀**：可以讀 Git、比對指紋、回報，但**不得對 main 執行任何寫入型
+Git 指令**（不得 `reset`、`checkout`、`merge --abort`、`clean`、`stash`、改 `.git/config`、刪任何 `*.lock`）。
+復原動作一律由 Owner 在看到具名差異後手動執行。
+（理由：v1 只禁「自行重試」沒禁「自行回滾」，而依實測 C，自動回滾無法區分半套用的 index 與
+Owner 自己的工作，`git clean` 更會刪掉未追蹤與 ignored 檔案——這是 v1 之下最可能真實發生的災難。）
 
-2. **崩潰安全，用真實的 kill 證明。** 在 promotion 的每一個可中斷點（至少：核准消耗後／checkout 前、
-   merge 寫入中、hook 執行中、記錄寫入前）以真實訊號強制中止，重啟後：
-   - 系統回報上述三種明確狀態之一
-   - **不得自行重試**把「不確定」變成一次寫入
-   - candidate 與 recovery ref 完好，Owner 有一條寫得出來的復原路徑
+### 通過標準（十項，全部成立才算通過）
+
+1. **只有仍描述現況的核准能寫入 main，且 promotion 是有意圖紀錄的兩段式操作。**
+   順序固定為：驗證綁定 → 寫入 `promoting` 意圖紀錄（含全部 pre-op 指紋）→ 消耗核准 → 寫 main →
+   寫入終局結果。**任何相鄰兩步之間的崩潰都必須能由意圖紀錄唯一決定後續判讀**，結果必須是三態之一。
+   以下四個窗各以真實 `kill -9` 驗證一次：意圖紀錄寫入中、核准消耗的 SQLite 寫入中、merge 寫入中、
+   終局結果寫入中。
+   **核准一旦消耗即為終局，任何路徑都不得把它改回 `approved` 或重新發放 token**——
+   失敗時 Owner 重新 preview 再問一次，這是刻意的摩擦。
+   （SQLite 交易與 Git commit 不可能是同一個原子單位，所以 v1 要求的「兩者不得同時存在」
+   沒有任何實作能真的滿足；正確的形狀是寫前意圖紀錄＋確定性收斂，這也正是 `CLAUDE.md`
+   對 apply-back 早已寫下的規則「必須先持久化進入 `applying` 才能修改主專案」。）
+
+2. **崩潰安全，用真實的 kill 證明，且必須在新的 OS 程序中重啟。**
+   可中斷點至少：核准消耗後／checkout 前、**merge 已寫入 index 與工作樹但尚未 commit（hook 執行中）**、
+   merge commit 寫入中、hook 執行中且該 hook 會修改工作樹、記錄寫入前。
+   每一個中斷點都必須：
+   - 以 `kill -9` 對**真實 OS 程序**執行，重啟必須是**另一個新程序**，答案只能從 durable 狀態重建；
+     **不得在同一程序內呼叫 reconcile 函式冒充重啟**。
+   - 回報三態之一，**且在「需要人工檢查」時具名列出 main 目前與 pre-op 指紋不同的每一個面向**
+     （HEAD／index／工作樹路徑／ignored 路徑／殘留的 `MERGE_HEAD`、`AUTO_MERGE`、`index.lock`）。
+     **「需要人工檢查」而不說出哪裡不同，等同不合格。**
+   - **不得自行重試，也不得自行回滾。**
+   - candidate 與 recovery ref 完好，Owner 有一條**可複製貼上的**復原指令。
+   - **promotion 啟動的所有子程序（含 hook 及其子孫）必須在結束或中止時被證明已終止**
+     （斷言整個 PGID 消失）。實測 C 顯示 git 被 kill 之後 hook 的子程序仍然活著。
 
 3. **關閉前置條件 3／4／5／6，每一項各有測試。**
-   - **Hooks**：真實 merge 會執行 repo 設定的 hook 而 preview 不會。
-     **必須實測 hook 真的被執行過**（例如 hook 寫檔案，斷言檔案存在），不得只斷言「有傳 `--no-verify`」。
-   - **main 工作樹不乾淨時拒絕**：`mergeable: true` 只代表沒有內容衝突。
-   - **ignored 檔案內容會被覆蓋的情況，必須在核准前呈現給 Owner**。
-     `mainIgnoredFingerprint` 目前只涵蓋路徑不涵蓋內容，這一項在此失效，必須補上或明確讓 Owner 看見風險。
-   - **preview 重算必須有節流與明確的逾時行為**：目前每次觀察重算完整 preview、30 秒 deadline，
-     大 repo 會持續逾時。逾時必須是可讀的狀態，不得表現為靜默失效。
+   - **Hooks**：必須實測 hook 真的被執行過（hook 寫檔案，斷言檔案存在），且必須**各別**實測
+     `pre-merge-commit` 非零退出與 `post-merge` 非零退出，並**斷言失敗後 main 的 index 與工作樹
+     已回到 pre-op 指紋**。hook 必須有**明確的逾時、輸出上限與程序樹終止**，以一個會掛住的 hook 實測。
+     **`core.hooksPath`、`.git/hooks/**` 的內容雜湊、`merge.*.driver` 與 `filter.*.clean/smudge`
+     設定必須納入 approval 綁定**，並在核准畫面上**逐項列出本次會執行的 hook 檔名與雜湊**。
+   - **main 工作樹不乾淨時拒絕**：「乾淨」必須明文定義，且必須**同時**排除：`git status --porcelain` 非空、
+     存在 `skip-worktree`／`assume-unchanged` 項目、啟用 sparse-checkout、存在 `MERGE_HEAD`／
+     `REBASE_HEAD`／`CHERRY_PICK_HEAD`／`index.lock`、存在 submodule 且其工作樹非乾淨、
+     `.gitattributes` 或 `.git/config` 含 `filter=lfs` 或任何 `clean`／`smudge` filter。各有一條拒絕測試。
+     （已實測：`git update-index --skip-worktree` 讓 `status` 完全空白，真實 merge 卻以 exit 2 中止，
+     且**每次重試都會以同樣方式失敗**——第 4 項的「恢復後可重新成功」在此形狀下永遠為假。）
+   - **ignored 檔案內容**：`mainIgnoredFingerprint` **必須升級為涵蓋內容**（在既有 30 秒串流雜湊預算內），
+     並在核准畫面上**逐一列出**「這次合併會覆蓋的 ignored 檔案路徑」。
+     **「顯示一句通用警告」不滿足本項**——一行常數文案是 PITFALLS #86 的同形違反。
+     必須有一條測試：main 有一個 ignored 檔案、candidate 的 commit 含同路徑，
+     斷言在核准前就具名呈現，且 Owner 未確認即拒絕。
+   - **preview 重算節流**：逾時必須是可讀狀態，且必須以一個實測會超過原 deadline 的 fixture
+     證明節流後 dialog 仍可達到可核准狀態。
 
-4. **失敗必須可回復，用真實失敗證明。** promotion 失敗後 main 必須回到操作前的
-   **HEAD、index、工作樹、stash 與 reflog**，且 candidate 與 recovery ref 完好。
-   至少用四種真實失敗各驗一次：磁碟唯讀、hook 非零退出、merge driver 失敗、中途 kill。
-   **每一種都必須額外斷言「環境恢復後仍可正常重新發起並成功」**——
-   拒絕該次動作可以，永久燒掉 Owner 的工作不行（PITFALLS #84／#85）。
+4. **失敗必須可回復，用真實失敗證明，而且「回到操作前」以指紋定義。**
+   「操作前的狀態」＝意圖紀錄中的 pre-op 指紋，逐項比對：HEAD、index、tracked 工作樹內容、
+   **未追蹤檔案**、**ignored 檔案的路徑與內容**、stash、reflog、`.git/config`、`core.hooksPath`、
+   worktree 註冊、submodule 的 HEAD 與工作樹、sparse-checkout／`skip-worktree` 位元，
+   以及 `.git` 內不得殘留 `MERGE_HEAD`／`AUTO_MERGE`／`MERGE_MSG`／任何 `*.lock`。
+   至少用**五種**真實失敗各驗一次：磁碟唯讀、hook 非零退出、merge driver 失敗、中途 kill、
+   **main 上存在會被覆蓋的 ignored 檔案**。
+   每一種都必須額外斷言「環境恢復後仍可正常重新發起並成功」，且**「環境恢復」只允許是
+   「還原被刻意破壞的外部條件」與「重啟程序」；測試不得手動修改或刪除 `.git` 內的任何檔案**。
+   **回滾不得使用 `git clean` 的任何形式，也不得使用會刪除未追蹤或 ignored 檔案的指令**；
+   若某種失敗無法在不破壞這類檔案的前提下回滾，**正確答案是事前拒絕該次 promotion，不是事後清理**。
 
-5. **留痕，而且痕跡必須為真。** audit 與公開帳本必須記錄：誰核准、套用了哪個 commit、以及**觀察到的**結果。
-   **紀錄中的每一個事實斷言都必須是觀察來的，不得是常數**（PITFALLS #86；
-   `rejectMainMerge()` 已經是這條規則的現行違反者）。audit hash chain 與 room chain 事後 `verify()` 必須為 true。
+5. **留痕，而且痕跡必須為真、必須涵蓋失敗。**
+   audit 與公開帳本必須記錄成功與失敗**兩條路徑**，每一個事實斷言都必須是觀察來的：
+   - main 的 **HEAD 在 promotion 前與後各觀察一次並都記錄**；若兩者相同，必須明說
+     「main 未產生新 commit（no-op）」，**不得只記一個 commit id 就宣稱已套用**。
+   - 記錄實際執行過的 hook 檔名與退出碼（觀察來的），不得記 `hooks: ok`。
+   - 失敗與回滾也必須各留一筆終局紀錄，含具名失敗原因與**回滾後逐項指紋比對的結果**。
+     **一次無聲的失敗與一次從未發生的 promotion，在紀錄上必須可區分。**
+   - **audit／ledger 寫入失敗不得觸發任何對 main 的寫入**；已套用就是已套用，
+     必須以 fail-loud 的獨立錯誤碼標記，並在下次啟動時仍能由意圖紀錄重建。
+   - 「誰核准」必須指向可稽核的 approval row 與其 `decided_by`／`previewDigest`，不得是自由文字常數。
+   - audit hash chain 與 room chain 事後 `verify()` 必須為 true，
+     **並且必須另外斷言預期的紀錄筆數與內容存在**——空鏈永遠 verify true，不算證據。
 
-6. **真實瀏覽器驗收。** Owner 在 GUI 上走完一次真實的 promotion，並記錄成一列
-   dated live-acceptance（含 gate digest，比照 `test/merge-dialog-acceptance.test.ts` 的機制）。
-   **只有 Node 測試不算通過**——這是第一次真的寫 main，不能只有作者自述。
+6. **同一個 candidate 只能被套用一次。** promotion 成功後 candidate 必須轉為終局 `merged`；
+   對已 `merged` 的 candidate 再次 preview／request／promote 一律拒絕並具名。
+   必須有一條測試：完成一次 promotion 後重新 preview 並嘗試第二次，斷言在核准前即被拒絕。
+   （`CandidateStatus` 已有 `merged` 這個值，目前程式碼裡沒有任何地方設它。
+   若 Owner 在中間 revert 了那次合併，第二次 promotion 會**靜默地把 Owner 明確撤銷的變更重新套回去**。）
+
+7. **promotion 期間對 main 具有排他性。** 開始前必須確認 `.git/index.lock` 不存在
+   （存在即拒絕，**不等待**），並在整個期間持有一個可觀察的排他標記；
+   期間偵測到 main HEAD／index 被外部改動即中止並走第 4 項的回復路徑。
+   必須有一條測試模擬外部程序在 checkout 與 commit 之間推進 main。
+   （綁定檢查與實際 merge 之間的 TOCTOU 窗，在 5-5 從幾毫秒放大到整個 checkout＋hook 執行時間。）
+
+8. **取消語意明文化。** promotion 一旦開始即不可取消：UI 不得呈現取消控制項；
+   任何關閉分頁／中斷連線都不影響已開始的 promotion，其結果由第 1／2 項的意圖紀錄決定。
+
+9. **真實瀏覽器驗收，但第一次不准打在真實主專案上。**
+   - 先在**拋棄式 repo** 上由 Owner 在 GUI 完成一次成功 promotion **與一次真實失敗＋回滾**，
+     兩者各記一列 dated live-acceptance。
+   - 之後才允許對真實 main 執行，且執行前必須有**已驗證可還原的完整備份（含 `.git`）**
+     與已記錄的 pre-HEAD，備份完成的事實由 Owner 確認後才可繼續。
+   - gate digest 必須**同時涵蓋伺服器端 promotion 路徑的函式**，不得只雜湊 `public/room.js`。
+   （v1 要求「走完一次真實 promotion」卻沒規定在哪個 repo、沒要求備份——
+   **滿足那一項的動作本身就是風險事件**。）
+
+10. **明文承認並列入殘餘風險表**：promotion 會以 Owner 身分、在無沙箱的情況下執行 repo `.git` 內
+    設定的 hook 與 merge driver。此項若不納入第 3 項的綁定與揭露，**即為未關閉的前置條件，
+    不得以殘餘風險接受**。
 
 ### 可接受的殘餘風險（連同「何時失效」一起列，未列出的不得事後補認）
 
@@ -262,14 +357,21 @@ Phase 5-1 在**沒有通過標準**的情況下跑了十輪對抗式審查，十
 | --- | --- | --- |
 | promotion 是本機單機操作，不處理遠端 push | 專案守則禁止自動 push，發布一律需人類批准 | 若未來加入自動化發布，立即失效 |
 | 不支援 merge 進行中的互動式衝突解決；有衝突就拒絕 | 有衝突時 Owner 本來就該自己看 | 若要支援 rebase／squash 等策略，需重訂 |
-| 單一 candidate → 單一 main，不處理多 candidate 排隊 | 目前結構上每 task 僅一筆未結核准 | 若開放多 candidate 併發 promotion，立即失效 |
+| 單一 candidate → 單一 main，不處理多 candidate 排隊 | 結構上每 task 僅一筆未結核准 | 若開放多 candidate 併發 promotion，立即失效 |
+| submodule 與 LFS **偵測到即拒絕**，不做完整支援 | 兩者都會讓「回到操作前」變成無法保證 | 若 Owner 的專案開始使用，必須改為完整支援；**不檢查不算可接受** |
 | P0-2（Writer apply-back 仍是 `window.prompt`）不在 5-5 範圍 | 那是另一條寫回路徑，與 candidate promotion 不同機制 | **9/1 之前必須有結論**：要嘛做，要嘛明文記為不做 |
+
+**已從殘餘風險移除、改列為必修**：
+
+| 原殘餘風險 | 裁決 |
+| --- | --- |
+| `mainIgnoredFingerprint` 只涵蓋路徑不涵蓋內容 | **不接受。** 實測 A＋B 證明是兩段式資料損毀：merge 靜默覆蓋 Owner 的 ignored 檔案內容，回滾時該檔案被刪除。必須升級為內容指紋並逐項揭露，**不得以「讓 Owner 看見風險」了結** |
 
 ### 明確不在 5-5 範圍
 
 - Phase 5-6（rollback／recovery 的專用介面）。**建議 5-5 完成即為 Phase 5 停點**：
-  recovery ref、`orchestrator candidates orphan-refs` 與 dialog 內可複製的 `git reset --hard <ref>` 已構成
-  可用的復原路徑；5-6 是把已存在的路徑包裝得更好，不是讓不可能變可能。**此項需 Owner 裁決。**
+  recovery ref、`orchestrator candidates orphan-refs` 與 dialog 內可複製的 `git reset --hard <ref>`
+  已構成可用的復原路徑；5-6 是把已存在的路徑包裝得更好。**此項需 Owner 裁決。**
 - 所有 UX P1／P2。
 
 ## 主工作區 apply-back dialog 瀏覽器驗收（2026-08-06）
