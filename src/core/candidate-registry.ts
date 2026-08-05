@@ -7,7 +7,7 @@ import { canonicalWorkspace } from "../security/workspace.ts";
 import { GitBroker, type GitInspection } from "./git-broker.ts";
 import { minimalGitEnvironment, resolveExecutable, runProcess } from "./process-runner.ts";
 import { openOwnerDatabase, verifyOwnerDatabaseFiles } from "./sqlite-security.ts";
-import { WorktreeBroker } from "./worktree-broker.ts";
+import { WorktreeBroker, type CandidateWorktree } from "./worktree-broker.ts";
 
 export type CandidateStatus = "creating" | "active" | "completed" | "retained" | "rejected" | "merged" | "failed";
 
@@ -200,8 +200,20 @@ export interface MergeApprovalBinding {
 
 export interface MergeApprovalRefusal {
   code: string;
-  /** Names of the bound values that no longer match, so a refusal says what moved. */
+  /**
+   * Names of the bound values that were compared against live state and no longer match.
+   *
+   * Only compared values appear here. A value the check could not read is NOT a value that moved,
+   * and this array is copied verbatim into the audit chain and the public Room ledger — listing an
+   * unread field here would tell the owner and every agent in the room that main's HEAD moved when
+   * nothing about main had changed at all.
+   */
   changed: string[];
+  /**
+   * Names of the bound values the check could not read on this attempt, kept separate from `changed`
+   * for exactly that reason. Present only when at least one value could not be compared.
+   */
+  unverified?: string[];
   reason?: string;
 }
 
@@ -228,8 +240,13 @@ export interface MergeApprovalBindingCheck {
   checked: boolean;
   /** True only when the comparison ran and every bound value still matched. */
   valid: boolean;
-  /** Bound values that moved, named with the same vocabulary grant and consume use. */
+  /**
+   * Bound values that were actually compared and moved, named with the same vocabulary grant and
+   * consume use. A value that could not be read is never named here — see `unverified`.
+   */
   changed: string[];
+  /** Bound values this read could not compare at all. Never merged into `changed`. */
+  unverified?: string[];
   /** Stable code, present only when the comparison could not be completed. */
   unavailable?: string;
 }
@@ -247,7 +264,10 @@ export interface MergeApprovalDriftEvent {
   candidateHead: string;
   mainHead: string;
   previewDigest: string;
+  /** Only values that were compared and moved. Unread values are reported in `unverified`. */
   changed: string[];
+  /** Values that could not be compared on the read that noticed the drift, if any. */
+  unverified?: string[];
   /**
    * True when the owner had already granted this approval. A granted decision that lapsed unnoticed
    * is a materially different record from a request nobody ever answered.
@@ -335,11 +355,34 @@ export interface MergeAuthorization {
  */
 export class MergeApprovalBindingError extends Error {
   readonly changed: string[];
+  /** Values that could not be read on the same attempt. Never folded into `changed`. */
+  readonly unverified: string[];
 
-  constructor(changed: string[]) {
+  constructor(changed: string[], unverified: string[] = []) {
     super(`MAIN_MERGE_APPROVAL_BINDING_CHANGED:${changed.join(",")}`);
     this.name = "MergeApprovalBindingError";
     this.changed = changed;
+    this.unverified = unverified;
+  }
+}
+
+/**
+ * The check could not be completed, so this attempt is refused — and nothing else happens.
+ *
+ * It is deliberately a different type from `MergeApprovalBindingError`, because the two demand
+ * opposite handling. Drift is a fact about the world and makes the approval permanently unusable.
+ * An unreadable repository is a fact about this attempt: a `chmod`, an unmounted volume, a spawn
+ * that failed under load. Rounding the second to the first burns an owner decision that nothing was
+ * ever wrong with, and no later recovery can bring it back, so the approval row is left untouched
+ * and the caller is told to try again.
+ */
+export class MergeApprovalBindingUnverifiableError extends Error {
+  readonly unverified: string[];
+
+  constructor(unverified: string[]) {
+    super(`MAIN_MERGE_APPROVAL_BINDING_CHECK_FAILED:${unverified.join(",")}`);
+    this.name = "MergeApprovalBindingUnverifiableError";
+    this.unverified = unverified;
   }
 }
 
@@ -402,6 +445,16 @@ interface RequestRow {
   created_at_ms: number;
   updated_at_ms: number;
   row_hash: string;
+}
+
+/**
+ * The result of one binding re-check. Two lists, never one: `changed` is what was compared and
+ * differs, `unverified` is what could not be compared at all. Only the first may invalidate an
+ * approval, and only the first may be shown to the owner as a value that moved.
+ */
+interface MergeBindingVerification {
+  changed: string[];
+  unverified: string[];
 }
 
 interface MergeApprovalRow {
@@ -832,9 +885,13 @@ function boundedRefusal(refusal: MergeApprovalRefusal): MergeApprovalRefusal {
   const reason = refusal.reason === undefined
     ? undefined
     : refusal.reason.replace(/[\r\n\t\0]+/gu, " ").slice(0, MAX_MERGE_REJECT_REASON).trim();
+  const unverified = refusal.unverified === undefined
+    ? undefined
+    : refusal.unverified.slice(0, MAX_MERGE_REFUSAL_CHANGED).map((name) => name.slice(0, 40));
   return {
     code: refusal.code.slice(0, 64),
     changed: refusal.changed.slice(0, MAX_MERGE_REFUSAL_CHANGED).map((name) => name.slice(0, 40)),
+    ...(unverified && unverified.length > 0 ? { unverified } : {}),
     ...(reason ? { reason } : {}),
   };
 }
@@ -844,10 +901,13 @@ function boundedRefusal(refusal: MergeApprovalRefusal): MergeApprovalRefusal {
  * path go through it so the durable record of "this approval stopped applying" reads the same no
  * matter who noticed, and always names both the values that moved and the surface that saw them.
  */
-function driftRefusal(changed: string[], observedOn: MergeApprovalObservation): MergeApprovalRefusal {
+function driftRefusal(
+  changed: string[], observedOn: MergeApprovalObservation, unverified: string[] = [],
+): MergeApprovalRefusal {
   return {
     code: "MAIN_MERGE_APPROVAL_BINDING_CHANGED",
     changed,
+    ...(unverified.length > 0 ? { unverified } : {}),
     reason: `drift-detected-on:${observedOn}`,
   };
 }
@@ -867,10 +927,13 @@ function assertRefusal(value: unknown): MergeApprovalRefusal {
     throw new Error("MAIN_MERGE_APPROVAL_ROW_TAMPERED");
   }
   const refusal = value as Record<string, unknown>;
-  if (Object.keys(refusal).some((key) => !["code", "changed", "reason"].includes(key))
+  if (Object.keys(refusal).some((key) => !["code", "changed", "unverified", "reason"].includes(key))
     || typeof refusal.code !== "string" || refusal.code.length < 1 || refusal.code.length > 64
     || !Array.isArray(refusal.changed) || refusal.changed.length > MAX_MERGE_REFUSAL_CHANGED
     || refusal.changed.some((name) => typeof name !== "string" || name.length < 1 || name.length > 40)
+    || (refusal.unverified !== undefined
+      && (!Array.isArray(refusal.unverified) || refusal.unverified.length > MAX_MERGE_REFUSAL_CHANGED
+        || refusal.unverified.some((name) => typeof name !== "string" || name.length < 1 || name.length > 40)))
     || (refusal.reason !== undefined
       && (typeof refusal.reason !== "string" || refusal.reason.length > MAX_MERGE_REJECT_REASON))) {
     throw new Error("MAIN_MERGE_APPROVAL_ROW_TAMPERED");
@@ -1769,11 +1832,15 @@ export class CandidateRegistry {
     if (typeof input.previewDigest !== "string" || input.previewDigest !== row.preview_digest) {
       throw new Error("MAIN_MERGE_PREVIEW_DIGEST_MISMATCH");
     }
-    const changed = await this.#verifyMergeBinding(row);
+    const { changed, unverified } = await this.#verifyMergeBinding(row);
     if (changed.length > 0) {
-      this.#settleMergeApproval(row, "invalidated", driftRefusal(changed, "grant"));
-      throw new MergeApprovalBindingError(changed);
+      this.#settleMergeApproval(row, "invalidated", driftRefusal(changed, "grant", unverified));
+      throw new MergeApprovalBindingError(changed, unverified);
     }
+    // Nothing moved, but something could not be read, so this grant is refused and the request stays
+    // exactly where it was — still `requested`, still answerable once the repository is readable.
+    // Settling it here would destroy the owner's open question over a permission bit.
+    if (unverified.length > 0) throw new MergeApprovalBindingUnverifiableError(unverified);
     const token = randomBytes(32).toString("base64url");
     const now = this.#now();
     const granted = this.#writeMergeApproval(row, {
@@ -1866,11 +1933,14 @@ export class CandidateRegistry {
     try { mainPath = await canonicalWorkspace(input.mainPath); } catch { /* unresolvable is "changed" */ }
     if (mainPath !== row.main_path) intent.push("mainPath");
     if (intent.length > 0) throw new MergeApprovalBindingError(intent);
-    const changed = await this.#verifyMergeBinding(row);
+    const { changed, unverified } = await this.#verifyMergeBinding(row);
     if (changed.length > 0) {
-      this.#settleMergeApproval(row, "invalidated", driftRefusal(changed, "consume"));
-      throw new MergeApprovalBindingError(changed);
+      this.#settleMergeApproval(row, "invalidated", driftRefusal(changed, "consume", unverified));
+      throw new MergeApprovalBindingError(changed, unverified);
     }
+    // Fail closed on the action, open on the decision: the merge does not proceed, and the grant is
+    // still there to be spent when the check can actually run.
+    if (unverified.length > 0) throw new MergeApprovalBindingUnverifiableError(unverified);
     let consumed: MergeApprovalRow;
     try {
       consumed = this.#writeMergeApproval(row, {
@@ -2065,6 +2135,31 @@ export class CandidateRegistry {
     try {
       return (await this.#gitCommand(mainPath, ["rev-parse", "--verify", `${ref}^{commit}`], 16_384)).trim() === head;
     } catch { return false; }
+  }
+
+  /**
+   * The same question as `#checkpointRefMatches`, but with three answers instead of two.
+   *
+   * `--quiet` is what makes the third separable: git exits 1 with empty output for a ref that simply
+   * is not there, and uses 128 (or dies outright) when it cannot read the repository. Collapsing both
+   * into `false`, as the boolean form does, is exactly how an unreadable `.git` gets reported to the
+   * owner as "your recovery point is gone" — so the drift check uses this form and lets an
+   * unreadable repository throw.
+   */
+  async #checkpointRefState(mainPath: string, ref: string, head: string): Promise<"matches" | "differs"> {
+    if (!CHECKPOINT_REF_PATTERN.test(ref) || !HEAD_PATTERN.test(head)) return "differs";
+    const result = await runProcess({
+      executable: await resolveExecutable("git"),
+      args: ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`],
+      cwd: mainPath,
+      timeoutMs: 30_000,
+      outputLimitBytes: 16_384,
+      env: minimalGitEnvironment(),
+    });
+    if (result.terminationReason) throw new Error("CANDIDATE_GIT_COMMAND_FAILED");
+    if (result.exitCode === 1) return "differs";
+    if (result.exitCode !== 0) throw new Error("CANDIDATE_GIT_COMMAND_FAILED");
+    return result.stdout.trim() === head ? "matches" : "differs";
   }
 
   async #ignoredInventory(workspace: string): Promise<{ files: number; fingerprint: string }> {
@@ -2870,15 +2965,23 @@ export class CandidateRegistry {
   }
 
   /**
-   * Re-checks every bound value against live state and returns the names of the ones that moved.
+   * Re-checks every bound value against live state and separates two answers that must never be
+   * conflated: values that were read and moved, and values that could not be read at all.
+   *
+   * The distinction is the whole point. "The repository was momentarily unreadable" is not evidence
+   * that anything moved, and treating it as drift makes the approval terminally `invalidated` with
+   * its token cleared — a state nothing can undo once the volume remounts or the permission bit comes
+   * back. So every probe here is attempted individually and its failure is recorded against the
+   * specific field it would have compared, rather than one `catch` collapsing a whole group into
+   * "changed". A value only reaches `changed` when the comparison actually ran.
    *
    * It collects rather than short-circuits, so a refusal can say "mainHead, mainBranch" instead of
    * only the first thing it noticed. Identity is checked before anything is spawned, because once the
    * task, room or paths have moved there is nothing meaningful left to compare.
    */
-  async #verifyMergeBinding(row: MergeApprovalRow): Promise<string[]> {
+  async #verifyMergeBinding(row: MergeApprovalRow): Promise<MergeBindingVerification> {
     const candidateRow = this.#rowByTask(row.task_id);
-    if (!candidateRow) return ["taskId"];
+    if (!candidateRow) return { changed: ["taskId"], unverified: [] };
     this.#assertRow(candidateRow);
     const task = this.#public(candidateRow);
     const identity: string[] = [];
@@ -2888,53 +2991,79 @@ export class CandidateRegistry {
     if (task.baseMainHead !== row.base_main_head) identity.push("baseMainHead");
     if (task.status !== "completed") identity.push("candidateStatus");
     if (task.completion?.id !== row.completion_id) identity.push("completionId");
-    if (identity.length > 0) return identity;
+    if (identity.length > 0) return { changed: identity, unverified: [] };
     const changed: string[] = [];
+    const unverified: string[] = [];
     let candidateWorkspace: string | undefined;
-    let candidateHead: string | undefined;
-    let candidateClean = false;
-    let scoped = false;
+    let candidate: CandidateWorktree | undefined;
     try {
-      const candidate = await this.#worktrees.inspectCandidate(task.candidateId);
-      scoped = candidate.workspace === task.candidatePath && candidate.sourceWorkspace === task.mainPath
-        && candidate.branch === task.candidateBranch;
-      candidateWorkspace = candidate.workspace;
-      candidateHead = candidate.headSha;
-      candidateClean = (await this.#git.inspect(candidate.workspace)).clean;
-    } catch { /* an absent or unverifiable candidate is reported as changed, never assumed intact */ }
-    if (!scoped) changed.push("candidateWorktree");
-    if (candidateHead !== row.candidate_head) changed.push("candidateHead");
-    if (!candidateClean) changed.push("candidateWorktreeClean");
-    let mainBranch: string | undefined;
-    let mainHead: string | undefined;
-    let mainFingerprint: string | undefined;
-    let mainIgnoredFingerprint: string | undefined;
-    try {
-      mainBranch = await this.#mainBranch(task.mainPath);
-      mainHead = await this.#git.headSha(task.mainPath);
-      mainFingerprint = (await this.#git.inspect(task.mainPath)).fingerprint;
-      mainIgnoredFingerprint = (await this.#ignoredInventory(task.mainPath)).fingerprint;
-    } catch { /* same rule for main: unreadable is not "unchanged" */ }
-    if (mainBranch !== row.main_branch) changed.push("mainBranch");
-    if (mainHead !== row.main_head) changed.push("mainHead");
-    if (mainFingerprint !== row.main_fingerprint) changed.push("mainDirtyFingerprint");
-    if (mainIgnoredFingerprint !== row.main_ignored_fingerprint) changed.push("mainIgnoredFingerprint");
-    if (!await this.#checkpointRefMatches(task.mainPath, row.recovery_ref, row.candidate_head)) {
-      changed.push("recoveryRef");
+      candidate = await this.#worktrees.inspectCandidate(task.candidateId);
+    } catch {
+      // The candidate could not be inspected: its directory is gone, an external volume dropped, git
+      // failed to spawn. None of that says the worktree changed, and an absent candidate cannot be
+      // merged either way — consume re-runs this check and refuses. So it is reported as unread.
+      unverified.push("candidateWorktree", "candidateHead", "candidateWorktreeClean");
     }
-    if (changed.length > 0 || candidateWorkspace === undefined) return changed;
+    if (candidate) {
+      const scoped = candidate.workspace === task.candidatePath
+        && candidate.sourceWorkspace === task.mainPath && candidate.branch === task.candidateBranch;
+      if (!scoped) changed.push("candidateWorktree");
+      if (candidate.headSha !== row.candidate_head) changed.push("candidateHead");
+      candidateWorkspace = candidate.workspace;
+      try {
+        if (!(await this.#git.inspect(candidate.workspace)).clean) changed.push("candidateWorktreeClean");
+      } catch { unverified.push("candidateWorktreeClean"); }
+    }
+    try {
+      const mainBranch = await this.#mainBranch(task.mainPath);
+      if (mainBranch !== row.main_branch) changed.push("mainBranch");
+    } catch (error) {
+      // `CANDIDATE_MAIN_BRANCH_REQUIRED` is git answering successfully that main is on no branch at
+      // all — a detached HEAD is a real difference from the branch name the owner approved against.
+      // Anything else is a failed read.
+      if (error instanceof Error && error.message === "CANDIDATE_MAIN_BRANCH_REQUIRED") changed.push("mainBranch");
+      else unverified.push("mainBranch");
+    }
+    try {
+      const mainHead = await this.#git.headSha(task.mainPath);
+      if (mainHead !== row.main_head) changed.push("mainHead");
+    } catch { unverified.push("mainHead"); }
+    try {
+      const mainFingerprint = (await this.#git.inspect(task.mainPath)).fingerprint;
+      if (mainFingerprint !== row.main_fingerprint) changed.push("mainDirtyFingerprint");
+    } catch { unverified.push("mainDirtyFingerprint"); }
+    try {
+      const mainIgnored = (await this.#ignoredInventory(task.mainPath)).fingerprint;
+      if (mainIgnored !== row.main_ignored_fingerprint) changed.push("mainIgnoredFingerprint");
+    } catch { unverified.push("mainIgnoredFingerprint"); }
+    try {
+      if (await this.#checkpointRefState(task.mainPath, row.recovery_ref, row.candidate_head) === "differs") {
+        changed.push("recoveryRef");
+      }
+    } catch { unverified.push("recoveryRef"); }
+    // A snapshot recomputed from values that could not all be read is not a comparison, so the digest
+    // step is skipped whenever anything above is unknown. Skipped is reported as unread, not as equal.
+    if (changed.length > 0 || unverified.length > 0) return { changed, unverified };
+    if (candidateWorkspace === undefined) return { changed, unverified: ["previewDigest"] };
     // Only now is recomputing the whole snapshot meaningful — and it is still done, because the
     // scalar checks above are a summary and the digest is the thing the owner actually approved.
-    const { previewDigest } = await this.#previewSnapshot({
-      task,
-      candidateWorkspace,
-      candidateHead: row.candidate_head,
-      recoveryRef: row.recovery_ref,
-      tests: task.completion?.preview.tests ?? [],
-      knownRisks: task.completion?.preview.knownRisks ?? [],
-    });
-    if (previewDigest !== row.preview_digest) changed.push("previewDigest");
-    return changed;
+    try {
+      const { previewDigest } = await this.#previewSnapshot({
+        task,
+        candidateWorkspace,
+        candidateHead: row.candidate_head,
+        recoveryRef: row.recovery_ref,
+        tests: task.completion?.preview.tests ?? [],
+        knownRisks: task.completion?.preview.knownRisks ?? [],
+      });
+      if (previewDigest !== row.preview_digest) changed.push("previewDigest");
+    } catch {
+      // Recomputing the preview streams every changed file and simulates the merge. On a large or
+      // dirty repository it is also the step most likely to hit the 30s command deadline, which is
+      // precisely why its failure may not be allowed to read as "the digest moved".
+      unverified.push("previewDigest");
+    }
+    return { changed, unverified };
   }
 
   async #scopedMergeApprovalRow(idValue: unknown, roomIdValue: string, mainPathValue: string): Promise<MergeApprovalRow> {
@@ -3028,11 +3157,17 @@ export class CandidateRegistry {
    * Three outcomes, deliberately distinct:
    *  - not applicable: the row is already terminal, or its deadline has passed. Nothing is compared
    *    and nothing is written; an expired approval is refused on its own terms.
-   *  - unavailable: the comparison could not be completed. The approval is NOT invalidated — a
-   *    transient Git failure must not destroy an owner decision, which is the same reasoning the
-   *    5-2 bar records for burning an idempotency key — and it is not reported as valid either.
-   *  - drifted: the bound values that moved are named, and the row is invalidated durably before it
-   *    is reported, so the refusal survives the process that noticed it.
+   *  - unavailable: at least one bound value could not be read, and none of the ones that could be
+   *    read had moved. The approval is NOT invalidated, its token is NOT cleared, and no row is
+   *    written at all — a `chmod`, an unmounted volume or a spawn failure must not destroy an owner
+   *    decision, which is the same reasoning the 5-2 bar records for burning an idempotency key. It
+   *    is not reported as valid either: `checked` is false, `unavailable` carries the stable code,
+   *    and `unverified` names the fields that could not be read. Once the repository is readable the
+   *    next observation reports it valid again and it can still be consumed.
+   *  - drifted: at least one bound value was actually compared and moved. Only those values are
+   *    named in `changed`; anything unread on the same pass is reported separately in `unverified`
+   *    and never presented as a value that moved. The row is invalidated durably before it is
+   *    reported, so the refusal survives the process that noticed it.
    *
    * Nothing here touches the candidate, a checkpoint, a recovery ref or main. The only write is the
    * approval row's own transition to a terminal state it could never have escaped anyway.
@@ -3044,19 +3179,40 @@ export class CandidateRegistry {
     if (MERGE_APPROVAL_TERMINAL.has(row.state) || this.#now() > row.expires_at_ms) {
       return { row, check: { checked: false, valid: false, changed: [] } };
     }
-    let changed: string[];
+    let verification: MergeBindingVerification;
     try {
-      changed = await this.#verifyMergeBinding(row);
+      verification = await this.#verifyMergeBinding(row);
     } catch (error) {
       return {
         row,
         check: { checked: false, valid: false, changed: [], unavailable: bindingCheckFailure(error) },
       };
     }
+    const { changed, unverified } = verification;
+    if (changed.length === 0 && unverified.length > 0) {
+      // Nothing was found to have moved and something could not be read. The approval is left exactly
+      // as the owner left it: not reported valid, not invalidated, and still consumable once whatever
+      // was unreadable comes back.
+      return {
+        row,
+        check: {
+          checked: false,
+          valid: false,
+          changed: [],
+          unverified,
+          unavailable: "MAIN_MERGE_APPROVAL_BINDING_CHECK_FAILED",
+        },
+      };
+    }
     if (changed.length === 0) return { row, check: { checked: true, valid: true, changed: [] } };
     return {
-      row: this.#invalidateDrifted(row, changed, observedOn) ?? row,
-      check: { checked: true, valid: false, changed },
+      row: this.#invalidateDrifted(row, changed, observedOn, unverified) ?? row,
+      check: {
+        checked: true,
+        valid: false,
+        changed,
+        ...(unverified.length > 0 ? { unverified } : {}),
+      },
     };
   }
 
@@ -3070,13 +3226,14 @@ export class CandidateRegistry {
    */
   #invalidateDrifted(
     row: MergeApprovalRow, changed: string[], observedOn: MergeApprovalObservation,
+    unverified: string[] = [],
   ): MergeApprovalRow | undefined {
     let next: MergeApprovalRow;
     try {
       next = this.#writeMergeApproval(row, {
         state: "invalidated",
         token_hash: null,
-        refusal_json: JSON.stringify(boundedRefusal(driftRefusal(changed, observedOn))),
+        refusal_json: JSON.stringify(boundedRefusal(driftRefusal(changed, observedOn, unverified))),
         updated_at_ms: Math.max(row.created_at_ms, this.#now()),
       });
     } catch {
@@ -3100,6 +3257,7 @@ export class CandidateRegistry {
         mainHead: next.main_head,
         previewDigest: next.preview_digest,
         changed: [...changed],
+        ...(unverified.length > 0 ? { unverified: [...unverified] } : {}),
         wasGranted: row.decided_by !== null,
         previousState: row.state,
         observedOn,

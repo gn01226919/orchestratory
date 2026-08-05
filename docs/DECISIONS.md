@@ -544,26 +544,57 @@ candidate 動了，approval 依然在每一條讀取路徑上顯示成 `approved
 2. **「重新詢問」也是一種觀察。** `main_merge_request` 在檢查「每個 task 只有一個未決問題」之前
    先跑同一個檢查。否則一個已經停止適用的核准會佔住那個結構性名額直到 TTL 到期，而它擋掉的正是
    失效本身要促成的那次重問——直接違反「失效不得破壞任何東西，Owner 可立即重問」。
-3. **無法完成的檢查不算漂移。** 檢查若拋錯（Git 暫時失敗、某一列暫時無法驗證），approval **不**失效，
-   也**不**回報為有效，而是回 `bindingCheck.unavailable`＋穩定錯誤碼。以暫時性失敗燒掉 Owner 的決定，
-   正是 [[VERIFICATION]] Phase 5-2 已判定必須在 5-5 前關閉的那個模式。
+3. **「查到了、值不同」與「根本查不到」必須分開，因為兩者的後果相反。** 綁定檢查逐欄位獨立探測：
+   每一個探測各自 try/catch，成功但值不同記入 `changed`，讀不到則記入 `unverified`，**任何例外都不會
+   變成「已改變」**。只有 `changed` 非空才會失效；`changed` 為空而 `unverified` 非空時，approval
+   **不**失效、`token_hash` **不**清除、**完全不寫任何列**，只回
+   `bindingCheck = {checked:false, valid:false, changed:[], unverified:[…],
+   unavailable:"MAIN_MERGE_APPROVAL_BINDING_CHECK_FAILED"}`；環境恢復後下一次觀察即回到
+   `{checked:true, valid:true, changed:[]}`，該核准仍可正常 consume。`grant`／`consume` 遇到同樣情形
+   以獨立錯誤型別 `MergeApprovalBindingUnverifiableError`
+   （`MAIN_MERGE_APPROVAL_BINDING_CHECK_FAILED:<欄位名>`，與漂移碼不同）**拒絕該次動作**，但不把
+   approval 轉為任何終局狀態——requested 仍是 requested，approved 仍是 approved。
+   以暫時性失敗燒掉 Owner 的決定，正是 [[VERIFICATION]] Phase 5-2 已判定必須在 5-5 前關閉的那個模式。
+   **這一條原本寫著而實作沒做到**：先前兩處 `catch` 把例外一律轉成「已改變」，因此 main 的 `.git`
+   短暫 `chmod 000`、candidate worktree 短暫離開外接碟、git 無法啟動，都會列出八個「已改變」欄位
+   （其中一個都沒真的變）並永久失效。現行行為由 `test/merge-approval-drift.test.ts` 的
+   「a real transient failure refuses the action without burning the owner's decision」（三種真實
+   失敗：`chmod 000`、目錄改名離開再放回、PATH 內無 git）與「a transient failure at grant leaves the
+   owner's question open instead of destroying it」驗證，兩者都斷言**環境恢復後仍可成功 consume**。
+   反向也有測試：真的刪掉 recovery ref 仍然算漂移（`#checkpointRefState` 以 `rev-parse --verify
+   --quiet` 的 exit 1 區分「ref 不存在」與「repo 讀不到」，後者才拋錯）。
+   `refusal.changed`／`bindingCheck.changed`／drift 事件的 `changed` 一律只含**實際比對過**的欄位，
+   讀不到的欄位改以獨立的 `unverified` 呈現——因為 `changed` 會原樣進入 audit 鏈與**公開的 Room
+   ledger**，把沒讀到的欄位混進去等於向整個 Room 宣告 main HEAD 動過，而 main 從頭到尾沒動。
 4. **恰好一次的紀錄。** 失效以 `#writeMergeApproval` 的 compare-and-set 寫入，只有贏家會通知
    sink，因此三條路徑同時看到同一次漂移也只產生一筆稽核事件與一則帳本訊息。輸家改讀 store 目前的
    內容再回報，所以每一個觀察者看到的都是 `invalidated`，不是自己手上那份過期的列。
 5. **稽核在 service 層、durable 在 registry 層。** registry 擁有持久狀態且不認識稽核鏈與 Room ledger，
-   因此以建構期注入的 sink 回報。**帳本是公開的**，訊息只列改變的欄位名、明說 candidate／checkpoint／
-   recovery ref 完整保留且 main 未修改，不含路徑、id 或 token；完整細節走 owner-only 的 audit 鏈，
-   並記錄 `ownerHadGranted`——「Owner 核准過但漂移作廢」與「沒人回答過」是兩件不同的事。
+   因此以建構期注入的 sink 回報。**帳本是公開的**，訊息只列改變的欄位名（以及本次讀不到、因此未比對的
+   欄位）並明說**這次失效沒有刪除 candidate、checkpoint 或復原點，也沒有修改 main**，不含路徑、id 或
+   token；完整細節走 owner-only 的 audit 鏈，並記錄 `ownerHadGranted`——「Owner 核准過但漂移作廢」與
+   「沒人回答過」是兩件不同的事。**紀錄只描述這次動作，不宣告現況**：先前 audit detail 寫死
+   `candidateRetained`／`checkpointsRetained`／`recoveryRefRetained: true`，帳本文案寫死「完整保留」，
+   但這條路徑從來沒有去看過那三樣東西——先刪掉 recovery ref 再觸發漂移，紀錄仍宣稱「復原點完整保留」。
+   現行 detail 改為單一 `deletedByThisInvalidation: "nothing"`（失效路徑不執行任何 Git 指令、只寫
+   approval 那一列，所以這是結構性為真的敘述），三個舊常數已移除。由
+   `test/merge-approval-drift.test.ts`「the invalidation record describes what it did, not the state
+   of things it never looked at」驗證（刪 ref → 觀察 → 斷言 detail 不含 `recoveryRefRetained`、帳本
+   不含「完整保留」）。
 6. **不需要 schema 變更。** durable 語意（終局 `invalidated` ＋ 具名 `refusal`）在 v4 已經存在；5-4
    加的是「誰在什麼時候發現」，`refusal.reason` 就能承載。v1→v4、v3→v4 升級路徑與 v2 拒絕維持不變。
 
 ### 代價與殘餘風險
 
-- **偵測是觀察時觸發，不是背景輪詢。** 沒有人讀就沒有人發現。可接受：GUI dialog 每 5 秒 inspect，
-  所有 MCP 讀取都會經過，而真正的授權關卡（grant／consume）仍各自重驗一次。
-- **讀取路徑現在會寫入。** 唯一可能的轉移是「已經無法使用的核准被記成終局失效」，它不能授權、
-  不能復活、不能刪除任何東西；`GET /api/rooms/merge-approvals/inspect` 因此在 CSRF 意義上不再是
-  純讀取，但它能造成的唯一效果是 fail-closed 方向。
-- **成本與 task 數成正比。** 每個仍未決的 approval 在每次觀察都會重算一次完整 preview（每個 task
-  結構上至多一個）。未加上限：加上限等於留下一批不會被檢查的 approval，那是比成本更糟的洞。
-- sink 若拋錯（audit 鏈不可用），失效仍已持久化，但該次稽核事件會遺失。durable 那一列是主要紀錄。
+每一項都標「到 5-5 是否仍可接受」，欄位語意與 [[VERIFICATION]]「可接受的殘餘風險（本階段）」表一致。
+
+| 項目 | 說明與緩解 | 到 5-5 是否仍可接受 |
+|---|---|---|
+| 偵測是觀察時觸發，不是背景輪詢 | 沒有人讀就沒有人發現。GUI dialog 每 5 秒 inspect，所有 MCP 讀取都會經過，而真正的授權關卡（grant／consume）仍各自重驗一次 | **可接受**，不需在 5-5 前處理 |
+| 讀取路徑現在會寫入 | 唯一可能的轉移是「已經無法使用的核准被記成終局失效」，不能授權、復活或刪除任何東西，方向恆為 fail-closed。但 `GET /api/rooms/merge-approvals/inspect` 在 CSRF 意義上**不再是純讀取**。**實際緩解只有兩項，且都不在這個端點裡**：（a）session cookie 是 `HttpOnly; SameSite=Strict`（`src/ui/web.ts:371`），跨站請求不會帶上它；（b）Host pinning——`request.headers.host` 必須等於 origin 的 host，否則回 421（`src/ui/web.ts:345-346`），另有 loopback-only 來源檢查（`src/ui/web.ts:341-343`）。**沒有 Origin／Referer 檢查，也沒有 CSRF token。** 因此這一列同時是給未來的警告：**任何把 cookie 放寬成 `SameSite=Lax`／`None`、或放寬 Host pinning 的變更，都會讓這個 GET 端點變成可被跨站觸發的寫入**，必須同時為它補上 Origin 檢查 | **可接受（本階段）**，但列為 5-5 的 gating 前提：5-5 促成真正的 main 寫入後，任何 cookie／Host 檢查的放寬都必須先補 Origin 檢查 |
+| 每次觀察重算完整 preview、無上限 | 每個仍未決的 approval（每個 task 結構上至多一個）在每次觀察都重算整份 preview：串流雜湊所有變更檔案並模擬 merge，共用 30 秒 deadline。GUI dialog 每 5 秒 inspect 一次，大 repo ＋ dirty main 會每 5 秒重跑一遍 | **5-5 前必須處理。** 撞上 30 秒 deadline 即拋錯；修復後這只會讓該次觀察回 `unavailable`（`unverified: ["previewDigest"]`）而不再永久失效，但等於「Owner 的 dialog 在大 repo 上會反覆顯示無法檢查、confirm 一直不可用」。需要節流、快取或提高上限 |
+| audit sink 拋錯時該次稽核事件遺失 | 失效仍已持久化，durable 那一列是主要紀錄 | **可接受**，不需在 5-5 前處理 |
+| 檢查無法完成＝永久失效（**已解決**） | 曾經：`#verifyMergeBinding` 兩處 `catch` 把任何例外轉成「已改變」，Git／檔案系統的暫時失敗會把 approval 寫成終局 `invalidated` 並清掉 token，恢復後也救不回來 | **已解決**（本 ADR 決策 3）：例外改記為 `unverified`，不失效；`grant`／`consume` 以獨立錯誤碼拒絕該次動作。回歸測試斷言環境恢復後仍可 consume |
+| `refusal.changed` 可能列出沒真的變的欄位，且會進公開帳本（**已解決**） | 曾經：一次 `chmod 000` 會讓 refusal 列出八個欄位、寫進 audit 鏈與公開 Room ledger，向 Owner 與其他 agent 宣告 main HEAD 變了 | **已解決**（本 ADR 決策 3）：`changed` 只含實際比對過的欄位，讀不到的改以 `unverified` 呈現 |
+| audit／ledger 的保留宣告是常數不是觀察（**已解決**） | 曾經：`candidateRetained`／`checkpointsRetained`／`recoveryRefRetained` 寫死 `true`、帳本寫死「完整保留」；刪掉 recovery ref 後觀察，紀錄仍宣稱復原點完整保留 | **已解決**（本 ADR 決策 5）：改為只描述本次動作的 `deletedByThisInvalidation: "nothing"`。**注意這是範圍縮小而非替代**：現在沒有任何自動紀錄可以證明 candidate／checkpoint／recovery ref 目前仍存在；要知道現況必須另行 `candidate_status` 或讀 Git |
+| 一次觀察可能同時「有欄位變了」又「有欄位讀不到」 | 此時仍以漂移處理並失效（實際觀察到的變動是 fail-closed 的正確依據），`unverified` 一併記入 refusal、audit detail 與帳本 | **可接受**：方向恆為 fail-closed，且不會因純粹的暫時失敗觸發 |
