@@ -117,7 +117,7 @@ test("the merge approval dialog contract lists, inspects, approves once, and ref
 
   const inspected = await get(`/api/rooms/merge-approvals/inspect?room=demo&approvalId=${approval.id}`);
   assert.equal(inspected.status, 200);
-  assert.deepEqual(inspected.body.binding, { valid: true, changed: [] });
+  assert.deepEqual(inspected.body.binding, { checked: true, valid: true, changed: [] });
   assert.equal(inspected.body.confirmationPhrase, MERGE_APPROVAL_CONFIRMATION);
   assert.equal((await get("/api/rooms/merge-approvals/inspect?room=demo&approvalId=nope")).status, 400);
   assert.equal((await get("/api/rooms/merge-approvals/inspect?room=missing&approvalId=x")).status, 400);
@@ -192,7 +192,9 @@ test("the merge approval dialog contract lists, inspects, approves once, and ref
     approval.binding.candidateHead,
   );
   const afterReject = await get(`/api/rooms/merge-approvals/inspect?room=demo&approvalId=${approval.id}`);
-  assert.deepEqual(afterReject.body.binding, { valid: false, changed: [] });
+  // Terminal: nothing is compared, so the check reports that it did not run rather than
+  // reporting a clean binding it never looked at.
+  assert.deepEqual(afterReject.body.binding, { checked: false, valid: false, changed: [] });
   assert.equal((await post("/api/rooms/merge-approvals/reject", {
     room: "demo", approvalId: approval.id,
   })).body.error, "MAIN_MERGE_APPROVAL_NOT_PENDING");

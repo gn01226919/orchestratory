@@ -2808,9 +2808,13 @@ function mergeApprovalBlockers(approval, binding) {
   } else if (approval.expired) {
     blockers.push("核准視窗已逾時，必須重新產生預覽再問一次。 · The approval window expired; a fresh preview is required.");
   }
-  if (binding && binding.valid === false) {
+  // Three outcomes, not two. "The bindings moved" and "the check could not run" are different facts,
+  // and reporting the second as the first would tell the owner a snapshot changed when nothing did.
+  if (binding && binding.unavailable) {
+    blockers.push(`無法比對綁定值（${binding.unavailable}），因此不能確認這份核准仍描述你正在看的東西。 · The binding check could not be completed, so this approval cannot be confirmed as current.`);
+  } else if (binding && binding.valid === false && (binding.changed || []).length > 0) {
     const changed = (binding.changed || []).map(bindingFieldLabel);
-    blockers.push(`綁定值已改變，這份核准只適用於它綁定的 snapshot：${changed.join("、") || "未知欄位"} · Bound values changed; this approval no longer describes what you are looking at.`);
+    blockers.push(`綁定值已改變，這份核准只適用於它綁定的 snapshot：${changed.join("、")} · Bound values changed; this approval no longer describes what you are looking at.`);
   }
   if (preview.mergeable === false) {
     blockers.push(`模擬 merge 有內容衝突，共 ${(preview.mergeConflicts || []).length} 個檔案。 · The simulated merge conflicts.`);

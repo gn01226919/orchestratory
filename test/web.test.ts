@@ -1462,6 +1462,9 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   // Blocking section: conflicts, every truncation flag and an invalid binding keep it disabled.
   assert.match(mergeDialogScript, /function mergeApprovalBlockers\(/u);
   assert.match(mergeDialogScript, /binding\.valid === false/u);
+  // A binding check that could not run is reported as such, never as "the bound values changed".
+  assert.match(mergeDialogScript, /if \(binding && binding\.unavailable\)/u);
+  assert.match(mergeDialogScript, /無法比對綁定值/u);
   assert.match(mergeDialogScript, /preview\.mergeable === false/u);
   assert.match(mergeDialogScript, /preview\.mergeConflictsTruncated/u);
   assert.match(mergeDialogScript, /preview\.filesTruncated/u);

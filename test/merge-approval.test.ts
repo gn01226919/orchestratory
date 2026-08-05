@@ -985,7 +985,11 @@ test("an approval survives a reopen and stays bound to the same snapshot", async
   const reopened = new CandidateRegistry(fixture.data, { now: () => fixture.clock.now });
   t.after(() => reopened.close());
   const listed = await reopened.mergeApprovals({ roomId: "demo", mainPath: fixture.source });
-  assert.deepEqual(listed[0], approval);
+  // The listing is an observation path, so it also reports the live binding check the request path
+  // had no reason to run. Everything the approval itself binds must be identical across the reopen.
+  assert.deepEqual(listed[0]?.bindingCheck, { checked: true, valid: true, changed: [] });
+  const { bindingCheck: _observed, ...persisted } = listed[0] ?? {};
+  assert.deepEqual(persisted, approval);
   const granted = await reopened.grantMainMerge({
     approvalId: approval.id, roomId: "demo", mainPath: fixture.source,
     previewDigest: approval.binding.previewDigest,
