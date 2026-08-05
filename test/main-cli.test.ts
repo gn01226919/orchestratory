@@ -78,3 +78,50 @@ test("conversation slash commands dispatch without a terminal", async () => {
   assert.equal(switched.status().mainAgent.provider, "claude");
   assert.match(runConversationCommand("/model shell x", makeSession(), opts).lines.join("\n"), /無法切換主代理/u);
 });
+
+test("/local applies for the loopback endpoint and never registers it itself", async () => {
+  const { runConversationCommand } = await import("../src/ui/tui.ts");
+  const { NaturalLanguageSession } = await import("../src/core/session.ts");
+  const { ProviderRegistry } = await import("../src/providers/registry.ts");
+  const { DEFAULT_HARD_LIMITS } = await import("../src/config.ts");
+  const registry = new ProviderRegistry([]);
+  const session = new NaturalLanguageSession({
+    providers: registry,
+    workspace: "/tmp/project",
+    hardLimits: { ...DEFAULT_HARD_LIMITS },
+  });
+  const opts = { maxProviderCalls: 500 };
+
+  // Bare /local explains the gate instead of opening it.
+  const help = runConversationCommand("/local", session, opts);
+  assert.equal(help.localEndpointRequest, undefined);
+  assert.match(help.lines.join("\n"), /loopback/u);
+  assert.match(help.lines.join("\n"), /唯讀角色/u);
+
+  // A candidate is only ever handed back for confirmation, never registered here.
+  const applied = runConversationCommand("/local http://127.0.0.1:11434", session, opts);
+  assert.equal(applied.localEndpointRequest, "http://127.0.0.1:11434");
+  assert.equal(applied.lines.length, 0);
+  assert.equal(registry.has("local"), false);
+
+  // Extra words are rejected rather than silently truncated to the first token.
+  assert.equal(
+    runConversationCommand("/local http://127.0.0.1:11434 extra", session, opts).localEndpointRequest,
+    undefined,
+  );
+
+  // Once registered the command reports state and refuses to re-point the id.
+  assert.equal(
+    runConversationCommand("/local http://127.0.0.1:11434", session, {
+      ...opts,
+      localEndpointRegistered: true,
+    }).localEndpointRequest,
+    undefined,
+  );
+  assert.match(
+    runConversationCommand("/local", session, { ...opts, localEndpointRegistered: true })
+      .lines.join("\n"),
+    /已在這次啟動中加入/u,
+  );
+  assert.match(runConversationCommand("/help", session, opts).lines.join("\n"), /\/local/u);
+});

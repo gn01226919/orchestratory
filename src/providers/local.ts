@@ -154,7 +154,12 @@ export class LocalModelProvider implements ProviderAdapter {
     this.#discoveryLimitBytes = options.discoveryLimitBytes ?? DEFAULT_DISCOVERY_LIMIT_BYTES;
     this.capabilities = {
       id: "local",
-      displayName: options.displayName ?? "Local model endpoint (no subscription quota)",
+      // The display name is what every menu renders, so it — not a tooltip a UI
+      // may or may not show — carries the three facts a chooser needs: the model
+      // runs on this machine, the connection is loopback-only, and no subscription
+      // or API quota is spent.
+      displayName:
+        options.displayName ?? `地端模型 · 本機 loopback ${this.#origin} · 不使用訂閱或 API 額度`,
       subscription: true,
       api: false,
       canWrite: false,

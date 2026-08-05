@@ -603,20 +603,52 @@ test("usage surfaces report a local call as an explicit zero, not as quota spend
   );
 });
 
-test("the local provider stays unreachable from every workflow request surface", async (t) => {
+test("the local provider is selectable as a read-only workflow agent", () => {
   const registry = new ProviderRegistry([], { localEndpoint: PLACEHOLDER_ENDPOINT });
-  const proposal = {
+  const proposal = (): Record<string, unknown> => ({
     workspace: "/tmp/synthetic-project",
     workspaceMode: "in-place",
     task: "Synthetic task",
     profile: "normal",
     planner: { provider: "local", model: "synthetic-local-model" },
     writer: { provider: "fake", model: "fake" },
+    reviewers: [{ provider: "local", model: "synthetic-local-model" }],
+    testConfirmed: false,
+  });
+  const parsed = parseWorkflowRequest(proposal(), registry);
+  assert.equal(parsed.planner.provider, "local");
+  assert.equal(parsed.planner.authMode, "subscription");
+  assert.equal(parsed.reviewers[0]?.provider, "local");
+  // Reaching a workflow must not reach a budget: the run still quotes zero.
+  assert.equal(parsed.apiMaxCostUsdPerCall, 0);
+  assert.equal(parsed.apiBudgetUsdPerRun, 0);
+});
+
+test("the local provider is still refused every writing and billed surface", async (t) => {
+  const registry = new ProviderRegistry([], { localEndpoint: PLACEHOLDER_ENDPOINT });
+  const asWriter = {
+    workspace: "/tmp/synthetic-project",
+    workspaceMode: "in-place",
+    task: "Synthetic task",
+    profile: "normal",
+    planner: { provider: "fake", model: "fake" },
+    writer: { provider: "local", model: "synthetic-local-model" },
     reviewers: [{ provider: "fake", model: "fake" }],
     testConfirmed: false,
   };
-  assert.throws(() => parseWorkflowRequest(proposal, registry), /UNKNOWN_PROVIDER/u);
+  assert.throws(() => parseWorkflowRequest(asWriter, registry), /WRITER_PROVIDER_IS_READ_ONLY/u);
 
+  const asApi = {
+    ...asWriter,
+    writer: { provider: "fake", model: "fake" },
+    planner: { provider: "local", model: "synthetic-local-model", authMode: "api" },
+  };
+  assert.throws(() => parseWorkflowRequest(asApi, registry), /API_MODE_NOT_AVAILABLE/u);
+
+  // Known remaining gap: the pending-proposal queue keeps its own hand-written
+  // provider list in src/core/workflow-request-store.ts, which this change was not
+  // authorised to touch. It fails closed, so a local proposal is refused rather
+  // than mis-queued — but a conversation-created proposal still cannot pick it.
   const data = await mkdtemp(join(tmpdir(), "orchestratory-no-cost-queue-"));
   t.after(async () => await rm(data, { recursive: true, force: true }));
   const store = new WorkflowRequestStore(data);

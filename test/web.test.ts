@@ -360,6 +360,26 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
     headers: { Cookie: cookie },
   });
   assert.equal(invalidModels.status, 400);
+  // The local endpoint is a legal menu choice, so the model route accepts the id;
+  // with no owner-approved endpoint the registry still fails closed behind it.
+  const localModels = await fetch(`${server.url}/api/models?provider=local&authMode=subscription`, {
+    headers: { Cookie: cookie },
+  });
+  assert.equal(localModels.status, 400);
+  assert.match(((await localModels.json()) as { error: string }).error, /PROVIDER_NOT_REGISTERED/u);
+  // …and it is never offered on the conversation surface.
+  const localChat = await fetch(`${server.url}/api/chat`, {
+    method: "POST",
+    headers: {
+      Cookie: cookie,
+      Origin: server.url,
+      "X-CSRF-Token": bootstrapBody.csrf,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ workspace, provider: "local", model: "llama3", message: "hi" }),
+  });
+  assert.equal(localChat.status, 400);
+  assert.match(((await localChat.json()) as { error: string }).error, /INVALID_PROVIDER_ID/u);
 
   const csrfHeaders = {
     Cookie: cookie,
@@ -1312,7 +1332,10 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomScript, /回應處理中/u);
   assert.match(roomScript, /件申請/u);
   assert.match(roomScript, /有申請/u);
-  assert.match(roomScript, /const BASE_OFFICE_AGENTS = Object\.freeze\(\["you", "codex", "claude", "grok"\]\)/u);
+  // Office desks are derived from the mirrored selection constant, not written
+  // out again — test/provider-selection.test.ts pins that constant to the table.
+  assert.match(roomScript, /const ROOM_RESIDENT_PROVIDER_IDS = Object\.freeze\(\["codex", "claude", "grok"\]\)/u);
+  assert.match(roomScript, /const BASE_OFFICE_AGENTS = Object\.freeze\(\["you", \.\.\.ROOM_RESIDENT_PROVIDER_IDS\]\)/u);
   assert.match(roomScript, /function syncOfficeDesks\(/u);
   assert.match(roomScript, /value\.session/u);
   assert.match(roomScript, /filter\(\(entry\) => entry\.id !== value\.session\.id\)/u);

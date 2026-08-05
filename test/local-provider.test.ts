@@ -448,3 +448,58 @@ test("provider registry exposes the local adapter only when an endpoint is confi
     /LOCAL_ENDPOINT_NOT_LOOPBACK/u,
   );
 });
+
+test("owner-initiated local registration stays default-off and loopback-only", async (t) => {
+  const stub = await startStub(t);
+  stub.reply((_request, response) => json(response, { data: [{ id: "qwen3:8b" }] }));
+
+  const registry = new ProviderRegistry();
+  // Default off: nothing is registered until the owner asks for it.
+  assert.equal(registry.has("local"), false);
+  assert.throws(() => registry.get("local"), /PROVIDER_NOT_REGISTERED:local/u);
+
+  for (const rejected of [
+    "http://models.example.com:11434",
+    "https://127.0.0.1:11434",
+    "http://user:pass@127.0.0.1:11434",
+    "http://127.0.0.1:11434/v1",
+    "http://127.0.0.1",
+    "file:///etc/passwd",
+    "  ",
+    "not a url",
+    11434,
+    undefined,
+    null,
+    { endpoint: "http://127.0.0.1:11434" },
+  ]) {
+    assert.throws(() => registry.enableLocalEndpoint(rejected), /^Error: LOCAL_/u, String(rejected));
+    assert.equal(registry.has("local"), false);
+  }
+
+  const capabilities = registry.enableLocalEndpoint(stub.origin);
+  assert.equal(capabilities.id, "local");
+  // The menu label itself has to say what the provider is.
+  assert.match(capabilities.displayName, /地端模型/u);
+  assert.match(capabilities.displayName, /loopback/u);
+  assert.match(capabilities.displayName, /不使用訂閱或 API 額度/u);
+  assert.equal(capabilities.canWrite, false);
+  assert.equal(capabilities.canWriteSubscription, false);
+  assert.equal(capabilities.canWriteApi, false);
+  assert.equal(capabilities.api, false);
+  assert.ok(registry.has("local"));
+  assert.deepEqual(await registry.listModels("local", "subscription"), ["qwen3:8b"]);
+
+  // Single-shot: an already-registered id can never be re-pointed at another port.
+  assert.throws(
+    () => registry.enableLocalEndpoint("http://127.0.0.1:1"),
+    /LOCAL_PROVIDER_ALREADY_REGISTERED/u,
+  );
+  assert.throws(
+    () => new ProviderRegistry([], { localEndpoint: stub.origin }).enableLocalEndpoint(stub.origin),
+    /LOCAL_PROVIDER_ALREADY_REGISTERED/u,
+  );
+
+  // The returned capability arrays are copies; a caller cannot mutate the registry.
+  capabilities.subscriptionModels.push("smuggled");
+  assert.deepEqual(registry.get("local").capabilities.subscriptionModels, []);
+});

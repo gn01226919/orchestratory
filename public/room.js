@@ -1,5 +1,29 @@
 const page = new URL(window.location.href);
 const ROOM_UI_PROTOCOL = 2;
+/*
+ * Provider 選單的單一來源（瀏覽器側）。
+ *
+ * 這兩份清單必須與 src/providers/selection.ts 的 roomResident / roomMention
+ * surface 逐字一致；瀏覽器無法 import TypeScript，所以由
+ * test/provider-selection.test.ts 直接讀這個檔案比對——任何一邊改了而另一邊沒改
+ * 都會讓測試失敗，不會像過去一樣靜靜地漏掉一個 provider。
+ *
+ * 地端模型（local）刻意不在這裡：room 席位與 room_mention 的契約由控制面與
+ * collab MCP 決定，理由寫在 selection.ts 的表格內，不是遺漏。
+ */
+const ROOM_RESIDENT_PROVIDER_IDS = Object.freeze(["codex", "claude", "grok"]);
+const ROOM_MENTION_PROVIDER_IDS = Object.freeze(["codex", "claude", "grok", "fake"]);
+const RESIDENT_PROVIDER_ALTERNATION = ROOM_RESIDENT_PROVIDER_IDS.join("|");
+const MENTION_PROVIDER_ALTERNATION = ROOM_MENTION_PROVIDER_IDS.join("|");
+const RESIDENT_PREFIX_PATTERN = new RegExp(`^(${RESIDENT_PROVIDER_ALTERNATION})`);
+const EXTERNAL_MENTION_PATTERN =
+  new RegExp(`^@((?:${RESIDENT_PROVIDER_ALTERNATION})(?:[1-9][0-9]*|（[^）\\r\\n]{1,24}）))\\s`, "u");
+const MENTION_MESSAGE_PATTERN = new RegExp(`^@(${MENTION_PROVIDER_ALTERNATION})\\s+[\\s\\S]+$`);
+const MENTION_TARGET_PATTERN =
+  new RegExp(`^@(${MENTION_PROVIDER_ALTERNATION})(?::([A-Za-z0-9._:/-]{1,128}))?\\s+([\\s\\S]+)$`);
+const MENTION_WORD_PATTERN = new RegExp(`^@(${MENTION_PROVIDER_ALTERNATION})\\b`);
+const MENTION_DRAFT_PATTERN =
+  new RegExp(`^@(?:${MENTION_PROVIDER_ALTERNATION})(?::[^\\s]+)?\\s*`);
 const state = {
   csrf: "",
   room: "",
@@ -251,7 +275,7 @@ function providerForAgent(agent) {
   const managed = state.managedAgents.find((entry) => entry.displayName === agent);
   if (managed) return managed.provider;
   return state.presences.find((session) => session.displayName === agent)?.provider ||
-    String(agent).match(/^(codex|claude|grok)/)?.[1] || agent;
+    String(agent).match(RESIDENT_PREFIX_PATTERN)?.[1] || agent;
 }
 function authorColor(author) { return AUTHOR_COLORS[author] || AUTHOR_COLORS[providerForAgent(author)] || "#8a8f98"; }
 
@@ -422,7 +446,7 @@ function updateWaitingIndicator(messages) {
   for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index];
     if (message.kind !== "chat") continue;
-    const mention = message.text.match(/^@(codex|claude|grok|fake)\s+[\s\S]+$/);
+    const mention = message.text.match(MENTION_MESSAGE_PATTERN);
     if (!mention || mention[1] === message.author) continue;
     if (state.cancelledMentions.has(message.seq)) continue;
     const target = mention[1];
@@ -485,7 +509,7 @@ function ingestRoomNotifications(messages) {
   for (const message of messages) {
     if (message.kind === "system" && /失敗|停止|取消/u.test(message.text)) {
       addOfficeNotification("error", "Room 工作需要注意", message.text);
-    } else if (message.kind === "chat" && ["codex", "claude", "grok"].includes(providerForAgent(message.author))) {
+    } else if (message.kind === "chat" && ROOM_RESIDENT_PROVIDER_IDS.includes(providerForAgent(message.author))) {
       addOfficeNotification("message", `${message.author} 有新回覆`, message.text);
     }
   }
@@ -1184,7 +1208,7 @@ function offlineExternalMention(text) {
     .sort((left, right) => right.length - left.length)
     .find((name) => text.startsWith(`@${name} `) || text.startsWith(`@${name}\n`) || text.startsWith(`@${name}\t`));
   if (known) return known;
-  return text.match(/^@((?:codex|claude|grok)(?:[1-9][0-9]*|（[^）\r\n]{1,24}）))\s/u)?.[1];
+  return text.match(EXTERNAL_MENTION_PATTERN)?.[1];
 }
 
 const DOUBLE_ENTER_WINDOW_MS = 1600;
@@ -1278,7 +1302,7 @@ async function submitRoomText(text, explicitPresenceId = "", explicitManagedAgen
     });
   }
   if (offlineExternalMention(text)) throw new Error("TARGET_AGENT_OFFLINE");
-  const mention = text.match(/^@(codex|claude|grok|fake)(?::([A-Za-z0-9._:/-]{1,128}))?\s+([\s\S]+)$/);
+  const mention = text.match(MENTION_TARGET_PATTERN);
   if (mention) {
     const target = mention[2] ? `${mention[1]}:${mention[2]}` : mention[1];
     return api("/api/rooms/mention", {
@@ -1330,7 +1354,7 @@ byId("room-search").addEventListener("input", async () => {
 
 
 /* ── Agents 辦公室視圖（原創 Orbie，走動＋閒聊＝免費裝飾；點擊喚醒＝真對話）── */
-const BASE_OFFICE_AGENTS = Object.freeze(["you", "codex", "claude", "grok"]);
+const BASE_OFFICE_AGENTS = Object.freeze(["you", ...ROOM_RESIDENT_PROVIDER_IDS]);
 const OFFICE_AGENTS = [...BASE_OFFICE_AGENTS];
 const ORBIE_HTML =
   '<span class="orbie-shadow"></span><span class="orbie-body">' +
@@ -1552,7 +1576,7 @@ function workflowAgentWork() {
     for (const event of state.workflowEvents.get(run.id) || []) {
       const provider = String(event.metadata?.provider || event.actor || "");
       const role = String(event.metadata?.role || "");
-      if (event.type === "provider.started" && ["codex", "claude", "grok"].includes(provider)) {
+      if (event.type === "provider.started" && ROOM_RESIDENT_PROVIDER_IDS.includes(provider)) {
         active.set(`${provider}:${role}`, { provider, role, model: String(event.metadata?.model || ""), event });
       } else if (event.type === "provider.completed") {
         active.delete(`${provider}:${role}`);
@@ -1964,7 +1988,7 @@ function detectPendingWork(messages) {
   for (let i = 0; i < messages.length; i += 1) {
     const m = messages[i];
     if (m.kind !== "chat") continue;
-    const mention = m.text.match(/^@(codex|claude|grok|fake)\s+[\s\S]+$/);
+    const mention = m.text.match(MENTION_MESSAGE_PATTERN);
     if (!mention || mention[1] === m.author) continue;
     if (state.cancelledMentions.has(m.seq)) continue;
     const target = mention[1];
@@ -2113,7 +2137,7 @@ function updateOffice(messages) {
   const stats = Object.fromEntries((state.stats || []).map((s) => [s.author, s]));
   if (lastChat && lastChat.seq > officeLastSeq) {
     officeLastSeq = lastChat.seq;
-    const m = String(lastChat.text).match(/^@(codex|claude|grok|fake)\b/);
+    const m = String(lastChat.text).match(MENTION_WORD_PATTERN);
     if (m && lastChat.author !== m[1]) {
       const targetDesk = OFFICE_AGENTS.find((agent) => providerForAgent(agent) === m[1]) || m[1];
       fireWire(lastChat.author, targetDesk);
@@ -2603,7 +2627,7 @@ function setWriterHandoff(open) {
   }
   renderWriterControl();
   const draft = byId("office-chat-input").value
-    .replace(/^@(codex|claude|grok|fake)(?::[^\s]+)?\s*/, "")
+    .replace(MENTION_DRAFT_PATTERN, "")
     .trim();
   if (!task.value.trim() && draft) task.value = draft;
   task.focus();
