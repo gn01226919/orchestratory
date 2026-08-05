@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { access, chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -8,6 +8,23 @@ import {
   runProcess,
   resolveExecutable,
 } from "../src/core/process-runner.ts";
+
+/**
+ * Cancellation tests must abort only after the spawned child really exists. A fixed sleep is
+ * load-sensitive: under a full parallel suite the child may not have reported its pid yet, the
+ * assertion then reads an empty string, and the test flakes. Poll the pid file instead.
+ */
+async function awaitReportedPid(pidFile: string): Promise<number> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    try {
+      const pid = Number((await readFile(pidFile, "utf8")).trim());
+      if (Number.isSafeInteger(pid) && pid > 1) return pid;
+    } catch { /* the child has not written it yet */ }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("CHILD_PID_NOT_REPORTED");
+}
 
 test("runs an executable without a shell", async () => {
   const node = await resolveExecutable("node");
@@ -124,6 +141,7 @@ test("does not report cancellation complete while a stubborn grandchild survives
   if (process.platform === "win32") return;
   const node = await resolveExecutable("node");
   const controller = new AbortController();
+  const pidFile = join(await mkdtemp(join(tmpdir(), "orchestratory-cancel-")), "grandchild.pid");
   let grandchildPid = 0;
   t.after(() => {
     if (grandchildPid < 2) return;
@@ -139,8 +157,10 @@ test("does not report cancellation complete while a stubborn grandchild survives
       "-e",
       [
         "const {spawn}=require('node:child_process')",
+        "const fs=require('node:fs')",
         "const stubborn=spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)\"],{stdio:'ignore'})",
         "process.stdout.write(String(stubborn.pid)+'\\n')",
+        `fs.writeFileSync(${JSON.stringify(pidFile)},String(stubborn.pid))`,
         "process.on('SIGTERM',()=>process.exit(0))",
         "setInterval(()=>{},1000)",
       ].join(";"),
@@ -150,12 +170,11 @@ test("does not report cancellation complete while a stubborn grandchild survives
     outputLimitBytes: 1_024,
     signal: controller.signal,
   });
-  await new Promise((resolve) => setTimeout(resolve, 150));
+  grandchildPid = await awaitReportedPid(pidFile);
   controller.abort();
   const result = await running;
-  grandchildPid = Number(result.stdout.trim());
   assert.equal(result.terminationReason, "cancelled");
-  assert.ok(Number.isSafeInteger(grandchildPid) && grandchildPid > 1);
+  assert.equal(Number(result.stdout.trim()), grandchildPid);
   assert.throws(() => process.kill(grandchildPid, 0), (error: unknown) => {
     return (error as NodeJS.ErrnoException).code === "ESRCH";
   });
@@ -165,14 +184,17 @@ test("cancellation terminates the detached process group", async () => {
   if (process.platform === "win32") return;
   const node = await resolveExecutable("node");
   const controller = new AbortController();
+  const pidFile = join(await mkdtemp(join(tmpdir(), "orchestratory-cancel-")), "child.pid");
   const running = runProcess({
     executable: node,
     args: [
       "-e",
       [
         "const {spawn}=require('node:child_process')",
+        "const fs=require('node:fs')",
         "const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'})",
         "process.stdout.write(String(child.pid)+'\\n')",
+        `fs.writeFileSync(${JSON.stringify(pidFile)},String(child.pid))`,
         "setInterval(()=>{},1000)",
       ].join(";"),
     ],
@@ -181,12 +203,11 @@ test("cancellation terminates the detached process group", async () => {
     outputLimitBytes: 1_024,
     signal: controller.signal,
   });
-  await new Promise((resolve) => setTimeout(resolve, 150));
+  const childPid = await awaitReportedPid(pidFile);
   controller.abort();
   const result = await running;
   assert.equal(result.terminationReason, "cancelled");
-  const childPid = Number(result.stdout.trim());
-  assert.ok(Number.isSafeInteger(childPid) && childPid > 1);
+  assert.equal(Number(result.stdout.trim()), childPid);
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.throws(() => process.kill(childPid, 0), (error: unknown) => {
     return (error as NodeJS.ErrnoException).code === "ESRCH";

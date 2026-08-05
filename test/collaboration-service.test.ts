@@ -11,6 +11,8 @@ import { CollaborationService } from "../src/core/collaboration-service.ts";
 
 const execFileAsync = promisify(execFile);
 const ROOM_FIRST_JOIN = { collaborationMode: "room-first" as const, syncTurns: true };
+/** One fresh durable idempotency key per logical candidate call. */
+const key = (): string => randomUUID();
 
 async function repository(prefix = "orchestratory-collaboration-source-"): Promise<string> {
   const source = await mkdtemp(join(tmpdir(), prefix));
@@ -349,7 +351,7 @@ test("exact native seat owns a durable candidate lifecycle while main remains un
   const mainHead = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: source })).stdout.trim();
 
   const candidate = await service.startCandidate({
-    presenceId: seat.id, roomId: "demo", workspace: source,
+    presenceId: seat.id, clientRequestId: key(), roomId: "demo", workspace: source,
     task: "Implement without touching main", acceptanceCriteria: "owner draft survives",
   });
   assert.equal(candidate.baseline.clean, false);
@@ -360,11 +362,11 @@ test("exact native seat owns a durable candidate lifecycle while main remains un
     "commit", "-m", "candidate implementation",
   ], { cwd: candidate.candidatePath });
   const checkpoint = await service.checkpointCandidate({
-    presenceId: seat.id, roomId: "demo", workspace: source,
+    presenceId: seat.id, clientRequestId: key(), roomId: "demo", workspace: source,
     taskId: candidate.taskId, summary: "committed checkpoint",
   });
   const completed = await service.completeCandidate({
-    presenceId: seat.id, roomId: "demo", workspace: source,
+    presenceId: seat.id, clientRequestId: key(), roomId: "demo", workspace: source,
     taskId: candidate.taskId, summary: "ready for owner",
     tests: [{ command: "node --test", status: "passed" }], knownRisks: [],
   });

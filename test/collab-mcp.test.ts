@@ -17,6 +17,8 @@ import { DEFAULT_HARD_LIMITS } from "../src/config.ts";
 import type { AgentAssignment, ProviderRequest, ProviderResult } from "../src/types.ts";
 
 const execFileAsync = promisify(execFile);
+/** One fresh durable idempotency key per logical candidate call. */
+const key = (): string => randomUUID();
 
 function providerResult(
   assignment: AgentAssignment,
@@ -1037,6 +1039,7 @@ test("native MCP candidate tools preserve main and end at an owner-required merg
   });
   const mainHead = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
   const started = JSON.parse(await broker.call("candidate_start", {
+    clientRequestId: key(),
     mainPath: root, task: "MCP lifecycle", acceptanceCriteria: "main untouched", room: "demo",
   })) as {
     candidate: { taskId: string; candidatePath: string };
@@ -1054,12 +1057,13 @@ test("native MCP candidate tools preserve main and end at an owner-required merg
     "commit", "-m", "candidate",
   ], { cwd: started.candidate.candidatePath });
   const checkpointed = JSON.parse(await broker.call("candidate_checkpoint", {
-    taskId: started.candidate.taskId, summary: "committed",
+    clientRequestId: key(), taskId: started.candidate.taskId, summary: "committed",
   })) as { mainMutation: boolean; mainMutationScope: string; sharedGitMetadataMutation: boolean };
   assert.equal(checkpointed.mainMutation, false);
   assert.equal(checkpointed.mainMutationScope, "canonical-main-branch-and-worktree");
   assert.equal(checkpointed.sharedGitMetadataMutation, true);
   const completed = JSON.parse(await broker.call("candidate_complete", {
+    clientRequestId: key(),
     taskId: started.candidate.taskId,
     summary: "ready",
     tests: [{ command: "node --test", status: "passed" }],
@@ -1082,11 +1086,15 @@ test("native MCP candidate tools preserve main and end at an owner-required merg
   assert.equal(status.candidates[0]?.live.completionStale, false);
   assert.equal((await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim(), mainHead);
   await assert.rejects(
-    broker.call("candidate_start", { mainPath: join(root, "other"), task: "wrong binding" }),
+    broker.call("candidate_start", {
+      clientRequestId: key(), mainPath: join(root, "other"), task: "wrong binding",
+    }),
     /CANDIDATE_MAIN_PATH_BINDING_MISMATCH/u,
   );
   await assert.rejects(
-    broker.call("candidate_complete", { taskId: started.candidate.taskId, summary: "x", approve: true }),
+    broker.call("candidate_complete", {
+      clientRequestId: key(), taskId: started.candidate.taskId, summary: "x", approve: true,
+    }),
     /UNKNOWN_CANDIDATE_COMPLETE_ARGUMENT/u,
   );
 });
