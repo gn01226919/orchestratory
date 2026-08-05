@@ -127,6 +127,39 @@ Phase 5-1 在**沒有通過標準**的情況下跑了十輪對抗式審查，十
 | 漂移與 consume 之間仍有極窄的 TOCTOU 窗 | consume 會再驗一次，窗內失敗即 fail closed | 否 |
 | 同帳號程序可直接改 approval store | 與產品信任模型一致 | 否 |
 
+## Merge approval dialog 真實瀏覽器驗收（2026-08-06）
+
+**為什麼需要這一列**：dialog 有 704 行新程式碼，先前的「測試」形如
+`assert(/input.disabled = !ready;/)`——只要那行字串存在就通過，**即使它從未執行**。
+未接上的 listener、上方提早 return、字串內被改名的變數，全都照樣通過。
+而 scroll-gate 是 Owner 用來取代抄寫 taskId 的唯一保護，不能只有源碼證據。
+
+**方法**：Chrome 載入真實 `public/room.html` 與真實 `public/room.js`（loopback 靜態伺服器），
+用真實 DOM、真實 `scroll`／`input` 事件與真實 `setInterval` 時鐘驅動，讀取真實的
+`input.disabled` / `button.disabled`。所有數值都是瀏覽器回報的，不是對源碼比對。
+
+| 行為 | 實測結果 | 證據 |
+| --- | --- | --- |
+| diff 未捲到底 → 輸入框鎖住 | 通過 | 區塊真的溢出（scrollHeight 2250 / clientHeight 284）、60 列真實 DOM、scrollTop 0 → `inputDisabled true` |
+| 捲到一半 → 仍鎖住 | 通過 | scrollTop 983 → `mergeApprovalScrolled false`、`inputDisabled true` |
+| 捲到底 → 輸入框解鎖、按鈕仍鎖 | 通過 | scrollTop 1966.5 → `inputDisabled false`、`buttonDisabled true`（scroll listener 確實有掛上） |
+| 短語必須精確相符 | 通過 | 尾端多一空白 → 鎖住；全小寫 → 鎖住；`MERGE INTO MAIN` → 解鎖 |
+| 阻擋項壓住一切 | 通過 | 模擬衝突（2 項）、檔案清單截斷（1 項）、綁定失效（1 項）三種情況下 `inputDisabled` 與 `buttonDisabled` 皆 true，風險徽章翻成「高風險 · HIGH」 |
+| 阻擋解除後不得帶著舊短語自動解鎖 | 通過 | 走完整轉換（已武裝 → 出現阻擋 → 阻擋解除）後 `input.value === ""` 且 `buttonDisabled true`，必須重打 |
+| TTL 真的倒數並在到期時停用 | 通過 | 真實時鐘連續取樣 `00:03 → 00:02 → 00:01 → 00:00 → 已逾時 · expired`；到期當下按鈕由 false 翻成 true、加上逾時阻擋項、狀態列顯示重新產生預覽的指示 |
+
+**觀察（非缺陷）**：`formatCountdown` 用 floor，所以到期前最後 <1 秒顯示 `00:00` 而按鈕仍可按。
+方向是安全的——它在仍然有效時顯示 00:00，而不是在已逾時後還顯示剩餘時間。
+
+**這一列沒有涵蓋的部分（誠實邊界）**：
+- 只涵蓋 client 端的 gate。**沒有**涵蓋伺服器往返：實際 POST 消耗核准、CSRF、以及伺服器端
+  重新驗證 13 個綁定值的路徑，仍然只有 Node 端測試涵蓋。
+- 沒有涵蓋 `openMergeApprovalDialog()` 的載入路徑（它需要後端）；ticker 是依照
+  `public/room.js:3195` 同樣的方式手動啟動的。
+- 未涵蓋鍵盤操作、螢幕閱讀器與觸控裝置上的捲動判定。
+- **殘餘風險**：這是一次手動驗收，不會在 CI 重跑。它會隨 dialog 改動而失效。
+  真正的修補是 DOM 測試執行器，已列為 D-006 待 Owner 裁決（新增執行期相依 ＋ SBOM 變更）。
+
 ## ADR-028 vNext 待驗證矩陣
 
 | 範圍 | 狀態 | 必要證據 |
