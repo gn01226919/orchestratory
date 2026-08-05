@@ -7,6 +7,15 @@ import { basename, resolve } from "node:path";
 import { homedir } from "node:os";
 import type { AppContext } from "../app.ts";
 import { parseWorkflowRequest } from "./request.ts";
+import {
+  isModelListingProvider,
+  isRoomResidentProvider,
+  isSelectableProvider,
+  mentionedProviderId,
+  parseProviderMentionTarget,
+  roomResidentProviderIds,
+  type RoomResidentProviderId,
+} from "../providers/selection.ts";
 import { safeSummary } from "../security/redact.ts";
 import { canonicalWorkspace } from "../security/workspace.ts";
 import { NaturalLanguageSession, type SessionDecision, type SessionStatus } from "../core/session.ts";
@@ -82,17 +91,16 @@ export interface WebServerOptions {
   }) => Promise<string>;
 }
 
-const CHAT_PROVIDER_IDS = new Set(["fake", "codex", "claude", "grok"]);
-
 function writerCandidate(value: unknown): WriterCandidate {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("INVALID_WRITER_CANDIDATE");
   const candidate = value as Record<string, unknown>;
   if (candidate.origin === "resident") {
+    const provider = candidate.provider;
     if (Object.keys(candidate).some((key) => key !== "origin" && key !== "provider")
-      || (candidate.provider !== "codex" && candidate.provider !== "claude" && candidate.provider !== "grok")) {
+      || !isRoomResidentProvider(provider)) {
       throw new Error("INVALID_WRITER_CANDIDATE");
     }
-    return { origin: "resident", provider: candidate.provider };
+    return { origin: "resident", provider };
   }
   if (candidate.origin === "managed") {
     if (Object.keys(candidate).some((key) => key !== "origin" && key !== "actorId") || typeof candidate.actorId !== "string") {
@@ -444,7 +452,7 @@ export async function startWebServer(
         if (!info) throw new Error("ROOM_NOT_FOUND");
         const workspace = await app.workspaces.assertAllowed(info.workspace);
         const view = collaboration.roomView(room, workspace);
-        const eligible = (provider: "codex" | "claude" | "grok"): boolean =>
+        const eligible = (provider: RoomResidentProviderId): boolean =>
           app.providers.canWrite(provider, "subscription");
         json(response, 200, {
           leases: view.writerLeases.map((lease) => {
@@ -460,7 +468,7 @@ export async function startWebServer(
           }),
           delegations: view.writerDelegations,
           candidates: [
-            ...(["codex", "claude", "grok"] as const).map((provider) => ({
+            ...roomResidentProviderIds().map((provider) => ({
               origin: "resident", provider, actorId: provider, displayName: provider,
               eligible: eligible(provider),
               ...(eligible(provider) ? {} : { reason: "此 provider 目前沒有通過寫入沙箱驗證" }),
@@ -603,17 +611,15 @@ export async function startWebServer(
       if (request.method === "GET" && url.pathname === "/api/models") {
         const provider = url.searchParams.get("provider") ?? "";
         const authMode = url.searchParams.get("authMode") ?? "";
-        if (!["fake", "codex", "claude", "grok"].includes(provider)) {
+        // Anything a menu can hold must be listable, and nothing beyond it.
+        if (!isModelListingProvider(provider)) {
           throw new Error("INVALID_PROVIDER_ID");
         }
         if (authMode !== "subscription" && authMode !== "api") {
           throw new Error("INVALID_AUTH_MODE");
         }
         json(response, 200, {
-          models: await app.providers.listModels(
-            provider as import("../types.ts").ProviderId,
-            authMode,
-          ),
+          models: await app.providers.listModels(provider, authMode),
         });
         return;
       }
@@ -662,7 +668,7 @@ export async function startWebServer(
             throw new Error("INVALID_CHAT_REQUEST");
           }
           const provider = input.provider === undefined ? "codex" : input.provider;
-          if (typeof provider !== "string" || !CHAT_PROVIDER_IDS.has(provider)) {
+          if (!isSelectableProvider("conversation", provider)) {
             throw new Error("INVALID_PROVIDER_ID");
           }
           if (!/^[A-Za-z0-9._:/-]{1,128}$/u.test(input.model)) throw new Error("INVALID_MODEL_ID");
@@ -712,8 +718,8 @@ export async function startWebServer(
         }
         if (url.pathname === "/api/rooms/summarize") {
           const value = body as Record<string, unknown>;
-          const provider = typeof value.provider === "string" ? value.provider : "codex";
-          if (!CHAT_PROVIDER_IDS.has(provider)) throw new Error("INVALID_PROVIDER_ID");
+          const provider = value.provider === undefined ? "codex" : value.provider;
+          if (!isSelectableProvider("conversation", provider)) throw new Error("INVALID_PROVIDER_ID");
           if (typeof value.room !== "string") throw new Error("ROOM_NOT_FOUND");
           if (webProviderCalls >= maxWebProviderCalls) {
             throw new Error("SESSION_PROVIDER_CALL_LIMIT_REACHED");
@@ -723,14 +729,14 @@ export async function startWebServer(
           await app.workspaces.assertAllowed(info.workspace);
           const lastSeq = info.messages;
           const tail = ledger.listAfter(value.room, Math.max(0, lastSeq - 60));
-          const capabilities = app.providers.get(provider as import("../types.ts").ProviderId).capabilities;
+          const capabilities = app.providers.get(provider).capabilities;
           const model = capabilities.subscriptionModels[0] ?? "default";
           webProviderCalls += 1;
           const controller = new AbortController();
           roomCallControllers.add(controller);
           let result;
           try {
-            result = await app.providers.get(provider as import("../types.ts").ProviderId).invoke({
+            result = await app.providers.get(provider).invoke({
               runId: randomUUID(),
               role: "planner",
               access: "read-only",
@@ -757,15 +763,14 @@ export async function startWebServer(
         }
         if (url.pathname === "/api/rooms/mention") {
           const value = body as Record<string, unknown>;
+          const mentionTarget = parseProviderMentionTarget(value.target);
           if (
-            typeof value.room !== "string" || typeof value.target !== "string" ||
-            typeof value.text !== "string" ||
-            !/^(codex|claude|grok|fake)(?::[A-Za-z0-9._:/-]{1,128})?$/u.test(value.target)
+            typeof value.room !== "string" || typeof value.text !== "string" || !mentionTarget
           ) throw new Error("INVALID_ROOM_MENTION");
           const info = ledger.getRoom(value.room);
           if (!info) throw new Error("ROOM_NOT_FOUND");
           await app.workspaces.assertAllowed(info.workspace);
-          const provider = value.target.split(":", 1)[0];
+          const provider = mentionTarget.provider;
           if (provider !== "fake") {
             if (webProviderCalls >= maxWebProviderCalls) {
               throw new Error("SESSION_PROVIDER_CALL_LIMIT_REACHED");
@@ -809,13 +814,10 @@ export async function startWebServer(
           await app.workspaces.assertAllowed(info.workspace);
           const seq = Number(value.seq);
           const mention = ledger.getRange(value.room, seq, seq)[0];
-          const parsed = mention?.kind === "chat"
-            ? mention.text.match(/^@(codex|claude|grok|fake)\s+[\s\S]+$/u)
-            : null;
-          if (!mention || !parsed || parsed[1] === mention.author) {
+          const target = mention?.kind === "chat" ? mentionedProviderId(mention.text) : undefined;
+          if (!mention || !target || target === mention.author) {
             throw new Error("ROOM_MENTION_NOT_FOUND");
           }
-          const target = parsed[1];
           const resolved = ledger.listAfter(value.room, seq).some((later) =>
             later.author === target ||
             (later.kind === "system" && later.text.includes(`（提及 #${seq}）`) &&
@@ -979,12 +981,12 @@ export async function startWebServer(
           if (
             Object.keys(value).some((key) => !["room", "provider", "label"].includes(key)) ||
             typeof value.room !== "string" || typeof value.label !== "string" ||
-            (value.provider !== "codex" && value.provider !== "claude" && value.provider !== "grok")
+            !isRoomResidentProvider(value.provider)
           ) throw new Error("INVALID_MANAGED_AGENT_REQUEST");
           const info = ledger.getRoom(value.room);
           if (!info) throw new Error("ROOM_NOT_FOUND");
           const workspace = await app.workspaces.assertAllowed(info.workspace);
-          const provider = value.provider as ManagedAgentProvider;
+          const provider: ManagedAgentProvider = value.provider;
           const desiredName = managedAgentDisplayName(provider, value.label);
           if (presence.list(workspace, value.room).some((session) => session.displayName === desiredName)) {
             throw new Error("MANAGED_AGENT_DISPLAY_NAME_IN_USE");
@@ -1290,7 +1292,7 @@ export async function startWebServer(
           const value = body as Record<string, unknown>;
           if (Object.keys(value).some((key) => !["room", "taskId", "childProvider", "label"].includes(key))
             || typeof value.room !== "string" || typeof value.taskId !== "string" || typeof value.label !== "string"
-            || (value.childProvider !== "codex" && value.childProvider !== "claude" && value.childProvider !== "grok")) {
+            || !isRoomResidentProvider(value.childProvider)) {
             throw new Error("INVALID_WRITER_DELEGATE_REQUEST");
           }
           const info = ledger.getRoom(value.room);

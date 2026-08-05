@@ -1,8 +1,7 @@
 import { PROFILES } from "../config.ts";
 import type { AgentAssignment, ProviderId, SoftLimits, WorkflowRequest } from "../types.ts";
 import type { ProviderRegistry } from "../providers/registry.ts";
-
-const PROVIDERS = new Set<ProviderId>(["fake", "codex", "claude", "grok"]);
+import { isSelectableProvider } from "../providers/selection.ts";
 
 function text(value: unknown, name: string, max: number): string {
   if (typeof value !== "string" || value.trim().length < 1 || value.length > max) {
@@ -29,11 +28,18 @@ function assignment(
     throw new Error(`INVALID_${role.toUpperCase()}_ASSIGNMENT`);
   }
   const value = input as Record<string, unknown>;
-  const provider = text(value.provider, "provider", 32) as ProviderId;
-  if (!PROVIDERS.has(provider)) throw new Error("UNKNOWN_PROVIDER");
+  const candidate = text(value.provider, "provider", 32);
+  if (!isSelectableProvider("workflowAgent", candidate)) throw new Error("UNKNOWN_PROVIDER");
+  const provider: ProviderId = candidate;
   const authMode = value.authMode === "api" ? "api" : "subscription";
   const capabilities = providers.get(provider).capabilities;
   if (authMode === "api" && !capabilities.api) throw new Error("API_MODE_NOT_AVAILABLE");
+  // Two independent writer gates on purpose. The selection table states which
+  // providers may ever be offered the writer role; `canWrite` then re-checks the
+  // registered adapter. Both must agree, and both report the same stable code.
+  if (role === "writer" && !isSelectableProvider("workflowWriter", provider)) {
+    throw new Error("WRITER_PROVIDER_IS_READ_ONLY");
+  }
   if (role === "writer" && !providers.canWrite(provider, authMode)) {
     throw new Error("WRITER_PROVIDER_IS_READ_ONLY");
   }

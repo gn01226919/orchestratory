@@ -2,7 +2,7 @@ import type { ApiModelPolicy, AuthMode, ProviderId } from "../types.ts";
 import { FakeProvider } from "./fake.ts";
 import { SubscriptionCliProvider } from "./cli.ts";
 import { ApiProvider, estimateMaximumApiCostUsd } from "./api.ts";
-import { LocalModelProvider } from "./local.ts";
+import { LocalModelProvider, normalizeLocalEndpoint } from "./local.ts";
 import type { ProviderAdapter, ProviderCapabilities } from "./provider.ts";
 import type { ProviderCallGovernor } from "../core/provider-call-governor.ts";
 
@@ -129,6 +129,36 @@ export class ProviderRegistry {
     const provider = this.#providers.get(id);
     if (!provider) throw new Error(`PROVIDER_NOT_REGISTERED:${id}`);
     return provider;
+  }
+
+  has(id: ProviderId): boolean {
+    return this.#providers.has(id);
+  }
+
+  /**
+   * Owner-initiated, process-scoped registration of the loopback model endpoint.
+   *
+   * Default-off is preserved: with no call the id stays unregistered and every
+   * lookup fails closed. The gate is a local TTY confirmation in the TUI rather
+   * than a settings file, which keeps the decision unforgeable by anything the
+   * model or the browser can reach — there is deliberately no HTTP route that
+   * enables this, because a web-reachable "point Orchestratory at a port" control
+   * would be a request-forgery lever even while restricted to loopback.
+   *
+   * Nothing is persisted: the endpoint lives only for this process, so a stale or
+   * hostile value cannot survive a restart. `normalizeLocalEndpoint` still rejects
+   * every non-loopback origin, credentialed URL, non-http scheme and path.
+   */
+  enableLocalEndpoint(endpoint: unknown): ProviderCapabilities {
+    if (this.#providers.has("local")) throw new Error("LOCAL_PROVIDER_ALREADY_REGISTERED");
+    const provider = new LocalModelProvider({ endpoint: normalizeLocalEndpoint(endpoint) });
+    this.register(provider);
+    return {
+      ...provider.capabilities,
+      suggestedModels: [...provider.capabilities.suggestedModels],
+      subscriptionModels: [...provider.capabilities.subscriptionModels],
+      apiModels: [...provider.capabilities.apiModels],
+    };
   }
 
   canWrite(id: ProviderId, authMode: AuthMode): boolean {

@@ -17,6 +17,8 @@ import type {
   WorkflowRequest,
 } from "../types.ts";
 import { PROFILES } from "../config.ts";
+import { localErrorCode, normalizeLocalEndpoint } from "../providers/local.ts";
+import { isSelectableProvider, selectableProviderIds } from "../providers/selection.ts";
 import { sanitizeTerminal } from "../security/redact.ts";
 import { checkpointApprovalScope, workflowApprovalScope } from "../security/approval.ts";
 import { NaturalLanguageSession, sessionTools } from "../core/session.ts";
@@ -31,7 +33,9 @@ import {
   usageDetailLines,
 } from "./terminal-dashboard.ts";
 
-const providerIds = new Set<ProviderId>(["fake", "codex", "claude", "grok"]);
+// Provider menus come from the exhaustive table in providers/selection.ts, so a
+// new provider cannot ship without being classified for this wizard.
+const workflowAgentProviderIds = selectableProviderIds("workflowAgent");
 const CLEAR_SCREEN = "\u001b[2J\u001b[H";
 const HIDE_CURSOR = "\u001b[?25l";
 const SHOW_CURSOR = "\u001b[?25h";
@@ -206,8 +210,8 @@ async function monitorRun(input: {
 }
 
 function provider(value: string, fallback: ProviderId): ProviderId {
-  const normalized = value.trim().toLowerCase() as ProviderId;
-  return providerIds.has(normalized) ? normalized : fallback;
+  const normalized = value.trim().toLowerCase();
+  return isSelectableProvider("workflowAgent", normalized) ? normalized : fallback;
 }
 
 async function askAssignment(
@@ -216,6 +220,14 @@ async function askAssignment(
   role: AgentAssignment["role"],
   fallback: ProviderId,
 ): Promise<AgentAssignment> {
+  // Show what is actually registered, using each adapter's own display name — that
+  // is where the local endpoint states it is loopback-only and costs nothing.
+  const offered = workflowAgentProviderIds.filter((id) => app.providers.has(id));
+  const choices = offered.map((id) => {
+    const registered = app.providers.get(id).capabilities;
+    return `  ${id.padEnd(6, " ")} ${sanitizeTerminal(registered.displayName)}`;
+  });
+  stdout.write(`${role} 可選 provider：\n${choices.join("\n")}\n`);
   const selected = provider(await rl.question(`${role} provider [${fallback}]: `), fallback);
   const capabilities = app.providers.get(selected).capabilities;
   let authMode: AgentAssignment["authMode"] = "subscription";
@@ -547,6 +559,12 @@ export interface ConversationCommandOutcome {
   exit: boolean;
   openAdvanced: boolean;
   lines: string[];
+  /**
+   * A `/local <url>` application, still unapproved. The dispatcher never
+   * registers anything itself: it only hands the loop a candidate endpoint that
+   * the owner must then confirm at the TTY.
+   */
+  localEndpointRequest?: string;
 }
 
 /**
@@ -557,7 +575,7 @@ export interface ConversationCommandOutcome {
 export function runConversationCommand(
   input: string,
   session: NaturalLanguageSession,
-  options: { guiUrl?: string; maxProviderCalls: number },
+  options: { guiUrl?: string; maxProviderCalls: number; localEndpointRegistered?: boolean },
 ): ConversationCommandOutcome {
   const command = input.toLowerCase().split(/\s+/u)[0];
   const lines: string[] = [];
@@ -592,6 +610,8 @@ export function runConversationCommand(
   } else if (command === "/new" || command === "/clear") {
     session.clear();
     lines.push("已清除 RAM 中的對話內容；模型呼叫計數不會重設。");
+  } else if (command === "/local") {
+    return localCommandOutcome(input, options.localEndpointRegistered === true);
   } else if (command === "/gui") {
     lines.push(options.guiUrl ? `GUI：${options.guiUrl}` : "此模式沒有啟動 GUI。");
   } else if (command === "/advanced") {
@@ -600,6 +620,34 @@ export function runConversationCommand(
     lines.push("未知指令；輸入 /help 查看可用指令。");
   }
   return { exit: false, openAdvanced: false, lines };
+}
+
+/**
+ * `/local` is an *application*, not an activation. It only reports state or
+ * returns a candidate endpoint; the loop still has to obtain a typed TTY
+ * confirmation before anything is registered, and nothing is written to disk.
+ */
+function localCommandOutcome(input: string, registered: boolean): ConversationCommandOutcome {
+  const lines: string[] = [];
+  const parts = input.split(/\s+/u).slice(1);
+  if (registered) {
+    lines.push(
+      "地端模型已在這次啟動中加入，可直接在 /advanced 團隊設定或 GUI 團隊選單選用。",
+      "要換一個 endpoint 請重新啟動 Orchestrator——本次程序不會覆寫已核准的位址。",
+    );
+    return { exit: false, openAdvanced: false, lines };
+  }
+  if (parts.length !== 1 || !parts[0]) {
+    lines.push(
+      "地端模型預設未載入。用法：/local http://127.0.0.1:11434",
+      "只接受 loopback（127.0.0.1、[::1]、localhost）與明確通訊埠的 http:// 位址；",
+      "不接受帳號密碼、路徑、查詢字串或任何對外主機。",
+      "加入後它只能擔任唯讀角色（planner／reviewer），不會使用訂閱或 API 額度，",
+      "但仍受呼叫數、回合、逾時、併發、連續失敗與 kill switch 等硬性上限約束。",
+    );
+    return { exit: false, openAdvanced: false, lines };
+  }
+  return { exit: false, openAdvanced: false, lines, localEndpointRequest: parts[0] };
 }
 
 function conversationHelpLines(): string[] {
@@ -611,6 +659,7 @@ function conversationHelpLines(): string[] {
     "  /status    顯示 session 用量與硬性上限",
     "  /new       清除目前的暫存對話內容",
     "  /gui       顯示本機 GUI 位址",
+    "  /local     申請把地端模型（loopback endpoint）加入這次啟動，例如 /local http://127.0.0.1:11434",
     "  /advanced  開啟完整 workflow 設定精靈",
     "  /exit      結束 Orchestrator",
     "訊息開頭用 @codex、@claude、@grok 可單輪指定模型直答（唯讀）；多個 @ 會並排比稿。",
@@ -715,6 +764,60 @@ async function runDefaultCodingTeam(
   stdout.write("\nCoding team 已結束；你可以繼續原本的對話。\n");
 }
 
+/**
+ * Owner approval for the loopback model endpoint, at the TTY the owner is already
+ * typing into. The candidate URL is echoed back exactly as it will be used — the
+ * canonical origin after validation, not the raw input — so a confusable host or
+ * a stray path cannot be approved by mistake. Refusal leaves the id unregistered,
+ * which is the default state; nothing is persisted either way.
+ */
+async function approveLocalEndpoint(
+  app: AppContext,
+  rl: ReturnType<typeof createInterface>,
+  candidate: string,
+): Promise<void> {
+  let origin: string;
+  try {
+    origin = normalizeLocalEndpoint(candidate);
+  } catch (error) {
+    stdout.write(
+      `\n這個位址無法作為地端 endpoint：${sanitizeTerminal(localErrorCode(error))}\n` +
+        "只接受 loopback 主機、http:// 與明確通訊埠，例如 http://127.0.0.1:11434。\n",
+    );
+    return;
+  }
+  stdout.write(
+    "\n\u001b[1m加入地端模型\u001b[0m\n" +
+      `  位址：${sanitizeTerminal(origin)}（只連本機 loopback，不會對外連線）\n` +
+      "  費用：不使用訂閱或 API 額度；不讀取也不傳送任何憑證\n" +
+      "  角色：只能擔任唯讀角色（planner／reviewer），不能當 Writer\n" +
+      "  範圍：只在這次啟動有效，不寫入設定檔；重新啟動後需要再次申請\n" +
+      "  限制：呼叫數、回合、逾時、併發、連續失敗與 kill switch 全部照舊\n\n",
+  );
+  if ((await rl.question("輸入 LOCAL 確認加入；其他輸入都會取消：")) !== "LOCAL") {
+    stdout.write("已取消，沒有加入任何 provider。\n");
+    return;
+  }
+  let capabilities: ReturnType<AppContext["providers"]["enableLocalEndpoint"]>;
+  try {
+    capabilities = app.providers.enableLocalEndpoint(origin);
+  } catch (error) {
+    stdout.write(
+      `\n加入失敗：${sanitizeTerminal(error instanceof Error ? error.message : "LOCAL_REGISTER_FAILED")}\n`,
+    );
+    return;
+  }
+  stdout.write(`\n已加入：${sanitizeTerminal(capabilities.displayName)}\n`);
+  const health = await app.providers.get("local").doctor();
+  stdout.write(
+    health.ok
+      ? `連線檢查通過${health.version ? `：${sanitizeTerminal(health.version)}` : ""}\n`
+      : `⚠ 連線檢查未通過：${sanitizeTerminal(health.reason ?? "LOCAL_ENDPOINT_UNREACHABLE")}\n` +
+        "（provider 已登記，但要等本機服務可用才會回應。）\n",
+  );
+  stdout.write("現在可在 /advanced 團隊設定或 GUI 的團隊選單中選擇它。\n");
+}
+
 export async function runTui(app: AppContext, options: { guiUrl?: string } = {}): Promise<void> {
   if (!stdin.isTTY || !stdout.isTTY) throw new Error("TUI_REQUIRES_TTY");
   let rl = createInterface({ input: stdin, output: stdout, terminal: true });
@@ -749,9 +852,14 @@ export async function runTui(app: AppContext, options: { guiUrl?: string } = {})
         const outcome = runConversationCommand(input, session, {
           ...(options.guiUrl ? { guiUrl: options.guiUrl } : {}),
           maxProviderCalls: app.hardLimits.maxProviderCalls,
+          localEndpointRegistered: app.providers.has("local"),
         });
         if (outcome.lines.length > 0) stdout.write(`\n${outcome.lines.join("\n")}\n`);
         if (outcome.exit) break;
+        if (outcome.localEndpointRequest !== undefined) {
+          await approveLocalEndpoint(app, rl, outcome.localEndpointRequest);
+          continue;
+        }
         if (outcome.openAdvanced) {
           rl.close();
           try {
