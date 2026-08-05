@@ -574,6 +574,14 @@ function appendProposalCard(input) {
 
 /* ---------- run lifecycle ---------- */
 
+function restoreProposalCard(card, note) {
+  card.stateLabel.textContent = "待確認";
+  card.stateLabel.className = "state pending";
+  card.runButton.disabled = false;
+  card.dismissButton.disabled = false;
+  if (note) appendNote(note);
+}
+
 async function startRun(card, input) {
   if (state.activeRun) {
     appendNote("已有工作流執行中，請先等它結束或取消。");
@@ -635,10 +643,19 @@ async function startRun(card, input) {
         }),
       });
       const snapshot = approval.snapshot;
-      if (!snapshot || !window.confirm(
+      const snapshotApproved = Boolean(snapshot) && window.confirm(
         `已捕捉 ${snapshot.files} 個檔案（寫入 ${snapshot.writes}、刪除 ${snapshot.deletes}，${snapshot.totalBytes} bytes）。\n` +
         "內容只在 RAM 保存約 2 分鐘，將匯入安全分支；主專案不會被修改。繼續嗎？",
-      )) return;
+      );
+      if (!snapshotApproved) {
+        restoreProposalCard(
+          card,
+          snapshot
+            ? "已取消，主專案與安全分支都沒有變更。提案卡已還原，隨時可以再按一次 RUN。"
+            : "沒有可匯入的未提交變更快照，已取消；主專案與安全分支都沒有變更。提案卡已還原。",
+        );
+        return;
+      }
       payload.dirtySnapshotId = snapshot.id;
       payload.dirtySnapshotApproval = approval.token;
     }

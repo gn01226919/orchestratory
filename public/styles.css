@@ -107,9 +107,20 @@ select:focus, textarea:focus, input:focus, button:focus-visible {
 .rail-row small { color: var(--muted); font-size: 10px; }
 .side-foot { margin-top: auto; display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--border); padding-top: 12px; }
 .usage { color: var(--muted); }
-.conn { color: var(--faint); font-size: 10px; }
+.conn { display: grid; gap: 6px; justify-items: start; color: var(--faint); font-size: 10px; }
 .conn.ready { color: var(--accent-dim); }
 .conn.error { color: var(--danger); }
+.conn.paused { color: var(--muted); }
+.conn .conn-action {
+  padding: 5px 8px;
+  border: 1px solid #3d7659;
+  border-radius: 6px;
+  color: #8ce1b4;
+  background: #1b3227;
+  font-size: 9px;
+  line-height: 1.3;
+  text-align: left;
+}
 
 /* Stream */
 .stream { flex: 1; overflow-y: auto; padding: 26px max(22px, calc((100% - 780px) / 2)) 12px; }
@@ -870,6 +881,29 @@ button.cancel-pending:hover { border-color: var(--warn); }
   flex-direction: column;
   align-items: stretch;
   gap: 4px;
+}
+.office-presence-row .presence-stages {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.office-presence-row .presence-stage {
+  padding: 2px 5px;
+  border: 1px solid #3b323e;
+  border-radius: 999px;
+  color: #7d7481;
+  font: 700 7px/1.4 var(--font-mono);
+  white-space: nowrap;
+}
+.office-presence-row .presence-stage.is-done { border-color: #3d7659; color: #8ce1b4; background: #16241c; }
+.office-presence-row .presence-stage.is-waiting { border-color: #7a6738; color: #e7c37a; background: #241f14; }
+.office-presence-row .presence-stage-hint {
+  flex-basis: 100%;
+  color: #857b88;
+  font-size: 7px;
+  line-height: 1.4;
 }
 .office-presence-row .presence-name-input {
   grid-column: 1 / -1;
@@ -1831,6 +1865,18 @@ button.cancel-pending:hover { border-color: var(--warn); }
 .office-notification[data-kind="success"]::before { background: #58ce90; }
 .office-notification[data-kind="error"]::before { background: #ef736d; }
 .office-notification[data-kind="message"]::before { background: #6da5ef; }
+.office-notification-action {
+  justify-self: start;
+  padding: 5px 8px;
+  border: 1px solid #3d7659;
+  border-radius: 6px;
+  color: #8ce1b4;
+  background: #1b3227;
+  font-size: 8.5px;
+  line-height: 1.3;
+  text-align: left;
+}
+.office-notification-done { color: #6f8f7d; }
 #office-notification-clear { width: 100%; margin-top: 10px; padding: 6px; font-size: 9px; }
 .office-agent-card { top: auto; bottom: 103px; max-height: 210px; border-color: #57465a; background: linear-gradient(180deg, rgb(33 28 38 / 98%), rgb(22 20 27 / 98%)); }
 .office-agent-card-head > span { display: flex; align-items: center; gap: 7px; }
