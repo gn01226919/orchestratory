@@ -1342,6 +1342,43 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomScript, /office-pet pet-dino/u);
   assert.match(roomScript, /document\.hidden/u);
   assert.doesNotMatch(roomScript, /localStorage/u);
+  // Room errors are translated inline; no blocking native dialog may report them.
+  assert.doesNotMatch(roomScript, /\balert\(/u);
+  assert.match(roomScript, /function humanError\(/u);
+  assert.match(roomScript, /function showRoomError\(/u);
+  assert.match(roomScript, /TARGET_AGENT_STANDBY_NOT_APPROVED:/u);
+  assert.match(roomScript, /conn-action/u);
+  assert.match(roomScript, /核准 \$\{target\.displayName \|\| target\.provider\} 的 room-wait 待命/u);
+  // The status indicator must not keep claiming 直播中 while polling is suspended.
+  assert.match(roomScript, /已暫停（分頁在背景）/u);
+  assert.match(roomScript, /補抓中…/u);
+  assert.match(roomScript, /function setConnectionState\(/u);
+  // A lease waiting for apply-back must survive a freshly generated task id.
+  assert.match(roomScript, /ready\.find\(\(lease\) => lease\.taskId === taskId\) \|\| ready\[0\]/u);
+  assert.match(roomScript, /terminal\.find\(\(lease\) => lease\.taskId === taskId\) \|\| terminal\[0\]/u);
+  assert.match(roomScript, /function pendingWriterLease\(/u);
+  assert.match(roomScript, /pendingWriterLease\(\)\?\.taskId \|\| `task-\$\{Date\.now\(\)\.toString\(36\)\}`/u);
+  // Completing a Writer revokes access, so the button says so and confirms once inline.
+  assert.match(roomScript, /結束 Writer 並準備回寫/u);
+  assert.match(roomScript, /再按一次：結束 Writer 並撤銷寫入權/u);
+  assert.match(roomScript, /writerCompleteConfirm/u);
+  assert.match(roomScript, /階段 1／2（結束 Writer）失敗/u);
+  assert.match(roomScript, /階段 2／2（回寫主專案）失敗/u);
+  assert.match(roomScript, /筆變更未列出/u);
+  // Join and standby render as one progressive card with the approve button in place.
+  assert.match(roomScript, /presence-stages/u);
+  assert.match(roomScript, /① 已加入房間/u);
+  assert.match(roomScript, /② 待命待核准/u);
+  assert.match(roomScript, /office-notification-action/u);
+  assert.match(roomScript, /standby-approve/u);
+  assert.match(roomHtml, /id="writer-complete" type="button" disabled>結束 Writer 並準備回寫/u);
+  const appScriptResponse = await fetch(`${server.url}/app.js`);
+  assert.equal(appScriptResponse.status, 200);
+  const appScript = await appScriptResponse.text();
+  // Cancelling the dirty-snapshot confirmation must restore the proposal card.
+  assert.match(appScript, /function restoreProposalCard\(/u);
+  assert.match(appScript, /const snapshotApproved = Boolean\(snapshot\) && window\.confirm\(/u);
+  assert.match(appScript, /已取消，主專案與安全分支都沒有變更。/u);
   const roomStylesResponse = await fetch(`${server.url}/styles.css`);
   assert.equal(roomStylesResponse.status, 200);
   const roomStyles = await roomStylesResponse.text();
@@ -1356,6 +1393,10 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomStyles, /@keyframes dino-leg-backward/u);
   assert.match(roomScript, /cat-leg-front-near/u);
   assert.match(roomScript, /dino-leg-near/u);
+  assert.match(roomStyles, /\.conn\.paused/u);
+  assert.match(roomStyles, /\.conn \.conn-action/u);
+  assert.match(roomStyles, /\.presence-stage\.is-waiting/u);
+  assert.match(roomStyles, /\.office-notification-action/u);
 
   const usageView = await fetch(
     `${server.url}/api/view?runId=${restoreRunId}&kind=usage`,

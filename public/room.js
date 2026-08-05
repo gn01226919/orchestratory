@@ -42,6 +42,7 @@ const state = {
   dayMode: false,
   officePositions: {},
   officeLayouts: {},
+  writerCompleteConfirm: "",
 };
 const byId = (id) => document.getElementById(id);
 let sessionRecovery;
@@ -85,6 +86,109 @@ async function api(path, options = {}, recovered = false) {
   const value = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(value.error || `HTTP ${response.status}`);
   return value;
+}
+
+/*
+ * Room 專用的錯誤翻譯表。app.js 另有一份 humanError()，兩者涵蓋不同端點的代碼；
+ * 目前無法合併成共用檔案，因為靜態資產是 src/ui/web.ts 的固定 allowlist（/room.js、
+ * /app.js、/styles.css），新增共用 script 需要後端變更。
+ */
+const ROOM_ERROR_MESSAGES = {
+  TARGET_AGENT_STANDBY_NOT_APPROVED: "這個終端已加入房間，但 room-wait 待命還沒核准，所以收不到訊息。",
+  TARGET_AGENT_OFFLINE: "這個終端目前不在線；請等它重新連上或改選其他席位。",
+  SEAT_OFFLINE: "這個席位目前不在線；請等它重新連上或改選其他席位。",
+  SOURCE_SEAT_OFFLINE: "來源席位已離線，訊息沒有送出。",
+  MANAGED_AGENT_BUSY: "這個受控 Agent 正在回覆上一則訊息，請稍候。",
+  MANAGED_AGENT_NOT_FOUND: "找不到這個受控 Agent，可能已被移除。",
+  MANAGED_AGENT_NOT_BUSY: "這個受控 Agent 目前沒有在回覆，不需要取消。",
+  MANAGED_AGENT_REPLY_CANCELLED: "已取消這次回覆；帳本沒有留下模型內容。",
+  MANAGED_AGENT_REPLY_FAILED: "受控 Agent 回覆失敗，請確認對應的 CLI 已登入後再試。",
+  MANAGED_AGENT_PROVIDER_UNAVAILABLE: "這個模型來源目前無法使用。",
+  MANAGED_AGENT_DISPLAY_NAME_IN_USE: "這個名稱已被使用，請換一個。",
+  MANAGED_AGENT_REMOVED: "這個受控 Agent 已被移除。",
+  EMPTY_AGENT_MESSAGE: "只有 @名稱沒有內容；請在名稱後面加上要交辦的訊息。",
+  RATE_LIMITED: "操作太頻繁，請稍等幾秒再試。",
+  ROOM_NOT_FOUND: "找不到這個房間，可能已被移除；請重新選擇。",
+  ROOM_RECORDING_OFF: "這個房間的收錄已關閉，訊息不會入帳。",
+  ROOM_RECORDING_PAUSED: "收錄已暫停；請先按「恢復收錄」再發言。",
+  ROOM_LEDGER_FULL: "帳本已達容量上限，請先整理或改用新房間。",
+  ROOM_MENTION_NOT_FOUND: "找不到這則等待中的呼叫，可能已經結束。",
+  ROOM_MENTION_CANCELLED: "已取消這次模型呼叫。",
+  ROOM_WAIT_CANCELLED: "終端的 room_wait 等待已被取消。",
+  ROOM_STANDBY_REVOKED: "這個終端的 room-wait 待命已被撤銷。",
+  ROOM_BINARY_MESSAGE_DENIED: "訊息含有不允許的二進位內容，沒有送出。",
+  PRESENCE_NOT_FOUND: "找不到這個終端席位，可能已離線。",
+  PRESENCE_NOT_JOINED: "這個終端還沒被核准加入房間。",
+  PRESENCE_ALREADY_JOINED: "這個終端已經在房間裡了。",
+  PRESENCE_JOIN_NOT_REQUESTED: "這個終端尚未提出加入申請。",
+  PRESENCE_STANDBY_NOT_REQUESTED: "這個終端還沒申請 room-wait 待命，無法核准。",
+  PRESENCE_DISPLAY_NAME_IN_USE: "這個名稱已被使用，請換一個。",
+  PRESENCE_LIMIT_REACHED: "席位數量已達上限。",
+  PRESENCE_WORKSPACE_MISMATCH: "這個終端的專案路徑與房間不符，已拒絕加入。",
+  DELIVERY_NOT_FOUND: "找不到這筆投遞紀錄，可能已完成或過期。",
+  DELIVERY_NOT_RETRYABLE: "這筆投遞目前不能重新排隊。",
+  DELIVERY_ATTEMPTS_EXHAUSTED: "投遞重試次數已用完；請確認終端仍在線再重新送出。",
+  DELIVERY_CANCELLED: "這筆投遞已取消。",
+  WRITER_LEASE_NOT_ACTIVE: "目前沒有進行中的 Writer Lease。",
+  WRITER_LEASE_ALREADY_ACTIVE: "這個任務已經有進行中的 Writer；請先完成或交接。",
+  WRITER_EPOCH_STALE: "Writer 狀態已被其他操作更新；請重新開啟面板再試。",
+  WRITER_CHECKPOINT_REQUIRED: "完成或交接前必須填寫 checkpoint。",
+  WRITER_NOT_REVIEW_READY: "這個任務還沒進入待回寫狀態。",
+  WRITER_TASK_ALREADY_RUNNING: "這個任務正在執行中，請等它結束。",
+  WRITER_TASK_ALREADY_APPLIED: "這個任務已經回寫過主專案，不會重複套用。",
+  WRITER_BASE_COMMIT_REQUIRED: "此專案尚無基準 commit；請先在終端建立第一個 commit，再指派 Writer。",
+  WRITER_CANDIDATE_WRITE_NOT_ALLOWED: "這個人選不能擔任 Writer（沒有寫入能力）。",
+  WRITER_RUN_FAILED: "Writer 執行失敗；主專案沒有被修改。",
+  DELEGATION_TASK_ALREADY_RUNNING: "同一個 task worktree 正在執行中，系統會序列執行，請稍候。",
+  DELEGATION_WRITE_NOT_ALLOWED: "跨類型子 Agent 只能唯讀，無法取得寫入權。",
+  DELEGATION_NOT_ACTIVE: "這個子 Agent 已失效。",
+  APPLY_BACK_NOT_FOUND_OR_EXPIRED: "回寫預覽已失效或逾時，請重新產生預覽。",
+  APPLY_BACK_CONFIRMATION_MISMATCH: "確認文字不相符，沒有任何主專案檔案被修改。",
+  APPLY_BACK_SOURCE_CHANGED: "來源自預覽後已變動，為安全起見已中止；請重新產生預覽。",
+  APPLY_BACK_SOURCE_FILE_CHANGED: "有檔案在預覽後被改動，已中止回寫；請重新產生預覽。",
+  APPLY_BACK_SOURCE_HEAD_CHANGED: "主專案 HEAD 已變動，已中止回寫；請重新產生預覽。",
+  APPLY_BACK_WORKTREE_HEAD_CHANGED: "Writer worktree 已變動，已中止回寫；請重新產生預覽。",
+  APPLY_BACK_FAILED: "回寫失敗；系統已停止，請檢查預覽與復原區。",
+  SESSION_PROVIDER_CALL_LIMIT_REACHED: "這次啟動已達模型呼叫硬上限（owner 設定檔可調）。請重新啟動 Orchestrator。",
+  CHAT_TURN_ALREADY_RUNNING: "上一個回答還在生成，請稍候。",
+  PROVIDER_FAILED: "模型程序失敗，請確認對應的 CLI 已登入後重試。",
+  PROVIDER_EXITED: "模型程序已結束，請確認對應的 CLI 已登入後重試。",
+  REQUEST_BODY_TOO_LARGE: "內容太長，請縮短後再送出。",
+  UI_PROTOCOL_MISMATCH_RESTART_REQUIRED: "網頁版本與後端不一致；請重新啟動 Orchestrator 或重新整理頁面。",
+};
+
+function humanError(error) {
+  const code = error instanceof Error ? error.message : String(error);
+  return ROOM_ERROR_MESSAGES[code] || code;
+}
+
+function pendingStandbySession(session) {
+  if (session?.joined && session.standbyRequested && !session.standbyApproved) return session;
+  return (state.presences || []).find(
+    (entry) => entry.joined && entry.standbyRequested && !entry.standbyApproved,
+  );
+}
+
+function showRoomError(error, options = {}) {
+  const code = error instanceof Error ? error.message : String(error);
+  const connection = byId("connection");
+  if (!connection) return;
+  connection.textContent = "";
+  connection.className = "conn error";
+  const text = document.createElement("span");
+  text.textContent = options.prefix ? `${options.prefix}：${humanError(error)}` : humanError(error);
+  connection.append(text);
+  const target = code === "TARGET_AGENT_STANDBY_NOT_APPROVED"
+    ? pendingStandbySession(options.session)
+    : undefined;
+  if (target) {
+    const approve = document.createElement("button");
+    approve.type = "button";
+    approve.className = "conn-action";
+    approve.textContent = `核准 ${target.displayName || target.provider} 的 room-wait 待命`;
+    approve.addEventListener("click", () => void changePresenceStandby(target, "approve", approve));
+    connection.append(approve);
+  }
 }
 
 const AUTHOR_COLORS = { you: "#dde0e4", system: "#5f636b", claude: "#3ecf8e", codex: "#5e9eff", grok: "#f5a623" };
@@ -181,7 +285,7 @@ async function changeDelivery(delivery, action, button) {
     state.deliveries = state.deliveries.map((item) => item.id === value.delivery.id ? value.delivery : item);
     refreshDeliveryReceipts();
   } catch (error) {
-    alert(error.message);
+    showRoomError(error, { prefix: "投遞操作失敗" });
   } finally {
     button.disabled = false;
   }
@@ -302,7 +406,7 @@ async function cancelPending(pending, button) {
   } catch (error) {
     button.disabled = false;
     button.textContent = "取消等待";
-    alert(error.message);
+    showRoomError(error, { prefix: "取消等待失敗" });
   }
 }
 
@@ -502,7 +606,35 @@ function renderPresencePanel() {
         void changePresenceMembership(session, membership);
       });
       actions.append(membership);
-      row.append(identity, actions);
+      /*
+       * 加入房間與 room-wait 待命是兩個不同的授權，但對使用者來說是同一個 Agent 的
+       * 第一步與第二步；用漸進式卡片呈現，避免看起來像重複詢問。核准鈕就在同一列。
+       */
+      const stages = document.createElement("div");
+      stages.className = "presence-stages";
+      const standbyPending = Boolean(session.joined && session.standbyRequested && !session.standbyApproved);
+      const stageOne = document.createElement("span");
+      stageOne.className = `presence-stage ${session.joined ? "is-done" : "is-waiting"}`;
+      stageOne.textContent = session.joined ? "① 已加入房間" : "① 待核准加入房間";
+      const stageTwo = document.createElement("span");
+      stageTwo.className = `presence-stage ${
+        session.standbyApproved ? "is-done" : standbyPending ? "is-waiting" : ""
+      }`;
+      stageTwo.textContent = !session.joined
+        ? "② 待命（加入後由終端自行申請）"
+        : session.standbyApproved
+          ? session.listening
+            ? "② 待命已核准 · room_wait 掛起中"
+            : "② 待命已核准 · 等終端重新掛起 room_wait"
+          : standbyPending ? "② 待命待核准" : "② 尚未申請待命";
+      stages.append(stageOne, stageTwo);
+      if (standbyPending) {
+        const hint = document.createElement("small");
+        hint.className = "presence-stage-hint";
+        hint.textContent = "同一個 Agent 的第二步：加入房間決定是否入帳，待命決定能否由 GUI 收件喚醒。";
+        stages.append(hint);
+      }
+      row.append(identity, actions, stages);
       if (nameInput) row.append(nameInput);
       if (modeSelect) row.append(modeSelect);
       if (syncLabel) row.append(syncLabel);
@@ -586,7 +718,7 @@ async function changeManagedAgent(agent, button) {
     await refreshPresence(true);
     await poll();
   } catch (error) {
-    alert(error.message);
+    showRoomError(error, { prefix: "受控 Agent 操作失敗" });
   } finally {
     button.disabled = false;
   }
@@ -630,8 +762,7 @@ async function changePresenceMembership(session, button) {
     await refreshPresence(true);
     await poll();
   } catch (error) {
-    byId("connection").textContent = `Agent 加入失敗：${error.message}`;
-    alert(error.message);
+    showRoomError(error, { prefix: joining ? "核准加入房間失敗" : "移出房間失敗", session });
     renderPresencePanel();
   }
 }
@@ -649,13 +780,13 @@ async function changePresenceStandby(session, action, button) {
       state.presences = [...state.presences.filter((entry) => entry.id !== value.session.id), value.session];
     }
     renderPresencePanel();
+    renderOfficeNotifications();
     syncOfficeDesks();
     if (!byId("office").hidden) updateOffice(state.recent || []);
     await refreshPresence(true);
     await poll();
   } catch (error) {
-    byId("connection").textContent = `room-wait 待命變更失敗：${error.message}`;
-    alert(error.message);
+    showRoomError(error, { prefix: "room-wait 待命變更失敗" });
     renderPresencePanel();
   }
 }
@@ -702,8 +833,9 @@ async function refreshPresence(force = false) {
           addOfficeNotification(
             "presence",
             `${session.displayName || session.provider} 申請 room-wait 待命`,
-            "請在左側「新增 Agents」核准；核准後只有這個終端 session 掛起 room_wait 時可由 GUI 喚醒。",
+            "同一個 Agent 的第二步（① 已加入 → ② 待命待核准）；核准後只有這個終端 session 掛起 room_wait 時可由 GUI 喚醒。可直接在這裡核准。",
             false,
+            { kind: "standby-approve", presenceId: session.id },
           );
         }
       }
@@ -713,7 +845,10 @@ async function refreshPresence(force = false) {
         }
       }
     }
-    if (presenceChanged) renderPresencePanel();
+    if (presenceChanged) {
+      renderPresencePanel();
+      renderOfficeNotifications();
+    }
     if (managedChanged) renderManagedAgents();
     refreshDeliveryReceipts();
     renderWriterControl();
@@ -754,8 +889,7 @@ async function poll() {
     byId("connection").textContent = "直播中";
     byId("connection").className = "conn ready";
   } catch (error) {
-    byId("connection").textContent = `連線錯誤：${error.message}`;
-    byId("connection").className = "conn error";
+    showRoomError(error, { prefix: "連線錯誤" });
   } finally {
     state.polling = false;
   }
@@ -781,8 +915,8 @@ async function loadHistory(reset) {
     byId("connection").className = "conn ready";
     byId("ledger").scrollTop = reset ? byId("ledger").scrollHeight : 0;
   } catch (error) {
-    byId("connection").textContent = `載入失敗：${error.message}`;
-    byId("connection").className = "conn error";
+    byId("older-history").disabled = false;
+    showRoomError(error, { prefix: "載入失敗" });
   }
 }
 
@@ -894,8 +1028,24 @@ async function bootstrap() {
   }
 }
 
+function setConnectionState(text, variant) {
+  const connection = byId("connection");
+  if (!connection) return;
+  connection.textContent = text;
+  connection.className = variant ? `conn ${variant}` : "conn";
+}
+
+/*
+ * poll() 在 document.hidden 時直接 return（背景分頁、被完全遮蔽的視窗都算），
+ * 所以指示器不能繼續停在「直播中」；否則畫面靜止時指示器等於說謊。
+ */
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden || state.mode !== "live") return;
+  if (state.mode !== "live") return;
+  if (document.hidden) {
+    setConnectionState("已暫停（分頁在背景）· 回到前景會自動補抓", "paused");
+    return;
+  }
+  setConnectionState("補抓中…", "paused");
   void poll();
   void refreshPresence(true);
   void refreshOfficeControlPlane();
@@ -930,7 +1080,7 @@ byId("rec-toggle").addEventListener("click", async () => {
       body: JSON.stringify({ room: state.room, state: byId("rec-toggle").dataset.next || "paused" }),
     });
     updateRoomInfo(value.room);
-  } catch (error) { alert(error.message); }
+  } catch (error) { showRoomError(error, { prefix: "收錄設定失敗" }); }
 });
 byId("summarize").addEventListener("click", async () => {
   if (!state.room) return;
@@ -940,15 +1090,15 @@ byId("summarize").addEventListener("click", async () => {
   try {
     await api("/api/rooms/summarize", { method: "POST", body: JSON.stringify({ room: state.room, provider: "codex" }) });
     await poll();
-  } catch (error) { alert(error.message); }
+  } catch (error) { showRoomError(error, { prefix: "摘要失敗" }); }
   byId("summarize").disabled = false;
   byId("summarize").textContent = "🧾 摘要這個房間";
 });
 byId("stop-all").addEventListener("click", async () => {
   try {
     const value = await api("/api/stop-all", { method: "POST", body: "{}" });
-    byId("connection").textContent = `已停止 ${value.stopped} 個工作流`;
-  } catch (error) { alert(error.message); }
+    setConnectionState(`已停止 ${value.stopped} 個工作流`, "");
+  } catch (error) { showRoomError(error, { prefix: "緊急停止失敗" }); }
 });
 
 function joinedPresenceMention(text) {
@@ -1106,7 +1256,7 @@ byId("post-form").addEventListener("submit", async (event) => {
     if (error.message === "ROOM_MENTION_CANCELLED") {
       byId("post-input").value = "";
       await poll();
-    } else alert(error.message);
+    } else showRoomError(error, { prefix: "發言失敗", session: joinedPresenceMention(text) });
   }
 });
 byId("room-search").addEventListener("input", async () => {
@@ -1200,7 +1350,7 @@ function providerInfo(agent) {
   };
 }
 
-function addOfficeNotification(kind, title, detail, unread = true) {
+function addOfficeNotification(kind, title, detail, unread = true, action) {
   const latest = state.notifications[0];
   if (latest && latest.kind === kind && latest.title === title && latest.detail === detail) return;
   state.notificationSequence += 1;
@@ -1211,6 +1361,7 @@ function addOfficeNotification(kind, title, detail, unread = true) {
     detail: String(detail || "").slice(0, 240),
     at: new Date().toISOString(),
     unread,
+    ...(action ? { action } : {}),
   });
   state.notifications = state.notifications.slice(0, 30);
   renderOfficeNotifications();
@@ -1237,6 +1388,22 @@ function renderOfficeNotifications() {
       const time = document.createElement("small");
       time.textContent = item.at.slice(11, 16);
       row.append(title, detail, time);
+      if (item.action?.kind === "standby-approve") {
+        const session = (state.presences || []).find((entry) => entry.id === item.action.presenceId);
+        if (session?.joined && session.standbyRequested && !session.standbyApproved) {
+          const approve = document.createElement("button");
+          approve.type = "button";
+          approve.className = "office-notification-action";
+          approve.textContent = `② 核准 ${session.displayName || session.provider} 的 room-wait 待命`;
+          approve.addEventListener("click", () => void changePresenceStandby(session, "approve", approve));
+          row.append(approve);
+        } else {
+          const done = document.createElement("small");
+          done.className = "office-notification-done";
+          done.textContent = session ? "② 待命已處理" : "席位已離線，不需處理";
+          row.append(done);
+        }
+      }
       list.append(row);
     }
   }
@@ -1982,7 +2149,7 @@ byId("managed-agent-create").addEventListener("submit", async (event) => {
     syncOfficeDesks();
     await poll();
   } catch (error) {
-    status.textContent = `建立失敗：${error.message}`;
+    status.textContent = `建立失敗：${humanError(error)}`;
   } finally {
     button.disabled = false;
     button.textContent = "＋ 建立即時子 Agent";
@@ -2053,18 +2220,28 @@ function activeWriterLease() {
   return active.find((lease) => lease.taskId === taskId) || active[0];
 }
 
+/*
+ * 與 activeWriterLease() 相同：找不到符合輸入框 taskId 的 lease 時退回最新一筆，
+ * 否則面板重開後自動填入的新 taskId 會讓「待回寫」的任務整個從 UI 消失。
+ */
 function reviewReadyWriterLease() {
   const taskId = byId("writer-task-id")?.value.trim();
-  return (state.writers?.leases || [])
-    .filter((lease) => lease.state === "completed" && lease.taskPhase === "review-ready" && (!taskId || lease.taskId === taskId))
-    .sort((left, right) => Number(right.grantedAtMs || 0) - Number(left.grantedAtMs || 0))[0];
+  const ready = (state.writers?.leases || [])
+    .filter((lease) => lease.state === "completed" && lease.taskPhase === "review-ready")
+    .sort((left, right) => Number(right.grantedAtMs || 0) - Number(left.grantedAtMs || 0));
+  return ready.find((lease) => lease.taskId === taskId) || ready[0];
 }
 
 function terminalWriterLease() {
   const taskId = byId("writer-task-id")?.value.trim();
-  return (state.writers?.leases || [])
-    .filter((lease) => ["applying", "applied"].includes(lease.taskPhase) && (!taskId || lease.taskId === taskId))
-    .sort((left, right) => Number(right.grantedAtMs || 0) - Number(left.grantedAtMs || 0))[0];
+  const terminal = (state.writers?.leases || [])
+    .filter((lease) => ["applying", "applied"].includes(lease.taskPhase))
+    .sort((left, right) => Number(right.grantedAtMs || 0) - Number(left.grantedAtMs || 0));
+  return terminal.find((lease) => lease.taskId === taskId) || terminal[0];
+}
+
+function pendingWriterLease() {
+  return activeWriterLease() || reviewReadyWriterLease();
 }
 
 function renderWriterControl() {
@@ -2119,8 +2296,17 @@ function renderWriterControl() {
           ? `${terminal.writer.displayName} · ${terminal.taskId} · 回寫狀態待人工確認（fail-closed）`
       : "尚未指派 Writer";
   byId("writer-assign").textContent = active ? "交接 Writer" : "指派 Writer";
-  byId("writer-complete").disabled = !active && !reviewReady;
-  byId("writer-complete").textContent = active ? "完成並檢視風險" : reviewReady ? "重新檢視回寫風險" : "完成 Writer";
+  const completeButton = byId("writer-complete");
+  if (!active) state.writerCompleteConfirm = "";
+  const awaitingCompleteConfirm = Boolean(active) &&
+    state.writerCompleteConfirm === `${active.taskId}:${active.epoch}`;
+  completeButton.disabled = !active && !reviewReady;
+  completeButton.textContent = awaitingCompleteConfirm
+    ? "再按一次：結束 Writer 並撤銷寫入權"
+    : active
+      ? "結束 Writer 並準備回寫"
+      : reviewReady ? "重新檢視回寫風險" : "完成 Writer";
+  completeButton.classList.toggle("danger", awaitingCompleteConfirm);
   byId("writer-delegate").disabled = !active;
   byId("writer-run-cancel").hidden = !executionBusy;
   byId("writer-run-cancel").disabled = !executionBusy;
@@ -2150,7 +2336,7 @@ async function cancelWriterRun() {
     status.textContent = delegationId ? "已要求取消精確子 Agent 執行。" : "已要求取消精確 Writer 執行。";
     await refreshPresence(true);
   } catch (error) {
-    status.textContent = `取消失敗：${error.message}`;
+    status.textContent = `取消失敗：${humanError(error)}`;
   }
 }
 
@@ -2183,15 +2369,17 @@ async function assignWriter() {
     await refreshPresence(true);
     status.textContent = active ? "Writer 已交接；舊 epoch 與子權限已撤銷。" : "Writer 已指派並建立隔離 worktree。";
   } catch (error) {
-    status.textContent = error.message === "WRITER_BASE_COMMIT_REQUIRED"
-      ? "此專案尚無基準 commit；請先在終端建立第一個 commit，再指派 Writer。"
-      : `Writer 操作失敗：${error.message}`;
+    status.textContent = `Writer 操作失敗：${humanError(error)}`;
   }
 }
 
+/*
+ * 兩個階段必須分開回報：階段 1（結束 Writer）一旦成功，Writer 與所有子 Agent 的寫入權
+ * 就已經撤銷；此時階段 2 失敗不能再顯示成「完成失敗」，否則使用者會以為什麼都沒發生。
+ */
 async function completeWriterLease() {
   const active = activeWriterLease();
-  const reviewReady = reviewReadyWriterLease();
+  const reviewReady = active ? undefined : reviewReadyWriterLease();
   const checkpoint = byId("writer-checkpoint").value.trim();
   const status = byId("writer-live-status");
   if (!active && !reviewReady) {
@@ -2202,7 +2390,26 @@ async function completeWriterLease() {
     status.textContent = "完成前必須填寫 checkpoint。";
     return;
   }
+  if (active) {
+    const confirmKey = `${active.taskId}:${active.epoch}`;
+    const children = (state.writers?.delegations || [])
+      .filter((child) => child.parentLeaseId === active.id && child.state === "active");
+    if (state.writerCompleteConfirm !== confirmKey) {
+      state.writerCompleteConfirm = confirmKey;
+      status.textContent = `這個動作會先結束 Writer ${active.writer.displayName}（${active.taskId} · epoch ${active.epoch}），` +
+        `立即撤銷它與 ${children.length} 個子 Agent 的寫入權，之後才產生回寫預覽；` +
+        "撤銷後不能繼續寫作，只能重新指派 Writer。確定的話請再按一次按鈕。";
+      renderWriterControl();
+      return;
+    }
+    state.writerCompleteConfirm = "";
+  }
+  const taskId = active?.taskId || reviewReady.taskId;
+  let preview;
   try {
+    status.textContent = active
+      ? "階段 1／2：正在結束 Writer 並撤銷寫入權…"
+      : "正在重新產生回寫預覽…";
     const value = active
       ? await api("/api/rooms/writers/complete", {
         method: "POST",
@@ -2212,19 +2419,36 @@ async function completeWriterLease() {
         method: "POST",
         body: JSON.stringify({ room: state.room, taskId: reviewReady.taskId }),
       });
-    await refreshPresence(true);
-    await reviewAndApplyWriter(active?.taskId || reviewReady.taskId, value.preview);
+    preview = value.preview;
   } catch (error) {
-    status.textContent = `完成失敗：${error.message}`;
+    status.textContent = active
+      ? `階段 1／2（結束 Writer）失敗：${humanError(error)}。Writer 與子 Agent 的寫入權仍然有效，主專案沒有變更。`
+      : `重新產生回寫預覽失敗：${humanError(error)}。主專案沒有變更。`;
+    renderWriterControl();
+    return;
   }
+  await refreshPresence(true);
+  if (!preview) {
+    status.textContent = active
+      ? "階段 1／2 完成：Writer 已結束、寫入權已撤銷；但沒有取得回寫預覽。請按「重新檢視回寫風險」再試一次。"
+      : "沒有取得回寫預覽，請稍後再試；主專案沒有變更。";
+    return;
+  }
+  await reviewAndApplyWriter(taskId, preview, active ? "階段 1／2 完成：Writer 已結束、寫入權已撤銷。" : "");
 }
 
-async function reviewAndApplyWriter(taskId, preview) {
+async function reviewAndApplyWriter(taskId, preview, stageNote = "") {
   const status = byId("writer-live-status");
+  const stagePrefix = stageNote ? `${stageNote} ` : "";
   const riskLabel = preview.risk?.level === "high" ? "高" : preview.risk?.level === "medium" ? "中" : "低";
-  const changes = (preview.changes || []).slice(0, 24)
-    .map((change) => `${change.operation === "delete" ? "刪除（移至可復原區）" : "寫入"} · ${change.path} · ${change.bytes} bytes`)
-    .join("\n");
+  const allChanges = preview.changes || [];
+  const shown = allChanges.slice(0, 24);
+  const changeLines = shown
+    .map((change) => `${change.operation === "delete" ? "刪除（移至可復原區）" : "寫入"} · ${change.path} · ${change.bytes} bytes`);
+  if (allChanges.length > shown.length) {
+    changeLines.push(`（另有 ${allChanges.length - shown.length} 筆變更未列出，共 ${allChanges.length} 筆）`);
+  }
+  const changes = changeLines.join("\n");
   const phrase = `APPLY WRITER ${taskId} TO PROJECT`;
   const explanation = [
     `任務 ${taskId} 已完成寫作，但尚未改動主專案。`,
@@ -2236,19 +2460,23 @@ async function reviewAndApplyWriter(taskId, preview) {
   ].join("\n\n");
   const confirmation = window.prompt(explanation, "");
   if (confirmation === null) {
-    status.textContent = "已保留在隔離 Writer worktree；尚未回寫主專案，可稍後重新檢視。";
+    status.textContent = `${stagePrefix}階段 2／2（回寫主專案）已取消；變更仍保留在隔離 Writer worktree，主專案沒有變更，可稍後重新檢視。`;
     return;
   }
   if (confirmation !== phrase) {
-    status.textContent = "確認文字不符，沒有任何主專案檔案被修改。";
+    status.textContent = `${stagePrefix}階段 2／2（回寫主專案）確認文字不符，沒有任何主專案檔案被修改。`;
     return;
   }
-  status.textContent = "正在重新驗證 source、逐檔雜湊與風險快照…";
-  const value = await api("/api/rooms/writers/apply-back/apply", {
-    method: "POST",
-    body: JSON.stringify({ room: state.room, taskId, previewId: preview.id, confirmation }),
-  });
-  status.textContent = `Owner 已核准回寫：${value.result.writes} 個寫入；${value.result.deletesMovedToTrash} 個刪除移至可復原區。`;
+  status.textContent = `${stagePrefix}階段 2／2：正在重新驗證 source、逐檔雜湊與風險快照…`;
+  try {
+    const value = await api("/api/rooms/writers/apply-back/apply", {
+      method: "POST",
+      body: JSON.stringify({ room: state.room, taskId, previewId: preview.id, confirmation }),
+    });
+    status.textContent = `Owner 已核准回寫：${value.result.writes} 個寫入；${value.result.deletesMovedToTrash} 個刪除移至可復原區。`;
+  } catch (error) {
+    status.textContent = `${stagePrefix}階段 2／2（回寫主專案）失敗：${humanError(error)}。可按「重新檢視回寫風險」重新產生預覽再試。`;
+  }
   await refreshPresence(true);
   await poll();
 }
@@ -2273,7 +2501,7 @@ async function delegateWriter() {
       ? `${value.delegation.displayName} 已取得同一 Writer worktree 的受控寫入權；系統會與 Writer／其他子 Agent 序列執行。`
       : `${value.delegation.displayName} 已加入，但因跨類型而保持唯讀。`;
   } catch (error) {
-    status.textContent = `派駐失敗：${error.message}`;
+    status.textContent = `派駐失敗：${humanError(error)}`;
   }
 }
 
@@ -2291,7 +2519,12 @@ function setWriterHandoff(open) {
   form.hidden = false;
   byId("writer-handoff-status").textContent = "";
   byId("writer-live-status").textContent = "";
-  if (!byId("writer-task-id").value.trim()) byId("writer-task-id").value = `task-${Date.now().toString(36)}`;
+  state.writerCompleteConfirm = "";
+  const taskInput = byId("writer-task-id");
+  if (!taskInput.value.trim()) {
+    /* 有進行中或待回寫的 lease 時沿用它的 taskId，不要蓋掉待核准的任務。 */
+    taskInput.value = pendingWriterLease()?.taskId || `task-${Date.now().toString(36)}`;
+  }
   renderWriterControl();
   const draft = byId("office-chat-input").value
     .replace(/^@(codex|claude|grok|fake)(?::[^\s]+)?\s*/, "")
@@ -2348,7 +2581,7 @@ byId("writer-handoff-form").addEventListener("submit", async (event) => {
       result.querySelector("b").textContent = `提案 ${String(value.request?.id || "").slice(0, 8)} 已建立，尚未啟動`;
     }
   } catch (error) {
-    status.textContent = `建立失敗：${error.message}`;
+    status.textContent = `建立失敗：${humanError(error)}`;
   } finally {
     submit.disabled = false;
     renderWriterControl();
@@ -2381,7 +2614,14 @@ byId("office-chat-form").addEventListener("submit", async (event) => {
     if (error.message === "ROOM_MENTION_CANCELLED") {
       input.value = "";
       await poll();
-    } else alert(error.message);
+    } else {
+      const targetId = input.dataset.presenceId || "";
+      showRoomError(error, {
+        prefix: "送出失敗",
+        session: (targetId && state.presences.find((entry) => entry.id === targetId)) ||
+          joinedPresenceMention(text),
+      });
+    }
   } finally {
     button.disabled = false;
     button.textContent = "送出";
@@ -2409,12 +2649,11 @@ bootstrap().catch((error) => {
     const title = document.createElement("b");
     title.textContent = "Room 載入失敗";
     const detail = document.createElement("span");
-    detail.textContent = String(error.message || "UNKNOWN");
+    detail.textContent = humanError(error.message ? error : new Error("UNKNOWN"));
     const recovery = document.createElement("small");
     recovery.textContent = "系統已停用發言操作；帳本資料沒有因此被刪除。";
     notice.append(title, detail, recovery);
     ledger.append(notice);
   }
-  byId("connection").textContent = `載入失敗：${error.message}`;
-  byId("connection").className = "conn error";
+  showRoomError(error, { prefix: "載入失敗" });
 });
