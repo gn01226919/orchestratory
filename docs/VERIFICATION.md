@@ -93,6 +93,40 @@ Phase 5-1 在**沒有通過標準**的情況下跑了十輪對抗式審查，十
 | 同帳號程序可直接改 approval store | 與整個產品的信任模型一致（見 §2 非安全保證） | 否 |
 | approval 過期後需重新 preview，成本由 Owner 承擔 | 這是刻意的摩擦，不是缺陷 | 否 |
 
+## Phase 5-4 通過標準（開工前先訂，2026-08-06）
+
+**第一輪對抗式審查只准對照本節裁決。**
+
+### 不變式
+
+> **approval 存活期間，任何綁定值的漂移都必須讓它失效——而且失效是「拒絕並說出哪一項變了」，
+> 不是靜默重算成新的樣子。**
+
+5-3 已在 grant 與 consume 兩點驗證綁定。5-4 要處理的是**兩點之間**：漂移發生時，Owner 與 agent
+必須在**下一次觀察時**就知道，而不是等到 consume 才發現；而且失效必須留下可稽核的紀錄。
+
+### Yes 標準（五條）
+
+1. **主動偵測，不只被動驗證**：main 或 candidate 的綁定值在 approval 存活期間改變時，該 approval
+   必須在**下一次任何觀察路徑**（`candidate_status`、approval 列表、inspect）就顯示為失效，
+   不得只在 consume 時才發現。
+2. **失效必須具名**：回報哪些綁定值改變了，用與 5-3 相同的名稱集合。不得只說「已失效」。
+3. **失效必須留痕**：invalidation 寫進 durable 狀態與稽核鏈，Owner 事後查得到「那次核准為何沒有生效」。
+   一次無聲的失效與一次從未發生的核准，在紀錄上必須可區分。
+4. **失效不得破壞任何東西**：candidate、checkpoint、recovery ref、main 全部 byte-identical；
+   且 Owner 可立即重新 preview 再問一次。
+5. **不得誤殺**：與綁定無關的變動（例如 ignored 檔案內容、無關的 branch、index refresh）不得使
+   approval 失效。5-3 審查已實測出四種這類變動；它們必須維持不失效。
+
+### 可接受的殘餘風險（本階段）
+
+| 項目 | 理由 | 5-5 前是否失效 |
+|---|---|---|
+| 偵測是觀察時觸發，不是背景輪詢 | 本產品沒有常駐背景掃描；觀察路徑涵蓋 GUI dialog 的 5 秒 inspect 與所有 MCP 讀取 | 否 |
+| `mainIgnoredFingerprint` 只涵蓋 ignored 檔案的**路徑**，不涵蓋內容 | 5-3 審查 Finding 3 已記錄 | **會失效**——5-5 的真實 checkout 會靜默覆蓋 ignored 檔案 |
+| 漂移與 consume 之間仍有極窄的 TOCTOU 窗 | consume 會再驗一次，窗內失敗即 fail closed | 否 |
+| 同帳號程序可直接改 approval store | 與產品信任模型一致 | 否 |
+
 ## ADR-028 vNext 待驗證矩陣
 
 | 範圍 | 狀態 | 必要證據 |
