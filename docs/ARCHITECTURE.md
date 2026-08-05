@@ -113,6 +113,14 @@ inventory 採不保留內容的串流解析，大量檔案只會截斷明細清�
 Agent 宣告完成時建立穩定 checkpoint，彙整 diff、delete/rename、tests、main drift、conflicts、binary/
 large changes 與 recovery readiness，然後建立「是否 merge 到 main」的 Owner decision request。
 
+Diff 以 `git diff --raw` 解析，保留檔案 mode，因此純權限變更（644→755）與 submodule pointer 變更
+（mode 160000）都會各自標示，不再混入一般 modify。Conflicts 分成兩種事實：`conflicts` 只陳述 main
+drift 與 dirty main，`mergeConflicts`／`mergeable` 則是以 `git merge-tree --write-tree` 實際模擬 merge
+的結果。該指令只在 object database 計算，不寫 ref、不 checkout、不碰任何 worktree，因此可以在不修改
+canonical main 的前提下先告訴 Owner 會不會衝突、衝突在哪些路徑。清單有上限並各自標示 truncated。
+模擬失敗（git 拒絕合併、輸出超出 byte 預算、逾時或輸出格式無法解析）一律 fail closed，回報
+`CANDIDATE_MERGE_PREVIEW_UNAVAILABLE`，不得推定 `mergeable: true`。
+
 目前 MCP completion 已產生上述 preview 與 Owner-required 問句，但不含 approval token，也沒有 main
 mutation 工具；single-use snapshot-bound approval 從 3.6 Promotion Service 階段開始實作。
 

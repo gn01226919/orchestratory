@@ -7,6 +7,56 @@
 > host 驗收。下表其餘舊測試保留作為 GUI Managed 回歸證據，不得拿來冒充 Native Full-Trust、
 > 已安裝 runtime 或 main merge decision 已完成。
 
+## Phase 5-2 通過標準（開工前先訂，2026-08-05）
+
+Phase 5-1 在**沒有通過標準**的情況下跑了十輪對抗式審查，十輪皆 No；收斂的槓桿不是審得更兇，而是
+第九輪首度訂出「五條 yes 標準 ＋ 明列可接受殘餘風險」。**本節是把那根槓桿前移到 5-2 開工前**，
+避免同一個模式重演。第一輪對抗式審查**只准對照本節裁決**，不得引入本節以外的新終點線；
+要新增要求者，必須說明它為何屬於標準而非殘餘風險。
+
+### 不變式
+
+> **一個 `previewDigest` ⇒ 至多一種 merge 結果。**
+> preview 若宣稱 `mergeable: true`，在同一 snapshot 下實際執行 merge 不得出現 preview 未列出的衝突；
+> preview 若列出衝突，那些路徑必須是實際會衝突的路徑。
+
+5-3 的核准會綁定 `previewDigest`，5-5 會依它寫入 canonical main——**preview 說謊等於核准了不存在的東西**。
+
+### Yes 標準（五條）
+
+1. **Preview 不得改變 canonical main 的可見狀態**：不動任何 ref、不動 worktree、不動 index。
+   （`merge-tree --write-tree` 會寫入不可達的 tree object，這是可接受的，見殘餘風險。）
+2. **Preview 與實際 merge 一致**：以已知會衝突與已知不衝突的 fixture 各驗一組，preview 的
+   `mergeable` 與衝突路徑集合必須與實際 merge 的結果相符。
+3. **Mode change 與 submodule 可辨識**：純權限變更（644→755）與 submodule 指標變更
+   （mode `160000`）不得與一般 modify 混淆。
+4. **無法計算即 fail closed**：`merge-tree` 不可用、輸出畸形、或任何非「衝突退出碼」的失敗，
+   一律以穩定錯誤碼拒絕，**不得回傳 `mergeable: true`，也不得省略衝突欄位**。
+5. **新欄位納入完整性鏈**：全部進 `previewDigest`，並在讀取路徑以同等嚴格度驗證；
+   completion 經 close／reopen 後仍必須通過驗證。
+
+### 可接受的殘餘風險（本階段）
+
+| 項目 | 理由 | 5-5 前是否失效 |
+|---|---|---|
+| 檔案／衝突／submodule 清單有上限，超過只回報截斷旗標 | preview 是決策輔助，不是完整審計 | **會失效**——promotion 若基於截斷的 preview 核准，Owner 等於對看不到的內容簽名。5-5 前必須改為「截斷即不可核准」或提供分頁 |
+| `merge-tree` 產生的 tree object 留在 object DB | 不可達、等 gc、不影響 main 可見狀態 | 否 |
+| preview 與實際 promotion 之間的 drift | 屬 5-4（drift invalidation）範圍 | 否（由 5-4 關閉） |
+| 二進位／過大檔案只標示不顯示內容 | 顯示無意義且會撐爆界限 | 否 |
+| **Hooks 不會執行**（實測：`pre-merge-commit` 的 marker 不出現） | `minimalGitEnvironment` 釘 `core.hooksPath=/dev/null` | **必須在 5-5 前處理**——實測分歧方向為真：preview 回 `mergeable: true`，實際 merge 因 `pre-merge-commit` 回 1 而把工作樹留在 merge 中途 |
+| Submodule 遞迴更新不會執行 | `merge-tree` 不遞迴進 submodule | 否——submodule 指標變更本身有偵測（`submodules` 欄位） |
+| **`.gitattributes` merge driver 會執行**（原本本表宣稱不會，**該宣稱經實測證偽**） | driver 定義只能來自 repo 自身的 `.git/config`（`GIT_CONFIG_NOSYSTEM=1`、`GIT_CONFIG_GLOBAL=/dev/null` 已抑制 global/system）。保真度因此**優於**原本宣稱：driver 在 preview 與實際 merge 兩邊都跑，結果一致 | 否（保真度面）。**但安全面見 [[THREAT_MODEL]] F23**——preview 會依 repo config spawn `/bin/sh -c <字串>` |
+
+### 5-5 開工前必須關閉的既有項（第九輪判為殘餘的理由屆時失效）
+
+第九輪把一串缺陷判為可接受，理由明寫是**「這些都不會把錯誤內容寫進 canonical main」**。
+到 5-5（promotion）這個理由整條失效，以下兩項必須**在 5-5 開工前**關閉：
+
+- **暫時性 Git 失敗即判 `failed` 燒掉 key**：在 promotion 下，代價從「浪費一個 worktree」變成
+  「已 merge-ready 的工作被永久鎖死，而 main 處於沒人知道是否已部分套用的狀態」。
+- **`orphanRecoveryRefs()` 沒有任何 CLI／GUI／MCP 出口**：recovery ref 是 promotion 唯一的回復路徑，
+  Owner 目前看不到它。
+
 ## ADR-028 vNext 待驗證矩陣
 
 | 範圍 | 狀態 | 必要證據 |
@@ -72,8 +122,9 @@
 
 ## 目前自動證據
 
-- 290/290 deterministic tests。
-- 最新最終 gate：line 95.23%、branch 85.13%、functions 96.80%；gate 分別為 90%、85%、90%。
+- 393/393 deterministic tests（2026-08-06）。
+- 最新最終 gate：line 94.38%、branch 86.41%、functions 96.77%；gate 分別為 90%、85%、90%。
+  branch 餘裕 1.41 個百分點；仍應假設任何新增分支都要同批補測試。
 - 測試不使用真實 credentials、真實私人 repository、模型額度或付費 API。
 - CycloneDX SBOM 為 3 components，SHA-256 `ea620ec658783639ce0d9dcf64dccc4bf1ccda69d4b5c43f95491891e4b9f99a`。
 - 完整 npm dependency audit（含 dev toolchain）0 vulnerabilities；offline committed-HEAD clean clone與
