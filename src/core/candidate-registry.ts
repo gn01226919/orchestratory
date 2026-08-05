@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -136,6 +136,8 @@ export interface CandidateTask {
 
 export interface CandidateTaskStatus extends CandidateTask {
   checkpoints: CandidateCheckpoint[];
+  /** Bounded decision record only; the full preview lives on the approval itself. */
+  mergeApprovals: Array<MergeApprovalSummary | UnreadableMergeApproval>;
   live: {
     candidateHead?: string;
     candidateDirty?: boolean;
@@ -144,6 +146,138 @@ export interface CandidateTaskStatus extends CandidateTask {
     completionStale: boolean;
     recoveryReady: boolean;
   };
+}
+
+/**
+ * `requested` is an agent asking; it is NOT an approval. Only `approved` carries owner authority, and
+ * only for as long as its short grant window lasts. Every other state is terminal: a consumed
+ * approval is spent, and a rejected, invalidated or expired one can never become valid again — the
+ * owner has to be asked again against a freshly computed snapshot.
+ */
+export type MergeApprovalState = "requested" | "approved" | "consumed" | "rejected" | "invalidated" | "expired";
+
+/** The single action a merge approval may ever authorize. */
+export const MERGE_APPROVAL_GRANT = "merge-candidate-into-main";
+
+/**
+ * The exact owner confirmation phrase. It is semantic and deliberately carries no taskId: a phrase
+ * that can be copied out of the page it is shown on is not evidence of intent.
+ */
+export const MERGE_APPROVAL_CONFIRMATION = "MERGE INTO MAIN";
+
+/**
+ * Written into every consumed authorization so no downstream caller has to infer the limits of what
+ * the owner agreed to. A merge approval authorizes one merge of one snapshot into main; it is not a
+ * push, publish, deploy, delete or cleanup approval, and it never becomes one.
+ */
+export const MERGE_APPROVAL_NOT_AUTHORIZED: readonly string[] = [
+  "push", "publish", "deploy", "release", "delete-candidate", "delete-recovery-ref",
+  "cleanup-worktree", "restore-checkpoint", "run-test",
+];
+
+/** How long the owner has to decide on a request before it stops being answerable. */
+export const MERGE_APPROVAL_REQUEST_TTL_MS = 15 * 60_000;
+/** How long a granted approval stays usable. Short on purpose: it authorizes writing to main. */
+export const MERGE_APPROVAL_GRANT_TTL_MS = 5 * 60_000;
+/** Ledger growth bound per task; reaching it fails closed rather than accumulating silently. */
+export const MAX_MERGE_APPROVALS_PER_TASK = 50;
+
+export interface MergeApprovalBinding {
+  taskId: string;
+  completionId: string;
+  roomId: string;
+  mainPath: string;
+  mainBranch: string;
+  candidatePath: string;
+  baseMainHead: string;
+  candidateHead: string;
+  mainHead: string;
+  mainFingerprint: string;
+  mainIgnoredFingerprint: string;
+  recoveryRef: string;
+  previewDigest: string;
+}
+
+export interface MergeApprovalRefusal {
+  code: string;
+  /** Names of the bound values that no longer match, so a refusal says what moved. */
+  changed: string[];
+  reason?: string;
+}
+
+/** A row whose integrity check failed. Reported so it is visible, never silently dropped. */
+export interface UnreadableMergeApproval {
+  id: string;
+  taskId: string;
+  state: "unreadable";
+  unreadable: true;
+}
+
+export interface MergeApprovalSummary {
+  id: string;
+  taskId: string;
+  state: MergeApprovalState;
+  previewDigest: string;
+  candidateHead: string;
+  mainHead: string;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string;
+  /** True when the deadline has passed but no mutation has yet recorded the terminal state. */
+  expired: boolean;
+  refusal?: MergeApprovalRefusal;
+}
+
+export interface MergeApproval extends MergeApprovalSummary {
+  clientRequestId: string;
+  grants: string;
+  notAuthorized: readonly string[];
+  requestedBy: string;
+  decidedBy?: "local-web" | "local-tui";
+  binding: MergeApprovalBinding;
+  preview: CandidateCompletionPreview;
+  /** Nothing in the approval lifecycle writes to canonical main; promotion is a separate phase. */
+  mainMutation: false;
+}
+
+export interface MergeApprovalPreview {
+  taskId: string;
+  completionId: string;
+  previewDigest: string;
+  preview: CandidateCompletionPreview;
+  recoveryRef: string;
+  /** False whenever a bar-level gate is closed; `blockers` says which, so the owner sees why. */
+  approvable: boolean;
+  blockers: string[];
+  confirmationPhrase: string;
+  prompt: string;
+  mainMutation: false;
+}
+
+/** What Phase 5-5 receives, and the only thing it is entitled to do. */
+export interface MergeAuthorization {
+  approvalId: string;
+  grants: string;
+  notAuthorized: readonly string[];
+  singleUse: true;
+  binding: MergeApprovalBinding;
+  preview: CandidateCompletionPreview;
+  consumedAt: string;
+}
+
+/**
+ * A refusal that names the bound values that moved. The message keeps the stable code as its prefix
+ * so string matching on the code still works, and appends the field names because a refusal that
+ * does not say what changed leaves the owner nothing to act on.
+ */
+export class MergeApprovalBindingError extends Error {
+  readonly changed: string[];
+
+  constructor(changed: string[]) {
+    super(`MAIN_MERGE_APPROVAL_BINDING_CHANGED:${changed.join(",")}`);
+    this.name = "MergeApprovalBindingError";
+    this.changed = changed;
+  }
 }
 
 interface CandidateRow {
@@ -207,6 +341,45 @@ interface RequestRow {
   row_hash: string;
 }
 
+interface MergeApprovalRow {
+  id: string;
+  /**
+   * The approval row IS the durable artifact of `main_merge_request`, so it carries its own
+   * idempotency instead of borrowing the candidate request ledger. One UNIQUE column answers "did my
+   * request land?" without a reservation, an owner token or a second state machine to keep honest.
+   */
+  client_request_id: string;
+  input_digest: string;
+  task_id: string;
+  completion_id: string;
+  room_id: string;
+  main_path: string;
+  main_branch: string;
+  candidate_path: string;
+  base_main_head: string;
+  candidate_head: string;
+  main_head: string;
+  main_fingerprint: string;
+  main_ignored_fingerprint: string;
+  recovery_ref: string;
+  preview_digest: string;
+  preview_json: string;
+  grant_action: string;
+  state: MergeApprovalState;
+  /**
+   * SHA-256 of the single-use secret handed to the owner surface at grant time, never the secret. It
+   * is cleared the moment the approval leaves `approved`, so a spent approval holds no usable secret.
+   */
+  token_hash: string | null;
+  actor: string;
+  decided_by: "local-web" | "local-tui" | null;
+  refusal_json: string | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+  expires_at_ms: number;
+  row_hash: string;
+}
+
 /** Identifiers minted once per idempotency key so a retried mutation reuses them instead of duplicating work. */
 interface ReservedIdentifiers {
   taskId: string;
@@ -215,7 +388,7 @@ interface ReservedIdentifiers {
   completionId?: string;
 }
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const MAX_LIST = 100;
 const MAX_TESTS = 32;
 const MAX_RISKS = 32;
@@ -271,6 +444,13 @@ const MERGE_TREE_OUTPUT_BYTES = 1_048_576;
 const ORPHAN_REF_SCAN_BYTES = 262_144;
 /** Fixed-size success marker; the answer itself is always rebuilt from durable state on replay. */
 const SETTLED_RECEIPT = "{\"settled\":true}";
+/** 32 random bytes, base64url. Same shape as every other single-use approval secret in the product. */
+const MERGE_APPROVAL_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
+const MAX_MERGE_REFUSAL_CHANGED = 20;
+const MAX_MERGE_REJECT_REASON = 240;
+/** Terminal states can never become usable again; only these leave the one-open-approval slot free. */
+const MERGE_APPROVAL_TERMINAL: ReadonlySet<MergeApprovalState> =
+  new Set<MergeApprovalState>(["consumed", "rejected", "invalidated", "expired"]);
 
 /**
  * Durable idempotency ledger for candidate mutations, keyed by clientRequestId alone.
@@ -297,6 +477,50 @@ const REQUESTS_TABLE_SQL = `CREATE TABLE candidate_requests (
         row_hash TEXT NOT NULL CHECK(length(row_hash)=64)
       ) STRICT;
       CREATE INDEX candidate_requests_created ON candidate_requests(created_at_ms);`;
+
+/**
+ * Snapshot-bound, single-use owner approval for merging one candidate into main.
+ *
+ * It is a separate table rather than a widening of `candidate_requests` on purpose: that ledger
+ * records whether a mutation happened, while this records what an owner authorized, and the two have
+ * different lifetimes, different terminal states and different consequences when they are wrong.
+ *
+ * The partial UNIQUE index is the structural form of "one open question per task". Without it two
+ * concurrent requests could both pass an application-level check and leave the owner two dialogs for
+ * the same candidate, only one of which they would read.
+ */
+const MERGE_APPROVALS_TABLE_SQL = `CREATE TABLE candidate_merge_approvals (
+        id TEXT PRIMARY KEY CHECK(length(id)=36),
+        client_request_id TEXT NOT NULL UNIQUE CHECK(length(client_request_id)=36),
+        input_digest TEXT NOT NULL CHECK(length(input_digest)=64),
+        task_id TEXT NOT NULL REFERENCES candidates(task_id),
+        completion_id TEXT NOT NULL CHECK(length(completion_id)=36),
+        room_id TEXT NOT NULL CHECK(length(room_id) BETWEEN 1 AND 48),
+        main_path TEXT NOT NULL CHECK(length(main_path) BETWEEN 1 AND 4096),
+        main_branch TEXT NOT NULL CHECK(length(main_branch) BETWEEN 1 AND 255),
+        candidate_path TEXT NOT NULL CHECK(length(candidate_path) BETWEEN 1 AND 4096),
+        base_main_head TEXT NOT NULL CHECK(length(base_main_head) BETWEEN 40 AND 64),
+        candidate_head TEXT NOT NULL CHECK(length(candidate_head) BETWEEN 40 AND 64),
+        main_head TEXT NOT NULL CHECK(length(main_head) BETWEEN 40 AND 64),
+        main_fingerprint TEXT NOT NULL CHECK(length(main_fingerprint)=64),
+        main_ignored_fingerprint TEXT NOT NULL CHECK(length(main_ignored_fingerprint)=64),
+        recovery_ref TEXT NOT NULL CHECK(length(recovery_ref) BETWEEN 1 AND 512),
+        preview_digest TEXT NOT NULL CHECK(length(preview_digest)=64),
+        preview_json TEXT NOT NULL CHECK(length(preview_json) BETWEEN 2 AND 1000000),
+        grant_action TEXT NOT NULL CHECK(grant_action='${MERGE_APPROVAL_GRANT}'),
+        state TEXT NOT NULL CHECK(state IN ('requested','approved','consumed','rejected','invalidated','expired')),
+        token_hash TEXT CHECK(token_hash IS NULL OR length(token_hash)=64),
+        actor TEXT NOT NULL CHECK(length(actor) BETWEEN 1 AND ${MAX_ACTOR}),
+        decided_by TEXT CHECK(decided_by IS NULL OR decided_by IN ('local-web','local-tui')),
+        refusal_json TEXT CHECK(refusal_json IS NULL OR length(refusal_json) BETWEEN 2 AND 1000),
+        created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+        updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= created_at_ms),
+        expires_at_ms INTEGER NOT NULL CHECK(expires_at_ms > created_at_ms),
+        row_hash TEXT NOT NULL CHECK(length(row_hash)=64)
+      ) STRICT;
+      CREATE INDEX candidate_merge_approvals_task ON candidate_merge_approvals(task_id, created_at_ms);
+      CREATE UNIQUE INDEX candidate_merge_approvals_open ON candidate_merge_approvals(task_id)
+        WHERE state IN ('requested','approved');`;
 
 function sha(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
@@ -410,6 +634,46 @@ function previewFileFacts(value: unknown): void {
   }
 }
 
+/**
+ * Read-path check for a whole stored preview. Shared by the frozen completion and by the snapshot a
+ * merge approval is bound to, because both are shown to an owner who is about to act on them, and a
+ * preview validated at only one of the two entry points is a preview that can be displayed unchecked.
+ */
+function assertPreviewShape(value: unknown): CandidateCompletionPreview {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("CANDIDATE_COMPLETION_PREVIEW_INVALID");
+  }
+  const preview = value as CandidateCompletionPreview;
+  tests(preview.tests);
+  risks(preview.knownRisks);
+  previewFileFacts(preview.files);
+  previewPaths(preview.submodules, MAX_PREVIEW_SUBMODULES);
+  previewPaths(preview.mergeConflicts, MAX_MERGE_CONFLICTS);
+  if (!HEAD_PATTERN.test(preview.baseMainHead) || !HEAD_PATTERN.test(preview.candidateHead)
+    || !HEAD_PATTERN.test(preview.mainHead) || !isAbsolute(preview.candidatePath) || !isAbsolute(preview.mainPath)
+    || !Array.isArray(preview.largeFiles) || !Array.isArray(preview.conflicts)
+    || !Number.isSafeInteger(preview.fileCount) || preview.fileCount < preview.files.length
+    || !Number.isSafeInteger(preview.additions) || preview.additions < 0
+    || !Number.isSafeInteger(preview.deletions) || preview.deletions < 0
+    || !Number.isSafeInteger(preview.binaryEntries) || preview.binaryEntries < 0
+    || !Number.isSafeInteger(preview.modeChanges) || preview.modeChanges < 0
+    || preview.modeChanges > preview.fileCount
+    || typeof preview.filesTruncated !== "boolean"
+    || typeof preview.submodulesTruncated !== "boolean" || typeof preview.mergeConflictsTruncated !== "boolean"
+    || typeof preview.mergeable !== "boolean"
+    // A stored preview that claims both "this merges cleanly" and a list of conflicting paths is
+    // not a preview with a defect in one field; it is two contradictory answers to the question the
+    // owner is about to act on, so neither is shown.
+    || (preview.mergeable && (preview.mergeConflicts.length > 0 || preview.mergeConflictsTruncated))
+    || preview.recovery?.ready !== true || preview.recovery.kind !== "git-checkpoint-ref"
+    || !CHECKPOINT_REF_PATTERN.test(preview.recovery.ref)
+    || preview.recovery.head !== preview.candidateHead) {
+    throw new Error("CANDIDATE_COMPLETION_PREVIEW_INVALID");
+  }
+  validateBaseline(preview.mainDirty);
+  return preview;
+}
+
 function risks(value: unknown): string[] {
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.length > MAX_RISKS) throw new Error("CANDIDATE_RISKS_INVALID");
@@ -449,6 +713,110 @@ function requestDigest(operation: CandidateRequestOperation, payload: unknown): 
 function requestKey(value: unknown): string {
   if (typeof value !== "string" || !UUID_PATTERN.test(value)) throw new Error("CANDIDATE_CLIENT_REQUEST_ID_INVALID");
   return value;
+}
+
+function mergeApprovalHash(row: Omit<MergeApprovalRow, "row_hash">): string {
+  return sha(JSON.stringify([
+    row.id, row.client_request_id, row.input_digest, row.task_id, row.completion_id, row.room_id,
+    row.main_path, row.main_branch, row.candidate_path, row.base_main_head, row.candidate_head,
+    row.main_head, row.main_fingerprint, row.main_ignored_fingerprint, row.recovery_ref,
+    row.preview_digest, row.preview_json, row.grant_action, row.state, row.token_hash, row.actor,
+    row.decided_by, row.refusal_json, row.created_at_ms, row.updated_at_ms, row.expires_at_ms,
+  ]));
+}
+
+function mergeRequestKey(value: unknown): string {
+  if (typeof value !== "string" || !UUID_PATTERN.test(value)) throw new Error("MAIN_MERGE_CLIENT_REQUEST_ID_INVALID");
+  return value;
+}
+
+function mergeBinding(row: MergeApprovalRow): MergeApprovalBinding {
+  return {
+    taskId: row.task_id,
+    completionId: row.completion_id,
+    roomId: row.room_id,
+    mainPath: row.main_path,
+    mainBranch: row.main_branch,
+    candidatePath: row.candidate_path,
+    baseMainHead: row.base_main_head,
+    candidateHead: row.candidate_head,
+    mainHead: row.main_head,
+    mainFingerprint: row.main_fingerprint,
+    mainIgnoredFingerprint: row.main_ignored_fingerprint,
+    recoveryRef: row.recovery_ref,
+    previewDigest: row.preview_digest,
+  };
+}
+
+/**
+ * Every reason a snapshot is not approvable, named individually.
+ *
+ * The three truncation flags are separate entries rather than one "truncated" verdict because they
+ * are three different things the owner was not shown, and a merge that the simulation says conflicts
+ * is a fourth: an approval is documented to mean "no content conflicts", so one that carries them
+ * would be promising something the preview already disproved.
+ */
+function mergeBlockers(preview: CandidateCompletionPreview): string[] {
+  const blockers: string[] = [];
+  if (preview.filesTruncated) blockers.push("PREVIEW_FILES_TRUNCATED");
+  if (preview.submodulesTruncated) blockers.push("PREVIEW_SUBMODULES_TRUNCATED");
+  if (preview.mergeConflictsTruncated) blockers.push("PREVIEW_MERGE_CONFLICTS_TRUNCATED");
+  if (!preview.mergeable) blockers.push("MERGE_CONFLICTS_PRESENT");
+  return blockers;
+}
+
+function boundedRefusal(refusal: MergeApprovalRefusal): MergeApprovalRefusal {
+  const reason = refusal.reason === undefined
+    ? undefined
+    : refusal.reason.replace(/[\r\n\t\0]+/gu, " ").slice(0, MAX_MERGE_REJECT_REASON).trim();
+  return {
+    code: refusal.code.slice(0, 64),
+    changed: refusal.changed.slice(0, MAX_MERGE_REFUSAL_CHANGED).map((name) => name.slice(0, 40)),
+    ...(reason ? { reason } : {}),
+  };
+}
+
+function assertRefusal(value: unknown): MergeApprovalRefusal {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("MAIN_MERGE_APPROVAL_ROW_TAMPERED");
+  }
+  const refusal = value as Record<string, unknown>;
+  if (Object.keys(refusal).some((key) => !["code", "changed", "reason"].includes(key))
+    || typeof refusal.code !== "string" || refusal.code.length < 1 || refusal.code.length > 64
+    || !Array.isArray(refusal.changed) || refusal.changed.length > MAX_MERGE_REFUSAL_CHANGED
+    || refusal.changed.some((name) => typeof name !== "string" || name.length < 1 || name.length > 40)
+    || (refusal.reason !== undefined
+      && (typeof refusal.reason !== "string" || refusal.reason.length > MAX_MERGE_REJECT_REASON))) {
+    throw new Error("MAIN_MERGE_APPROVAL_ROW_TAMPERED");
+  }
+  return refusal as unknown as MergeApprovalRefusal;
+}
+
+/** Constant-time compare of two hex digests; a length or alphabet mismatch is simply not equal. */
+function equalDigest(left: string, right: string): boolean {
+  if (!HASH_PATTERN.test(left) || !HASH_PATTERN.test(right)) return false;
+  return timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(right, "hex"));
+}
+
+function mergeApprovalPrompt(
+  task: CandidateTask,
+  preview: CandidateCompletionPreview,
+  previewDigest: string,
+  blockers: string[],
+): string {
+  return [
+    `即將要求核准的動作：把 candidate ${task.candidatePath} 的這個精確 snapshot merge 進 canonical main ${task.mainPath}`
+      + `（分支 ${task.mainBranch}）。目前尚未修改 main。`,
+    `Candidate HEAD ${preview.candidateHead}；main HEAD ${preview.mainHead}；base ${preview.baseMainHead}；`
+      + `preview ${previewDigest}。`,
+    `檔案 ${preview.fileCount} 個，新增 ${preview.additions} 行，刪除 ${preview.deletions} 行，`
+      + `模式變更 ${preview.modeChanges} 個，submodule ${preview.submodules.length} 個。`,
+    `復原點：${preview.recovery.ref}（指向 ${preview.recovery.head}）。`,
+    preview.mergeable ? "已模擬 merge：沒有內容衝突。" : `已模擬 merge：${preview.mergeConflicts.length} 個檔案衝突。`,
+    blockers.length === 0
+      ? `本次核准只適用於這一個 snapshot，只能使用一次，且只授權 merge；請 Owner 在頁內 dialog 輸入 ${MERGE_APPROVAL_CONFIRMATION}。`
+      : `目前不可核准：${blockers.join("、")}。請先處理後重新 preview 再詢問。`,
+  ].join(" ");
 }
 
 function reservedIdentifiers(value: unknown): ReservedIdentifiers {
@@ -597,8 +965,7 @@ export class CandidateRegistry {
     const inspection = await this.#git.inspect(mainPath);
     const ignored = await this.#ignoredInventory(mainPath);
     const baseMainHead = await this.#git.headSha(mainPath);
-    const mainBranch = (await this.#gitCommand(mainPath, ["branch", "--show-current"], 16_384)).trim();
-    if (!mainBranch || mainBranch.length > 255 || mainBranch.includes("\0")) throw new Error("CANDIDATE_MAIN_BRANCH_REQUIRED");
+    const mainBranch = await this.#mainBranch(mainPath);
     const taskId = reserved.taskId;
     const candidateId = reserved.candidateId;
     const candidatePath = join(this.#dataDirectory, "candidates", candidateId);
@@ -830,36 +1197,16 @@ export class CandidateRegistry {
       || candidate.branch !== task.candidateBranch) throw new Error("CANDIDATE_WORKTREE_SCOPE_MISMATCH");
     const candidateState = await this.#git.inspect(candidate.workspace);
     if (!candidateState.clean) throw new Error("CANDIDATE_COMPLETION_REQUIRES_CLEAN_WORKTREE");
-    const mainState = await this.#git.inspect(task.mainPath);
-    const mainIgnored = await this.#ignoredInventory(task.mainPath);
-    const mainHead = await this.#git.headSha(task.mainPath);
-    const diff = await this.#diff(task.baseMainHead, candidate.headSha, candidate.workspace);
-    // Simulated in the candidate worktree against the observed main head. Nothing about main is
-    // written, checked out or refreshed; the owner is simply no longer asked to approve a merge
-    // whose conflicts are unknown until it is attempted.
-    const merge = await this.#mergePreview(candidate.workspace, mainHead, candidate.headSha);
     const checkpointId = reservedCheckpointId;
     const recoveryRef = this.#checkpointRef(task.taskId, checkpointId);
-    const preview: CandidateCompletionPreview = {
-      baseMainHead: task.baseMainHead,
+    const { preview, previewDigest, mainState, mainIgnored, mainHead } = await this.#previewSnapshot({
+      task,
+      candidateWorkspace: candidate.workspace,
       candidateHead: candidate.headSha,
-      mainHead,
-      mainDrift: mainHead !== task.baseMainHead,
-      candidatePath: task.candidatePath,
-      mainPath: task.mainPath,
-      ...diff,
+      recoveryRef,
       tests: checkedTests,
       knownRisks: checkedRisks,
-      conflicts: [
-        ...(mainHead === task.baseMainHead ? [] : ["MAIN_DRIFT_REQUIRES_FRESH_MERGE_PREVIEW"]),
-        ...(task.baseline.clean ? [] : ["DIRTY_MAIN_BASELINE_WAS_RECORDED_BUT_NOT_COPIED_TO_CANDIDATE"]),
-        ...(mainState.clean ? [] : ["CURRENT_DIRTY_MAIN_CHANGES_ARE_EXCLUDED_FROM_CANDIDATE"]),
-      ],
-      ...merge,
-      mainDirty: baseline(mainState, mainIgnored),
-      recovery: { ready: true, kind: "git-checkpoint-ref", ref: recoveryRef, head: candidate.headSha },
-    };
-    const previewDigest = sha(JSON.stringify(preview));
+    });
     const completionId = reservedCompletionId;
     const createdAtMs = this.#now();
     const prompt = [
@@ -1010,6 +1357,7 @@ export class CandidateRegistry {
       output.push({
         ...task,
         checkpoints,
+        mergeApprovals: this.#mergeApprovalSummaries(task.taskId),
         live: {
           ...(candidateHead ? { candidateHead } : {}),
           ...(candidateDirty === undefined ? {} : { candidateDirty }),
@@ -1086,6 +1434,9 @@ export class CandidateRegistry {
      */
     requests: number;
     requestsPending: number;
+    /** Merge approvals ever recorded, and the subset that is still answerable. Same growth story. */
+    mergeApprovals: number;
+    mergeApprovalsOpen: number;
   } {
     this.#assertOpen();
     const row = this.#db.prepare(`SELECT
@@ -1094,8 +1445,13 @@ export class CandidateRegistry {
       (SELECT COUNT(*) FROM candidates WHERE status='completed') completed,
       (SELECT COUNT(*) FROM candidate_checkpoints) checkpoints,
       (SELECT COUNT(*) FROM candidate_requests) requests,
-      (SELECT COUNT(*) FROM candidate_requests WHERE state='pending') requestsPending`).get() as
-      { tasks: number; active: number; completed: number; checkpoints: number; requests: number; requestsPending: number };
+      (SELECT COUNT(*) FROM candidate_requests WHERE state='pending') requestsPending,
+      (SELECT COUNT(*) FROM candidate_merge_approvals) mergeApprovals,
+      (SELECT COUNT(*) FROM candidate_merge_approvals WHERE state IN ('requested','approved')) mergeApprovalsOpen`)
+      .get() as {
+        tasks: number; active: number; completed: number; checkpoints: number;
+        requests: number; requestsPending: number; mergeApprovals: number; mergeApprovalsOpen: number;
+      };
     return { database: this.path, schemaVersion: SCHEMA_VERSION, databaseBytes: statSync(this.path).size, ...row };
   }
 
@@ -1137,6 +1493,340 @@ export class CandidateRegistry {
       if (orphans.length >= MAX_ORPHAN_RECOVERY_REFS) break;
     }
     return orphans;
+  }
+
+  /**
+   * Recomputes, from live state, the exact snapshot an owner would be asked to approve, and writes
+   * nothing whatsoever — no row, no ref, no worktree.
+   *
+   * The gates that make a snapshot approvable are reported as `blockers` rather than thrown, because
+   * the owner has to be able to SEE why a candidate cannot be merged; a bare error code would hide
+   * the conflicting paths that are the whole explanation.
+   */
+  async previewMainMerge(input: { taskId: string; roomId: string; mainPath: string }): Promise<MergeApprovalPreview> {
+    this.#assertOpen();
+    const scope = await this.#mergeScope(input.taskId, input.roomId, input.mainPath);
+    const { preview, previewDigest } = await this.#previewSnapshot({
+      task: scope.task,
+      candidateWorkspace: scope.candidateWorkspace,
+      candidateHead: scope.candidateHead,
+      recoveryRef: scope.recoveryRef,
+      tests: scope.completion.preview.tests,
+      knownRisks: scope.completion.preview.knownRisks,
+    });
+    const blockers = mergeBlockers(preview);
+    return {
+      taskId: scope.task.taskId,
+      completionId: scope.completion.id,
+      previewDigest,
+      preview,
+      recoveryRef: scope.recoveryRef,
+      approvable: blockers.length === 0,
+      blockers,
+      confirmationPhrase: MERGE_APPROVAL_CONFIRMATION,
+      prompt: mergeApprovalPrompt(scope.task, preview, previewDigest, blockers),
+      mainMutation: false,
+    };
+  }
+
+  /**
+   * Records an agent's REQUEST that the owner be asked. It is not an approval and confers nothing:
+   * the row it writes is `requested`, carries no secret, and cannot be consumed.
+   *
+   * The caller must present the `previewDigest` it just showed the owner. If live state has moved
+   * since, the recomputed digest will not match and the request is refused, so a request can never
+   * be raised against a snapshot nobody looked at.
+   */
+  async requestMainMerge(input: {
+    actor: string;
+    clientRequestId: unknown;
+    taskId: string;
+    roomId: string;
+    mainPath: string;
+    completionId: string;
+    previewDigest: string;
+  }): Promise<MergeApproval> {
+    this.#assertOpen();
+    const actor = text(input.actor, "CANDIDATE_ACTOR_INVALID", MAX_ACTOR);
+    const clientRequestId = mergeRequestKey(input.clientRequestId);
+    if (typeof input.completionId !== "string" || !UUID_PATTERN.test(input.completionId)) {
+      throw new Error("MAIN_MERGE_COMPLETION_MISMATCH");
+    }
+    if (typeof input.previewDigest !== "string" || !HASH_PATTERN.test(input.previewDigest)) {
+      throw new Error("MAIN_MERGE_PREVIEW_DIGEST_STALE");
+    }
+    const scope = await this.#mergeScope(input.taskId, input.roomId, input.mainPath);
+    const digest = sha(JSON.stringify(["main-merge-request", {
+      taskId: scope.task.taskId,
+      roomId: scope.task.roomId,
+      mainPath: scope.task.mainPath,
+      completionId: input.completionId,
+      previewDigest: input.previewDigest,
+    }]));
+    const replayed = this.#mergeApprovalByKey(clientRequestId);
+    if (replayed) {
+      if (replayed.input_digest !== digest) throw new Error("MAIN_MERGE_REQUEST_IDEMPOTENCY_CONFLICT");
+      return this.#publicMergeApproval(replayed);
+    }
+    if (scope.completion.id !== input.completionId) throw new Error("MAIN_MERGE_COMPLETION_MISMATCH");
+    this.#sweepExpiredMergeApprovals(scope.task.taskId);
+    if (this.#openMergeApproval(scope.task.taskId)) throw new Error("MAIN_MERGE_APPROVAL_ALREADY_PENDING");
+    if (this.#countMergeApprovals(scope.task.taskId) >= MAX_MERGE_APPROVALS_PER_TASK) {
+      throw new Error("MAIN_MERGE_APPROVAL_TASK_LIMIT_REACHED");
+    }
+    const { preview, previewDigest } = await this.#previewSnapshot({
+      task: scope.task,
+      candidateWorkspace: scope.candidateWorkspace,
+      candidateHead: scope.candidateHead,
+      recoveryRef: scope.recoveryRef,
+      tests: scope.completion.preview.tests,
+      knownRisks: scope.completion.preview.knownRisks,
+    });
+    if (previewDigest !== input.previewDigest) throw new Error("MAIN_MERGE_PREVIEW_DIGEST_STALE");
+    const blockers = mergeBlockers(preview);
+    if (blockers.includes("MERGE_CONFLICTS_PRESENT")) throw new Error("MAIN_MERGE_PREVIEW_CONFLICTED");
+    // Bar item 5: an owner must not be asked to sign for content the preview could not show them.
+    if (blockers.length > 0) throw new Error("MAIN_MERGE_PREVIEW_TRUNCATED");
+    const now = this.#now();
+    if (!Number.isSafeInteger(now) || now < 0) throw new Error("CANDIDATE_TIME_INVALID");
+    const bare: Omit<MergeApprovalRow, "row_hash"> = {
+      id: randomUUID(),
+      client_request_id: clientRequestId,
+      input_digest: digest,
+      task_id: scope.task.taskId,
+      completion_id: scope.completion.id,
+      room_id: scope.task.roomId,
+      main_path: scope.task.mainPath,
+      main_branch: scope.mainBranch,
+      candidate_path: scope.task.candidatePath,
+      base_main_head: scope.task.baseMainHead,
+      candidate_head: preview.candidateHead,
+      main_head: preview.mainHead,
+      main_fingerprint: preview.mainDirty.fingerprint,
+      main_ignored_fingerprint: preview.mainDirty.ignoredFingerprint,
+      recovery_ref: scope.recoveryRef,
+      preview_digest: previewDigest,
+      preview_json: JSON.stringify(preview),
+      grant_action: MERGE_APPROVAL_GRANT,
+      state: "requested",
+      token_hash: null,
+      actor,
+      decided_by: null,
+      refusal_json: null,
+      created_at_ms: now,
+      updated_at_ms: now,
+      expires_at_ms: now + MERGE_APPROVAL_REQUEST_TTL_MS,
+    };
+    const row: MergeApprovalRow = { ...bare, row_hash: mergeApprovalHash(bare) };
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      this.#insertMergeApproval(row);
+      this.#db.exec("COMMIT");
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      // Two writers racing the same key, or two keys racing the same task, both land here. Re-read
+      // before deciding: a duplicate key carrying identical input is this request arriving twice,
+      // not a conflict, and the row the winner wrote is the answer both callers are owed.
+      const existing = this.#mergeApprovalByKey(clientRequestId);
+      if (existing) {
+        if (existing.input_digest !== digest) throw new Error("MAIN_MERGE_REQUEST_IDEMPOTENCY_CONFLICT");
+        return this.#publicMergeApproval(existing);
+      }
+      if (this.#openMergeApproval(scope.task.taskId)) throw new Error("MAIN_MERGE_APPROVAL_ALREADY_PENDING");
+      throw error;
+    }
+    return this.#publicMergeApproval(row);
+  }
+
+  /**
+   * The owner's decision, and the only place authority is created. The whole binding is verified
+   * against live state again here, so a request raised minutes ago against a snapshot that has since
+   * moved is refused rather than quietly re-pointed at the new one.
+   */
+  async grantMainMerge(input: {
+    approvalId: string;
+    roomId: string;
+    mainPath: string;
+    previewDigest: string;
+    confirmation: string;
+    decidedBy: "local-web" | "local-tui";
+  }): Promise<{ approval: MergeApproval; approvalToken: string; expiresAt: string }> {
+    this.#assertOpen();
+    if (input.decidedBy !== "local-web" && input.decidedBy !== "local-tui") {
+      throw new Error("MAIN_MERGE_APPROVAL_ACTOR_INVALID");
+    }
+    const row = await this.#scopedMergeApprovalRow(input.approvalId, input.roomId, input.mainPath);
+    if (row.state !== "requested") throw new Error("MAIN_MERGE_APPROVAL_NOT_PENDING");
+    this.#assertMergeApprovalLive(row);
+    if (input.confirmation !== MERGE_APPROVAL_CONFIRMATION) throw new Error("MAIN_MERGE_CONFIRMATION_MISMATCH");
+    // The surface has to name the digest it displayed. Approving a row whose preview the caller never
+    // saw is exactly the failure the whole binding exists to prevent.
+    if (typeof input.previewDigest !== "string" || input.previewDigest !== row.preview_digest) {
+      throw new Error("MAIN_MERGE_PREVIEW_DIGEST_MISMATCH");
+    }
+    const changed = await this.#verifyMergeBinding(row);
+    if (changed.length > 0) {
+      this.#settleMergeApproval(row, "invalidated", { code: "MAIN_MERGE_APPROVAL_BINDING_CHANGED", changed });
+      throw new MergeApprovalBindingError(changed);
+    }
+    const token = randomBytes(32).toString("base64url");
+    const now = this.#now();
+    const granted = this.#writeMergeApproval(row, {
+      state: "approved",
+      token_hash: sha(token),
+      decided_by: input.decidedBy,
+      updated_at_ms: Math.max(row.created_at_ms, now),
+      expires_at_ms: Math.max(row.created_at_ms + 1, now + MERGE_APPROVAL_GRANT_TTL_MS),
+    });
+    return {
+      approval: this.#publicMergeApproval(granted),
+      approvalToken: token,
+      expiresAt: new Date(granted.expires_at_ms).toISOString(),
+    };
+  }
+
+  /**
+   * Refusing, or withdrawing a grant the owner changed their mind about. It touches the approval row
+   * and nothing else: no Git command runs, no candidate row changes, and no ref is removed. Refusal
+   * is not a cleanup authorization, and the owner can be asked again after a fresh preview.
+   */
+  async rejectMainMerge(input: {
+    approvalId: string;
+    roomId: string;
+    mainPath: string;
+    decidedBy: "local-web" | "local-tui";
+    reason?: string;
+  }): Promise<MergeApproval> {
+    this.#assertOpen();
+    if (input.decidedBy !== "local-web" && input.decidedBy !== "local-tui") {
+      throw new Error("MAIN_MERGE_APPROVAL_ACTOR_INVALID");
+    }
+    const row = await this.#scopedMergeApprovalRow(input.approvalId, input.roomId, input.mainPath);
+    if (row.state !== "requested" && row.state !== "approved") throw new Error("MAIN_MERGE_APPROVAL_NOT_PENDING");
+    const rejected = this.#writeMergeApproval(row, {
+      state: "rejected",
+      token_hash: null,
+      decided_by: input.decidedBy,
+      refusal_json: JSON.stringify(boundedRefusal({
+        code: "OWNER_REJECTED",
+        changed: [],
+        ...(input.reason === undefined ? {} : { reason: input.reason }),
+      })),
+      updated_at_ms: Math.max(row.created_at_ms, this.#now()),
+    });
+    return this.#publicMergeApproval(rejected);
+  }
+
+  /**
+   * Turns an approval into authority exactly once. Phase 5-5 promotion is its only intended caller.
+   *
+   * Nothing here writes to canonical main, creates or removes a ref, or touches the candidate: it
+   * re-verifies the entire binding against live state a SECOND time — creation-time verification
+   * alone would let anything that moved in between slip through — and hands back a description of
+   * precisely what the owner agreed to, together with what they did not.
+   */
+  async consumeMainMerge(input: {
+    approvalId: string;
+    token: string;
+    action: string;
+    taskId: string;
+    roomId: string;
+    mainPath: string;
+  }): Promise<MergeAuthorization> {
+    this.#assertOpen();
+    if (typeof input.approvalId !== "string" || !UUID_PATTERN.test(input.approvalId)) {
+      throw new Error("MAIN_MERGE_APPROVAL_ID_INVALID");
+    }
+    // Bar item 4: the approval names one action. Anything else is refused before the row is read, so
+    // no other operation can even attempt to spend it.
+    if (input.action !== MERGE_APPROVAL_GRANT) throw new Error("MAIN_MERGE_APPROVAL_ACTION_NOT_GRANTED");
+    if (typeof input.token !== "string" || !MERGE_APPROVAL_TOKEN_PATTERN.test(input.token)) {
+      throw new Error("MAIN_MERGE_APPROVAL_TOKEN_INVALID");
+    }
+    const row = this.#mergeApprovalRow(input.approvalId);
+    if (!row) throw new Error("MAIN_MERGE_APPROVAL_NOT_FOUND");
+    this.#assertMergeApprovalRow(row);
+    if (row.state === "consumed") throw new Error("MAIN_MERGE_APPROVAL_ALREADY_CONSUMED");
+    if (row.state !== "approved") throw new Error("MAIN_MERGE_APPROVAL_NOT_APPROVED");
+    this.#assertMergeApprovalLive(row);
+    if (row.token_hash === null || !equalDigest(sha(input.token), row.token_hash)) {
+      throw new Error("MAIN_MERGE_APPROVAL_TOKEN_INVALID");
+    }
+    // What the caller believes it is about to do has to match what the owner agreed to. Scoping the
+    // lookup by room and path instead would answer "not found" and never name the value that differs.
+    const intent: string[] = [];
+    if (input.taskId !== row.task_id) intent.push("taskId");
+    if (input.roomId !== row.room_id) intent.push("roomId");
+    let mainPath: string | undefined;
+    try { mainPath = await canonicalWorkspace(input.mainPath); } catch { /* unresolvable is "changed" */ }
+    if (mainPath !== row.main_path) intent.push("mainPath");
+    if (intent.length > 0) throw new MergeApprovalBindingError(intent);
+    const changed = await this.#verifyMergeBinding(row);
+    if (changed.length > 0) {
+      this.#settleMergeApproval(row, "invalidated", { code: "MAIN_MERGE_APPROVAL_BINDING_CHANGED", changed });
+      throw new MergeApprovalBindingError(changed);
+    }
+    let consumed: MergeApprovalRow;
+    try {
+      consumed = this.#writeMergeApproval(row, {
+        state: "consumed",
+        token_hash: null,
+        updated_at_ms: Math.max(row.created_at_ms, this.#now()),
+      });
+    } catch (error) {
+      // The compare-and-set is the single-use guarantee. A loser here did not arrive late, it arrived
+      // at the same instant, so it is told the approval is spent rather than shown a storage-level
+      // error it cannot act on.
+      const current = this.#mergeApprovalRow(row.id);
+      if (current?.state === "consumed") throw new Error("MAIN_MERGE_APPROVAL_ALREADY_CONSUMED");
+      throw error;
+    }
+    return {
+      approvalId: consumed.id,
+      grants: consumed.grant_action,
+      notAuthorized: MERGE_APPROVAL_NOT_AUTHORIZED,
+      singleUse: true,
+      binding: mergeBinding(consumed),
+      preview: assertPreviewShape(JSON.parse(consumed.preview_json) as unknown),
+      consumedAt: new Date(consumed.updated_at_ms).toISOString(),
+    };
+  }
+
+  /** Merge approvals recorded for this exact Room/workspace, newest first. */
+  async mergeApprovals(input: { roomId: string; mainPath: string; taskId?: string }): Promise<MergeApproval[]> {
+    this.#assertOpen();
+    const roomId = text(input.roomId, "CANDIDATE_ROOM_INVALID", 48);
+    if (!ROOM_PATTERN.test(roomId)) throw new Error("CANDIDATE_ROOM_INVALID");
+    const mainPath = await canonicalWorkspace(input.mainPath);
+    if (input.taskId !== undefined && (typeof input.taskId !== "string" || !UUID_PATTERN.test(input.taskId))) {
+      throw new Error("CANDIDATE_TASK_ID_INVALID");
+    }
+    const rows = input.taskId === undefined
+      ? this.#db.prepare(`SELECT * FROM candidate_merge_approvals WHERE room_id=? AND main_path=?
+          ORDER BY created_at_ms DESC, id LIMIT ?`).all(roomId, mainPath, MAX_LIST) as unknown as MergeApprovalRow[]
+      : this.#db.prepare(`SELECT * FROM candidate_merge_approvals WHERE room_id=? AND main_path=? AND task_id=?
+          ORDER BY created_at_ms DESC, id LIMIT ?`)
+        .all(roomId, mainPath, input.taskId, MAX_LIST) as unknown as MergeApprovalRow[];
+    return rows.map((row) => this.#publicMergeApproval(row));
+  }
+
+  /**
+   * The approval plus a live re-verification of its binding, for a surface that has to decide whether
+   * to keep its confirm control enabled. Deliberately read-only: a dialog that polls must never be
+   * able to settle an approval, and an owner who steps away must find the row exactly as they left it.
+   */
+  async inspectMergeApproval(input: { approvalId: string; roomId: string; mainPath: string }): Promise<{
+    approval: MergeApproval;
+    binding: { valid: boolean; changed: string[] };
+  }> {
+    this.#assertOpen();
+    const row = await this.#scopedMergeApprovalRow(input.approvalId, input.roomId, input.mainPath);
+    const usable = !MERGE_APPROVAL_TERMINAL.has(row.state) && this.#now() <= row.expires_at_ms;
+    const changed = usable ? await this.#verifyMergeBinding(row) : [];
+    return {
+      approval: this.#publicMergeApproval(row),
+      binding: { valid: usable && changed.length === 0, changed },
+    };
   }
 
   close(): void {
@@ -1366,8 +2056,70 @@ export class CandidateRegistry {
       submodules,
       submodulesTruncated: submoduleCount > submodules.length,
       largeFiles,
+      // Derived from the same condition as filesTruncated above, so the two always agree. The
+      // approval dialog blocks on either; a stored preview where they disagree is a tamper signal,
+      // not a state this code can produce.
       largeFileScanTruncated: fileCount > files.length,
     };
+  }
+
+  async #mainBranch(mainPath: string): Promise<string> {
+    const branch = (await this.#gitCommand(mainPath, ["branch", "--show-current"], 16_384)).trim();
+    if (!branch || branch.length > 255 || branch.includes("\0")) throw new Error("CANDIDATE_MAIN_BRANCH_REQUIRED");
+    return branch;
+  }
+
+  /**
+   * The entire snapshot an owner is asked to act on, computed from live state and nothing else.
+   *
+   * `complete` freezes it into the completion; the merge approval path recomputes it, because an
+   * approval must be bound to what is true when it is asked for rather than to what was true when
+   * the work finished. Both go through this one function so the two previews cannot drift apart in
+   * shape — the digest that binds the approval is a digest of this exact object.
+   */
+  async #previewSnapshot(input: {
+    task: CandidateTask;
+    candidateWorkspace: string;
+    candidateHead: string;
+    recoveryRef: string;
+    tests: CandidateTestResult[];
+    knownRisks: string[];
+  }): Promise<{
+    preview: CandidateCompletionPreview;
+    previewDigest: string;
+    mainState: GitInspection;
+    mainIgnored: { files: number; fingerprint: string };
+    mainHead: string;
+  }> {
+    const task = input.task;
+    const mainState = await this.#git.inspect(task.mainPath);
+    const mainIgnored = await this.#ignoredInventory(task.mainPath);
+    const mainHead = await this.#git.headSha(task.mainPath);
+    const diff = await this.#diff(task.baseMainHead, input.candidateHead, input.candidateWorkspace);
+    // Simulated in the candidate worktree against the observed main head. Nothing about main is
+    // written, checked out or refreshed; the owner is simply no longer asked to approve a merge
+    // whose conflicts are unknown until it is attempted.
+    const merge = await this.#mergePreview(input.candidateWorkspace, mainHead, input.candidateHead);
+    const preview: CandidateCompletionPreview = {
+      baseMainHead: task.baseMainHead,
+      candidateHead: input.candidateHead,
+      mainHead,
+      mainDrift: mainHead !== task.baseMainHead,
+      candidatePath: task.candidatePath,
+      mainPath: task.mainPath,
+      ...diff,
+      tests: input.tests,
+      knownRisks: input.knownRisks,
+      conflicts: [
+        ...(mainHead === task.baseMainHead ? [] : ["MAIN_DRIFT_REQUIRES_FRESH_MERGE_PREVIEW"]),
+        ...(task.baseline.clean ? [] : ["DIRTY_MAIN_BASELINE_WAS_RECORDED_BUT_NOT_COPIED_TO_CANDIDATE"]),
+        ...(mainState.clean ? [] : ["CURRENT_DIRTY_MAIN_CHANGES_ARE_EXCLUDED_FROM_CANDIDATE"]),
+      ],
+      ...merge,
+      mainDirty: baseline(mainState, mainIgnored),
+      recovery: { ready: true, kind: "git-checkpoint-ref", ref: input.recoveryRef, head: input.candidateHead },
+    };
+    return { preview, previewDigest: sha(JSON.stringify(preview)), mainState, mainIgnored, mainHead };
   }
 
   /**
@@ -1490,19 +2242,28 @@ export class CandidateRegistry {
       ) STRICT;
       CREATE INDEX candidate_checkpoints_task_created ON candidate_checkpoints(task_id, created_at_ms, id);
       ${REQUESTS_TABLE_SQL}
+      ${MERGE_APPROVALS_TABLE_SQL}
       PRAGMA user_version=${SCHEMA_VERSION}; COMMIT;`);
   }
 
   /**
-   * v1 stores only candidates and checkpoints. Adding the request ledger is additive, so existing
-   * rows are left byte-identical and their hashes stay valid; a failure rolls the whole step back.
+   * Every supported upgrade is purely additive, so existing rows are left byte-identical and their
+   * hashes stay valid; a failure rolls the whole step back.
    */
   #upgrade(from: number): void {
     if (from === 1) {
-      // v1 holds only candidates and checkpoints. Adding the request ledger is additive, so existing
-      // rows stay byte-identical and their hashes stay valid.
+      // v1 holds only candidates and checkpoints. Adding the request ledger and the merge approval
+      // table is additive, so existing rows stay byte-identical and their hashes stay valid.
       this.#db.exec(`BEGIN IMMEDIATE;
         ${REQUESTS_TABLE_SQL}
+        ${MERGE_APPROVALS_TABLE_SQL}
+        PRAGMA user_version=${SCHEMA_VERSION}; COMMIT;`);
+      return;
+    }
+    if (from === 3) {
+      // v3 already carries the request ledger; only the approval table is new, and no v3 row moves.
+      this.#db.exec(`BEGIN IMMEDIATE;
+        ${MERGE_APPROVALS_TABLE_SQL}
         PRAGMA user_version=${SCHEMA_VERSION}; COMMIT;`);
       return;
     }
@@ -1874,33 +2635,7 @@ export class CandidateRegistry {
       || sha(JSON.stringify(completion.preview)) !== completion.previewDigest) {
       throw new Error("CANDIDATE_COMPLETION_INVALID");
     }
-    tests(completion.preview.tests);
-    risks(completion.preview.knownRisks);
-    const preview = completion.preview;
-    previewFileFacts(preview.files);
-    previewPaths(preview.submodules, MAX_PREVIEW_SUBMODULES);
-    previewPaths(preview.mergeConflicts, MAX_MERGE_CONFLICTS);
-    if (!HEAD_PATTERN.test(preview.baseMainHead) || !HEAD_PATTERN.test(preview.candidateHead)
-      || !HEAD_PATTERN.test(preview.mainHead) || !isAbsolute(preview.candidatePath) || !isAbsolute(preview.mainPath)
-      || !Array.isArray(preview.largeFiles) || !Array.isArray(preview.conflicts)
-      || !Number.isSafeInteger(preview.fileCount) || preview.fileCount < preview.files.length
-      || !Number.isSafeInteger(preview.additions) || preview.additions < 0
-      || !Number.isSafeInteger(preview.deletions) || preview.deletions < 0
-      || !Number.isSafeInteger(preview.binaryEntries) || preview.binaryEntries < 0
-      || !Number.isSafeInteger(preview.modeChanges) || preview.modeChanges < 0
-      || preview.modeChanges > preview.fileCount
-      || typeof preview.submodulesTruncated !== "boolean" || typeof preview.mergeConflictsTruncated !== "boolean"
-      || typeof preview.mergeable !== "boolean"
-      // A stored preview that claims both "this merges cleanly" and a list of conflicting paths is
-      // not a preview with a defect in one field; it is two contradictory answers to the question the
-      // owner is about to act on, so neither is shown.
-      || (preview.mergeable && (preview.mergeConflicts.length > 0 || preview.mergeConflictsTruncated))
-      || preview.recovery?.ready !== true || preview.recovery.kind !== "git-checkpoint-ref"
-      || !CHECKPOINT_REF_PATTERN.test(preview.recovery.ref)
-      || preview.recovery.head !== preview.candidateHead) {
-      throw new Error("CANDIDATE_COMPLETION_PREVIEW_INVALID");
-    }
-    validateBaseline(preview.mainDirty);
+    assertPreviewShape(completion.preview);
     return completion;
   }
 
@@ -1948,11 +2683,342 @@ export class CandidateRegistry {
       this.#assertCheckpoint(row);
       if (!this.#rowByTask(row.task_id)) throw new Error("CANDIDATE_CHECKPOINT_PARENT_MISSING");
     }
+    // candidate_merge_approvals is deliberately NOT verified here either, for the same reason and
+    // with no loss of strictness: every read of an approval verifies its row hash and re-derives its
+    // preview digest, so a tampered approval can never be listed, granted or consumed. Failing the
+    // constructor instead would put the candidates, checkpoints and recovery refs the owner needs in
+    // order to recover out of reach because one approval row was edited.
     // candidate_requests is deliberately NOT verified here. It is an advisory retry ledger, while
     // candidates and candidate_checkpoints are the authoritative record. Failing the constructor on
     // one unreadable retry row would make the durable candidate data unreachable — the opposite of
     // what this table exists for. Each row is validated by #assertRequestRow when it is read, so a
     // corrupt row poisons only its own idempotency key.
+  }
+
+  /**
+   * The candidate a merge approval could be raised against, or a refusal saying exactly why not.
+   *
+   * A completed candidate whose worktree has moved past its own completion is refused rather than
+   * re-previewed at the new head: the completion's recovery ref names the completed head, so merging
+   * a later one would be a merge with no verified recovery point behind it.
+   */
+  async #mergeScope(taskIdValue: unknown, roomIdValue: string, mainPathValue: string): Promise<{
+    task: CandidateTask;
+    completion: CandidateCompletion;
+    candidateWorkspace: string;
+    candidateHead: string;
+    recoveryRef: string;
+    mainBranch: string;
+  }> {
+    const roomId = text(roomIdValue, "CANDIDATE_ROOM_INVALID", 48);
+    if (!ROOM_PATTERN.test(roomId)) throw new Error("CANDIDATE_ROOM_INVALID");
+    if (typeof taskIdValue !== "string" || !UUID_PATTERN.test(taskIdValue)) throw new Error("MAIN_MERGE_TASK_NOT_FOUND");
+    const mainPath = await canonicalWorkspace(mainPathValue);
+    const row = this.#rowByTask(taskIdValue);
+    if (!row) throw new Error("MAIN_MERGE_TASK_NOT_FOUND");
+    this.#assertRow(row);
+    if (row.room_id !== roomId || row.main_path !== mainPath) throw new Error("MAIN_MERGE_TASK_NOT_FOUND");
+    const task = this.#public(row);
+    const completion = task.completion;
+    if (task.status !== "completed" || !completion) throw new Error("MAIN_MERGE_CANDIDATE_NOT_COMPLETED");
+    const candidate = await this.#worktrees.inspectCandidate(task.candidateId);
+    if (candidate.workspace !== task.candidatePath || candidate.sourceWorkspace !== task.mainPath
+      || candidate.branch !== task.candidateBranch) throw new Error("CANDIDATE_WORKTREE_SCOPE_MISMATCH");
+    if (candidate.headSha !== completion.preview.candidateHead) throw new Error("MAIN_MERGE_CANDIDATE_HEAD_CHANGED");
+    if (!(await this.#git.inspect(candidate.workspace)).clean) throw new Error("MAIN_MERGE_CANDIDATE_WORKTREE_DIRTY");
+    const recoveryRef = completion.preview.recovery.ref;
+    if (!await this.#checkpointRefMatches(task.mainPath, recoveryRef, candidate.headSha)) {
+      throw new Error("MAIN_MERGE_RECOVERY_POINT_MISSING");
+    }
+    return {
+      task,
+      completion,
+      candidateWorkspace: candidate.workspace,
+      candidateHead: candidate.headSha,
+      recoveryRef,
+      mainBranch: await this.#mainBranch(task.mainPath),
+    };
+  }
+
+  /**
+   * Re-checks every bound value against live state and returns the names of the ones that moved.
+   *
+   * It collects rather than short-circuits, so a refusal can say "mainHead, mainBranch" instead of
+   * only the first thing it noticed. Identity is checked before anything is spawned, because once the
+   * task, room or paths have moved there is nothing meaningful left to compare.
+   */
+  async #verifyMergeBinding(row: MergeApprovalRow): Promise<string[]> {
+    const candidateRow = this.#rowByTask(row.task_id);
+    if (!candidateRow) return ["taskId"];
+    this.#assertRow(candidateRow);
+    const task = this.#public(candidateRow);
+    const identity: string[] = [];
+    if (task.roomId !== row.room_id) identity.push("roomId");
+    if (task.mainPath !== row.main_path) identity.push("mainPath");
+    if (task.candidatePath !== row.candidate_path) identity.push("candidatePath");
+    if (task.baseMainHead !== row.base_main_head) identity.push("baseMainHead");
+    if (task.status !== "completed") identity.push("candidateStatus");
+    if (task.completion?.id !== row.completion_id) identity.push("completionId");
+    if (identity.length > 0) return identity;
+    const changed: string[] = [];
+    let candidateWorkspace: string | undefined;
+    let candidateHead: string | undefined;
+    let candidateClean = false;
+    let scoped = false;
+    try {
+      const candidate = await this.#worktrees.inspectCandidate(task.candidateId);
+      scoped = candidate.workspace === task.candidatePath && candidate.sourceWorkspace === task.mainPath
+        && candidate.branch === task.candidateBranch;
+      candidateWorkspace = candidate.workspace;
+      candidateHead = candidate.headSha;
+      candidateClean = (await this.#git.inspect(candidate.workspace)).clean;
+    } catch { /* an absent or unverifiable candidate is reported as changed, never assumed intact */ }
+    if (!scoped) changed.push("candidateWorktree");
+    if (candidateHead !== row.candidate_head) changed.push("candidateHead");
+    if (!candidateClean) changed.push("candidateWorktreeClean");
+    let mainBranch: string | undefined;
+    let mainHead: string | undefined;
+    let mainFingerprint: string | undefined;
+    let mainIgnoredFingerprint: string | undefined;
+    try {
+      mainBranch = await this.#mainBranch(task.mainPath);
+      mainHead = await this.#git.headSha(task.mainPath);
+      mainFingerprint = (await this.#git.inspect(task.mainPath)).fingerprint;
+      mainIgnoredFingerprint = (await this.#ignoredInventory(task.mainPath)).fingerprint;
+    } catch { /* same rule for main: unreadable is not "unchanged" */ }
+    if (mainBranch !== row.main_branch) changed.push("mainBranch");
+    if (mainHead !== row.main_head) changed.push("mainHead");
+    if (mainFingerprint !== row.main_fingerprint) changed.push("mainDirtyFingerprint");
+    if (mainIgnoredFingerprint !== row.main_ignored_fingerprint) changed.push("mainIgnoredFingerprint");
+    if (!await this.#checkpointRefMatches(task.mainPath, row.recovery_ref, row.candidate_head)) {
+      changed.push("recoveryRef");
+    }
+    if (changed.length > 0 || candidateWorkspace === undefined) return changed;
+    // Only now is recomputing the whole snapshot meaningful — and it is still done, because the
+    // scalar checks above are a summary and the digest is the thing the owner actually approved.
+    const { previewDigest } = await this.#previewSnapshot({
+      task,
+      candidateWorkspace,
+      candidateHead: row.candidate_head,
+      recoveryRef: row.recovery_ref,
+      tests: task.completion?.preview.tests ?? [],
+      knownRisks: task.completion?.preview.knownRisks ?? [],
+    });
+    if (previewDigest !== row.preview_digest) changed.push("previewDigest");
+    return changed;
+  }
+
+  async #scopedMergeApprovalRow(idValue: unknown, roomIdValue: string, mainPathValue: string): Promise<MergeApprovalRow> {
+    if (typeof idValue !== "string" || !UUID_PATTERN.test(idValue)) throw new Error("MAIN_MERGE_APPROVAL_ID_INVALID");
+    const roomId = text(roomIdValue, "CANDIDATE_ROOM_INVALID", 48);
+    if (!ROOM_PATTERN.test(roomId)) throw new Error("CANDIDATE_ROOM_INVALID");
+    const mainPath = await canonicalWorkspace(mainPathValue);
+    const row = this.#mergeApprovalRow(idValue);
+    if (!row) throw new Error("MAIN_MERGE_APPROVAL_NOT_FOUND");
+    this.#assertMergeApprovalRow(row);
+    // A caller scoped to another Room or project is told the approval does not exist rather than that
+    // it exists elsewhere: Room membership is the authorization boundary.
+    if (row.room_id !== roomId || row.main_path !== mainPath) throw new Error("MAIN_MERGE_APPROVAL_NOT_FOUND");
+    return row;
+  }
+
+  #mergeApprovalRow(id: string): MergeApprovalRow | undefined {
+    return this.#db.prepare("SELECT * FROM candidate_merge_approvals WHERE id=?")
+      .get(id) as unknown as MergeApprovalRow | undefined;
+  }
+
+  #mergeApprovalByKey(clientRequestId: string): MergeApprovalRow | undefined {
+    const row = this.#db.prepare("SELECT * FROM candidate_merge_approvals WHERE client_request_id=?")
+      .get(clientRequestId) as unknown as MergeApprovalRow | undefined;
+    if (row) this.#assertMergeApprovalRow(row);
+    return row;
+  }
+
+  #openMergeApproval(taskId: string): MergeApprovalRow | undefined {
+    return this.#db.prepare(
+      "SELECT * FROM candidate_merge_approvals WHERE task_id=? AND state IN ('requested','approved')",
+    ).get(taskId) as unknown as MergeApprovalRow | undefined;
+  }
+
+  #countMergeApprovals(taskId: string): number {
+    const row = this.#db.prepare("SELECT COUNT(*) AS total FROM candidate_merge_approvals WHERE task_id=?")
+      .get(taskId) as { total: number };
+    return Number(row.total);
+  }
+
+  /** Records lapsed approvals as terminal so the single open slot cannot be held by a dead question. */
+  #sweepExpiredMergeApprovals(taskId: string): void {
+    const now = this.#now();
+    const rows = this.#db.prepare(
+      "SELECT * FROM candidate_merge_approvals WHERE task_id=? AND state IN ('requested','approved') AND expires_at_ms<?",
+    ).all(taskId, now) as unknown as MergeApprovalRow[];
+    for (const row of rows) {
+      try {
+        this.#assertMergeApprovalRow(row);
+        this.#writeMergeApproval(row, {
+          state: "expired",
+          token_hash: null,
+          updated_at_ms: Math.max(row.created_at_ms, now),
+        });
+      } catch { /* a row that cannot be verified is left alone; it can never be granted either way */ }
+    }
+  }
+
+  #assertMergeApprovalLive(row: MergeApprovalRow): void {
+    const now = this.#now();
+    if (now <= row.expires_at_ms) return;
+    // Recording the lapse is what makes it terminal. A row that merely looks expired to one reader
+    // could otherwise still be granted by another, and an expired approval must never come back.
+    this.#settleMergeApproval(row, "expired");
+    throw new Error("MAIN_MERGE_APPROVAL_EXPIRED");
+  }
+
+  /** Best-effort terminal transition used on refusal paths; it must never replace the real refusal. */
+  #settleMergeApproval(row: MergeApprovalRow, state: MergeApprovalState, refusal?: MergeApprovalRefusal): void {
+    try {
+      this.#writeMergeApproval(row, {
+        state,
+        token_hash: null,
+        ...(refusal === undefined ? {} : { refusal_json: JSON.stringify(boundedRefusal(refusal)) }),
+        updated_at_ms: Math.max(row.created_at_ms, this.#now()),
+      });
+    } catch { /* another writer already settled it; the caller's refusal stands either way */ }
+  }
+
+  /**
+   * The only way to UPDATE a merge approval, and it cannot move a terminal row.
+   *
+   * This is structural rather than a check at each call site: grant, reject, expire, invalidate and
+   * consume are five verbs on one row, and a state machine whose "terminal" is enforced in only some
+   * of them is a state machine where a spent approval can be brought back. The compare-and-set on
+   * both the previous row hash and the previous state is what makes consumption single-use.
+   */
+  #writeMergeApproval(previous: MergeApprovalRow, fields: Partial<MergeApprovalRow>): MergeApprovalRow {
+    if (MERGE_APPROVAL_TERMINAL.has(previous.state)) throw new Error("MAIN_MERGE_APPROVAL_NOT_PENDING");
+    const merged = { ...previous, ...fields };
+    const { row_hash: _old, ...bare } = merged;
+    const next: MergeApprovalRow = { ...bare, row_hash: mergeApprovalHash(bare) };
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.#db.prepare(`UPDATE candidate_merge_approvals
+        SET state=?,token_hash=?,decided_by=?,refusal_json=?,updated_at_ms=?,expires_at_ms=?,row_hash=?
+        WHERE id=? AND row_hash=? AND state=?`).run(
+        next.state, next.token_hash, next.decided_by, next.refusal_json, next.updated_at_ms,
+        next.expires_at_ms, next.row_hash, next.id, previous.row_hash, previous.state,
+      );
+      if (Number(result.changes) !== 1) throw new Error("MAIN_MERGE_APPROVAL_CONCURRENT_UPDATE");
+      this.#db.exec("COMMIT");
+      return next;
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  #insertMergeApproval(row: MergeApprovalRow): void {
+    this.#db.prepare("INSERT INTO candidate_merge_approvals VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(
+      row.id, row.client_request_id, row.input_digest, row.task_id, row.completion_id, row.room_id,
+      row.main_path, row.main_branch, row.candidate_path, row.base_main_head, row.candidate_head,
+      row.main_head, row.main_fingerprint, row.main_ignored_fingerprint, row.recovery_ref,
+      row.preview_digest, row.preview_json, row.grant_action, row.state, row.token_hash, row.actor,
+      row.decided_by, row.refusal_json, row.created_at_ms, row.updated_at_ms, row.expires_at_ms,
+      row.row_hash,
+    );
+  }
+
+  /**
+   * Degrades per row rather than throwing. A summary is not authority — grant and consume still read
+   * the row through #assertMergeApprovalRow and still refuse an unreadable one — so a single corrupt
+   * approval must not take out `candidate_status` for the whole Room. That tool is what every error
+   * path tells the agent to call in order to learn the real state; losing it is how a small
+   * corruption becomes an outage. An unreadable row is reported as such, not hidden.
+   */
+  #mergeApprovalSummaries(taskId: string): Array<MergeApprovalSummary | UnreadableMergeApproval> {
+    const rows = this.#db.prepare(
+      "SELECT * FROM candidate_merge_approvals WHERE task_id=? ORDER BY created_at_ms DESC, id LIMIT ?",
+    ).all(taskId, MAX_LIST) as unknown as MergeApprovalRow[];
+    return rows.map((row) => {
+      try {
+        return this.#mergeApprovalSummary(row);
+      } catch {
+        return {
+          id: typeof row.id === "string" ? row.id : "",
+          taskId,
+          state: "unreadable" as const,
+          unreadable: true as const,
+        };
+      }
+    });
+  }
+
+  #mergeApprovalSummary(row: MergeApprovalRow): MergeApprovalSummary {
+    this.#assertMergeApprovalRow(row);
+    return {
+      id: row.id,
+      taskId: row.task_id,
+      state: row.state,
+      previewDigest: row.preview_digest,
+      candidateHead: row.candidate_head,
+      mainHead: row.main_head,
+      createdAt: new Date(row.created_at_ms).toISOString(),
+      updatedAt: new Date(row.updated_at_ms).toISOString(),
+      expiresAt: new Date(row.expires_at_ms).toISOString(),
+      expired: !MERGE_APPROVAL_TERMINAL.has(row.state) && this.#now() > row.expires_at_ms,
+      ...(row.refusal_json === null
+        ? {}
+        : { refusal: assertRefusal(JSON.parse(row.refusal_json) as unknown) }),
+    };
+  }
+
+  #publicMergeApproval(row: MergeApprovalRow): MergeApproval {
+    return {
+      ...this.#mergeApprovalSummary(row),
+      clientRequestId: row.client_request_id,
+      grants: row.grant_action,
+      notAuthorized: MERGE_APPROVAL_NOT_AUTHORIZED,
+      requestedBy: row.actor,
+      ...(row.decided_by === null ? {} : { decidedBy: row.decided_by }),
+      binding: mergeBinding(row),
+      preview: assertPreviewShape(JSON.parse(row.preview_json) as unknown),
+      mainMutation: false,
+    };
+  }
+
+  #assertMergeApprovalRow(row: MergeApprovalRow): void {
+    const { row_hash: actual, ...bare } = row;
+    if (!HASH_PATTERN.test(actual) || mergeApprovalHash(bare) !== actual
+      || !UUID_PATTERN.test(row.id) || !UUID_PATTERN.test(row.client_request_id)
+      || !UUID_PATTERN.test(row.task_id) || !UUID_PATTERN.test(row.completion_id)
+      || !HASH_PATTERN.test(row.input_digest) || !HASH_PATTERN.test(row.preview_digest)
+      || !HASH_PATTERN.test(row.main_fingerprint) || !HASH_PATTERN.test(row.main_ignored_fingerprint)
+      || !ROOM_PATTERN.test(row.room_id) || !isAbsolute(row.main_path) || !isAbsolute(row.candidate_path)
+      || !HEAD_PATTERN.test(row.base_main_head) || !HEAD_PATTERN.test(row.candidate_head)
+      || !HEAD_PATTERN.test(row.main_head) || !CHECKPOINT_REF_PATTERN.test(row.recovery_ref)
+      || row.grant_action !== MERGE_APPROVAL_GRANT
+      || row.main_branch.length < 1 || row.main_branch.length > 255
+      || row.actor.length < 1 || row.actor.length > MAX_ACTOR
+      || row.expires_at_ms <= row.created_at_ms || row.updated_at_ms < row.created_at_ms
+      // A usable secret may exist only while the approval is usable; anything else means a spent or
+      // refused approval is still carrying one.
+      || (row.state === "approved") !== (row.token_hash !== null)
+      || (row.token_hash !== null && !HASH_PATTERN.test(row.token_hash))) {
+      throw new Error("MAIN_MERGE_APPROVAL_ROW_TAMPERED");
+    }
+    const preview = assertPreviewShape(JSON.parse(row.preview_json) as unknown);
+    // The scalar columns are redundant with the stored preview on purpose: that redundancy is the
+    // integrity check, so no single edited field can change what the approval appears to bind.
+    if (sha(JSON.stringify(preview)) !== row.preview_digest
+      || preview.candidateHead !== row.candidate_head || preview.mainHead !== row.main_head
+      || preview.baseMainHead !== row.base_main_head || preview.mainPath !== row.main_path
+      || preview.candidatePath !== row.candidate_path || preview.recovery.ref !== row.recovery_ref
+      || preview.mainDirty.fingerprint !== row.main_fingerprint
+      || preview.mainDirty.ignoredFingerprint !== row.main_ignored_fingerprint
+      // Bar item 5 on the read path as well: a truncated or conflicted preview is not approvable, so
+      // a stored approval carrying one is not an approval anything may act on.
+      || mergeBlockers(preview).length > 0) {
+      throw new Error("MAIN_MERGE_APPROVAL_ROW_TAMPERED");
+    }
+    if (row.refusal_json !== null) assertRefusal(JSON.parse(row.refusal_json) as unknown);
   }
 
   #assertOpen(): void {

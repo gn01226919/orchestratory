@@ -18,6 +18,11 @@ import {
   type ManagedRoomAgent,
 } from "../core/managed-room-agent.ts";
 import { CollaborationService, type WriterCandidate } from "../core/collaboration-service.ts";
+import {
+  MERGE_APPROVAL_CONFIRMATION,
+  MERGE_APPROVAL_GRANT,
+  MERGE_APPROVAL_NOT_AUTHORIZED,
+} from "../core/candidate-registry.ts";
 import type { WriterLease } from "../core/writer-lease.ts";
 import type { WriterDelegation } from "../core/writer-delegation.ts";
 import { CollabToolBroker } from "../mcp/collab-server.ts";
@@ -479,6 +484,51 @@ export async function startWebServer(
         json(response, 200, {
           events: collaboration.audit.list({ roomId: room, after, limit: 200 }),
           chainValid: collaboration.audit.verify(),
+        });
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/api/rooms/candidates") {
+        const room = url.searchParams.get("room") ?? "";
+        const info = ledger.getRoom(room);
+        if (!info) throw new Error("ROOM_NOT_FOUND");
+        const workspace = await app.workspaces.assertAllowed(info.workspace);
+        const taskId = url.searchParams.get("taskId");
+        if (taskId !== null && !/^[0-9a-f-]{36}$/u.test(taskId)) throw new Error("INVALID_CANDIDATE_TASK_ID");
+        json(response, 200, {
+          candidates: await collaboration.candidates.status({
+            roomId: room, mainPath: workspace, ...(taskId === null ? {} : { taskId }),
+          }),
+        });
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/api/rooms/merge-approvals") {
+        const room = url.searchParams.get("room") ?? "";
+        const info = ledger.getRoom(room);
+        if (!info) throw new Error("ROOM_NOT_FOUND");
+        const workspace = await app.workspaces.assertAllowed(info.workspace);
+        const taskId = url.searchParams.get("taskId");
+        if (taskId !== null && !/^[0-9a-f-]{36}$/u.test(taskId)) throw new Error("INVALID_CANDIDATE_TASK_ID");
+        json(response, 200, {
+          approvals: await collaboration.listMergeApprovals({
+            roomId: room, workspace, ...(taskId === null ? {} : { taskId }),
+          }),
+          confirmationPhrase: MERGE_APPROVAL_CONFIRMATION,
+          grants: MERGE_APPROVAL_GRANT,
+          notAuthorized: MERGE_APPROVAL_NOT_AUTHORIZED,
+        });
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/api/rooms/merge-approvals/inspect") {
+        const room = url.searchParams.get("room") ?? "";
+        const info = ledger.getRoom(room);
+        if (!info) throw new Error("ROOM_NOT_FOUND");
+        const workspace = await app.workspaces.assertAllowed(info.workspace);
+        const approvalId = url.searchParams.get("approvalId") ?? "";
+        if (!/^[0-9a-f-]{36}$/u.test(approvalId)) throw new Error("INVALID_MERGE_APPROVAL_ID");
+        // Read-only on purpose: a dialog that polls this must not be able to settle an approval.
+        json(response, 200, {
+          ...await collaboration.inspectMergeApproval({ roomId: room, workspace, approvalId }),
+          confirmationPhrase: MERGE_APPROVAL_CONFIRMATION,
         });
         return;
       }
@@ -1117,6 +1167,59 @@ export async function startWebServer(
             await writeFile(pendingPath, JSON.stringify(pending, null, 2), { encoding: "utf8", mode: 0o600 });
           }
           json(response, 200, { pending: pending.length, next: "在任一終端執行：orchestrator workspaces approve" });
+          return;
+        }
+        if (url.pathname === "/api/rooms/merge-approvals/approve") {
+          if (typeof body !== "object" || body === null || Array.isArray(body)) {
+            throw new Error("INVALID_MERGE_APPROVAL_REQUEST");
+          }
+          const value = body as Record<string, unknown>;
+          if (Object.keys(value).some((key) => !["room", "approvalId", "previewDigest", "confirmation"].includes(key))
+            || typeof value.room !== "string" || typeof value.approvalId !== "string"
+            || typeof value.previewDigest !== "string" || typeof value.confirmation !== "string") {
+            throw new Error("INVALID_MERGE_APPROVAL_REQUEST");
+          }
+          const info = ledger.getRoom(value.room);
+          if (!info) throw new Error("ROOM_NOT_FOUND");
+          const workspace = await app.workspaces.assertAllowed(info.workspace);
+          // The exact phrase, the exact preview the dialog displayed, and a live re-verification of
+          // every bound value all have to hold. The returned token is single-use and short-lived; it
+          // is never written to the audit chain or the room ledger.
+          json(response, 200, await collaboration.grantMainMerge({
+            roomId: value.room,
+            workspace,
+            approvalId: value.approvalId,
+            previewDigest: value.previewDigest,
+            confirmation: value.confirmation,
+            decidedBy: "local-web",
+          }));
+          return;
+        }
+        if (url.pathname === "/api/rooms/merge-approvals/reject") {
+          if (typeof body !== "object" || body === null || Array.isArray(body)) {
+            throw new Error("INVALID_MERGE_APPROVAL_REQUEST");
+          }
+          const value = body as Record<string, unknown>;
+          if (Object.keys(value).some((key) => !["room", "approvalId", "reason"].includes(key))
+            || typeof value.room !== "string" || typeof value.approvalId !== "string"
+            || (value.reason !== undefined && typeof value.reason !== "string")) {
+            throw new Error("INVALID_MERGE_APPROVAL_REQUEST");
+          }
+          const info = ledger.getRoom(value.room);
+          if (!info) throw new Error("ROOM_NOT_FOUND");
+          const workspace = await app.workspaces.assertAllowed(info.workspace);
+          json(response, 200, {
+            approval: await collaboration.rejectMainMerge({
+              roomId: value.room,
+              workspace,
+              approvalId: value.approvalId,
+              decidedBy: "local-web",
+              ...(typeof value.reason === "string" ? { reason: value.reason } : {}),
+            }),
+            candidateRetained: true,
+            checkpointsRetained: true,
+            recoveryRefRetained: true,
+          });
           return;
         }
         if (url.pathname === "/api/rooms/writers/grant") {

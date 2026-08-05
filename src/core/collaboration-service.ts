@@ -38,10 +38,13 @@ import { WorktreeBroker } from "./worktree-broker.ts";
 import { CollaborationAuditLog, type AuditOutcome } from "./collaboration-audit.ts";
 import {
   CandidateRegistry,
+  MergeApprovalBindingError,
   type CandidateCheckpoint,
   type CandidateCompletion,
   type CandidateTask,
   type CandidateTaskStatus,
+  type MergeApproval,
+  type MergeApprovalPreview,
 } from "./candidate-registry.ts";
 
 export type WriterCandidate =
@@ -577,6 +580,200 @@ export class CollaborationService {
     return result;
   }
 
+  /** Read-only recompute of the snapshot an owner would be asked to approve. Writes nothing. */
+  async previewMainMerge(input: {
+    presenceId: string;
+    roomId: string;
+    workspace: string;
+    taskId: string;
+  }): Promise<MergeApprovalPreview> {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    this.externalActor(input.presenceId, input.roomId);
+    return await this.candidates.previewMainMerge({
+      taskId: input.taskId, roomId: input.roomId, mainPath: input.workspace,
+    });
+  }
+
+  /**
+   * An agent asking that the owner be asked. It creates a `requested` record and nothing else: no
+   * token exists yet, so there is nothing here that could be mistaken for authority.
+   */
+  async requestMainMerge(input: {
+    presenceId: string;
+    clientRequestId: unknown;
+    roomId: string;
+    workspace: string;
+    taskId: string;
+    completionId: string;
+    previewDigest: string;
+  }): Promise<MergeApproval> {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    const actor = this.externalActor(input.presenceId, input.roomId);
+    const approval = await this.candidates.requestMainMerge({
+      actor,
+      clientRequestId: input.clientRequestId,
+      taskId: input.taskId,
+      roomId: input.roomId,
+      mainPath: input.workspace,
+      completionId: input.completionId,
+      previewDigest: input.previewDigest,
+    });
+    this.audit.append({
+      roomId: input.roomId, taskId: input.taskId, type: "candidate.merge-approval-requested",
+      actor, executedBy: actor, action: "main-merge-request", path: approval.binding.mainPath,
+      outcome: "succeeded",
+      detail: {
+        approvalId: approval.id,
+        completionId: approval.binding.completionId,
+        candidateHead: approval.binding.candidateHead,
+        mainHead: approval.binding.mainHead,
+        mainBranch: approval.binding.mainBranch,
+        previewDigest: approval.binding.previewDigest,
+        recoveryRef: approval.binding.recoveryRef,
+        grants: approval.grants,
+        state: approval.state,
+        mainMutation: false,
+      },
+    });
+    this.#candidateLedger(input.roomId, input.taskId,
+      `${actor} 要求 Owner 核准把 candidate snapshot ${approval.binding.candidateHead.slice(0, 12)} merge 進 main`
+        + `（preview ${approval.binding.previewDigest.slice(0, 12)}）；尚未核准，main 未修改。`,
+      `candidate:${input.taskId}:merge-approval:${approval.id}:requested`);
+    return approval;
+  }
+
+  async listMergeApprovals(input: {
+    roomId: string;
+    workspace: string;
+    taskId?: string;
+  }): Promise<MergeApproval[]> {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    return await this.candidates.mergeApprovals({
+      roomId: input.roomId,
+      mainPath: input.workspace,
+      ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+    });
+  }
+
+  async inspectMergeApproval(input: {
+    roomId: string;
+    workspace: string;
+    approvalId: string;
+  }): Promise<{ approval: MergeApproval; binding: { valid: boolean; changed: string[] } }> {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    return await this.candidates.inspectMergeApproval({
+      approvalId: input.approvalId, roomId: input.roomId, mainPath: input.workspace,
+    });
+  }
+
+  /**
+   * The owner's decision. A refusal caused by drift is audited too — an approval that silently
+   * disappeared would leave the owner unable to tell a stale snapshot from a lost one.
+   */
+  async grantMainMerge(input: {
+    roomId: string;
+    workspace: string;
+    approvalId: string;
+    previewDigest: string;
+    confirmation: string;
+    decidedBy: "local-web" | "local-tui";
+  }): Promise<{ approval: MergeApproval; approvalToken: string; expiresAt: string }> {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    let granted;
+    try {
+      granted = await this.candidates.grantMainMerge({
+        approvalId: input.approvalId,
+        roomId: input.roomId,
+        mainPath: input.workspace,
+        previewDigest: input.previewDigest,
+        confirmation: input.confirmation,
+        decidedBy: input.decidedBy,
+      });
+    } catch (error) {
+      if (error instanceof MergeApprovalBindingError) {
+        this.audit.append({
+          roomId: input.roomId, type: "candidate.merge-approval-invalidated", actor: "you",
+          action: "main-merge-grant", outcome: "denied",
+          detail: {
+            approvalId: input.approvalId,
+            changed: error.changed,
+            reason: "MAIN_MERGE_APPROVAL_BINDING_CHANGED",
+            mainMutation: false,
+          },
+        });
+        this.#candidateLedger(input.roomId, undefined,
+          `merge 核准已失效：綁定值改變（${error.changed.join("、")}）；candidate、checkpoint 與復原點皆保留，`
+            + `請重新 preview 後再詢問。`,
+          `candidate:merge-approval:${input.approvalId}:invalidated`);
+      }
+      throw error;
+    }
+    // The single-use token is deliberately absent from both the audit chain and the room ledger.
+    this.audit.append({
+      roomId: input.roomId, taskId: granted.approval.binding.taskId,
+      type: "candidate.merge-approval-granted", actor: "you", action: "main-merge-grant",
+      path: granted.approval.binding.mainPath, outcome: "succeeded",
+      detail: {
+        approvalId: granted.approval.id,
+        decidedBy: input.decidedBy,
+        candidateHead: granted.approval.binding.candidateHead,
+        mainHead: granted.approval.binding.mainHead,
+        mainBranch: granted.approval.binding.mainBranch,
+        previewDigest: granted.approval.binding.previewDigest,
+        grants: granted.approval.grants,
+        notAuthorized: granted.approval.notAuthorized,
+        singleUse: true,
+        expiresAt: granted.expiresAt,
+        mainMutation: false,
+      },
+    });
+    this.#candidateLedger(input.roomId, granted.approval.binding.taskId,
+      `Owner 已核准把 candidate snapshot ${granted.approval.binding.candidateHead.slice(0, 12)} merge 進 main`
+        + `（preview ${granted.approval.binding.previewDigest.slice(0, 12)}）；single-use，${granted.expiresAt} 到期，`
+        // The ledger is public and read by agents as well as by the owner. Without this clause a
+        // grant line reads as though the merge already happened — and nothing later contradicts it,
+        // because an unused grant only lapses quietly in its own row.
+        + `僅授權 merge。本階段未寫入 main；實際 merge 屬後續階段。`,
+      `candidate:merge-approval:${granted.approval.id}:granted`);
+    return granted;
+  }
+
+  /** Refusing or withdrawing. It never deletes a candidate, a checkpoint or a recovery ref. */
+  async rejectMainMerge(input: {
+    roomId: string;
+    workspace: string;
+    approvalId: string;
+    decidedBy: "local-web" | "local-tui";
+    reason?: string;
+  }): Promise<MergeApproval> {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    const approval = await this.candidates.rejectMainMerge({
+      approvalId: input.approvalId,
+      roomId: input.roomId,
+      mainPath: input.workspace,
+      decidedBy: input.decidedBy,
+      ...(input.reason === undefined ? {} : { reason: input.reason }),
+    });
+    this.audit.append({
+      roomId: input.roomId, taskId: approval.binding.taskId,
+      type: "candidate.merge-approval-rejected", actor: "you", action: "main-merge-reject",
+      outcome: "denied",
+      detail: {
+        approvalId: approval.id,
+        decidedBy: input.decidedBy,
+        reason: approval.refusal?.reason ?? null,
+        candidateRetained: true,
+        checkpointsRetained: true,
+        recoveryRefRetained: true,
+        mainMutation: false,
+      },
+    });
+    this.#candidateLedger(input.roomId, approval.binding.taskId,
+      `Owner 未同意這次 main merge；candidate、checkpoint 與復原點完整保留，可重新 preview 後再詢問。`,
+      `candidate:merge-approval:${approval.id}:rejected`);
+    return approval;
+  }
+
   async candidateStatus(input: {
     presenceId: string;
     roomId: string;
@@ -1025,12 +1222,13 @@ export class CollaborationService {
     try { return realpathSync(left) === realpathSync(right); } catch { return false; }
   }
 
-  #candidateLedger(roomId: string, taskId: string, message: string, key: string): void {
+  #candidateLedger(roomId: string, taskId: string | undefined, message: string, key: string): void {
     try {
       this.ledger.appendSystemIdempotent(roomId, message, key);
     } catch (error) {
       this.audit.append({
-        roomId, taskId, type: "candidate.ledger-notification-skipped", actor: "orchestratory",
+        roomId, ...(taskId === undefined ? {} : { taskId }),
+        type: "candidate.ledger-notification-skipped", actor: "orchestratory",
         action: "candidate-ledger-notification", outcome: "failed",
         detail: { reason: error instanceof Error ? error.message : "ROOM_LEDGER_NOTIFICATION_FAILED" },
       });

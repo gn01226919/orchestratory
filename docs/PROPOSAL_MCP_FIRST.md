@@ -261,42 +261,96 @@ readiness；merged/rejected/retained 與更完整的 Agent branch/thread 呈現�
 
 ## 6. Main merge 工具
 
-### `main_merge_preview`
+### `main_merge_preview`（已實作）
 
 ```ts
-input: { taskId: string; completionId: string }
+input: { taskId: string; room?: string }
 output: {
-  candidateHead: string;
-  mainHead: string;
-  files: FileChange[];
-  tests: TestResult[];
-  conflicts: Conflict[];
-  risks: string[];
-  recovery: RecoveryState;
-  previewDigest: string;
-  prompt: string;
-}
-```
-
-`prompt` 必須明確說明即將修改 canonical main，詢問 Owner 是否同意該精確快照。
-
-### `main_merge_request`
-
-```ts
-input: {
   taskId: string;
   completionId: string;
   previewDigest: string;
+  preview: CandidateCompletionPreview;   // 與 candidate_complete 完全同型
+  recoveryRef: string;
+  approvable: boolean;
+  blockers: string[];                    // PREVIEW_FILES_TRUNCATED / PREVIEW_SUBMODULES_TRUNCATED /
+                                         // PREVIEW_MERGE_CONFLICTS_TRUNCATED / MERGE_CONFLICTS_PRESENT
+  confirmationPhrase: "MERGE INTO MAIN";
+  prompt: string;
+  mainMutation: false;
+  sharedGitMetadataMutation: false;
 }
-output: { approvalRequestId: string; state: "pending-owner" }
 ```
 
-Agent 只能建立請求，不能自行把文字回覆轉換成 approval token。
+**唯讀。** 它不建立 approval、不寫 Git ref、不碰任何 worktree，只從 live state 重算整份 snapshot。
+`prompt` 明確說明即將修改 canonical main、綁定值、復原點，並詢問 Owner 是否同意該精確快照。
 
-### `main_merge_execute`
+不可核准的原因以 `blockers` 回報而非丟出錯誤：Owner 必須**看得到**衝突路徑才知道為什麼不能核准。
+結構性問題仍然是錯誤：`MAIN_MERGE_CANDIDATE_NOT_COMPLETED`、`MAIN_MERGE_CANDIDATE_HEAD_CHANGED`
+（candidate 走過自己的 completion，該 completion 的 recovery ref 已不指向現在的 HEAD）、
+`MAIN_MERGE_CANDIDATE_WORKTREE_DIRTY`、`MAIN_MERGE_RECOVERY_POINT_MISSING`、
+`CANDIDATE_MERGE_PREVIEW_UNAVAILABLE`。
+
+### `main_merge_request`（已實作）
+
+```ts
+input: {
+  clientRequestId: string;   // stable UUID，重試必須重用
+  taskId: string;
+  completionId: string;
+  previewDigest: string;     // 必須是剛剛給 Owner 看過的那一份
+  room?: string;
+}
+output: {
+  approval: MergeApproval;   // state: "requested"，無 token
+  approved: false;
+  state: "requested";
+  mergeDecision: "owner-required";
+  mainMutation: false;
+  sharedGitMetadataMutation: false;
+  next: string;
+}
+```
+
+**要求不等於核准。** Agent 只能建立請求，不能自行把文字回覆轉換成 approval token；`requested` 記錄
+不含任何秘密，也無法被消耗。`previewDigest` 必須與此刻重算的結果一致，否則回
+`MAIN_MERGE_PREVIEW_DIGEST_STALE`——因此不可能對「沒有人看過的快照」提出請求。截斷的 preview 回
+`MAIN_MERGE_PREVIEW_TRUNCATED`，模擬出衝突回 `MAIN_MERGE_PREVIEW_CONFLICTED`，兩者都不建立任何列。
+同一個 task 同時只允許一個未決問題（`MAIN_MERGE_APPROVAL_ALREADY_PENDING`，由 partial unique index
+結構性保證）。同一把 key 重放回同一個 approval；輸入不同則 `MAIN_MERGE_REQUEST_IDEMPOTENCY_CONFLICT`。
+
+### Owner 決定（GUI／TUI，非 Agent 工具）
+
+核准只能在本機 owner 介面產生，不存在對應的 MCP 工具：
+
+- `GET /api/rooms/merge-approvals?room=<id>[&taskId=<uuid>]`
+  → `{ approvals: MergeApproval[]; confirmationPhrase; grants; notAuthorized }`
+- `GET /api/rooms/merge-approvals/inspect?room=<id>&approvalId=<uuid>`
+  → `{ approval; binding: { valid: boolean; changed: string[] }; confirmationPhrase }`（唯讀，不改狀態）
+- `POST /api/rooms/merge-approvals/approve { room, approvalId, previewDigest, confirmation }`
+  → `{ approval; approvalToken; expiresAt }`
+- `POST /api/rooms/merge-approvals/reject { room, approvalId, reason? }`
+  → `{ approval; candidateRetained: true; checkpointsRetained: true; recoveryRefRetained: true }`
+
+`confirmation` 必須精確等於 `MERGE INTO MAIN`（語意化、不含 taskId）；`previewDigest` 必須等於
+dialog 實際顯示的那一份。核准當下會**再驗一次**整組綁定值，任一改變即回
+`MAIN_MERGE_APPROVAL_BINDING_CHANGED:<欄位名>` 並把該 approval 轉為終局 `invalidated`。
+`approvalToken` 只回傳一次，資料庫只存 SHA-256，且一離開 `approved` 狀態即清除。
+
+拒絕與逾時**不執行任何 Git 指令**：candidate、checkpoint 與 recovery ref 逐位元不變，Owner 可重新
+preview 再問一次。已核准的 approval 也可由 Owner 撤回（reject）。
+
+### `main_merge_execute`（Phase 5-5，尚未實作）
 
 由本機 GUI/TUI Owner action 或受保護 promotion service 消耗 single-use approval；一般 Agent tool 不
-直接接收可重放 token。執行前重驗 candidate/main HEAD、paths、preview digest 與 recovery readiness。
+直接接收可重放 token。核心已提供 `CandidateRegistry.consumeMainMerge({ approvalId, token, action,
+taskId, roomId, mainPath })`：它會第三度重驗 candidate/main HEAD、branch、paths、dirty/ignored
+fingerprint、recovery readiness 與 preview digest，以 compare-and-set 把 approval 轉為 `consumed`
+（並行只會有一個贏家，輸家收到 `MAIN_MERGE_APPROVAL_ALREADY_CONSUMED`），然後回傳一份只描述
+「這一次 merge」的授權物件，其中 `grants: "merge-candidate-into-main"` 與 `notAuthorized`
+（push／publish／deploy／delete-candidate／delete-recovery-ref／cleanup-worktree…）皆為明文。
+帶其他 `action` 消耗一律 `MAIN_MERGE_APPROVAL_ACTION_NOT_GRANTED`。
+
+**它本身不修改 canonical main**，目前也刻意沒有任何 MCP 或 HTTP 出口——實際寫入 main 屬 5-5。
 
 若發生 drift、scope expansion 或未預覽 conflict：
 

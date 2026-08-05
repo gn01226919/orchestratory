@@ -464,3 +464,61 @@ git 會自動合併。實際試算是唯一能讓 preview 與真實 merge 一致
 - `mergeable: true` 的語意是「沒有內容衝突」，不是「merge 一定會成功」：dirty main 會讓實際 merge
   在進入衝突解析前就中止。該情況由 `conflicts` 的 `CURRENT_DIRTY_MAIN_CHANGES_ARE_EXCLUDED_FROM_CANDIDATE`
   與完整的 `mainDirty` baseline 另行呈現；**5-5 必須要求乾淨的 main 工作樹**。
+
+## ADR-033：Merge 核准是 snapshot-bound、single-use、只授權 merge 的獨立記錄
+
+**日期：** 2026-08-06
+**狀態：** Accepted
+
+### 背景
+
+ADR-032 讓 preview 說真話，Phase 5-5 會依 preview 寫入 canonical main。中間缺的是核准本身：
+**一份能被重放、能套用到別的 snapshot、或能在綁定值改變後仍生效的核准，等於 Owner 核准的不是他看到的
+那個東西。**「同意」在此之前只是 `candidate_complete` 回傳的一句問話，沒有任何結構承載它。
+
+### 決策
+
+1. **要求與核准分離。** `main_merge_preview`（唯讀，不寫任何東西）→ `main_merge_request`（Agent 建立
+   `requested` 記錄，**不含 token、授權不了任何事**）→ Owner 在本機介面以精確短語 `MERGE INTO MAIN`
+   核准 → 5-5 消耗一次。Agent 不得把自己的文字或 Room 訊息換成核准。
+2. **請求必須先預覽。** `main_merge_request` 要求呈交剛給 Owner 看過的 `previewDigest`，與此刻重算的
+   結果不符即 `MAIN_MERGE_PREVIEW_DIGEST_STALE`。因此不可能對沒有人看過的快照提出請求。
+3. **綁定在三個時點各驗一次**：建立、核准、消耗。只在建立時驗證，等於放行建立之後發生的一切變化，
+   而那正是核准存在的期間。任一綁定值改變即以 `MAIN_MERGE_APPROVAL_BINDING_CHANGED:<欄位名>` 拒絕
+   ——**拒絕，不是靜默重算**——並把該 approval 轉為終局 `invalidated`。**拒絕會指名改變的欄位**，
+   因為只說「有東西變了」的拒絕，讓 Owner 沒有任何可行動的資訊。
+4. **獨立的表，不是既有帳本的擴充。** schema v4 新增 `candidate_merge_approvals`，沿用同一套 row-hash
+   紀律。`candidate_requests` 記錄「mutation 有沒有發生」，這張表記錄「Owner 授權了什麼」：生命週期、
+   終局狀態與出錯後果都不同，而那本歷經十一輪審查的帳本不該為此改形。approval 的 durable artifact 就是
+   它自己那一列，所以 idempotency 由 `client_request_id` 的 UNIQUE 欄位承擔，不需要第二套 reservation。
+5. **Single-use 由儲存層保證，不由檢查保證。** 消耗是 `state` ＋ `row_hash` 的 compare-and-set；並行
+   消耗只有一個能改到那一列，輸家收到 `MAIN_MERGE_APPROVAL_ALREADY_CONSUMED`。終局狀態在唯一的
+   UPDATE 出口結構性禁止再被移動——五個動詞共用一列，把「終局」只寫在其中幾個動詞裡的狀態機，就是
+   一個已用掉的核准可以復活的狀態機。
+6. **截斷即不可核准**（提前關閉 ADR-032 記下的到期項）。`filesTruncated`／`submodulesTruncated`／
+   `mergeConflictsTruncated` 任一為真、或模擬出衝突，都使該 snapshot 不可核准，寫入路徑與讀取路徑
+   都擋。Owner 不對看不到的內容簽名。
+7. **授權不得外溢。** 每筆 approval 帶固定 `grants: "merge-candidate-into-main"`，消耗時必須指名同一個
+   action，其餘一律 `MAIN_MERGE_APPROVAL_ACTION_NOT_GRANTED`；授權物件另以 `notAuthorized` 明列
+   push／publish／deploy／delete-candidate／delete-recovery-ref／cleanup-worktree 等**不**被授權的動作，
+   讓下游不必自行推論邊界。
+8. **拒絕不是刪除授權。** 拒絕、失效與逾時完全不執行 Git 指令；candidate、checkpoint 與 recovery ref
+   逐位元不變，Owner 可重新 preview 再問一次。已核准者亦可由 Owner 撤回。
+
+### 為什麼核准不是 RAM-only
+
+既有的 `ApprovalService` 是行程內、RAM-only 的。Merge 核准跨行程：提出請求的是 MCP seat，核准的是
+GUI，消耗的是未來的 promotion service。RAM-only 的核准在 GUI 重啟後消失，而**「並行消耗只有一個成功」
+必須由持久狀態的 compare-and-set 保證**，不能靠某一個行程的記憶體。
+
+### 代價與殘餘風險
+
+- **本階段不寫入 canonical main。** `consumeMainMerge` 只驗證與轉移狀態，且刻意沒有任何 MCP／HTTP
+  出口——否則 Agent 可以在沒有 merge 的情況下把 Owner 的核准燒掉。實際 promotion 屬 Phase 5-5。
+- Approval **不涵蓋 hooks 行為**，且 `mergeable: true` 只保證「沒有內容衝突」。兩者在 5-5 都會失效，
+  屆時必須要求乾淨的 main 工作樹並處理 hooks（見 ADR-032 與 [[VERIFICATION]] Phase 5-3 殘餘風險）。
+- 逾時後必須重新 preview，成本由 Owner 承擔。**這是刻意的摩擦，不是缺陷。**
+- 同帳號程序可直接改 approval store——與整個產品的信任模型一致（見 [[THREAT_MODEL]] §2）；row-hash 與
+  scalar／preview 互為冗餘的校驗只讓竄改「可偵測且不可用」，不讓它「不可能」。
+- 帳本無 TTL：每個 task 上限 50 筆 approval，總量由 `inventory()` 的 `mergeApprovals`／
+  `mergeApprovalsOpen` 曝露，超過即 fail closed 而非默默成長。
