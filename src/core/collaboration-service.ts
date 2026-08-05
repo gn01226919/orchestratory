@@ -44,6 +44,8 @@ import {
   type CandidateTask,
   type CandidateTaskStatus,
   type MergeApproval,
+  type MergeApprovalBindingCheck,
+  type MergeApprovalDriftEvent,
   type MergeApprovalPreview,
 } from "./candidate-registry.ts";
 
@@ -116,6 +118,7 @@ export class CollaborationService {
     this.audit = new CollaborationAuditLog(dataDirectory);
     this.candidates = new CandidateRegistry(dataDirectory, {
       ...(options.maxCandidateFiles === undefined ? {} : { maxFiles: options.maxCandidateFiles }),
+      onMergeApprovalInvalidated: (event) => this.#recordMergeApprovalDrift(event),
     });
     this.#worktrees = new WorktreeBroker(dataDirectory);
     this.#writerWorktrees = options.writerWorktrees;
@@ -659,7 +662,7 @@ export class CollaborationService {
     roomId: string;
     workspace: string;
     approvalId: string;
-  }): Promise<{ approval: MergeApproval; binding: { valid: boolean; changed: string[] } }> {
+  }): Promise<{ approval: MergeApproval; binding: MergeApprovalBindingCheck }> {
     this.#assertRoomWorkspace(input.roomId, input.workspace);
     return await this.candidates.inspectMergeApproval({
       approvalId: input.approvalId, roomId: input.roomId, mainPath: input.workspace,
@@ -1220,6 +1223,49 @@ export class CollaborationService {
   #sameWorkspace(left: string, right: string): boolean {
     if (left === right) return true;
     try { return realpathSync(left) === realpathSync(right); } catch { return false; }
+  }
+
+  /**
+   * The audit and ledger half of Phase 5-4. A drift invalidation noticed while merely READING has no
+   * caller to report to and no HTTP response to fail — so without this it would be exactly the silent
+   * disappearance the bar forbids, and an owner asking "why did my approval never take effect?" would
+   * find a terminal row and no account of it.
+   *
+   * The audit entry carries the whole story, including whether the owner had actually granted it: a
+   * decision that lapsed unnoticed and a request nobody answered are different failures. The room
+   * ledger is public and read by agents, so it names the moved fields and states plainly that nothing
+   * was destroyed and main was not touched — and carries no path, no id and no secret.
+   */
+  #recordMergeApprovalDrift(event: MergeApprovalDriftEvent): void {
+    try {
+      this.audit.append({
+        roomId: event.roomId, taskId: event.taskId,
+        type: "candidate.merge-approval-invalidated", actor: "orchestratory",
+        executedBy: "orchestratory", action: "main-merge-drift-check", path: event.mainPath,
+        outcome: "denied",
+        detail: {
+          approvalId: event.approvalId,
+          reason: "MAIN_MERGE_APPROVAL_BINDING_CHANGED",
+          changed: event.changed,
+          observedOn: event.observedOn,
+          previousState: event.previousState,
+          ownerHadGranted: event.wasGranted,
+          candidateHead: event.candidateHead,
+          mainHead: event.mainHead,
+          previewDigest: event.previewDigest,
+          detectedAt: event.at,
+          candidateRetained: true,
+          checkpointsRetained: true,
+          recoveryRefRetained: true,
+          mainMutation: false,
+        },
+      });
+    } catch { /* the durable invalidation has already committed and remains the primary record */ }
+    this.#candidateLedger(event.roomId, event.taskId,
+      `${event.wasGranted ? "Owner 已核准的 merge" : "待核准的 merge"}已因綁定漂移自動失效`
+        + `（${event.changed.join("、")}）；candidate、checkpoint 與復原點完整保留，main 未修改，`
+        + `請重新 preview 後再詢問。`,
+      `candidate:merge-approval:${event.approvalId}:invalidated`);
   }
 
   #candidateLedger(roomId: string, taskId: string | undefined, message: string, key: string): void {

@@ -325,7 +325,8 @@ output: {
 - `GET /api/rooms/merge-approvals?room=<id>[&taskId=<uuid>]`
   → `{ approvals: MergeApproval[]; confirmationPhrase; grants; notAuthorized }`
 - `GET /api/rooms/merge-approvals/inspect?room=<id>&approvalId=<uuid>`
-  → `{ approval; binding: { valid: boolean; changed: string[] }; confirmationPhrase }`（唯讀，不改狀態）
+  → `{ approval; binding: { checked: boolean; valid: boolean; changed: string[]; unavailable?: string };
+  confirmationPhrase }`
 - `POST /api/rooms/merge-approvals/approve { room, approvalId, previewDigest, confirmation }`
   → `{ approval; approvalToken; expiresAt }`
 - `POST /api/rooms/merge-approvals/reject { room, approvalId, reason? }`
@@ -338,6 +339,14 @@ dialog 實際顯示的那一份。核准當下會**再驗一次**整組綁定值
 
 拒絕與逾時**不執行任何 Git 指令**：candidate、checkpoint 與 recovery ref 逐位元不變，Owner 可重新
 preview 再問一次。已核准的 approval 也可由 Owner 撤回（reject）。
+
+**讀取即重驗（ADR-034）。** 上列兩個 `GET`、`candidate_status` 與 `main_merge_request` 都會在回報
+approval 之前對 live state 重驗綁定：漂移者在被回報前即持久轉為終局 `invalidated`，其 `refusal`
+帶 `code: "MAIN_MERGE_APPROVAL_BINDING_CHANGED"`、改變的欄位名，以及 `reason:
+"drift-detected-on:<介面>"`。因此這三個 `GET` **不是純唯讀**：它們唯一可能造成的狀態轉移，是把一個
+已經無法使用的核准記成終局失效（fail-closed 方向，無法授權、復活或刪除任何東西）。`bindingCheck`
+（列表與 `candidate_status` 上同名欄位；`inspect` 另以 `binding` 回傳同一物件）只在確實比對過時出現，
+`unavailable` 表示檢查無法完成——此時 approval **既未**被確認也**未**被失效。
 
 ### `main_merge_execute`（Phase 5-5，尚未實作）
 

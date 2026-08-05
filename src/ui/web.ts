@@ -525,7 +525,9 @@ export async function startWebServer(
         const workspace = await app.workspaces.assertAllowed(info.workspace);
         const approvalId = url.searchParams.get("approvalId") ?? "";
         if (!/^[0-9a-f-]{36}$/u.test(approvalId)) throw new Error("INVALID_MERGE_APPROVAL_ID");
-        // Read-only on purpose: a dialog that polls this must not be able to settle an approval.
+        // The dialog polls this. It cannot grant, consume or delete anything; the one transition it
+        // can cause is a drifted approval being recorded as terminally `invalidated`, which is the
+        // point — an approval whose snapshot has moved must stop looking live to the next reader.
         json(response, 200, {
           ...await collaboration.inspectMergeApproval({ roomId: room, workspace, approvalId }),
           confirmationPhrase: MERGE_APPROVAL_CONFIRMATION,

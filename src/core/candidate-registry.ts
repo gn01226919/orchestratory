@@ -205,6 +205,59 @@ export interface MergeApprovalRefusal {
   reason?: string;
 }
 
+/**
+ * Where a binding check ran. It is recorded in the durable refusal and in the audit entry, because
+ * "this approval was invalidated by drift, noticed by the status listing at 09:14" and "this approval
+ * was refused when the owner tried to grant it" are different stories about the same row, and an
+ * owner asking why their decision did not take effect needs to be able to tell them apart.
+ */
+export type MergeApprovalObservation =
+  | "candidate-status" | "merge-approval-list" | "merge-approval-inspect" | "merge-request"
+  | "grant" | "consume";
+
+/**
+ * The outcome of comparing one approval's bindings against live state on a read.
+ *
+ * `checked` is separate from `valid` on purpose. A check that could not run — a transient Git
+ * failure, a repository momentarily unreadable — is not evidence that anything moved, and treating
+ * it as such would burn an owner decision on a hiccup. It is also not evidence that nothing moved,
+ * so it is reported rather than rounded to either answer.
+ */
+export interface MergeApprovalBindingCheck {
+  /** True only when live state was actually compared on this read. */
+  checked: boolean;
+  /** True only when the comparison ran and every bound value still matched. */
+  valid: boolean;
+  /** Bound values that moved, named with the same vocabulary grant and consume use. */
+  changed: string[];
+  /** Stable code, present only when the comparison could not be completed. */
+  unavailable?: string;
+}
+
+/**
+ * One approval that an observation path found drifted and invalidated. Emitted only after the
+ * durable state transition has committed, so a listener can never record an invalidation that did
+ * not happen, and exactly one listener call exists per invalidation however many readers raced.
+ */
+export interface MergeApprovalDriftEvent {
+  approvalId: string;
+  taskId: string;
+  roomId: string;
+  mainPath: string;
+  candidateHead: string;
+  mainHead: string;
+  previewDigest: string;
+  changed: string[];
+  /**
+   * True when the owner had already granted this approval. A granted decision that lapsed unnoticed
+   * is a materially different record from a request nobody ever answered.
+   */
+  wasGranted: boolean;
+  previousState: MergeApprovalState;
+  observedOn: MergeApprovalObservation;
+  at: string;
+}
+
 /** A row whose integrity check failed. Reported so it is visible, never silently dropped. */
 export interface UnreadableMergeApproval {
   id: string;
@@ -226,6 +279,16 @@ export interface MergeApprovalSummary {
   /** True when the deadline has passed but no mutation has yet recorded the terminal state. */
   expired: boolean;
   refusal?: MergeApprovalRefusal;
+  /**
+   * Present only on an observation path (`status`, the approval list, `inspect`), where the bindings
+   * were compared against live state before the row was reported. Absent everywhere else, so it can
+   * never be read as "checked and fine" on a surface that did no checking.
+   *
+   * When it reports drift the row itself is already `invalidated` and its `refusal` names the same
+   * values; this field exists so a reader can also distinguish "checked, still valid" from "could
+   * not be checked", which the row alone cannot say.
+   */
+  bindingCheck?: MergeApprovalBindingCheck;
 }
 
 export interface MergeApproval extends MergeApprovalSummary {
@@ -776,6 +839,29 @@ function boundedRefusal(refusal: MergeApprovalRefusal): MergeApprovalRefusal {
   };
 }
 
+/**
+ * The one shape a drift refusal takes, wherever it is detected. Grant, consume and every observation
+ * path go through it so the durable record of "this approval stopped applying" reads the same no
+ * matter who noticed, and always names both the values that moved and the surface that saw them.
+ */
+function driftRefusal(changed: string[], observedOn: MergeApprovalObservation): MergeApprovalRefusal {
+  return {
+    code: "MAIN_MERGE_APPROVAL_BINDING_CHANGED",
+    changed,
+    reason: `drift-detected-on:${observedOn}`,
+  };
+}
+
+/**
+ * A stable, path-free code for a binding check that could not run. Anything that is not already a
+ * bare error code is collapsed to one, because a raw message can carry a filesystem path and this
+ * value is reported on read surfaces the room can see.
+ */
+function bindingCheckFailure(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  return /^[A-Z][A-Z0-9_]{2,63}$/u.test(message) ? message : "MAIN_MERGE_APPROVAL_BINDING_CHECK_FAILED";
+}
+
 function assertRefusal(value: unknown): MergeApprovalRefusal {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error("MAIN_MERGE_APPROVAL_ROW_TAMPERED");
@@ -849,6 +935,12 @@ export class CandidateRegistry {
   readonly #reachedDurable = new Set<string>();
   /** Opaque token this call held when it took the reservation; proof of ownership for discard. */
   readonly #ownerToken = new Map<string, string>();
+  /**
+   * Notified after an observation path has durably invalidated a drifted approval. The registry owns
+   * durable state and knows nothing about the audit chain or the room ledger, so the record that has
+   * to reach the owner is written by whoever supplied this.
+   */
+  readonly #onDrift: ((event: MergeApprovalDriftEvent) => void) | undefined;
   #closed = false;
 
   constructor(dataDirectory: string, options: {
@@ -856,9 +948,12 @@ export class CandidateRegistry {
     maxFiles?: number;
     /** Test/embedded-code dependency injection; the shipped service leaves this unset. */
     gitBroker?: GitBroker;
+    /** Sink for observation-time drift invalidations; see #onDrift. */
+    onMergeApprovalInvalidated?: (event: MergeApprovalDriftEvent) => void;
   } = {}) {
     this.#dataDirectory = realpathSync(dataDirectory);
     this.#now = options.now ?? Date.now;
+    this.#onDrift = options.onMergeApprovalInvalidated;
     this.#maxFiles = options.maxFiles ?? 500;
     this.#git = options.gitBroker ?? new GitBroker();
     if (!Number.isSafeInteger(this.#maxFiles) || this.#maxFiles < 1 || this.#maxFiles > 10_000) {
@@ -1357,7 +1452,11 @@ export class CandidateRegistry {
       output.push({
         ...task,
         checkpoints,
-        mergeApprovals: this.#mergeApprovalSummaries(task.taskId),
+        // Bar item 1: `state` here used to come straight off the stored row, so a granted approval
+        // whose snapshot had moved still read `approved` on the surface every agent is told to
+        // consult. The bindings are re-checked against live state first, and a drifted approval is
+        // invalidated durably before it is summarised.
+        mergeApprovals: await this.#observedMergeApprovalSummaries(task.taskId, "candidate-status"),
         live: {
           ...(candidateHead ? { candidateHead } : {}),
           ...(candidateDirty === undefined ? {} : { candidateDirty }),
@@ -1570,6 +1669,12 @@ export class CandidateRegistry {
     }
     if (scope.completion.id !== input.completionId) throw new Error("MAIN_MERGE_COMPLETION_MISMATCH");
     this.#sweepExpiredMergeApprovals(scope.task.taskId);
+    // Bar item 4: after a drift invalidation the owner must be able to be asked again immediately.
+    // The open-approval slot is structural — one unanswered question per task — so an approval that
+    // has silently stopped applying would otherwise hold that slot until its TTL ran out and block
+    // the very re-ask the invalidation exists to prompt. Asking is an observation of the approval as
+    // much as reading it is, so the same check runs, with the same durable record.
+    await this.#observeOpenMergeApproval(scope.task.taskId, "merge-request");
     if (this.#openMergeApproval(scope.task.taskId)) throw new Error("MAIN_MERGE_APPROVAL_ALREADY_PENDING");
     if (this.#countMergeApprovals(scope.task.taskId) >= MAX_MERGE_APPROVALS_PER_TASK) {
       throw new Error("MAIN_MERGE_APPROVAL_TASK_LIMIT_REACHED");
@@ -1666,7 +1771,7 @@ export class CandidateRegistry {
     }
     const changed = await this.#verifyMergeBinding(row);
     if (changed.length > 0) {
-      this.#settleMergeApproval(row, "invalidated", { code: "MAIN_MERGE_APPROVAL_BINDING_CHANGED", changed });
+      this.#settleMergeApproval(row, "invalidated", driftRefusal(changed, "grant"));
       throw new MergeApprovalBindingError(changed);
     }
     const token = randomBytes(32).toString("base64url");
@@ -1763,7 +1868,7 @@ export class CandidateRegistry {
     if (intent.length > 0) throw new MergeApprovalBindingError(intent);
     const changed = await this.#verifyMergeBinding(row);
     if (changed.length > 0) {
-      this.#settleMergeApproval(row, "invalidated", { code: "MAIN_MERGE_APPROVAL_BINDING_CHANGED", changed });
+      this.#settleMergeApproval(row, "invalidated", driftRefusal(changed, "consume"));
       throw new MergeApprovalBindingError(changed);
     }
     let consumed: MergeApprovalRow;
@@ -1807,25 +1912,49 @@ export class CandidateRegistry {
       : this.#db.prepare(`SELECT * FROM candidate_merge_approvals WHERE room_id=? AND main_path=? AND task_id=?
           ORDER BY created_at_ms DESC, id LIMIT ?`)
         .all(roomId, mainPath, input.taskId, MAX_LIST) as unknown as MergeApprovalRow[];
-    return rows.map((row) => this.#publicMergeApproval(row));
+    const approvals: MergeApproval[] = [];
+    for (const row of rows) {
+      // Same reason as `status`: the owner-facing list must not present a decision that has stopped
+      // describing anything. An unreadable row still throws here, as it did before — this listing is
+      // what the approval dialog is opened from, so a row it cannot verify is not shown at all.
+      this.#assertMergeApprovalRow(row);
+      const observed = await this.#observeMergeApproval(row, "merge-approval-list");
+      approvals.push({
+        ...this.#publicMergeApproval(observed.row),
+        ...(observed.check.checked || observed.check.unavailable !== undefined
+          ? { bindingCheck: observed.check }
+          : {}),
+      });
+    }
+    return approvals;
   }
 
   /**
    * The approval plus a live re-verification of its binding, for a surface that has to decide whether
-   * to keep its confirm control enabled. Deliberately read-only: a dialog that polls must never be
-   * able to settle an approval, and an owner who steps away must find the row exactly as they left it.
+   * to keep its confirm control enabled.
+   *
+   * It can move an approval exactly one way: a drifted one becomes terminally `invalidated`. That is
+   * Phase 5-4's requirement, and it is not a widening of what a polling dialog may do — the row was
+   * already unusable the moment its bindings moved, and recording that fact is what stops the same
+   * dead approval from being presented as live to the next reader, in this process or another. It
+   * still cannot grant, consume, revive or delete anything, and an owner who steps away from an
+   * undrifted approval finds it exactly as they left it.
    */
   async inspectMergeApproval(input: { approvalId: string; roomId: string; mainPath: string }): Promise<{
     approval: MergeApproval;
-    binding: { valid: boolean; changed: string[] };
+    binding: MergeApprovalBindingCheck;
   }> {
     this.#assertOpen();
     const row = await this.#scopedMergeApprovalRow(input.approvalId, input.roomId, input.mainPath);
-    const usable = !MERGE_APPROVAL_TERMINAL.has(row.state) && this.#now() <= row.expires_at_ms;
-    const changed = usable ? await this.#verifyMergeBinding(row) : [];
+    const observed = await this.#observeMergeApproval(row, "merge-approval-inspect");
     return {
-      approval: this.#publicMergeApproval(row),
-      binding: { valid: usable && changed.length === 0, changed },
+      approval: {
+        ...this.#publicMergeApproval(observed.row),
+        ...(observed.check.checked || observed.check.unavailable !== undefined
+          ? { bindingCheck: observed.check }
+          : {}),
+      },
+      binding: observed.check,
     };
   }
 
@@ -2834,6 +2963,20 @@ export class CandidateRegistry {
     return row;
   }
 
+  /**
+   * Runs the drift check over the one approval that can currently hold a task's open slot. A row
+   * that cannot be verified is left alone: it can never be granted either way, and invalidating on
+   * a failed check would let a bad read destroy an owner decision.
+   */
+  async #observeOpenMergeApproval(taskId: string, observedOn: MergeApprovalObservation): Promise<void> {
+    const open = this.#openMergeApproval(taskId);
+    if (!open) return;
+    try {
+      this.#assertMergeApprovalRow(open);
+    } catch { return; }
+    await this.#observeMergeApproval(open, observedOn);
+  }
+
   #openMergeApproval(taskId: string): MergeApprovalRow | undefined {
     return this.#db.prepare(
       "SELECT * FROM candidate_merge_approvals WHERE task_id=? AND state IN ('requested','approved')",
@@ -2871,6 +3014,99 @@ export class CandidateRegistry {
     // could otherwise still be granted by another, and an expired approval must never come back.
     this.#settleMergeApproval(row, "expired");
     throw new Error("MAIN_MERGE_APPROVAL_EXPIRED");
+  }
+
+  /**
+   * The observation-time drift check, and the whole of Phase 5-4's detection half.
+   *
+   * 5-3 verified the binding at grant and at consume. That leaves the interval between them, and an
+   * approval that stopped applying during it stayed on every read surface looking exactly like one
+   * that still applied — `state` comes from the stored row, and nothing was re-reading live state.
+   * Every read of an approval now goes through here first, so drift is noticed at the next
+   * observation rather than at the moment someone tries to act on it.
+   *
+   * Three outcomes, deliberately distinct:
+   *  - not applicable: the row is already terminal, or its deadline has passed. Nothing is compared
+   *    and nothing is written; an expired approval is refused on its own terms.
+   *  - unavailable: the comparison could not be completed. The approval is NOT invalidated — a
+   *    transient Git failure must not destroy an owner decision, which is the same reasoning the
+   *    5-2 bar records for burning an idempotency key — and it is not reported as valid either.
+   *  - drifted: the bound values that moved are named, and the row is invalidated durably before it
+   *    is reported, so the refusal survives the process that noticed it.
+   *
+   * Nothing here touches the candidate, a checkpoint, a recovery ref or main. The only write is the
+   * approval row's own transition to a terminal state it could never have escaped anyway.
+   */
+  async #observeMergeApproval(row: MergeApprovalRow, observedOn: MergeApprovalObservation): Promise<{
+    row: MergeApprovalRow;
+    check: MergeApprovalBindingCheck;
+  }> {
+    if (MERGE_APPROVAL_TERMINAL.has(row.state) || this.#now() > row.expires_at_ms) {
+      return { row, check: { checked: false, valid: false, changed: [] } };
+    }
+    let changed: string[];
+    try {
+      changed = await this.#verifyMergeBinding(row);
+    } catch (error) {
+      return {
+        row,
+        check: { checked: false, valid: false, changed: [], unavailable: bindingCheckFailure(error) },
+      };
+    }
+    if (changed.length === 0) return { row, check: { checked: true, valid: true, changed: [] } };
+    return {
+      row: this.#invalidateDrifted(row, changed, observedOn) ?? row,
+      check: { checked: true, valid: false, changed },
+    };
+  }
+
+  /**
+   * Records a drifted approval as terminally invalidated, then reports it exactly once.
+   *
+   * The compare-and-set inside #writeMergeApproval is what makes the report single: two readers that
+   * notice the same drift in the same instant both try, one wins, and only the winner notifies. A
+   * listener that throws is swallowed, because the durable row is the primary record and an audit
+   * sink that is unavailable must not undo an invalidation or break the read that found it.
+   */
+  #invalidateDrifted(
+    row: MergeApprovalRow, changed: string[], observedOn: MergeApprovalObservation,
+  ): MergeApprovalRow | undefined {
+    let next: MergeApprovalRow;
+    try {
+      next = this.#writeMergeApproval(row, {
+        state: "invalidated",
+        token_hash: null,
+        refusal_json: JSON.stringify(boundedRefusal(driftRefusal(changed, observedOn))),
+        updated_at_ms: Math.max(row.created_at_ms, this.#now()),
+      });
+    } catch {
+      // Another writer settled it first. Its record stands and describes the same drift, but this
+      // reader must report what the store now says rather than the stale row it read a moment ago —
+      // otherwise the loser of a race between two observations still shows the approval as live.
+      const current = this.#mergeApprovalRow(row.id);
+      if (!current) return undefined;
+      try {
+        this.#assertMergeApprovalRow(current);
+      } catch { return undefined; }
+      return current;
+    }
+    try {
+      this.#onDrift?.({
+        approvalId: next.id,
+        taskId: next.task_id,
+        roomId: next.room_id,
+        mainPath: next.main_path,
+        candidateHead: next.candidate_head,
+        mainHead: next.main_head,
+        previewDigest: next.preview_digest,
+        changed: [...changed],
+        wasGranted: row.decided_by !== null,
+        previousState: row.state,
+        observedOn,
+        at: new Date(next.updated_at_ms).toISOString(),
+      });
+    } catch { /* the durable invalidation has already committed and is the primary record */ }
+    return next;
   }
 
   /** Best-effort terminal transition used on refusal paths; it must never replace the real refusal. */
@@ -2933,22 +3169,35 @@ export class CandidateRegistry {
    * path tells the agent to call in order to learn the real state; losing it is how a small
    * corruption becomes an outage. An unreadable row is reported as such, not hidden.
    */
-  #mergeApprovalSummaries(taskId: string): Array<MergeApprovalSummary | UnreadableMergeApproval> {
+  async #observedMergeApprovalSummaries(
+    taskId: string, observedOn: MergeApprovalObservation,
+  ): Promise<Array<MergeApprovalSummary | UnreadableMergeApproval>> {
     const rows = this.#db.prepare(
       "SELECT * FROM candidate_merge_approvals WHERE task_id=? ORDER BY created_at_ms DESC, id LIMIT ?",
     ).all(taskId, MAX_LIST) as unknown as MergeApprovalRow[];
-    return rows.map((row) => {
+    const summaries: Array<MergeApprovalSummary | UnreadableMergeApproval> = [];
+    for (const row of rows) {
       try {
-        return this.#mergeApprovalSummary(row);
+        // Integrity first. A row that fails its own hash is not a description of anything live, so
+        // it is never compared against live state and never invalidated on that basis.
+        this.#assertMergeApprovalRow(row);
+        const observed = await this.#observeMergeApproval(row, observedOn);
+        summaries.push({
+          ...this.#mergeApprovalSummary(observed.row),
+          ...(observed.check.checked || observed.check.unavailable !== undefined
+            ? { bindingCheck: observed.check }
+            : {}),
+        });
       } catch {
-        return {
+        summaries.push({
           id: typeof row.id === "string" ? row.id : "",
           taskId,
           state: "unreadable" as const,
           unreadable: true as const,
-        };
+        });
       }
-    });
+    }
+    return summaries;
   }
 
   #mergeApprovalSummary(row: MergeApprovalRow): MergeApprovalSummary {

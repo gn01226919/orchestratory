@@ -522,3 +522,48 @@ GUI，消耗的是未來的 promotion service。RAM-only 的核准在 GUI 重啟
   scalar／preview 互為冗餘的校驗只讓竄改「可偵測且不可用」，不讓它「不可能」。
 - 帳本無 TTL：每個 task 上限 50 筆 approval，總量由 `inventory()` 的 `mergeApprovals`／
   `mergeApprovalsOpen` 曝露，超過即 fail closed 而非默默成長。
+
+## ADR-034：綁定漂移在下一次觀察時就失效，並留下可稽核的紀錄
+
+**日期：** 2026-08-06
+**狀態：** Accepted
+
+### 背景
+
+ADR-033 在**建立、核准、消耗**三個時點驗證綁定。中間仍有一段沒人看的區間：核准存活期間 main 或
+candidate 動了，approval 依然在每一條讀取路徑上顯示成 `approved`——因為 `state` 直接來自那一列，
+沒有任何讀取會重看 live state。Owner 與 agent 因此可能一直看著一個「已經不描述任何東西」的決定，
+直到有人試圖消耗它才發現。**一個沉默失效的核准，和一個從未發生的核准，在紀錄上也無法區分。**
+
+### 決策
+
+1. **每一條 approval 讀取路徑先驗綁定，再回報那一列。** `candidate_status`、approval 列表與
+   `inspect` 共用同一個 `#observeMergeApproval`；漂移者在被回報之前就已**持久**轉成終局
+   `invalidated`，`refusal` 帶 ADR-033 同一套欄位名稱與偵測它的介面。因此「顯示為失效」不需要每個
+   surface 各自實作，它就是那一列本身的狀態。
+2. **「重新詢問」也是一種觀察。** `main_merge_request` 在檢查「每個 task 只有一個未決問題」之前
+   先跑同一個檢查。否則一個已經停止適用的核准會佔住那個結構性名額直到 TTL 到期，而它擋掉的正是
+   失效本身要促成的那次重問——直接違反「失效不得破壞任何東西，Owner 可立即重問」。
+3. **無法完成的檢查不算漂移。** 檢查若拋錯（Git 暫時失敗、某一列暫時無法驗證），approval **不**失效，
+   也**不**回報為有效，而是回 `bindingCheck.unavailable`＋穩定錯誤碼。以暫時性失敗燒掉 Owner 的決定，
+   正是 [[VERIFICATION]] Phase 5-2 已判定必須在 5-5 前關閉的那個模式。
+4. **恰好一次的紀錄。** 失效以 `#writeMergeApproval` 的 compare-and-set 寫入，只有贏家會通知
+   sink，因此三條路徑同時看到同一次漂移也只產生一筆稽核事件與一則帳本訊息。輸家改讀 store 目前的
+   內容再回報，所以每一個觀察者看到的都是 `invalidated`，不是自己手上那份過期的列。
+5. **稽核在 service 層、durable 在 registry 層。** registry 擁有持久狀態且不認識稽核鏈與 Room ledger，
+   因此以建構期注入的 sink 回報。**帳本是公開的**，訊息只列改變的欄位名、明說 candidate／checkpoint／
+   recovery ref 完整保留且 main 未修改，不含路徑、id 或 token；完整細節走 owner-only 的 audit 鏈，
+   並記錄 `ownerHadGranted`——「Owner 核准過但漂移作廢」與「沒人回答過」是兩件不同的事。
+6. **不需要 schema 變更。** durable 語意（終局 `invalidated` ＋ 具名 `refusal`）在 v4 已經存在；5-4
+   加的是「誰在什麼時候發現」，`refusal.reason` 就能承載。v1→v4、v3→v4 升級路徑與 v2 拒絕維持不變。
+
+### 代價與殘餘風險
+
+- **偵測是觀察時觸發，不是背景輪詢。** 沒有人讀就沒有人發現。可接受：GUI dialog 每 5 秒 inspect，
+  所有 MCP 讀取都會經過，而真正的授權關卡（grant／consume）仍各自重驗一次。
+- **讀取路徑現在會寫入。** 唯一可能的轉移是「已經無法使用的核准被記成終局失效」，它不能授權、
+  不能復活、不能刪除任何東西；`GET /api/rooms/merge-approvals/inspect` 因此在 CSRF 意義上不再是
+  純讀取，但它能造成的唯一效果是 fail-closed 方向。
+- **成本與 task 數成正比。** 每個仍未決的 approval 在每次觀察都會重算一次完整 preview（每個 task
+  結構上至多一個）。未加上限：加上限等於留下一批不會被檢查的 approval，那是比成本更糟的洞。
+- sink 若拋錯（audit 鏈不可用），失效仍已持久化，但該次稽核事件會遺失。durable 那一列是主要紀錄。
