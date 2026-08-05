@@ -18,7 +18,11 @@ import type {
 } from "../types.ts";
 import { PROFILES } from "../config.ts";
 import { localErrorCode, normalizeLocalEndpoint } from "../providers/local.ts";
-import { isSelectableProvider, selectableProviderIds } from "../providers/selection.ts";
+import {
+  isSelectableProvider,
+  selectableProviderIds,
+  type ProviderSelectionSurface,
+} from "../providers/selection.ts";
 import { sanitizeTerminal } from "../security/redact.ts";
 import { checkpointApprovalScope, workflowApprovalScope } from "../security/approval.ts";
 import { NaturalLanguageSession, sessionTools } from "../core/session.ts";
@@ -34,8 +38,12 @@ import {
 } from "./terminal-dashboard.ts";
 
 // Provider menus come from the exhaustive table in providers/selection.ts, so a
-// new provider cannot ship without being classified for this wizard.
-const workflowAgentProviderIds = selectableProviderIds("workflowAgent");
+// new provider cannot ship without being classified for this wizard. Which surface a
+// role draws from is exported so it can be tested without driving readline: a writer
+// must come from the writer surface, or the menu offers a choice that cannot work.
+export function assignmentSurface(role: AgentAssignment["role"]): ProviderSelectionSurface {
+  return role === "writer" ? "workflowWriter" : "workflowAgent";
+}
 const CLEAR_SCREEN = "\u001b[2J\u001b[H";
 const HIDE_CURSOR = "\u001b[?25l";
 const SHOW_CURSOR = "\u001b[?25h";
@@ -209,9 +217,13 @@ async function monitorRun(input: {
   }
 }
 
-function provider(value: string, fallback: ProviderId): ProviderId {
+function provider(
+  value: string,
+  fallback: ProviderId,
+  surface: ProviderSelectionSurface,
+): ProviderId {
   const normalized = value.trim().toLowerCase();
-  return isSelectableProvider("workflowAgent", normalized) ? normalized : fallback;
+  return isSelectableProvider(surface, normalized) ? normalized : fallback;
 }
 
 async function askAssignment(
@@ -220,25 +232,39 @@ async function askAssignment(
   role: AgentAssignment["role"],
   fallback: ProviderId,
 ): Promise<AgentAssignment> {
+  // A writer has to be able to hold a lease. Every role used to be offered the agent
+  // list, so the read-only providers appeared in the writer menu and choosing one threw
+  // out of the wizard, discarding the task, profile and every answer given before it.
+  const surface = assignmentSurface(role);
   // Show what is actually registered, using each adapter's own display name — that
   // is where the local endpoint states it is loopback-only and costs nothing.
-  const offered = workflowAgentProviderIds.filter((id) => app.providers.has(id));
-  const choices = offered.map((id) => {
-    const registered = app.providers.get(id).capabilities;
-    return `  ${id.padEnd(6, " ")} ${sanitizeTerminal(registered.displayName)}`;
-  });
-  stdout.write(`${role} 可選 provider：\n${choices.join("\n")}\n`);
-  const selected = provider(await rl.question(`${role} provider [${fallback}]: `), fallback);
-  const capabilities = app.providers.get(selected).capabilities;
+  const offered = selectableProviderIds(surface).filter((id) => app.providers.has(id));
+  let selected: ProviderId = fallback;
   let authMode: AgentAssignment["authMode"] = "subscription";
-  if (role !== "writer" && capabilities.apiConfigured) {
-    const answer = (await rl.question(`${role} auth subscription/api [subscription]: `))
-      .trim()
-      .toLowerCase();
-    if (answer === "api") authMode = "api";
-  }
-  if (!app.providers.canWrite(selected, authMode) && role === "writer") {
-    throw new Error("WRITER_PROVIDER_IS_READ_ONLY");
+  for (let attempt = 0; ; attempt += 1) {
+    const choices = offered.map((id) => {
+      const registered = app.providers.get(id).capabilities;
+      return `  ${id.padEnd(6, " ")} ${sanitizeTerminal(registered.displayName)}`;
+    });
+    stdout.write(`${role} 可選 provider：\n${choices.join("\n")}\n`);
+    selected = provider(await rl.question(`${role} provider [${fallback}]: `), fallback, surface);
+    const capabilities = app.providers.get(selected).capabilities;
+    authMode = "subscription";
+    if (role !== "writer" && capabilities.apiConfigured) {
+      const answer = (await rl.question(`${role} auth subscription/api [subscription]: `))
+        .trim()
+        .toLowerCase();
+      if (answer === "api") authMode = "api";
+    }
+    if (role !== "writer" || app.providers.canWrite(selected, authMode)) break;
+    // Whether a provider may hold a lease is a runtime fact — an opt-in that is off, a
+    // credential that is missing — not something the menu can know. Say so and ask again
+    // rather than unwinding work the owner already did.
+    if (attempt >= 2) throw new Error("WRITER_PROVIDER_IS_READ_ONLY");
+    stdout.write(
+      `${selected} 目前不能擔任 writer（唯讀，或尚未開啟寫入授權）。` +
+        `請改選其他 provider。 · that provider cannot hold a writer lease right now.\n`,
+    );
   }
   const configuredModels = await app.providers.listModels(selected, authMode);
   const defaultModel =

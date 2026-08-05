@@ -21,6 +21,7 @@ import {
 } from "../src/providers/selection.ts";
 import { providerBillingModel } from "../src/providers/billing.ts";
 import type { ProviderId } from "../src/types.ts";
+import { assignmentSurface } from "../src/ui/tui.ts";
 
 const execFileAsync = promisify(execFile);
 const repositoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -213,4 +214,21 @@ test("selection surfaces expose stable, immutable lists", () => {
   assert.throws(() => {
     (first as ProviderId[]).push("fake");
   }, /object is not extensible|read only|Cannot add property/u);
+});
+
+test("the writer menu draws from the writer surface, not the agent surface", () => {
+  // Regression: every role used to be offered selectableProviderIds("workflowAgent"),
+  // so the read-only local endpoint appeared in the writer menu. Choosing it threw
+  // WRITER_PROVIDER_IS_READ_ONLY out of the wizard, discarding the task, profile,
+  // isolation and planner the owner had already answered.
+  assert.equal(assignmentSurface("writer"), "workflowWriter");
+  assert.equal(assignmentSurface("planner"), "workflowAgent");
+  assert.equal(assignmentSurface("reviewer"), "workflowAgent");
+
+  // The point of routing by surface: what the writer menu can offer excludes local,
+  // and what a planner may be is unaffected.
+  const writerChoices = selectableProviderIds(assignmentSurface("writer"));
+  const plannerChoices = selectableProviderIds(assignmentSurface("planner"));
+  assert.ok(!writerChoices.includes("local"), "a writer must never be offered the local endpoint");
+  assert.ok(plannerChoices.includes("local"), "a planner may be the local endpoint");
 });
