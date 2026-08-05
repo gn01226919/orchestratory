@@ -315,7 +315,7 @@ test("consumption re-verifies the binding rather than trusting the grant", async
   // ran only at creation time would let all of it through.
   await commit(fixture.source, "main-side.txt", "main moved after approval\n", "main moves");
   await assert.rejects(
-    fixture.registry.consumeMainMerge({
+    fixture.registry.promoteMainMerge({
       approvalId: approval.id, token: approvalToken, action: MERGE_APPROVAL_GRANT,
       taskId: fixture.task.taskId, roomId: "demo", mainPath: fixture.source,
     }),
@@ -338,7 +338,7 @@ test("a merge approval refuses a consumer pointed at anything but what the owner
     [{ mainPath: fixture.task.candidatePath }, "mainPath"],
   ] as const) {
     await assert.rejects(
-      fixture.registry.consumeMainMerge({ ...base, ...patch }),
+      fixture.registry.promoteMainMerge({ ...base, ...patch }),
       (error: MergeApprovalBindingError) => error.changed.includes(named),
     );
   }
@@ -354,10 +354,10 @@ test("a consumed merge approval cannot be replayed and cannot be revived", async
     approvalId: approval.id, token: approvalToken, action: MERGE_APPROVAL_GRANT,
     taskId: fixture.task.taskId, roomId: "demo", mainPath: fixture.source,
   };
-  const authorization = await fixture.registry.consumeMainMerge(call);
+  const { authorization } = await fixture.registry.promoteMainMerge(call);
   assert.equal(authorization.grants, MERGE_APPROVAL_GRANT);
   assert.equal(authorization.singleUse, true);
-  await assert.rejects(fixture.registry.consumeMainMerge(call), /MAIN_MERGE_APPROVAL_ALREADY_CONSUMED/u);
+  await assert.rejects(fixture.registry.promoteMainMerge(call), /MAIN_MERGE_APPROVAL_ALREADY_CONSUMED/u);
   // Terminal is terminal: neither the owner surface nor a second grant can put it back in play.
   await assert.rejects(grant(fixture, approval), /MAIN_MERGE_APPROVAL_NOT_PENDING/u);
   await assert.rejects(
@@ -381,16 +381,21 @@ test("two concurrent consumptions of one approval leave exactly one winner", asy
     taskId: fixture.task.taskId, roomId: "demo", mainPath: fixture.source,
   };
   const outcomes = await Promise.allSettled([
-    fixture.registry.consumeMainMerge(call),
-    fixture.registry.consumeMainMerge(call),
+    fixture.registry.promoteMainMerge(call),
+    fixture.registry.promoteMainMerge(call),
   ]);
   assert.equal(outcomes.filter((outcome) => outcome.status === "fulfilled").length, 1);
   const loser = outcomes.find((outcome) => outcome.status === "rejected");
+  // Either serialization point may win the race, and both are refusals that name what happened:
+  // the loser is stopped by the promotion ledger's exclusive marker before it can run any Git
+  // command, or by the approval's own single-use compare-and-set.
   assert.match(
     String(loser?.status === "rejected" ? (loser.reason as Error).message : ""),
-    /MAIN_MERGE_APPROVAL_ALREADY_CONSUMED/u,
+    /MAIN_MERGE_(?:APPROVAL_ALREADY_CONSUMED|PROMOTION_ALREADY_STARTED)/u,
   );
   assert.equal(tableRows(fixture.path, "candidate_merge_approvals").length, 1);
+  // And exactly one promotion exists, so main was written at most once.
+  assert.equal(tableRows(fixture.path, "candidate_merge_promotions").length, 1);
 });
 
 test("a merge approval expires, and an expired one is refused at every surface", async (t) => {
@@ -416,7 +421,7 @@ test("a merge approval expires, and an expired one is refused at every surface",
     const before = await untouched(fixture);
     fixture.clock.now += MERGE_APPROVAL_GRANT_TTL_MS + 1;
     await assert.rejects(
-      fixture.registry.consumeMainMerge({
+      fixture.registry.promoteMainMerge({
         approvalId: approval.id, token: approvalToken, action: MERGE_APPROVAL_GRANT,
         taskId: fixture.task.taskId, roomId: "demo", mainPath: fixture.source,
       }),
@@ -451,7 +456,13 @@ test("a truncated preview is not approvable, whichever list was truncated", asyn
     });
     assert.equal(preview.preview.filesTruncated, true);
     assert.equal(preview.approvable, false);
-    assert.deepEqual(preview.blockers, ["PREVIEW_FILES_TRUNCATED"]);
+    // A truncated file list also makes the overwrite scan unrunnable, and that is reported as its
+    // own blocker rather than as an empty overwrite result: the scan looks for exactly the paths the
+    // truncated list is missing, so "nothing would be overwritten" is not an answer it can give.
+    assert.deepEqual(
+      preview.blockers, ["PREVIEW_FILES_TRUNCATED", "OVERWRITE_SCAN_FILE_LIST_TRUNCATED"],
+    );
+    assert.equal(preview.overwrites.checked, false);
     await assert.rejects(
       fixture.registry.requestMainMerge({
         actor: "codex1", clientRequestId: key(), taskId: fixture.task.taskId, roomId: "demo",
@@ -530,7 +541,7 @@ test("a truncated preview is not approvable, whichever list was truncated", asyn
       );
       await assert.rejects(grant(fixture, approval), refusal);
       await assert.rejects(
-        fixture.registry.consumeMainMerge({
+        fixture.registry.promoteMainMerge({
           approvalId: approval.id, token: "A".repeat(43), action: MERGE_APPROVAL_GRANT,
           taskId: fixture.task.taskId, roomId: "demo", mainPath: fixture.source,
         }),
@@ -612,7 +623,7 @@ test("an owner can withdraw an approval they already granted", async (t) => {
     approvalId: approval.id, roomId: "demo", mainPath: fixture.source, decidedBy: "local-tui",
   });
   await assert.rejects(
-    fixture.registry.consumeMainMerge({
+    fixture.registry.promoteMainMerge({
       approvalId: approval.id, token: approvalToken, action: MERGE_APPROVAL_GRANT,
       taskId: fixture.task.taskId, roomId: "demo", mainPath: fixture.source,
     }),
@@ -632,7 +643,7 @@ test("a merge approval authorizes the merge and nothing else", async (t) => {
   const { approvalToken } = await grant(fixture, approval);
   for (const action of ["push", "publish", "deploy", "cleanup-worktree", "delete-candidate", ""]) {
     await assert.rejects(
-      fixture.registry.consumeMainMerge({
+      fixture.registry.promoteMainMerge({
         approvalId: approval.id, token: approvalToken, action,
         taskId: fixture.task.taskId, roomId: "demo", mainPath: fixture.source,
       }),
@@ -640,7 +651,7 @@ test("a merge approval authorizes the merge and nothing else", async (t) => {
     );
   }
   const before = await untouched(fixture);
-  const authorization = await fixture.registry.consumeMainMerge({
+  const { authorization, promotion, mainMutated } = await fixture.registry.promoteMainMerge({
     approvalId: approval.id, token: approvalToken, action: MERGE_APPROVAL_GRANT,
     taskId: fixture.task.taskId, roomId: "demo", mainPath: fixture.source,
   });
@@ -648,8 +659,18 @@ test("a merge approval authorizes the merge and nothing else", async (t) => {
   assert.equal(authorization.binding.candidateHead, approval.binding.candidateHead);
   assert.equal(authorization.binding.mainHead, approval.binding.mainHead);
   assert.equal(authorization.preview.mergeable, true);
-  // Consuming an approval is not promotion: this phase writes nothing to canonical main.
-  assert.deepEqual(await untouched(fixture), before);
+  // The one thing it IS authorized to do actually happened, and is reported from observation.
+  assert.equal(mainMutated, true);
+  assert.equal(promotion.state, "applied");
+  assert.equal(promotion.observation.authorizedMergeCommit, true);
+  const after = await untouched(fixture);
+  // The authorized merge moved main's head and nothing else: the candidate, its checkpoints and
+  // every ref under refs/ are byte-identical, and the candidate's own head never moved.
+  assert.notEqual(after.mainHead, before.mainHead);
+  assert.equal(after.candidateHead, before.candidateHead);
+  assert.deepEqual(after.checkpoints, before.checkpoints);
+  assert.equal(after.mainStatus, before.mainStatus);
+  assert.equal(promotion.mainHeadAfter, String(after.mainHead).trim());
 });
 
 test("requesting a merge approval is not approving it", async (t) => {
@@ -661,7 +682,7 @@ test("requesting a merge approval is not approving it", async (t) => {
   // Nothing in the request path writes a ref, a worktree or a candidate row.
   assert.deepEqual(await untouched(fixture), before);
   await assert.rejects(
-    fixture.registry.consumeMainMerge({
+    fixture.registry.promoteMainMerge({
       approvalId: approval.id, token: "A".repeat(43), action: MERGE_APPROVAL_GRANT,
       taskId: fixture.task.taskId, roomId: "demo", mainPath: fixture.source,
     }),
@@ -715,7 +736,7 @@ test("a granted approval refuses a token that is not the one it issued", async (
   };
   for (const token of ["", "short", `${approvalToken.slice(0, 42)}!`, "B".repeat(43)]) {
     await assert.rejects(
-      fixture.registry.consumeMainMerge({ ...call, token }),
+      fixture.registry.promoteMainMerge({ ...call, token }),
       /MAIN_MERGE_APPROVAL_TOKEN_INVALID/u,
     );
   }
@@ -921,7 +942,7 @@ test("a tampered merge approval row is refused instead of being shown as an owne
   );
   await assert.rejects(grant(fixture, approval), /MAIN_MERGE_APPROVAL_ROW_TAMPERED/u);
   await assert.rejects(
-    fixture.registry.consumeMainMerge({
+    fixture.registry.promoteMainMerge({
       approvalId: approval.id, token: "A".repeat(43), action: MERGE_APPROVAL_GRANT,
       taskId: fixture.task.taskId, roomId: "demo", mainPath: fixture.source,
     }),
@@ -962,7 +983,7 @@ test("a closed registry names itself instead of leaking a storage failure", asyn
     /CANDIDATE_REGISTRY_CLOSED/u,
   );
   await assert.rejects(
-    fixture.registry.consumeMainMerge({
+    fixture.registry.promoteMainMerge({
       approvalId: approval.id, token: "A".repeat(43), action: MERGE_APPROVAL_GRANT,
       taskId: fixture.task.taskId, roomId: "demo", mainPath: fixture.source,
     }),
@@ -997,7 +1018,7 @@ test("an approval survives a reopen and stays bound to the same snapshot", async
   });
   assert.equal(granted.approval.decidedBy, "local-tui");
   assert.match(granted.approvalToken, /^[A-Za-z0-9_-]{43}$/u);
-  const authorization = await reopened.consumeMainMerge({
+  const { authorization } = await reopened.promoteMainMerge({
     approvalId: approval.id, token: granted.approvalToken, action: MERGE_APPROVAL_GRANT,
     taskId: fixture.task.taskId, roomId: "demo", mainPath: fixture.source,
   });

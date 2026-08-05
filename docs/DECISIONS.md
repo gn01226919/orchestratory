@@ -598,3 +598,50 @@ candidate 動了，approval 依然在每一條讀取路徑上顯示成 `approved
 | `refusal.changed` 可能列出沒真的變的欄位，且會進公開帳本（**已解決**） | 曾經：一次 `chmod 000` 會讓 refusal 列出八個欄位、寫進 audit 鏈與公開 Room ledger，向 Owner 與其他 agent 宣告 main HEAD 變了 | **已解決**（本 ADR 決策 3）：`changed` 只含實際比對過的欄位，讀不到的改以 `unverified` 呈現 |
 | audit／ledger 的保留宣告是常數不是觀察（**已解決**） | 曾經：`candidateRetained`／`checkpointsRetained`／`recoveryRefRetained` 寫死 `true`、帳本寫死「完整保留」；刪掉 recovery ref 後觀察，紀錄仍宣稱復原點完整保留 | **已解決**（本 ADR 決策 5）：改為只描述本次動作的 `deletedByThisInvalidation: "nothing"`。**注意這是範圍縮小而非替代**：現在沒有任何自動紀錄可以證明 candidate／checkpoint／recovery ref 目前仍存在；要知道現況必須另行 `candidate_status` 或讀 Git |
 | 一次觀察可能同時「有欄位變了」又「有欄位讀不到」 | 此時仍以漂移處理並失效（實際觀察到的變動是 fail-closed 的正確依據），`unverified` 一併記入 refusal、audit detail 與帳本 | **可接受**：方向恆為 fail-closed，且不會因純粹的暫時失敗觸發 |
+
+## ADR-035：Promotion 是「先寫意圖、再消耗核准、再寫 main」，崩潰後的收斂一律唯讀
+
+**背景。** Phase 5-5 是全產品第一個真的寫入 Owner 主專案的操作。開工前訂的通過標準（v1）在實作開始後
+被一位專門攻擊標準本身的審查員以真實 git 推翻了三處，三個實測都直接決定了下面的設計：
+
+1. main 的 `git status --porcelain` **完全乾淨**時，`git merge` 仍會**靜默覆蓋** ignored 檔案的內容、
+   exit 0，而且事後仍回報工作樹乾淨。
+2. 接著用最自然的回滾方式 `git reset --hard <pre-HEAD>`，那個檔案**直接消失**，不是還原成原內容。
+3. 在 `pre-merge-commit` hook 執行中 `kill -9` git：**HEAD 沒動、沒有 `MERGE_HEAD`、`merge --abort` 用不了**，
+   但 index 與工作樹已被完整改寫，`git status` 顯示成一般的「Changes to be committed」——
+   與 Owner 自己 stage 的工作在位元層級無法區分。
+
+**決定。**
+
+- **順序固定**：驗證綁定 → 寫入 durable `applying` 意圖紀錄 → 消耗核准 → 寫 main → 寫入終局結果。
+  SQLite 交易與 Git commit 不可能是同一個原子單位，所以「兩者不得同時存在」沒有任何實作能真的滿足；
+  正確的形狀是**寫前意圖紀錄＋確定性收斂**，與 `CLAUDE.md` 對 apply-back 早已寫下的
+  「必須先持久化進入 `applying` 才能修改主專案」同形。意圖紀錄在任何 Git 寫入前就含全部 pre-op 指紋。
+- **核准一旦消耗即為終局**，沒有任何路徑會把它改回 `approved` 或重新發 token。失敗時 Owner 重新
+  preview 再問一次；這是刻意的摩擦。
+- **崩潰後的 reconciliation 一律唯讀。** 因為實測 3，自動回滾在「半套用的 index」與「Owner 自己的工作」
+  之間無法區分，而 `git clean` 更會刪掉未追蹤與 ignored 檔案。所以重啟後只讀、只比對、只**具名**回報
+  差異，並給出一行可複製的復原指令；復原由 Owner 自己執行。
+  同一程序內、merge 剛失敗時的 `merge --abort` 不在此限：那不是重試，而且事後以指紋逐項驗證。
+- **`mainIgnoredFingerprint` 升級為涵蓋內容**，並在核准畫面上**逐一列出**這次合併會覆蓋的 ignored 檔案；
+  有任何一個就在核准前拒絕。因為實測 1＋2，「顯示一句警告」不夠——那是兩段式資料損毀。
+  **無法在不破壞未追蹤／ignored 檔案的前提下回滾的失敗，正確答案是事前拒絕，不是事後清理。**
+- **「乾淨」寫死為一組具名條件**，而不是 `git status --porcelain` 是否為空：已實測
+  `git update-index --skip-worktree` 讓 `status` 完全空白，真實 merge 卻以 exit 2 中止，
+  而且**每次重試都會以同樣方式失敗**，「恢復後可重新成功」在該形狀下永遠為假。
+  submodule 與 LFS／clean-smudge filter 一律**偵測到即拒絕**，不做部分支援。
+- **Promotion 執行 repo hook，preview 永遠不執行。** 這是 5-5 引入的新信任邊界（[[THREAT_MODEL]] F26）：
+  所有唯讀 Git 指令固定 `core.hooksPath=/dev/null`，只有 `promotionGitEnvironment()` 解除它。
+  因此本次會執行的 hook 檔名與內容雜湊、`core.hooksPath`、`merge.*.driver` 與 `filter.*` 全部納入
+  `previewDigest`（＝納入 approval 綁定）並在核准畫面逐項揭露，消耗前再比對一次。
+  merge 子程序有固定逾時、輸出上限與整個 PGID 的終止。
+- **live 的 `.git` 狀態刻意不納入 digest。** 第一版把它放進去，實測立刻顯示：別的程序短暫持有一秒的
+  `index.lock` 會讓綁定「改變」，永久燒掉 Owner 的核准——PITFALLS #85 的同形違反。
+  綁定值只描述**快照**，`.git` 的當下狀態每次決策點重新計算，而且是「拒絕但不消耗」。
+- **`merged` 是終局。** 成功後 candidate 轉 `merged`，再次 preview／request 一律具名拒絕。
+  否則 Owner 在中間 revert 掉那次合併後，第二次 promotion 會靜默把他明確撤銷的變更重新套回去。
+
+**殘餘風險。** hook 一旦通過綁定就是以 Owner 權限執行的任意程式碼，本產品不沙箱它；
+`.git/config` 可被有終端的 Native agent 直接寫入，保護來自「綁定＋揭露＋消耗前重驗」而非阻止寫入。
+promotion 期間若外部程序推進 main，目前是**事後偵測**（觀察到的 HEAD 不是被授權的 merge commit →
+`needs-manual-review` 並具名），不是期間中止；這一項尚未有測試，見 [[VERIFICATION]] 的待辦。

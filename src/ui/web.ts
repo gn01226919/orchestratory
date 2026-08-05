@@ -1220,9 +1220,12 @@ export async function startWebServer(
               decidedBy: "local-web",
               ...(typeof value.reason === "string" ? { reason: value.reason } : {}),
             }),
-            candidateRetained: true,
-            checkpointsRetained: true,
-            recoveryRefRetained: true,
+            // PITFALLS #86: these were the constants `candidateRetained` / `checkpointsRetained` /
+            // `recoveryRefRetained`, all hard-coded `true` — an assertion about the current state of
+            // the repository made by a handler that reads nothing. Rejection runs no Git command, so
+            // the honest statement is what it did, not what now exists.
+            deletedByThisRejection: "nothing",
+            mainMutation: false,
           });
           return;
         }
