@@ -39,6 +39,7 @@ import { CollaborationAuditLog, type AuditOutcome } from "./collaboration-audit.
 import {
   CandidateRegistry,
   MergeApprovalBindingError,
+  MergeApprovalBindingUnverifiableError,
   type CandidateCheckpoint,
   type CandidateCompletion,
   type CandidateTask,
@@ -700,14 +701,36 @@ export class CollaborationService {
           detail: {
             approvalId: input.approvalId,
             changed: error.changed,
+            ...(error.unverified.length > 0 ? { unverified: error.unverified } : {}),
             reason: "MAIN_MERGE_APPROVAL_BINDING_CHANGED",
+            deletedByThisInvalidation: "nothing",
             mainMutation: false,
           },
         });
         this.#candidateLedger(input.roomId, undefined,
-          `merge 核准已失效：綁定值改變（${error.changed.join("、")}）；candidate、checkpoint 與復原點皆保留，`
+          `merge 核准已失效：綁定值改變（${error.changed.join("、")}）`
+            + (error.unverified.length > 0
+              ? `；本次另有無法讀取、因此未比對的欄位（${error.unverified.join("、")}）` : "")
+            + `；這次失效沒有刪除 candidate、checkpoint 或復原點，也沒有修改 main，`
             + `請重新 preview 後再詢問。`,
           `candidate:merge-approval:${input.approvalId}:invalidated`);
+      }
+      if (error instanceof MergeApprovalBindingUnverifiableError) {
+        // Refused, not invalidated: the approval is untouched and still answerable. It is audited so
+        // an owner whose click did nothing can see why, and deliberately not written to the public
+        // ledger — an unreadable repository is not a fact about the candidate, and a transient failure
+        // that repeats would otherwise fill the room with notices about a decision that is still fine.
+        this.audit.append({
+          roomId: input.roomId, type: "candidate.merge-approval-check-unavailable", actor: "you",
+          action: "main-merge-grant", outcome: "failed",
+          detail: {
+            approvalId: input.approvalId,
+            reason: "MAIN_MERGE_APPROVAL_BINDING_CHECK_FAILED",
+            unverified: error.unverified,
+            approvalInvalidated: false,
+            mainMutation: false,
+          },
+        });
       }
       throw error;
     }
@@ -1233,10 +1256,18 @@ export class CollaborationService {
    *
    * The audit entry carries the whole story, including whether the owner had actually granted it: a
    * decision that lapsed unnoticed and a request nobody answered are different failures. The room
-   * ledger is public and read by agents, so it names the moved fields and states plainly that nothing
-   * was destroyed and main was not touched — and carries no path, no id and no secret.
+   * ledger is public and read by agents, so it names the moved fields and states plainly that this
+   * invalidation destroyed nothing and did not touch main — and carries no path, no id and no secret.
+   *
+   * What neither of them says is that the candidate, its checkpoints and its recovery ref still
+   * exist. This path never looks, so it cannot know: it observes one approval row and writes one
+   * state transition. An earlier version asserted `candidateRetained: true` and printed「完整保留」
+   * as constants, which read as observations and were provably wrong — deleting the recovery ref and
+   * then triggering a drift still produced a record claiming the recovery point was intact. The
+   * claim is therefore scoped to the only thing this code actually did.
    */
   #recordMergeApprovalDrift(event: MergeApprovalDriftEvent): void {
+    const unverified = event.unverified ?? [];
     try {
       this.audit.append({
         roomId: event.roomId, taskId: event.taskId,
@@ -1246,7 +1277,10 @@ export class CollaborationService {
         detail: {
           approvalId: event.approvalId,
           reason: "MAIN_MERGE_APPROVAL_BINDING_CHANGED",
+          // Compared-and-moved only. Values the check could not read are reported separately, because
+          // this array is also what the public ledger prints and what an owner reads as "what broke".
           changed: event.changed,
+          ...(unverified.length > 0 ? { unverified } : {}),
           observedOn: event.observedOn,
           previousState: event.previousState,
           ownerHadGranted: event.wasGranted,
@@ -1254,16 +1288,18 @@ export class CollaborationService {
           mainHead: event.mainHead,
           previewDigest: event.previewDigest,
           detectedAt: event.at,
-          candidateRetained: true,
-          checkpointsRetained: true,
-          recoveryRefRetained: true,
+          // Scoped to this action, not to the current state of the world: the invalidation path runs
+          // no Git command and writes nothing but the approval row.
+          deletedByThisInvalidation: "nothing",
           mainMutation: false,
         },
       });
     } catch { /* the durable invalidation has already committed and remains the primary record */ }
     this.#candidateLedger(event.roomId, event.taskId,
-      `${event.wasGranted ? "Owner 已核准的 merge" : "待核准的 merge"}已因綁定漂移自動失效`
-        + `（${event.changed.join("、")}）；candidate、checkpoint 與復原點完整保留，main 未修改，`
+      `${event.wasGranted ? "Owner 已核准的 merge" : "待核准的 merge"} 已因綁定漂移自動失效`
+        + `（${event.changed.join("、")}）`
+        + (unverified.length > 0 ? `；本次另有無法讀取、因此未比對的欄位（${unverified.join("、")}）` : "")
+        + `；這次失效沒有刪除 candidate、checkpoint 或復原點，也沒有修改 main，`
         + `請重新 preview 後再詢問。`,
       `candidate:merge-approval:${event.approvalId}:invalidated`);
   }

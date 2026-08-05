@@ -3,7 +3,7 @@ import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rename, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -591,7 +591,12 @@ test("a drift invalidation is written to the audit chain and the room ledger, an
   assert.equal(detail.ownerHadGranted, true);
   assert.equal(detail.previousState, "approved");
   assert.equal(detail.mainMutation, false);
-  assert.equal(detail.recoveryRefRetained, true);
+  // Scoped to the action, not asserted about the world: this path never looked at the candidate, the
+  // checkpoints or the recovery ref, so it does not claim they are still there.
+  assert.equal(detail.deletedByThisInvalidation, "nothing");
+  assert.equal(detail.candidateRetained, undefined);
+  assert.equal(detail.checkpointsRetained, undefined);
+  assert.equal(detail.recoveryRefRetained, undefined);
   assert.equal(service.audit.verify(), true);
   assert.ok(service.audit.list({ roomId: "demo" }).length > before);
 
@@ -622,4 +627,274 @@ test("a drift invalidation is written to the audit chain and the room ledger, an
       .filter((event) => event.type === "candidate.merge-approval-invalidated").length,
     1,
   );
+});
+
+// ---------------------------------------------------------------------------------------------
+// Real transient failures. Not a tampered row, not a stubbed clock: an actual `chmod`, an actual
+// directory that leaves the filesystem and comes back, an actual failure to launch git.
+//
+// This is the case the earlier implementation got exactly backwards. Both of its `catch` blocks
+// turned any exception into "this value changed", so a repository that was unreadable for one
+// polling tick reported eight moved fields — none of which had moved — and wrote the approval to
+// terminal `invalidated` with its token cleared. Nothing brought it back afterwards. The assertions
+// that matter here are therefore the ones AFTER the recovery: the decision must still be spendable.
+// ---------------------------------------------------------------------------------------------
+
+interface TransientCase {
+  name: string;
+  /** Fields the check must report as unread. Never as changed. */
+  unverified: string[];
+  break: (fixture: Ready) => Promise<() => Promise<void>>;
+}
+
+const TRANSIENT_CASES: TransientCase[] = [
+  {
+    name: "main's .git is momentarily unreadable (a permission change or a mount blip)",
+    unverified: ["mainBranch", "mainHead", "mainDirtyFingerprint", "mainIgnoredFingerprint", "recoveryRef"],
+    break: async (fixture) => {
+      const dotGit = join(fixture.source, ".git");
+      await chmod(dotGit, 0o000);
+      return async () => await chmod(dotGit, 0o755);
+    },
+  },
+  {
+    name: "the candidate worktree leaves the filesystem and comes back (an external volume blip)",
+    unverified: ["candidateWorktree", "candidateHead", "candidateWorktreeClean"],
+    break: async (fixture) => {
+      const moved = `${fixture.task.candidatePath}.away`;
+      await rename(fixture.task.candidatePath, moved);
+      return async () => await rename(moved, fixture.task.candidatePath);
+    },
+  },
+  {
+    name: "git cannot be launched at all (a spawn failure)",
+    unverified: [
+      "candidateWorktree", "candidateHead", "candidateWorktreeClean",
+      "mainBranch", "mainHead", "mainDirtyFingerprint", "mainIgnoredFingerprint", "recoveryRef",
+    ],
+    break: async () => {
+      const previous = process.env.PATH;
+      process.env.PATH = join(tmpdir(), `orchestratory-no-git-${randomUUID()}`);
+      return async () => {
+        if (previous === undefined) delete process.env.PATH;
+        else process.env.PATH = previous;
+      };
+    },
+  },
+];
+
+test("a real transient failure refuses the action without burning the owner's decision", async (t) => {
+  for (const transient of TRANSIENT_CASES) {
+    await t.test(transient.name, async (child) => {
+      const fixture = await ready(child);
+      const approval = await raise(fixture);
+      const token = await grant(fixture, approval);
+      const intact = await preserved(fixture);
+      assert.equal(storedApproval(fixture.path, approval.id).state, "approved");
+
+      const heal = await transient.break(fixture);
+      try {
+        // Every observation surface reports the same thing: nothing was compared, so nothing is
+        // claimed. `changed` is empty because emptiness is the honest answer — no bound value was
+        // seen to move — and the fields that could not be read are named separately.
+        for (const surface of ["candidate-status", "merge-approval-list", "merge-approval-inspect"] as const) {
+          const observed = await observe(fixture, approval.id, surface);
+          assert.equal(observed.state, "approved", `${surface} must not invalidate`);
+          assert.equal(observed.refusal, undefined);
+          assert.equal(observed.bindingCheck?.checked, false);
+          assert.equal(observed.bindingCheck?.valid, false);
+          assert.deepEqual(observed.bindingCheck?.changed, []);
+          assert.equal(observed.bindingCheck?.unavailable, "MAIN_MERGE_APPROVAL_BINDING_CHECK_FAILED");
+          for (const field of transient.unverified) {
+            assert.ok(observed.bindingCheck?.unverified?.includes(field),
+              `expected ${field} in unverified ${JSON.stringify(observed.bindingCheck?.unverified)}`);
+          }
+        }
+        // Nothing was reported to the audit chain either: there was no invalidation to report.
+        assert.deepEqual(fixture.drift, []);
+        // The durable row is untouched, token and all — which is what makes recovery possible.
+        const held = new DatabaseSync(fixture.path);
+        const row = held.prepare("SELECT state,token_hash,refusal_json FROM candidate_merge_approvals WHERE id=?")
+          .get(approval.id) as { state: string; token_hash: string | null; refusal_json: string | null };
+        held.close();
+        assert.equal(row.state, "approved");
+        assert.equal(row.refusal_json, null);
+        assert.notEqual(row.token_hash, null);
+
+        // Acting on it now is refused, under a code of its own that is not the drift code. The
+        // action fails closed; the decision does not.
+        await assert.rejects(
+          fixture.registry.consumeMainMerge({
+            approvalId: approval.id, token, action: MERGE_APPROVAL_GRANT,
+            taskId: fixture.task.taskId, roomId: "demo", mainPath: fixture.source,
+          }),
+          (error: Error) => {
+            assert.match(error.message, /^MAIN_MERGE_APPROVAL_BINDING_CHECK_FAILED:/u);
+            assert.equal(error.name, "MergeApprovalBindingUnverifiableError");
+            return true;
+          },
+        );
+        assert.equal(storedApproval(fixture.path, approval.id).state, "approved");
+      } finally {
+        await heal();
+      }
+
+      // Recovered. The comparison runs, everything still matches, and the owner's decision is
+      // reported valid again by the same surface that could not read it a moment ago.
+      const recovered = await observe(fixture, approval.id, "merge-approval-inspect");
+      assert.equal(recovered.state, "approved");
+      assert.deepEqual(recovered.bindingCheck, { checked: true, valid: true, changed: [] });
+      assert.deepEqual(fixture.drift, []);
+
+      // The assertion the whole fix exists for: it can still be spent.
+      const consumed = await fixture.registry.consumeMainMerge({
+        approvalId: approval.id, token, action: MERGE_APPROVAL_GRANT,
+        taskId: fixture.task.taskId, roomId: "demo", mainPath: fixture.source,
+      });
+      assert.equal(consumed.grants, MERGE_APPROVAL_GRANT);
+      assert.equal(consumed.binding.previewDigest, approval.binding.previewDigest);
+      // And the failure disturbed nothing it was forbidden to disturb.
+      assert.deepEqual(await preserved(fixture), intact);
+    });
+  }
+});
+
+test("a transient failure at grant leaves the owner's question open instead of destroying it", async (t) => {
+  const fixture = await ready(t);
+  const approval = await raise(fixture);
+  const dotGit = join(fixture.source, ".git");
+
+  await chmod(dotGit, 0o000);
+  try {
+    await assert.rejects(
+      fixture.registry.grantMainMerge({
+        approvalId: approval.id, roomId: "demo", mainPath: fixture.source,
+        previewDigest: approval.binding.previewDigest,
+        confirmation: MERGE_APPROVAL_CONFIRMATION, decidedBy: "local-web",
+      }),
+      (error: Error) => {
+        assert.equal(error.name, "MergeApprovalBindingUnverifiableError");
+        assert.match(error.message, /^MAIN_MERGE_APPROVAL_BINDING_CHECK_FAILED:/u);
+        // The code is a bare code and the names are field names; no path can ride out on it.
+        assert.equal(error.message.includes(fixture.source), false);
+        return true;
+      },
+    );
+    // Still `requested`: not granted, and not invalidated either.
+    const held = storedApproval(fixture.path, approval.id);
+    assert.equal(held.state, "requested");
+    assert.equal(held.decidedBy, null);
+    assert.equal(held.refusal, undefined);
+  } finally {
+    await chmod(dotGit, 0o755);
+  }
+
+  // The owner answers the same question again once the repository is readable, and it works.
+  const token = await grant(fixture, approval);
+  assert.equal(storedApproval(fixture.path, approval.id).state, "approved");
+  const consumed = await fixture.registry.consumeMainMerge({
+    approvalId: approval.id, token, action: MERGE_APPROVAL_GRANT,
+    taskId: fixture.task.taskId, roomId: "demo", mainPath: fixture.source,
+  });
+  assert.equal(consumed.grants, MERGE_APPROVAL_GRANT);
+  assert.deepEqual(fixture.drift, []);
+});
+
+test("a value that could not be read is never reported as a value that moved", async (t) => {
+  const fixture = await ready(t);
+  const approval = await raise(fixture);
+  await grant(fixture, approval);
+  // Real drift on the candidate side, and at the same time a main repository that cannot be read.
+  // The refusal must name the one that was actually compared and keep the rest out of `changed`:
+  // this array is copied verbatim into the audit chain and the public room ledger, and telling the
+  // room that main's HEAD moved when main never moved is a false statement about a shared record.
+  const moved = `${fixture.task.candidatePath}.away`;
+  await rename(fixture.task.candidatePath, moved);
+  await commit(fixture.source, "main-side.txt", "main moved on\n", "main moves");
+
+  const observed = await observe(fixture, approval.id, "merge-approval-inspect");
+  assert.equal(observed.state, "invalidated");
+  assert.deepEqual(observed.refusal?.changed, ["mainHead"]);
+  assert.deepEqual(observed.refusal?.unverified,
+    ["candidateWorktree", "candidateHead", "candidateWorktreeClean"]);
+  assert.deepEqual(observed.bindingCheck?.changed, ["mainHead"]);
+  assert.deepEqual(observed.bindingCheck?.unverified,
+    ["candidateWorktree", "candidateHead", "candidateWorktreeClean"]);
+  // The event the audit chain and the ledger are built from carries the same separation.
+  assert.deepEqual(fixture.drift[0]?.changed, ["mainHead"]);
+  assert.deepEqual(fixture.drift[0]?.unverified,
+    ["candidateWorktree", "candidateHead", "candidateWorktreeClean"]);
+  await rename(moved, fixture.task.candidatePath);
+});
+
+test("a missing recovery ref is drift, and an unreadable repository is not", async (t) => {
+  const fixture = await ready(t);
+  const approval = await raise(fixture);
+  await grant(fixture, approval);
+
+  // Deleting the ref really is drift: git answers, and the answer is that the ref is gone. The
+  // three-answer form must not have made a genuinely missing recovery point invisible.
+  await execFileAsync("git", ["update-ref", "-d", approval.binding.recoveryRef], { cwd: fixture.source });
+  const observed = await observe(fixture, approval.id, "merge-approval-inspect");
+  assert.equal(observed.state, "invalidated");
+  assert.ok(observed.refusal?.changed.includes("recoveryRef"));
+  assert.equal(observed.refusal?.unverified, undefined);
+});
+
+// The reviewer's finding, as a test: delete the recovery point, then let a drift be recorded, and
+// read what the audit chain and the public ledger say happened.
+test("the invalidation record describes what it did, not the state of things it never looked at", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "orchestratory-merge-drift-claims-"));
+  const source = join(root, "source");
+  const data = join(root, "data");
+  await mkdir(source);
+  await mkdir(data, { mode: 0o700 });
+  await execFileAsync("git", ["init", "-b", "main"], { cwd: source });
+  await writeFile(join(source, "README.md"), "committed main\n", "utf8");
+  await execFileAsync("git", ["add", "README.md"], { cwd: source });
+  await execFileAsync("git", [...author, "commit", "-m", "initial"], { cwd: source });
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+
+  const service = new CollaborationService(data);
+  t.after(() => service.close());
+  service.ledger.createRoom("demo", source);
+  const task = await service.candidates.start({
+    actor: "codex1", clientRequestId: key(), roomId: "demo", mainPath: source, task: "claims",
+  });
+  await commit(task.candidatePath, "candidate.txt", "candidate\n", "candidate work");
+  await service.candidates.complete({
+    actor: "codex1", clientRequestId: key(), taskId: task.taskId, roomId: "demo",
+    mainPath: source, summary: "ready",
+  });
+  const preview = await service.candidates.previewMainMerge({ taskId: task.taskId, roomId: "demo", mainPath: source });
+  const approval = await service.candidates.requestMainMerge({
+    actor: "codex1", clientRequestId: key(), taskId: task.taskId, roomId: "demo",
+    mainPath: source, completionId: preview.completionId, previewDigest: preview.previewDigest,
+  });
+  await service.grantMainMerge({
+    roomId: "demo", workspace: source, approvalId: approval.id,
+    previewDigest: approval.binding.previewDigest,
+    confirmation: MERGE_APPROVAL_CONFIRMATION, decidedBy: "local-web",
+  });
+
+  // The recovery point is really gone before anything observes the approval.
+  await execFileAsync("git", ["update-ref", "-d", approval.binding.recoveryRef], { cwd: source });
+  const listed = await service.listMergeApprovals({ roomId: "demo", workspace: source });
+  assert.equal(listed.find((entry) => entry.id === approval.id)?.state, "invalidated");
+
+  const record = service.audit.list({ roomId: "demo" })
+    .find((event) => event.type === "candidate.merge-approval-invalidated");
+  const detail = record?.detail as Record<string, unknown>;
+  assert.deepEqual(detail.changed, ["recoveryRef"]);
+  // No constant claiming a recovery point that demonstrably does not exist.
+  assert.equal(detail.recoveryRefRetained, undefined);
+  assert.equal(detail.deletedByThisInvalidation, "nothing");
+  const line = service.ledger.getByIdempotencyKey(`candidate:merge-approval:${approval.id}:invalidated`);
+  assert.ok(line);
+  assert.equal(line.text.includes("完整保留"), false);
+  assert.match(line.text, /這次失效沒有刪除/u);
+  // And the spacing defect the review flagged: a granted approval reads "merge 已因", not "merge已因".
+  assert.match(line.text, /Owner 已核准的 merge 已因/u);
+  assert.equal(service.audit.verify(), true);
+  assert.equal(service.ledger.verifyChain("demo"), true);
 });
