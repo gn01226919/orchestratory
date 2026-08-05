@@ -98,7 +98,34 @@ Orchestratory 承諾：
 - Push、公開 repository、release、package publish、deploy、付費 API、寄信或其他遠端寫入需要與 main
   merge 分離的精確授權。
 
-## 10. Persistence、audit 與 retention
+## 10. 本機模型 endpoint（local provider）
+
+- 本機模型 adapter 預設不註冊；必須由 Owner 明確提供 base URL 才存在，未設定時查詢一律 fail closed。
+- Endpoint 只接受 `http://127.0.0.1:<port>`、`http://[::1]:<port>` 與 `http://localhost:<port>`；
+  `localhost` 會被固定成 `127.0.0.1`，避免 hosts 檔或 resolver 把連線移出 loopback。
+- 非 loopback host、非 http scheme、帶帳號密碼的 URL、含 path/query/fragment 的 URL 與缺少 port 一律拒絕。
+- 不跟隨 redirect：任何 3xx 直接以 `LOCAL_ENDPOINT_REDIRECT_DENIED` 失敗，避免被導向 loopback 之外。
+- 每次呼叫只有一次嘗試，具明確 timeout 與輸出 byte 上限，無重試、無串流、無 workspace 寫入權限。
+- 不載入、不傳送、不保存任何 credential；本機模型不進入 API 模式與計費預算路徑。
+- 傳輸錯誤只以穩定的 `LOCAL_*` 代碼回報，不外洩原始 socket／errno 字串；探索失敗不得退化成空模型清單。
+
+### 10.1 無金額成本路徑（no-cost path）
+
+- 「無金額成本」必須由 provider 明確宣告，不得因政策查表落空而預設取得。宣告表
+  （`src/providers/billing.ts`）對 `ProviderId` 是完整的：新增 provider 而未分類即編譯失敗；
+  執行期查不到宣告一律丟 `PROVIDER_BILLING_MODEL_UNDECLARED`，不得視為免費。
+- `no-cost` 只跳過「金額預留」一項。以下非金額硬上限對本機呼叫完全不變：
+  呼叫數（soft/hard `maxProviderCalls` 與跨程序 24 小時 governor ceiling）、輪數 `maxRounds`、
+  單次 timeout 與 workflow 絕對期限、`maxConcurrentWorkflows`、連續失敗 `maxConsecutiveErrors`、
+  總輸出 byte 上限，以及共享 kill switch／kill epoch。
+- 宣告為 `no-cost` 的 provider 不得以 `authMode: "api"` 執行；出現即 fail closed
+  （`NO_COST_PROVIDER_HAS_NO_API_MODE`），不是免預留的通行證。
+- 使用量必須誠實：無金額成本的呼叫一律記錄「明確的 0」與 `billing` 標記，不得留空欄位讓讀者
+  誤讀為「尚未量測」。計費 provider 未回報金額時維持空缺，不得偽裝成量測到的 0。
+- `local` 不啟動子程序，因此不佔 `maxSubprocesses` 名額；其資源上限由呼叫數與時間上限承擔。
+  本機模型仍會消耗 CPU／RAM／磁碟，本產品不宣稱對其有資源配額控制。
+
+## 11. Persistence、audit 與 retention
 
 - 只保存 Room/thread/task/candidate/approval/promotion 所需的最小 metadata。
 - 不保存 raw reasoning、provider session、完整環境或無必要 terminal capture。
@@ -106,7 +133,7 @@ Orchestratory 承諾：
 - Audit hash 能偵測意外變更，但同帳號寫入者可重算；不得宣稱為不可否認簽章。
 - Candidate/recovery retention 由 Owner 控制，清理前顯示完整 preview。
 
-## 11. 供應鏈與發布
+## 12. 供應鏈與發布
 
 - Dependency、CI action 與 release artifact 維持 pin、SBOM、secret/history scan 與人工 release gate。
 - 正式 LaunchAgent 只能指向 SHA-256 已驗證、實體安裝的 compiled runtime；拒絕 TypeScript checkout、
@@ -116,7 +143,7 @@ Orchestratory 承諾：
 - Main merge approval 不構成 Git push、GitHub PR、公開 repository 或 release 授權。
 - 文件必須同時標示 target spec、runtime status 與殘餘風險。
 
-## 12. 安全事件
+## 13. 安全事件
 
 發現未經流程的 main 修改、candidate/recovery 遺失、identity spoof、approval replay 或秘密洩漏時：
 

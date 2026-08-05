@@ -7,6 +7,7 @@ import type {
   WorkspaceMode,
 } from "../types.ts";
 import { sanitizeTerminal } from "../security/redact.ts";
+import { isNoCostProvider } from "../providers/billing.ts";
 
 export type DashboardView = "activity" | "messages" | "diff" | "tests" | "usage";
 
@@ -179,7 +180,9 @@ export function renderTerminalDashboard(
 
   for (const assignment of input.assignments) {
     const role = assignment.role.padEnd(8, " ");
-    const auth = assignment.provider === "fake" ? "no quota" : assignment.authMode;
+    // Declared no-cost providers must not read as "subscription": that would imply the
+    // call spends quota it never touches.
+    const auth = isNoCostProvider(assignment.provider) ? "no cost" : assignment.authMode;
     lines.push(
       `  ${paint("◆", ANSI.magenta, color)} ${role}  ${clip(`${assignment.provider}/${assignment.model}`, assignmentWidth).padEnd(assignmentWidth, " ")}  ${assignmentState(assignment, input.events, color)}  ${paint(auth, ANSI.dim, color)}`,
     );
@@ -220,6 +223,13 @@ export function renderTerminalDashboard(
 
 export function usageDetailLines(input: TerminalDashboardInput): string[] {
   const counters = input.record.counters;
+  const noCost = [
+    ...new Set(
+      input.assignments
+        .filter((assignment) => isNoCostProvider(assignment.provider))
+        .map((assignment) => assignment.provider),
+    ),
+  ];
   return [
     `Rounds                 ${counters.rounds} / ${input.softLimits.maxRounds} soft / ${input.hardLimits.maxRounds} hard`,
     `Provider calls         ${counters.providerCalls} / ${input.softLimits.maxProviderCalls} soft / ${input.hardLimits.maxProviderCalls} hard`,
@@ -227,5 +237,9 @@ export function usageDetailLines(input: TerminalDashboardInput): string[] {
     `Consecutive errors     ${counters.consecutiveErrors} / ${input.hardLimits.maxConsecutiveErrors} hard`,
     `Output                 ${formatBytes(counters.outputBytes)} / ${formatBytes(input.hardLimits.maxOutputBytes)} per call`,
     `Reserved API budget    $${counters.apiBudgetUsd.toFixed(2)} / $${input.hardLimits.maxApiBudgetUsdPerRun.toFixed(2)} hard`,
+    // Spelled out so $0.00 reads as a measured zero rather than an unmeasured blank.
+    ...(noCost.length > 0
+      ? [`No-cost providers      ${noCost.join(", ")} · measured cost $0.00 (no monetary reservation)`]
+      : []),
   ];
 }

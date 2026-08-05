@@ -9,7 +9,7 @@ export interface ProviderCapabilities {
   canWriteSubscription: boolean;
   canWriteApi: boolean;
   apiConfigured: boolean;
-  modelDiscovery: "cli" | "manual" | "static";
+  modelDiscovery: "cli" | "manual" | "static" | "endpoint";
   suggestedModels: string[];
   subscriptionModels: string[];
   apiModels: string[];

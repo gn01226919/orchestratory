@@ -7,9 +7,10 @@ import type {
 } from "../types.ts";
 import { redact } from "../security/redact.ts";
 import { loadApiSecret } from "../security/secret-provider.ts";
+import { readBoundedJson } from "./bounded-json.ts";
 import type { ProviderAdapter, ProviderCapabilities } from "./provider.ts";
 
-type ApiProviderId = Exclude<ProviderId, "fake">;
+type ApiProviderId = Exclude<ProviderId, "fake" | "local">;
 
 const DEFINITIONS: Record<
   ApiProviderId,
@@ -85,29 +86,6 @@ function usage(provider: ApiProviderId, value: Record<string, unknown>): {
     ...(inputTokens !== undefined ? { inputTokens } : {}),
     ...(outputTokens !== undefined ? { outputTokens } : {}),
   };
-}
-
-async function readBoundedJson(response: Response, limitBytes: number, controller: AbortController): Promise<unknown> {
-  if (!response.body) throw new Error("API_RESPONSE_BODY_MISSING");
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let bytes = 0;
-  while (true) {
-    const part = await reader.read();
-    if (part.done) break;
-    bytes += part.value.byteLength;
-    if (bytes > limitBytes) {
-      controller.abort();
-      throw new Error("API_OUTPUT_LIMIT_REACHED");
-    }
-    chunks.push(part.value);
-  }
-  const output = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8");
-  try {
-    return JSON.parse(output) as unknown;
-  } catch {
-    throw new Error("API_RESPONSE_JSON_INVALID");
-  }
 }
 
 export function estimateMaximumApiCostUsd(policy: ApiModelPolicy, prompt: string): number {
@@ -205,7 +183,7 @@ export class ApiProvider implements ProviderAdapter {
         controller.abort();
         throw new Error(`API_HTTP_STATUS:${response.status}`);
       }
-      const value = asRecord(await readBoundedJson(response, request.outputLimitBytes, controller));
+      const value = asRecord(await readBoundedJson(response, request.outputLimitBytes, controller, "API"));
       const text = redact(responseText(this.#id, value));
       const measuredUsage = usage(this.#id, value);
       const estimatedCostUsd =
