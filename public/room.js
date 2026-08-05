@@ -2836,9 +2836,18 @@ function mergeApprovalBlockers(approval, binding) {
   // and reporting the second as the first would tell the owner a snapshot changed when nothing did.
   if (binding && binding.unavailable) {
     blockers.push(`無法比對綁定值（${binding.unavailable}），因此不能確認這份核准仍描述你正在看的東西。 · The binding check could not be completed, so this approval cannot be confirmed as current.`);
-  } else if (binding && binding.valid === false && (binding.changed || []).length > 0) {
+  } else if (binding && binding.valid === false) {
     const changed = (binding.changed || []).map(bindingFieldLabel);
-    blockers.push(`綁定值已改變，這份核准只適用於它綁定的 snapshot：${changed.join("、")} · Bound values changed; this approval no longer describes what you are looking at.`);
+    // A named field is better, but "not valid with nothing named" must never go quiet:
+    // the server reports exactly that for an approval it already considers expired, and
+    // a browser clock that has not ticked yet still shows state "requested". Requiring a
+    // named field to raise a blocker left that combination with no blocker at all, and an
+    // enabled merge button, on the last screen before main is written.
+    blockers.push(
+      changed.length > 0
+        ? `綁定值已改變，這份核准只適用於它綁定的 snapshot：${changed.join("、")} · Bound values changed; this approval no longer describes what you are looking at.`
+        : "伺服器判定這份核准的綁定不再有效，但沒有指出是哪一個欄位；在查清楚之前不能核准。 · The server reports this approval's binding as no longer valid without naming a field.",
+    );
   }
   if (preview.mergeable === false) {
     blockers.push(`模擬 merge 有內容衝突，共 ${(preview.mergeConflicts || []).length} 個檔案。 · The simulated merge conflicts.`);
