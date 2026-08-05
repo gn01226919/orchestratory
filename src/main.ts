@@ -142,6 +142,55 @@ export async function daemonRuntimeEntry(
   return entry;
 }
 
+/**
+ * Renders the orphan recovery-ref report `orchestrator candidates orphan-refs` prints.
+ *
+ * Pure and read-only on purpose. A recovery ref is the only thing standing between an owner and a
+ * candidate that cannot be rebuilt, so this command exists to make accumulated refs VISIBLE and
+ * deliberately offers no way to remove one: deleting refs from the owner's canonical repository is a
+ * destructive Git action, and the project's deletion rule routes those through a staged,
+ * human-confirmed path rather than a CLI flag.
+ *
+ * Nothing outside the ref namespace is echoed. Ref names and object ids are the only repository
+ * content that reaches the output; the workspace path is the canonicalised one the caller supplied
+ * and had allowlisted, and no candidate row's stored paths, task text or actor names are read.
+ */
+export function describeOrphanRecoveryRefs(input: {
+  mainPath: string;
+  orphans: ReadonlyArray<{ ref: string; head: string }>;
+  /** The scan's own upper bound; reaching it means "there may be more", never "there are this many". */
+  limit: number;
+  /** Status of the candidate task named by a ref, when one is still on record. */
+  taskStatus: (taskId: string) => string | undefined;
+}): string {
+  const namespace = "refs/orchestratory/checkpoints";
+  const lines: string[] = [];
+  if (input.orphans.length === 0) {
+    return `No orphan recovery refs under ${namespace} in ${input.mainPath}.\n`;
+  }
+  const truncated = input.orphans.length >= input.limit;
+  lines.push(
+    `Orphan recovery refs under ${namespace} in ${input.mainPath}: ${input.orphans.length}`
+      + (truncated ? ` (scan limit ${input.limit} reached — more may exist)` : ""),
+  );
+  lines.push("An orphan is a checkpoint ref with no owning checkpoint row in the candidate ledger,");
+  lines.push("so nothing in the product will ever consume or update it again.");
+  lines.push("Listed only. Removing a recovery ref is a destructive Git action and is not offered here.");
+  for (const orphan of input.orphans) {
+    const parts = orphan.ref.split("/");
+    const taskId = parts[parts.length - 2] ?? "";
+    const checkpointId = parts[parts.length - 1] ?? "";
+    const status = input.taskStatus(taskId);
+    lines.push("");
+    lines.push(orphan.ref);
+    lines.push(`  commit      ${orphan.head}`);
+    lines.push(`  task        ${taskId} (${status === undefined ? "no candidate row on record" : `candidate status: ${status}`})`);
+    lines.push(`  checkpoint  ${checkpointId} (no checkpoint row on record)`);
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
 export async function main(args = process.argv.slice(2)): Promise<void> {
   const command = args[0] ?? "hybrid";
   if (command === "--help" || command === "-h" || command === "help") {
@@ -336,6 +385,34 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       }
       await writeFileAsync(pendingPath, "[]", { encoding: "utf8", mode: 0o600 });
       stdout.write("申請清單已清空。重新整理 GUI 即可看到新專案（伺服器會自動重載授權清單）。\n");
+      return;
+    }
+    if (command === "candidates" && args[1] === "orphan-refs") {
+      const requested = args[2];
+      if (!requested) throw new Error("CANDIDATE_ORPHAN_REFS_PATH_REQUIRED");
+      // The allowlist decides, not the caller: an empty allowlist fails closed and a path outside it
+      // is refused, so this read can never be pointed at an arbitrary repository on the machine.
+      const mainPath = await app.workspaces.assertAllowed(requested);
+      const [{ CollaborationService }, { MAX_ORPHAN_RECOVERY_REFS }] = await Promise.all([
+        import("./core/collaboration-service.ts"),
+        import("./core/candidate-registry.ts"),
+      ]);
+      const collaboration = new CollaborationService(app.store.dataDirectory);
+      try {
+        const orphans = await collaboration.candidates.orphanRecoveryRefs(mainPath);
+        stdout.write(describeOrphanRecoveryRefs({
+          mainPath,
+          orphans,
+          limit: MAX_ORPHAN_RECOVERY_REFS,
+          // A ref name is repository content, so the id inside it is untrusted input to the lookup.
+          // A malformed one is simply not a task this ledger knows, never a reason to fail the report.
+          taskStatus: (taskId) => {
+            try { return collaboration.candidates.get(taskId)?.status; } catch { return undefined; }
+          },
+        }));
+      } finally {
+        collaboration.close();
+      }
       return;
     }
     if (command === "data" && args[1] === "inventory") {

@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { chmod, cp, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -1677,9 +1678,11 @@ test("a candidate key that recorded a failure demands a new key and still has a 
   assert.equal(registry.inventory().checkpoints, 1);
 
   // complete cannot be driven onto the ref-conflict path the way checkpoint can: once a completion
-  // exists, its retry is refused by #activeScoped (src/core/candidate-registry.ts:684, rejecting at
-  // src/core/candidate-registry.ts:999) long before any ref is written. A ref occupying the task's
-  // whole namespace fails the identical call at the identical durable boundary instead.
+  // exists, its retry is refused by #activeScoped long before any ref is written. A ref occupying the
+  // task's whole namespace fails the identical call at the identical durable boundary instead — but
+  // git answers that one with the same undifferentiated CANDIDATE_GIT_COMMAND_FAILED it uses for a
+  // read-only ref store or a spawn that never happened, so it is NOT a verdict this module may
+  // record. The key stays retryable, and removing the obstruction lets that same key converge.
   const second = await registry.start({
     actor: "codex", clientRequestId: key(), roomId: "demo", mainPath: source, task: "recorded completion failure",
   });
@@ -1691,17 +1694,234 @@ test("a candidate key that recorded a failure demands a new key and still has a 
     roomId: "demo", mainPath: source, summary: "blocked recovery ref namespace",
   };
   await assert.rejects(registry.complete(completeInput), /CANDIDATE_GIT_COMMAND_FAILED/u);
-  assert.equal(storedRequest(path, completeInput.clientRequestId).state, "failed");
-  await assert.rejects(registry.complete(completeInput), /CANDIDATE_REQUEST_FAILED_RETRY_WITH_NEW_KEY/u);
-  assert.equal(storedRequest(path, completeInput.clientRequestId).state, "failed");
+  assert.equal(storedRequest(path, completeInput.clientRequestId).state, "pending");
+  // Refused, not silently accepted: the obstruction is still there, so the answer is the same real
+  // failure rather than a fabricated success.
+  await assert.rejects(registry.complete(completeInput), /CANDIDATE_GIT_COMMAND_FAILED/u);
+  assert.equal(storedRequest(path, completeInput.clientRequestId).state, "pending");
   assert.equal(registry.get(second.taskId)?.status, "active");
   await execFileAsync("git", ["update-ref", "-d", blocking], { cwd: source });
-  const completed = await registry.complete({
-    actor: "codex", clientRequestId: key(), taskId: second.taskId,
-    roomId: "demo", mainPath: source, summary: "a fresh key completes",
-  });
+  const completed = await registry.complete(completeInput);
   assert.equal(completed.task.status, "completed");
+  assert.equal(storedRequest(path, completeInput.clientRequestId).state, "succeeded");
   assert.equal(registry.inventory().checkpoints, 2);
+});
+
+test("a momentarily read-only ref store does not burn a candidate checkpoint key", async (t) => {
+  const { source, data } = await fixture(t);
+  const registry = new CandidateRegistry(data);
+  t.after(() => registry.close());
+  const path = registry.path;
+  const task = await registry.start({
+    actor: "codex", clientRequestId: key(), roomId: "demo", mainPath: source, task: "transient ref store",
+  });
+  const head = await commit(task.candidatePath, "work.txt", "work\n", "candidate work");
+
+  // A REAL transient failure, induced with chmod alone: main's loose ref store cannot be written, so
+  // `git update-ref` fails while every read the call makes before it still succeeds. No database row
+  // is touched to arrange this — a doctored row is a permanent corruption and would never reach the
+  // branch under test, which is exactly how a previous revision shipped this defect with a passing
+  // test vouching for it.
+  const refs = join(source, ".git", "refs");
+  await chmod(refs, 0o500);
+  t.after(async () => await chmod(refs, 0o700).catch(() => undefined));
+  const input = {
+    actor: "codex", clientRequestId: key(), taskId: task.taskId,
+    roomId: "demo", mainPath: source, summary: "written while the ref store was read-only",
+  };
+  await assert.rejects(registry.checkpoint(input), /CANDIDATE_GIT_COMMAND_FAILED/u);
+  // Fail closed on the action: nothing was recorded, and the caller was told so.
+  assert.equal(registry.inventory().checkpoints, 0);
+  assert.equal(registry.get(task.taskId)?.status, "active");
+  // Open on the key: `pending` is the honest record of an outcome nobody established.
+  assert.deepEqual(storedRequest(path, input.clientRequestId), { state: "pending", receipt: null });
+  // Still failing while the store is still read-only. The key surviving must not mean the next
+  // attempt is waved through on the strength of the earlier one.
+  await assert.rejects(registry.checkpoint(input), /CANDIDATE_GIT_COMMAND_FAILED/u);
+  assert.equal(registry.inventory().checkpoints, 0);
+
+  await chmod(refs, 0o700);
+  const recovered = await registry.checkpoint(input);
+  assert.equal(recovered.taskId, task.taskId);
+  assert.equal(recovered.candidateHead, head);
+  assert.equal(storedRequest(path, input.clientRequestId).state, "succeeded");
+  assert.equal(registry.inventory().checkpoints, 1);
+  assert.equal(countRequests(path), 2);
+  // One logical request, one durable artifact: the surviving key converged rather than duplicating.
+  assert.deepEqual(tableRows(path, "candidate_checkpoints").map((row) => row.id), [recovered.id]);
+});
+
+test("a momentarily read-only ref store does not burn a candidate completion key", async (t) => {
+  const { source, data } = await fixture(t);
+  const registry = new CandidateRegistry(data);
+  t.after(() => registry.close());
+  const path = registry.path;
+  const task = await registry.start({
+    actor: "codex", clientRequestId: key(), roomId: "demo", mainPath: source, task: "transient completion",
+  });
+  await commit(task.candidatePath, "work.txt", "work\n", "candidate work");
+
+  // The most expensive key in the system to burn: by this point the candidate is finished work whose
+  // only remaining step is the owner's merge decision. Under the old rule one chmod made it reachable
+  // solely through a new key — and a new key knows nothing about what the burnt one already wrote.
+  const refs = join(source, ".git", "refs");
+  await chmod(refs, 0o500);
+  t.after(async () => await chmod(refs, 0o700).catch(() => undefined));
+  const input = {
+    actor: "codex", clientRequestId: key(), taskId: task.taskId,
+    roomId: "demo", mainPath: source, summary: "completed while the ref store was read-only",
+  };
+  await assert.rejects(registry.complete(input), /CANDIDATE_GIT_COMMAND_FAILED/u);
+  assert.equal(registry.get(task.taskId)?.status, "active");
+  assert.equal(registry.get(task.taskId)?.completion, undefined);
+  assert.deepEqual(storedRequest(path, input.clientRequestId), { state: "pending", receipt: null });
+
+  await chmod(refs, 0o700);
+  const completed = await registry.complete(input);
+  assert.equal(completed.task.status, "completed");
+  assert.equal(completed.task.taskId, task.taskId);
+  assert.equal(storedRequest(path, input.clientRequestId).state, "succeeded");
+  assert.equal(registry.inventory().checkpoints, 1);
+  // And the converged completion is genuinely usable: it is the snapshot an owner can be asked about.
+  const preview = await registry.previewMainMerge({ taskId: task.taskId, roomId: "demo", mainPath: source });
+  assert.equal(preview.completionId, completed.completion.id);
+  assert.equal(preview.approvable, true);
+});
+
+test("a git that cannot be spawned at all leaves the candidate key retryable", async (t) => {
+  const { source, data } = await fixture(t);
+  const registry = new CandidateRegistry(data);
+  t.after(() => registry.close());
+  const path = registry.path;
+  const task = await registry.start({
+    actor: "codex", clientRequestId: key(), roomId: "demo", mainPath: source, task: "git off the path",
+  });
+  await commit(task.candidatePath, "work.txt", "work\n", "candidate work");
+
+  // The other half of "the machine, not the request": git is not merely failing, it cannot be found.
+  // resolveExecutable reads PATH on every call, so emptying it is a real spawn-resolution failure and
+  // not a stub — and it is the failure an external volume or a broken shell profile actually produces.
+  const realPath = process.env.PATH;
+  process.env.PATH = "";
+  t.after(() => { process.env.PATH = realPath; });
+  const input = {
+    actor: "codex", clientRequestId: key(), taskId: task.taskId,
+    roomId: "demo", mainPath: source, summary: "attempted with no git on PATH",
+  };
+  await assert.rejects(registry.checkpoint(input), /EXECUTABLE_NOT_FOUND:git/u);
+  assert.equal(registry.inventory().checkpoints, 0);
+  // This one aborts before the durable boundary, so the reservation is dropped outright rather than
+  // left `pending` — only the successful start's key remains. Either way the key is reusable; what
+  // must never happen is a recorded `failed` that no repair to the machine can undo.
+  assert.equal(countRequests(path), 1);
+
+  process.env.PATH = realPath;
+  const recovered = await registry.checkpoint(input);
+  assert.equal(recovered.taskId, task.taskId);
+  assert.equal(storedRequest(path, input.clientRequestId).state, "succeeded");
+  assert.equal(registry.inventory().checkpoints, 1);
+});
+
+test("a candidate whose activation failed keeps its worktree reachable by the same key", async (t) => {
+  const { root, source, data } = await fixture(t);
+  const registryModule = fileURLToPath(new URL("../src/core/candidate-registry.ts", import.meta.url));
+  const child = join(root, "half-created-start.mjs");
+  // A separate process, because that is what ships: each MCP seat is its own process, and the retry
+  // after a seat is restarted is the retry this recovery exists for. It also means the reservation
+  // this attempt leaves behind has a genuinely dead owner rather than a doctored pid.
+  await writeFile(child, [
+    "const [data, source, clientRequestId, base] = process.argv.slice(2);",
+    `const { CandidateRegistry } = await import(${JSON.stringify(registryModule)});`,
+    "const at = Number(base);",
+    "let reads = 0;",
+    // A clock that steps backwards between the candidate row and its activation: an NTP correction or
+    // a sleep/wake, the same hazard #beginRequest and #settleRequest already clamp for. The row is
+    // durably `creating`, the worktree and branch are fully built, and the UPDATE that would mark it
+    // `active` violates CHECK(updated_at_ms >= created_at_ms).
+    "const registry = new CandidateRegistry(data, { now: () => { reads += 1; return reads >= 4 ? at - 60000 : at; } });",
+    "try {",
+    "  const task = await registry.start({ actor: 'codex', clientRequestId, roomId: 'demo', mainPath: source,",
+    "    task: 'activation blocked by a backwards clock' });",
+    "  console.log(JSON.stringify({ threw: false, status: task.status }));",
+    "} catch (error) { console.log(JSON.stringify({ threw: String(error && error.message) })); }",
+    "registry.close();",
+    "",
+  ].join("\n"), { encoding: "utf8", mode: 0o600 });
+
+  const shared = key();
+  const base = Date.UTC(2026, 7, 6, 9, 0, 0);
+  const attempt = await execFileAsync(process.execPath, [child, data, source, shared, String(base)]);
+  assert.deepEqual(JSON.parse(attempt.stdout.trim()), {
+    threw: "CHECK constraint failed: updated_at_ms >= created_at_ms",
+  });
+
+  const path = join(data, "candidate-registry.sqlite");
+  // The precondition that makes this the expensive case: a complete, usable worktree exists, and the
+  // only handle entitled to it is the key that just failed.
+  assert.deepEqual(tableRows(path, "candidates").map((row) => row.status), ["creating"]);
+  assert.deepEqual(storedRequest(path, shared), { state: "pending", receipt: null });
+  assert.equal(
+    (await execFileAsync("git", ["worktree", "list", "--porcelain"], { cwd: source })).stdout
+      .split("\n").filter((line) => line.startsWith("worktree ")).length,
+    2,
+  );
+
+  // A new seat, past the recovery grace, retrying the SAME key. Before this fix the ledger answered
+  // CANDIDATE_REQUEST_FAILED_RETRY_WITH_NEW_KEY here and that worktree and branch were orphaned for good.
+  const registry = new CandidateRegistry(data, { now: () => base + 10 * 60_000 });
+  t.after(() => registry.close());
+  const converged = await registry.start({
+    actor: "codex", clientRequestId: shared, roomId: "demo", mainPath: source,
+    task: "activation blocked by a backwards clock",
+  });
+  assert.equal(converged.status, "active");
+  assert.equal(registry.inventory().tasks, 1);
+  assert.equal(countRequests(path), 1);
+  assert.deepEqual(
+    (await execFileAsync("git", [
+      "branch", "--list", "orchestratory/candidate-*", "--format=%(refname:short)",
+    ], { cwd: source })).stdout.split("\n").filter(Boolean),
+    [converged.candidateBranch],
+  );
+  // Reachable is not enough; the recovered candidate has to be usable.
+  await commit(converged.candidatePath, "after.txt", "after\n", "post-recovery work");
+  const checkpoint = await registry.checkpoint({
+    actor: "codex", clientRequestId: key(), taskId: converged.taskId,
+    roomId: "demo", mainPath: source, summary: "usable after a failed activation",
+  });
+  assert.equal(checkpoint.taskId, converged.taskId);
+});
+
+test("a candidate start blocked by a read-only worktree store is not judged failed", async (t) => {
+  const { source, data } = await fixture(t);
+  const registry = new CandidateRegistry(data);
+  t.after(() => registry.close());
+  const path = registry.path;
+  // A first candidate so `.git/worktrees` exists and only the next child directory is blocked.
+  await registry.start({
+    actor: "codex", clientRequestId: key(), roomId: "demo", mainPath: source, task: "first candidate",
+  });
+  const worktrees = join(source, ".git", "worktrees");
+  await chmod(worktrees, 0o500);
+  t.after(async () => await chmod(worktrees, 0o700).catch(() => undefined));
+
+  const input = {
+    actor: "codex", clientRequestId: key(), roomId: "demo", mainPath: source, task: "blocked worktree store",
+  };
+  await assert.rejects(registry.start(input), /WORKTREE_GIT_COMMAND_FAILED/u);
+  // Nothing here establishes that this request failed — only that this attempt could not finish. The
+  // half-created row says exactly that, and the key is still the one entitled to whatever it owns.
+  assert.deepEqual(storedRequest(path, input.clientRequestId), { state: "pending", receipt: null });
+  assert.deepEqual(
+    (await registry.status({ roomId: "demo", mainPath: source })).map((task) => task.status).sort(),
+    ["active", "creating"],
+  );
+  await chmod(worktrees, 0o700);
+  // Retried inside the same live seat the answer is "wait for the recovery", never the terminal
+  // verdict that would force a second candidate for one logical create.
+  await assert.rejects(registry.start(input), /CANDIDATE_REQUEST_RECOVERING/u);
+  assert.deepEqual(storedRequest(path, input.clientRequestId), { state: "pending", receipt: null });
+  assert.equal(registry.inventory().tasks, 2);
 });
 
 test("a succeeded candidate request is never demoted by a later failure verdict", async (t) => {
