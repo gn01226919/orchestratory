@@ -20,6 +20,14 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
  * reminder, not coverage — a DOM test runner would be the real fix, and that is a new
  * dependency, so it is the owner's call (pending decision D-006).
  */
+const ACCEPTED_APPLY_BACK_FUNCTIONS = [
+  "applyBackRisk",
+  "applyBackScrolledToBottom",
+  "applyBackBlockers",
+  "applyBackGate",
+  "formatApplyBackCountdown",
+] as const;
+
 const ACCEPTED_FUNCTIONS = [
   "formatCountdown",
   "tickMergeApprovalTtl",
@@ -32,36 +40,48 @@ const ACCEPTED_FUNCTIONS = [
   "closeMergeApprovalDialog",
 ] as const;
 
-function acceptedSource(): string {
-  const source = readFileSync(join(root, "public", "room.js"), "utf8");
-  return ACCEPTED_FUNCTIONS.map((name) => {
+function acceptedSource(file: string, names: readonly string[]): string {
+  const source = readFileSync(join(root, "public", file), "utf8");
+  return names.map((name) => {
     // Top-level declarations in this file start at column 0 and end with a closing
     // brace at column 0, so the first such brace terminates the body.
     const pattern = new RegExp(String.raw`^function ${name}\([\s\S]*?^\}$`, "mu");
     const found = pattern.exec(source);
     assert.ok(
       found,
-      `${name}() is gone from public/room.js. If the dialog was restructured, re-run the ` +
+      `${name}() is gone from public/${file}. If the dialog was restructured, re-run the ` +
         `browser acceptance and update both this list and docs/VERIFICATION.md.`,
     );
     return found[0];
   }).join("\n");
 }
 
-test("the accepted merge dialog gate still matches its recorded browser acceptance", () => {
-  const digest = createHash("sha256").update(acceptedSource(), "utf8").digest("hex");
+/*
+ * Both write-back paths are covered. They are different endpoints with different
+ * previews, and each was accepted in a browser separately, so each carries its own
+ * digest — a change to one must not be able to hide behind the other still matching.
+ */
+const ACCEPTED_GATES = [
+  { file: "room.js", names: ACCEPTED_FUNCTIONS, label: "candidate → main merge approval" },
+  { file: "app.js", names: ACCEPTED_APPLY_BACK_FUNCTIONS, label: "workspace apply-back" },
+] as const;
+
+for (const gate of ACCEPTED_GATES) {
+  test(`the accepted ${gate.label} gate still matches its recorded browser acceptance`, () => {
+  const digest = createHash("sha256").update(acceptedSource(gate.file, gate.names), "utf8").digest("hex");
   const verification = readFileSync(join(root, "docs", "VERIFICATION.md"), "utf8");
 
   assert.ok(
     verification.includes(digest),
-    "The merge approval dialog changed since it was last accepted in a real browser.\n" +
+    `The ${gate.label} dialog changed since it was last accepted in a real browser.\n` +
       `Current gate digest: ${digest}\n` +
       "docs/VERIFICATION.md records a different one, so the recorded acceptance no longer\n" +
       "describes this code. Re-run the browser pass (scroll gate, blockers, TTL countdown,\n" +
       "exact phrase), add a dated row with the new digest, and this will pass again.\n" +
       "Editing the digest without re-running the browser pass defeats the point of it.",
   );
-});
+  });
+}
 
 test("the recorded acceptance names the behaviours a source check cannot see", () => {
   const verification = readFileSync(join(root, "docs", "VERIFICATION.md"), "utf8");

@@ -266,6 +266,43 @@ Phase 5-1 在**沒有通過標準**的情況下跑了十輪對抗式審查，十
   可用的復原路徑；5-6 是把已存在的路徑包裝得更好，不是讓不可能變可能。**此項需 Owner 裁決。**
 - 所有 UX P1／P2。
 
+## 主工作區 apply-back dialog 瀏覽器驗收（2026-08-06）
+
+**背景**：UX P0-3。`public/app.js` 的 apply-back 原本按一下 `window.confirm` 就把隔離 worktree 的
+變更寫回主專案——**沒有風險等級、沒有 diff、沒有確認短語**，而同一產品的 candidate → main 路徑
+要求捲完 diff 再打 `MERGE INTO MAIN`。這一項先前被靜默丟掉，紀錄還誤記為已完成。
+
+**方法**：Chrome 載入真實 `public/index.html` 與真實 `public/app.js`（loopback 靜態伺服器），
+依真實流程 `ensureApplyBackDialog()` → `dialog.hidden = false` 顯示後再渲染，
+用真實 DOM、真實 `scroll` / `input` 事件驅動，讀取真實的 `input.disabled` / `button.disabled`。
+**測試開頭先斷言區域幾何確實溢出**（clientHeight 284 / scrollHeight 5874），否則作廢——
+零高度的區域「已經在底部」，會讓 scroll-gate 假通過。
+
+| 行為 | 實測結果 |
+| --- | --- |
+| 未捲動 → 輸入框鎖住 | 通過（`inputDisabled true`，`scrolled false`） |
+| 捲到一半 → 仍鎖住 | 通過（scrollTop 2795 → 仍 `false`，scroll listener 確實有掛上） |
+| 捲到底 → 輸入解鎖、按鈕仍鎖 | 通過（scrollTop 5590 → `inputDisabled false` / `buttonDisabled true`） |
+| 短語尾端多空白 | 通過（按鈕維持鎖住） |
+| 短語全小寫 | 通過（按鈕維持鎖住） |
+| 短語精確相符 | 通過（按鈕解鎖） |
+| **diff 讀取失敗 → 阻擋項** | 通過（輸入框重新鎖住**且值被清空**——看不到要寫回什麼就不可核准） |
+
+這一列補上了實作代理明確列為無法自行驗證的部分：**scroll 事件真的有綁上、`disabled` 真的有寫回 DOM**。
+它自己的測試是用 `node:vm` 執行抽出的純函式（並附突變測試證明測試不是空的），涵蓋邏輯但不涵蓋佈線。
+
+**已接受的 gate digest**：`a3e2ca3b2d7dfdfa2043c0fb514b7167c6a225a5d24aa8076724511a0ec53c98`
+
+**這一列沒有涵蓋的**：
+- 後端仍是 `/api/apply-back/*`，其 preview hash、逐檔 CAS、single-use approval 只有 Node 測試涵蓋。
+- **使用者輸入的短語是 UI gate，不是送給後端的協定 token**（後端要的是 `APPLY BACK TO SOURCE`，
+  由前端當常數自動送出）。room.js 那條是與 preview 密碼學綁定的，**這一條不是**——
+  這是兩條路徑之間尚存的實質差異，不只是文案差異。
+- TTL 只有 120 秒，捲完長 diff 再打短語仍可能逾時；broker 的 pending 上限是 4。
+
+**仍未關閉的第三條路徑**：`public/room.js:2561` 的 Writer apply-back（P0-2）**仍是 `window.prompt`**，
+短語仍是識別碼化的 `APPLY WRITER <taskId> TO PROJECT`。P0-3 修完後落差從 2:1 變成 1:2，並未消滅。
+
 ## ADR-028 vNext 待驗證矩陣
 
 | 範圍 | 狀態 | 必要證據 |
