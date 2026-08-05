@@ -1,4 +1,4 @@
-export type ProviderId = "fake" | "codex" | "claude" | "grok";
+export type ProviderId = "fake" | "codex" | "claude" | "grok" | "local";
 export type AuthMode = "subscription" | "api";
 export type AgentRole = "planner" | "writer" | "reviewer" | "tester";
 export type AccessMode = "read-only" | "workspace-write";
@@ -82,7 +82,8 @@ export interface CheckpointRecord {
 }
 
 export interface ApiModelPolicy {
-  provider: Exclude<ProviderId, "fake">;
+  // "local" is deliberately excluded: local endpoints are never billed API providers.
+  provider: Exclude<ProviderId, "fake" | "local">;
   model: string;
   inputUsdPerMillionTokens: number;
   outputUsdPerMillionTokens: number;

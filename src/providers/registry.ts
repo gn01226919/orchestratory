@@ -2,6 +2,7 @@ import type { ApiModelPolicy, AuthMode, ProviderId } from "../types.ts";
 import { FakeProvider } from "./fake.ts";
 import { SubscriptionCliProvider } from "./cli.ts";
 import { ApiProvider, estimateMaximumApiCostUsd } from "./api.ts";
+import { LocalModelProvider } from "./local.ts";
 import type { ProviderAdapter, ProviderCapabilities } from "./provider.ts";
 import type { ProviderCallGovernor } from "../core/provider-call-governor.ts";
 
@@ -73,17 +74,29 @@ class HybridProvider implements ProviderAdapter {
 
 export class ProviderRegistry {
   readonly #providers = new Map<ProviderId, ProviderAdapter>();
-  readonly #apiProviders = new Map<Exclude<ProviderId, "fake">, ApiProvider>();
-  readonly #subscriptionProviders = new Map<Exclude<ProviderId, "fake">, SubscriptionCliProvider>();
+  readonly #apiProviders = new Map<Exclude<ProviderId, "fake" | "local">, ApiProvider>();
+  readonly #subscriptionProviders = new Map<
+    Exclude<ProviderId, "fake" | "local">,
+    SubscriptionCliProvider
+  >();
   readonly #modelCache = new Map<string, { expiresAt: number; models: string[] }>();
   readonly #governor: ProviderCallGovernor | undefined;
 
   constructor(
     policies: ReadonlyArray<Readonly<ApiModelPolicy>> = [],
-    options: { codexWriterEnabled?: boolean; governor?: ProviderCallGovernor } = {},
+    options: {
+      codexWriterEnabled?: boolean;
+      governor?: ProviderCallGovernor;
+      localEndpoint?: string;
+    } = {},
   ) {
     this.#governor = options.governor;
     this.register(new FakeProvider());
+    // The local endpoint is opt-in: with no owner-supplied loopback URL the
+    // provider is simply not registered, so every lookup fails closed.
+    if (options.localEndpoint !== undefined) {
+      this.register(new LocalModelProvider({ endpoint: options.localEndpoint }));
+    }
     for (const id of ["codex", "claude", "grok"] as const) {
       const api = new ApiProvider(id, policies);
       const subscription = new SubscriptionCliProvider(
@@ -96,6 +109,12 @@ export class ProviderRegistry {
     }
   }
 
+  /**
+   * Every registered provider except the in-process fake is wrapped by the governor.
+   * That is deliberate for no-cost providers too: the governor enforces the shared
+   * 24-hour call ceiling and the kill epoch, which are call-count and stop controls,
+   * not monetary ones. Only the USD reservation is skipped for a no-cost provider.
+   */
   register(provider: ProviderAdapter): void {
     if (this.#providers.has(provider.capabilities.id)) throw new Error("DUPLICATE_PROVIDER");
     this.#providers.set(
@@ -122,7 +141,8 @@ export class ProviderRegistry {
     const cached = this.#modelCache.get(key);
     if (cached && cached.expiresAt > Date.now()) return [...cached.models];
     if (id === "fake" && authMode === "api") throw new Error("FAKE_PROVIDER_HAS_NO_API_MODE");
-    const provider = id === "fake"
+    if (id === "local" && authMode === "api") throw new Error("LOCAL_PROVIDER_HAS_NO_API_MODE");
+    const provider = id === "fake" || id === "local"
       ? this.get(id)
       : authMode === "api"
         ? this.#apiProviders.get(id)
@@ -143,7 +163,11 @@ export class ProviderRegistry {
     maximumCostUsd: number;
     maxOutputTokens: number;
   }> {
+    // Declared no-cost providers (see providers/billing.ts) never produce a billed
+    // quote. Any other unregistered id falls through to API_PROVIDER_NOT_REGISTERED,
+    // so a missing entry fails closed instead of quoting zero.
     if (id === "fake") throw new Error("FAKE_PROVIDER_HAS_NO_API_MODE");
+    if (id === "local") throw new Error("LOCAL_PROVIDER_HAS_NO_API_MODE");
     const provider = this.#apiProviders.get(id);
     if (!provider) throw new Error("API_PROVIDER_NOT_REGISTERED");
     if (!provider.configured()) throw new Error("API_CREDENTIAL_OR_MODEL_POLICY_NOT_CONFIGURED");

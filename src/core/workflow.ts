@@ -16,6 +16,10 @@ import { decideProviderCall, decideRound } from "../security/policy.ts";
 import { canonicalWorkspace, inspectWorkspaceSymlinks } from "../security/workspace.ts";
 import { safeSummary } from "../security/redact.ts";
 import { ProviderRegistry } from "../providers/registry.ts";
+import {
+  providerBillingModel,
+  providerExecutionModel,
+} from "../providers/billing.ts";
 import type { LocalStore } from "./store.ts";
 import { RunEvents } from "./events.ts";
 import { GitBroker, MAX_CHANGED_BYTES } from "./git-broker.ts";
@@ -699,9 +703,31 @@ export class WorkflowService {
       throw new Error("SELECTED_WRITER_PROVIDER_IS_READ_ONLY");
     }
 
+    // Monetary budgeting is decided by an explicit per-provider declaration, never by a
+    // policy lookup that happened to miss: `providerBillingModel` throws for anything
+    // undeclared, so a new provider cannot inherit "no budget" by omission.
+    const billing = providerBillingModel(assignment.provider);
     let apiMaximumCostUsd: number | undefined;
     let apiMaxOutputTokens: number | undefined;
-    if (assignment.authMode === "api") {
+    if (billing === "no-cost") {
+      // The no-cost path skips the monetary reservation and nothing else. A no-cost
+      // provider holds no credential and has no metered price, so an "api" assignment
+      // is a misconfiguration rather than a free pass, and fails closed here.
+      if (assignment.authMode === "api") throw new Error("NO_COST_PROVIDER_HAS_NO_API_MODE");
+      this.#event(
+        active.record.id,
+        "provider.no-cost",
+        assignment.provider,
+        "info",
+        "No monetary reservation: this provider is declared no-cost. Call, round, timeout, concurrency, consecutive-failure and kill-switch limits still apply.",
+        {
+          provider: assignment.provider,
+          model: assignment.model,
+          billing,
+          estimatedCostUsd: 0,
+        },
+      );
+    } else if (assignment.authMode === "api") {
       const preparation = await this.#providers.prepareApiCall(assignment.provider, assignment.model, prompt);
       apiMaximumCostUsd = preparation.maximumCostUsd;
       apiMaxOutputTokens = preparation.maxOutputTokens;
@@ -729,8 +755,12 @@ export class WorkflowService {
     }
 
     active.record.counters.providerCalls += 1;
+    // Only providers that actually launch a child process consume a subprocess slot.
+    // API calls and declared in-process providers (fake, local loopback HTTP) do not.
     active.record.counters.subprocesses +=
-      assignment.provider === "fake" || assignment.authMode === "api" ? 0 : 1;
+      assignment.authMode === "api" || providerExecutionModel(assignment.provider) === "in-process"
+        ? 0
+        : 1;
     this.#save(active.record);
     this.#event(
       active.record.id,
@@ -764,6 +794,9 @@ export class WorkflowService {
         text: safeSummary(result.text, 4_000),
       });
       this.#save(active.record);
+      // A no-cost call is recorded as an explicit measured 0, never as an absent field
+      // a reader could mistake for "not yet measured"; `billing` says which one 0 means.
+      const recordedCostUsd = billing === "no-cost" ? 0 : result.estimatedCostUsd;
       this.#event(
         active.record.id,
         "provider.completed",
@@ -776,9 +809,8 @@ export class WorkflowService {
           model: assignment.model,
           durationMs: result.durationMs,
           outputBytes: result.outputBytes,
-          ...(result.estimatedCostUsd !== undefined
-            ? { estimatedCostUsd: result.estimatedCostUsd }
-            : {}),
+          billing,
+          ...(recordedCostUsd !== undefined ? { estimatedCostUsd: recordedCostUsd } : {}),
         },
       );
       return result;
