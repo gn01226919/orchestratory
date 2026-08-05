@@ -34,6 +34,14 @@ export interface CandidateFileChange {
   operation: "add" | "modify" | "delete" | "rename" | "copy" | "type-change" | "unmerged" | "unknown";
   previousPath?: string;
   bytes?: number;
+  /**
+   * Present only when the entry changed an existing file's mode, e.g. 100644 -> 100755. An add or a
+   * delete is deliberately excluded: its counterpart mode is `000000`, so reporting it would flag
+   * every new and removed file as a permission change and bury the ones that actually are.
+   */
+  mode?: { from: string; to: string };
+  /** Either side of the entry is a gitlink (mode 160000), so this is a submodule pointer, not a file. */
+  submodule?: true;
 }
 
 export interface CandidateCompletionPreview {
@@ -49,11 +57,29 @@ export interface CandidateCompletionPreview {
   additions: number;
   deletions: number;
   binaryEntries: number;
+  /** Entries whose file mode changed. Counted over every entry, not only the reported ones. */
+  modeChanges: number;
+  /** Paths whose entry is a submodule pointer change; bounded, with its own truncation flag. */
+  submodules: string[];
+  submodulesTruncated: boolean;
   largeFiles: string[];
   largeFileScanTruncated: boolean;
   tests: CandidateTestResult[];
   knownRisks: string[];
+  /**
+   * Advisory facts about the SHAPE of this preview — main has moved, main is dirty. They are not
+   * merge results and never were; `mergeConflicts` below is the simulated merge.
+   */
   conflicts: string[];
+  /**
+   * Paths that actually conflict when this candidate head is merged into the observed main head,
+   * computed with `git merge-tree --write-tree`, which writes no ref and touches no worktree.
+   * Bounded, with its own truncation flag.
+   */
+  mergeConflicts: string[];
+  mergeConflictsTruncated: boolean;
+  /** True only when the simulated merge produced no conflict at all. Never inferred from a failure. */
+  mergeable: boolean;
   mainDirty: CandidateBaseline;
   recovery: {
     ready: true;
@@ -211,6 +237,16 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0
 const ROOM_PATTERN = /^[a-z][a-z0-9-]{0,47}$/u;
 const HEAD_PATTERN = /^[0-9a-f]{40,64}$/u;
 const HASH_PATTERN = /^[0-9a-f]{64}$/u;
+const MODE_PATTERN = /^[0-7]{6}$/u;
+/**
+ * One `git diff --raw -z` record: `:<src mode> <dst mode> <src sha> <dst sha> <status><score?>`.
+ * Anchored and exact, because a record this parser does not fully understand is a record whose
+ * modes it must not guess at — a wrong mode here is a permission change reported as ordinary.
+ */
+const RAW_DIFF_RECORD = /^:([0-7]{6}) ([0-7]{6}) ([0-9a-f]{4,64}) ([0-9a-f]{4,64}) ([A-Z])([0-9]{0,3})$/u;
+const ABSENT_MODE = "000000";
+const SUBMODULE_MODE = "160000";
+const MAX_PREVIEW_PATH = 4_096;
 const CHECKPOINT_REF_PATTERN = /^refs\/orchestratory\/checkpoints\/[0-9a-f-]{36}\/[0-9a-f-]{36}$/u;
 const MAX_RECEIPT_BYTES = 1_000;
 const MAX_ACTOR = 64;
@@ -219,6 +255,18 @@ const MAX_ACTOR = 64;
  * truncated and more orphans may exist; it never means the repository holds exactly this many.
  */
 export const MAX_ORPHAN_RECOVERY_REFS = 100;
+/**
+ * Upper bound on the reported submodule and merge-conflict path lists. Reaching it sets the matching
+ * truncation flag, exactly as `filesTruncated` does; it never means the list is complete.
+ */
+export const MAX_PREVIEW_SUBMODULES = 100;
+export const MAX_MERGE_CONFLICTS = 100;
+/**
+ * Bounded stdout budget for the merge simulation. Streamed stdout bypasses the process runner's
+ * capture ceiling, so this is counted here; exceeding it fails closed rather than truncating, because
+ * a half-read conflict list would understate the conflicts the owner is being asked to approve.
+ */
+const MERGE_TREE_OUTPUT_BYTES = 1_048_576;
 /** Bounded stdout budget for the orphan scan; an oversized ref listing fails closed, never truncates. */
 const ORPHAN_REF_SCAN_BYTES = 262_144;
 /** Fixed-size success marker; the answer itself is always rebuilt from durable state on replay. */
@@ -310,6 +358,56 @@ function tests(value: unknown): CandidateTestResult[] {
       ...(input.summary === undefined ? {} : { summary: text(input.summary, "CANDIDATE_TESTS_INVALID", 1_000) }),
     };
   });
+}
+
+/**
+ * One `git diff --raw -z` record, parsed exactly.
+ *
+ * Exported only so the negative tests can drive it directly: git cannot be asked to emit a record it
+ * does not know how to write, yet the whole point of this parser is what it does with one. It is a
+ * pure function with no side effects and no privileged access.
+ */
+export function parseRawDiffRecord(token: string): { from: string; to: string; code: string } {
+  const parsed = RAW_DIFF_RECORD.exec(token);
+  const from = parsed?.[1];
+  const to = parsed?.[2];
+  const code = parsed?.[5];
+  if (from === undefined || to === undefined || code === undefined) throw new Error("CANDIDATE_DIFF_INVALID");
+  return { from, to, code };
+}
+
+/** Read-path check for a stored, bounded list of preview paths. */
+function previewPaths(value: unknown, max: number): string[] {
+  if (!Array.isArray(value) || value.length > max) throw new Error("CANDIDATE_COMPLETION_PREVIEW_INVALID");
+  return value.map((item) => text(item, "CANDIDATE_COMPLETION_PREVIEW_INVALID", MAX_PREVIEW_PATH));
+}
+
+/**
+ * Read-path check for the per-file mode and submodule facts. A stored preview is re-validated before
+ * it is shown, so these must be as strict on the way in as they were on the way out: a `mode` whose
+ * two sides are equal, or a `submodule` that is anything but `true`, is not a fact this code ever
+ * wrote and is therefore refused rather than displayed.
+ */
+function previewFileFacts(value: unknown): void {
+  if (!Array.isArray(value)) throw new Error("CANDIDATE_COMPLETION_PREVIEW_INVALID");
+  for (const item of value) {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) {
+      throw new Error("CANDIDATE_COMPLETION_PREVIEW_INVALID");
+    }
+    const file = item as Record<string, unknown>;
+    if (file.submodule !== undefined && file.submodule !== true) {
+      throw new Error("CANDIDATE_COMPLETION_PREVIEW_INVALID");
+    }
+    if (file.mode === undefined) continue;
+    if (typeof file.mode !== "object" || file.mode === null || Array.isArray(file.mode)) {
+      throw new Error("CANDIDATE_COMPLETION_PREVIEW_INVALID");
+    }
+    const mode = file.mode as Record<string, unknown>;
+    if (typeof mode.from !== "string" || !MODE_PATTERN.test(mode.from)
+      || typeof mode.to !== "string" || !MODE_PATTERN.test(mode.to) || mode.from === mode.to) {
+      throw new Error("CANDIDATE_COMPLETION_PREVIEW_INVALID");
+    }
+  }
 }
 
 function risks(value: unknown): string[] {
@@ -736,6 +834,10 @@ export class CandidateRegistry {
     const mainIgnored = await this.#ignoredInventory(task.mainPath);
     const mainHead = await this.#git.headSha(task.mainPath);
     const diff = await this.#diff(task.baseMainHead, candidate.headSha, candidate.workspace);
+    // Simulated in the candidate worktree against the observed main head. Nothing about main is
+    // written, checked out or refreshed; the owner is simply no longer asked to approve a merge
+    // whose conflicts are unknown until it is attempted.
+    const merge = await this.#mergePreview(candidate.workspace, mainHead, candidate.headSha);
     const checkpointId = reservedCheckpointId;
     const recoveryRef = this.#checkpointRef(task.taskId, checkpointId);
     const preview: CandidateCompletionPreview = {
@@ -753,6 +855,7 @@ export class CandidateRegistry {
         ...(task.baseline.clean ? [] : ["DIRTY_MAIN_BASELINE_WAS_RECORDED_BUT_NOT_COPIED_TO_CANDIDATE"]),
         ...(mainState.clean ? [] : ["CURRENT_DIRTY_MAIN_CHANGES_ARE_EXCLUDED_FROM_CANDIDATE"]),
       ],
+      ...merge,
       mainDirty: baseline(mainState, mainIgnored),
       recovery: { ready: true, kind: "git-checkpoint-ref", ref: recoveryRef, head: candidate.headSha },
     };
@@ -762,7 +865,11 @@ export class CandidateRegistry {
     const prompt = [
       `我已在 candidate ${task.candidatePath} 完成工作，尚未修改 main ${task.mainPath}。`,
       `Candidate HEAD ${candidate.headSha}；main HEAD ${mainHead}；preview ${previewDigest}。`,
-      `檔案 ${preview.fileCount} 個，新增 ${preview.additions} 行，刪除 ${preview.deletions} 行。`,
+      `檔案 ${preview.fileCount} 個，新增 ${preview.additions} 行，刪除 ${preview.deletions} 行，`
+        + `模式變更 ${preview.modeChanges} 個，submodule ${preview.submodules.length} 個。`,
+      preview.mergeable
+        ? "已模擬 merge：沒有衝突。"
+        : `已模擬 merge：${preview.mergeConflicts.length} 個檔案衝突${preview.mergeConflictsTruncated ? "（已截斷）" : ""}。`,
       "是否要將這個精確 candidate snapshot merge 到 main？目前尚未執行；同意後將進入 snapshot-bound 核准與 promotion。",
     ].join(" ");
     const completion: CandidateCompletion = {
@@ -1156,44 +1263,66 @@ export class CandidateRegistry {
     return { files, fingerprint: fingerprint.digest("hex") };
   }
 
+  /**
+   * `--raw` rather than `--name-status`, because name-status discards the file modes. Without them a
+   * pure permission change (644 -> 755) is an ordinary `M` with zero line changes, and a submodule
+   * pointer move (mode 160000) is indistinguishable from an edited file — both invisible to the owner
+   * being asked to approve the merge.
+   */
   async #diff(base: string, head: string, workspace: string): Promise<Pick<CandidateCompletionPreview,
     "files" | "fileCount" | "filesTruncated" | "additions" | "deletions" | "binaryEntries" |
-    "largeFiles" | "largeFileScanTruncated">> {
+    "modeChanges" | "submodules" | "submodulesTruncated" | "largeFiles" | "largeFileScanTruncated">> {
     const files: CandidateFileChange[] = [];
+    const submodules: string[] = [];
     let fileCount = 0;
-    let status: string | undefined;
+    let modeChanges = 0;
+    let submoduleCount = 0;
+    let record: { from: string; to: string; code: string } | undefined;
     let first: string | undefined;
     await this.#gitNulTokens(
       workspace,
-      ["diff", "--name-status", "-z", "--find-renames", base, head, "--"],
+      ["diff", "--raw", "-z", "--find-renames", base, head, "--"],
       (token) => {
-        if (status === undefined) {
-          if (!token) throw new Error("CANDIDATE_DIFF_INVALID");
-          status = token;
+        if (record === undefined) {
+          // A record this parser cannot fully read is refused, never guessed at: an unparsed mode
+          // silently becomes "no mode change reported".
+          record = parseRawDiffRecord(token);
           return;
         }
-        const code = status[0];
+        const fromMode = record.from;
+        const toMode = record.to;
+        const code = record.code;
         if ((code === "R" || code === "C") && first === undefined) {
           if (!token) throw new Error("CANDIDATE_DIFF_INVALID");
           first = token;
           return;
         }
         if (!token) throw new Error("CANDIDATE_DIFF_INVALID");
+        const submodule = fromMode === SUBMODULE_MODE || toMode === SUBMODULE_MODE;
+        const modeChanged = fromMode !== toMode && fromMode !== ABSENT_MODE && toMode !== ABSENT_MODE;
         fileCount += 1;
-        if (files.length < this.#maxFiles) {
-          if (code === "R" || code === "C") {
-            files.push({ path: token, previousPath: first!, operation: code === "R" ? "rename" : "copy" });
-          } else {
-            const operation = code === "A" ? "add" : code === "M" ? "modify" : code === "D" ? "delete"
-              : code === "T" ? "type-change" : code === "U" ? "unmerged" : "unknown";
-            files.push({ path: token, operation });
-          }
+        if (modeChanged) modeChanges += 1;
+        if (submodule) {
+          submoduleCount += 1;
+          if (submodules.length < MAX_PREVIEW_SUBMODULES) submodules.push(token);
         }
-        status = undefined;
+        if (files.length < this.#maxFiles) {
+          const operation = code === "R" ? "rename" : code === "C" ? "copy"
+            : code === "A" ? "add" : code === "M" ? "modify" : code === "D" ? "delete"
+              : code === "T" ? "type-change" : code === "U" ? "unmerged" : "unknown";
+          files.push({
+            path: token,
+            operation,
+            ...(first === undefined ? {} : { previousPath: first }),
+            ...(modeChanged ? { mode: { from: fromMode, to: toMode } } : {}),
+            ...(submodule ? { submodule: true as const } : {}),
+          });
+        }
+        record = undefined;
         first = undefined;
       },
     );
-    if (status !== undefined || first !== undefined) throw new Error("CANDIDATE_DIFF_INVALID");
+    if (record !== undefined || first !== undefined) throw new Error("CANDIDATE_DIFF_INVALID");
     let additions = 0;
     let deletions = 0;
     let binaryEntries = 0;
@@ -1213,7 +1342,9 @@ export class CandidateRegistry {
     });
     const largeFiles: string[] = [];
     for (const file of files) {
-      if (file.operation === "delete") continue;
+      // A gitlink names a commit that need not exist in this repository at all, so asking for its
+      // blob size is not a size question with an answer — it is a command that fails.
+      if (file.operation === "delete" || file.submodule) continue;
       try {
         const sizeText = await this.#gitCommand(workspace, ["cat-file", "-s", `${head}:${file.path}`], 16_384);
         const size = Number(sizeText.trim());
@@ -1231,8 +1362,98 @@ export class CandidateRegistry {
       additions,
       deletions,
       binaryEntries,
+      modeChanges,
+      submodules,
+      submodulesTruncated: submoduleCount > submodules.length,
       largeFiles,
       largeFileScanTruncated: fileCount > files.length,
+    };
+  }
+
+  /**
+   * Simulates merging the candidate head into the observed main head and reports the paths that
+   * actually conflict.
+   *
+   * `git merge-tree --write-tree` computes the merge entirely in the object database: it writes no
+   * ref, checks out nothing, and never touches either worktree, which is the only reason a real merge
+   * result can be offered as a PREVIEW at all. It runs in the candidate worktree, which shares main's
+   * object store, so main is not even the working directory of the subprocess.
+   *
+   * Exit status 1 is the documented "merged with conflicts" answer, not a failure. It is also what
+   * git returns when it cannot merge the arguments at all, so the exit code alone decides nothing:
+   * the stdout shape does. Anything that does not parse fails closed, because the one answer this
+   * method must never invent is `mergeable: true`.
+   */
+  async #mergePreview(workspace: string, mainHead: string, candidateHead: string): Promise<Pick<
+    CandidateCompletionPreview, "mergeConflicts" | "mergeConflictsTruncated" | "mergeable">> {
+    if (!HEAD_PATTERN.test(mainHead) || !HEAD_PATTERN.test(candidateHead)) {
+      throw new Error("CANDIDATE_MERGE_PREVIEW_UNAVAILABLE");
+    }
+    const decoder = new StringDecoder("utf8");
+    const mergeConflicts: string[] = [];
+    let pending = "";
+    let bytes = 0;
+    let tree: string | undefined;
+    let listEnded = false;
+    let conflictCount = 0;
+    const consume = (chunk: Buffer): void => {
+      bytes += chunk.length;
+      if (bytes > MERGE_TREE_OUTPUT_BYTES) throw new Error("CANDIDATE_MERGE_PREVIEW_UNAVAILABLE");
+      pending += decoder.write(chunk);
+      for (;;) {
+        const boundary = pending.indexOf("\0");
+        if (boundary < 0) return;
+        const token = pending.slice(0, boundary);
+        pending = pending.slice(boundary + 1);
+        if (token.includes("\uFFFD")) throw new Error("CANDIDATE_GIT_PATH_ENCODING_INVALID");
+        // The record after the empty terminator is git's human-readable explanation of each
+        // conflict. It is not parsed and never surfaces: only the machine-readable paths do.
+        if (listEnded) continue;
+        if (tree === undefined) {
+          tree = token;
+          continue;
+        }
+        if (token === "") {
+          listEnded = true;
+          continue;
+        }
+        conflictCount += 1;
+        if (mergeConflicts.length < MAX_MERGE_CONFLICTS) mergeConflicts.push(token);
+      }
+    };
+    let result;
+    try {
+      result = await runProcess({
+        executable: await resolveExecutable("git"),
+        args: ["merge-tree", "--write-tree", "--name-only", "-z", mainHead, candidateHead],
+        cwd: workspace,
+        timeoutMs: 60_000,
+        outputLimitBytes: MERGE_TREE_OUTPUT_BYTES,
+        env: minimalGitEnvironment(),
+        stdoutConsumer: consume,
+      });
+    } catch {
+      // A missing git, an over-budget stream, a path this parser refuses to transcode, a spawn
+      // failure: every one of them means the merge was not simulated, and none of them may be
+      // reported as a merge that simulated cleanly.
+      throw new Error("CANDIDATE_MERGE_PREVIEW_UNAVAILABLE");
+    }
+    pending += decoder.end();
+    // A conflicted answer is a whole shape, not an exit status: status 1 AND the empty terminator
+    // that closes the conflict list AND at least one conflicted path. Git exits 1 for its own errors
+    // too ("not something we can merge"), printing the reason to stderr and nothing to stdout, and a
+    // process killed on the timeout also surfaces as status 1 with a half-read list. Neither may be
+    // allowed to look like a merge result, so everything that is not exactly one of the two
+    // documented shapes fails closed under a single verdict.
+    const conflicted = result.exitCode === 1 && listEnded && conflictCount > 0;
+    if (result.terminationReason || pending.length > 0 || tree === undefined || !HEAD_PATTERN.test(tree)
+      || (!conflicted && (result.exitCode !== 0 || listEnded || conflictCount > 0))) {
+      throw new Error("CANDIDATE_MERGE_PREVIEW_UNAVAILABLE");
+    }
+    return {
+      mergeConflicts,
+      mergeConflictsTruncated: conflictCount > mergeConflicts.length,
+      mergeable: !conflicted,
     };
   }
 
@@ -1656,13 +1877,24 @@ export class CandidateRegistry {
     tests(completion.preview.tests);
     risks(completion.preview.knownRisks);
     const preview = completion.preview;
+    previewFileFacts(preview.files);
+    previewPaths(preview.submodules, MAX_PREVIEW_SUBMODULES);
+    previewPaths(preview.mergeConflicts, MAX_MERGE_CONFLICTS);
     if (!HEAD_PATTERN.test(preview.baseMainHead) || !HEAD_PATTERN.test(preview.candidateHead)
       || !HEAD_PATTERN.test(preview.mainHead) || !isAbsolute(preview.candidatePath) || !isAbsolute(preview.mainPath)
-      || !Array.isArray(preview.files) || !Array.isArray(preview.largeFiles) || !Array.isArray(preview.conflicts)
+      || !Array.isArray(preview.largeFiles) || !Array.isArray(preview.conflicts)
       || !Number.isSafeInteger(preview.fileCount) || preview.fileCount < preview.files.length
       || !Number.isSafeInteger(preview.additions) || preview.additions < 0
       || !Number.isSafeInteger(preview.deletions) || preview.deletions < 0
       || !Number.isSafeInteger(preview.binaryEntries) || preview.binaryEntries < 0
+      || !Number.isSafeInteger(preview.modeChanges) || preview.modeChanges < 0
+      || preview.modeChanges > preview.fileCount
+      || typeof preview.submodulesTruncated !== "boolean" || typeof preview.mergeConflictsTruncated !== "boolean"
+      || typeof preview.mergeable !== "boolean"
+      // A stored preview that claims both "this merges cleanly" and a list of conflicting paths is
+      // not a preview with a defect in one field; it is two contradictory answers to the question the
+      // owner is about to act on, so neither is shown.
+      || (preview.mergeable && (preview.mergeConflicts.length > 0 || preview.mergeConflictsTruncated))
       || preview.recovery?.ready !== true || preview.recovery.kind !== "git-checkpoint-ref"
       || !CHECKPOINT_REF_PATTERN.test(preview.recovery.ref)
       || preview.recovery.head !== preview.candidateHead) {

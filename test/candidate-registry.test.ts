@@ -3,13 +3,14 @@ import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import {
-  CandidateRegistry, MAX_ORPHAN_RECOVERY_REFS, type CandidateCheckpoint, type CandidateTask,
+  CandidateRegistry, MAX_MERGE_CONFLICTS, MAX_ORPHAN_RECOVERY_REFS, MAX_PREVIEW_SUBMODULES,
+  parseRawDiffRecord, type CandidateCheckpoint, type CandidateTask,
 } from "../src/core/candidate-registry.ts";
 import { GitBroker, type GitInspection } from "../src/core/git-broker.ts";
 
@@ -59,6 +60,18 @@ class StallingGitBroker extends GitBroker {
     this.entered?.();
     await stall;
     throw new Error("SYNTHETIC_MAIN_INSPECTION_FAILED");
+  }
+}
+
+/**
+ * Reports a main HEAD that is not a commit id, standing in for any way the observed head could stop
+ * being one. Nothing but a commit id may ever be handed to git as an argument.
+ */
+class UnverifiedHeadGitBroker extends GitBroker {
+  head?: string;
+
+  override async headSha(workspace: string): Promise<string> {
+    return this.head ?? await super.headSha(workspace);
   }
 }
 
@@ -291,6 +304,47 @@ async function fixture(t: TestContext): Promise<{ root: string; source: string; 
   return { root, source, data };
 }
 
+/** Commits whatever the index already holds; the mode and submodule fixtures change no file content. */
+async function commitIndex(workspace: string, message: string): Promise<string> {
+  await execFileAsync("git", [
+    "-c", "user.name=Candidate Test", "-c", "user.email=test@example.invalid",
+    "commit", "-m", message,
+  ], { cwd: workspace });
+  return (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspace })).stdout.trim();
+}
+
+/** A real nested repository, so the gitlink the preview reports names two commits that exist. */
+async function nestedRepository(path: string): Promise<{ first: string; second: string }> {
+  await mkdir(path);
+  await execFileAsync("git", ["init", "-b", "main", "."], { cwd: path });
+  await writeFile(join(path, "lib.txt"), "vendor one\n", "utf8");
+  await execFileAsync("git", ["add", "lib.txt"], { cwd: path });
+  const first = await commitIndex(path, "vendor one");
+  await writeFile(join(path, "lib.txt"), "vendor two\n", "utf8");
+  await execFileAsync("git", ["add", "lib.txt"], { cwd: path });
+  const second = await commitIndex(path, "vendor two");
+  return { first, second };
+}
+
+/**
+ * Rewrites a stored preview and re-stamps BOTH the preview digest and the row hash, so the corrupted
+ * completion is internally consistent. Anything the read path still refuses is refused on its own
+ * merits rather than because a checksum stopped matching.
+ */
+function storeCompletionPreview(path: string, taskId: string, preview: Record<string, unknown>): void {
+  const db = new DatabaseSync(path);
+  let row = db.prepare("SELECT * FROM candidates WHERE task_id=?").get(taskId) as Record<string, unknown>;
+  const completion = JSON.parse(String(row.completion_json)) as Record<string, unknown>;
+  completion.preview = preview;
+  completion.previewDigest = createHash("sha256").update(JSON.stringify(preview), "utf8").digest("hex");
+  const completionJson = JSON.stringify(completion);
+  row = { ...row, completion_json: completionJson };
+  const changes = db.prepare("UPDATE candidates SET completion_json=?,row_hash=? WHERE task_id=?")
+    .run(completionJson, candidateRowHash(row), taskId).changes;
+  db.close();
+  assert.equal(Number(changes), 1);
+}
+
 async function commit(workspace: string, filename: string, contents: string, message: string): Promise<string> {
   await writeFile(join(workspace, filename), contents, "utf8");
   await execFileAsync("git", ["add", "--", filename], { cwd: workspace });
@@ -299,6 +353,45 @@ async function commit(workspace: string, filename: string, contents: string, mes
     "commit", "-m", message,
   ], { cwd: workspace });
   return (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspace })).stdout.trim();
+}
+
+/** Long enough that an edit at each end is two hunks git merges without being asked to choose. */
+function longFile(first: string, last: string): string {
+  return [first, ...Array.from({ length: 38 }, (_, index) => `line ${String(index + 2).padStart(2, "0")}`), last]
+    .join("\n") + "\n";
+}
+
+/**
+ * Copies main — objects, refs and worktree — into a throwaway directory beside it, then carries the
+ * merge all the way out with real git. A preview asserted against a hand-built fixture only ever
+ * proves what its author believed the fixture would do; this is the merge itself, so the preview is
+ * being measured against the outcome the owner would actually get.
+ */
+async function actualMerge(root: string, name: string, source: string, candidateHead: string):
+  Promise<{ merged: boolean; conflicts: string[] }> {
+  const copy = join(root, name);
+  await cp(source, copy, { recursive: true });
+  // The copy inherits main's worktree registry, whose entries still name the live candidate
+  // directory. Dropping it leaves a self-contained repository that cannot reach back into anything
+  // this exercise is about to make assertions on.
+  await rm(join(copy, ".git", "worktrees"), { recursive: true, force: true });
+  let merged = true;
+  try {
+    await execFileAsync("git", [
+      "-c", "user.name=Candidate Test", "-c", "user.email=test@example.invalid",
+      "merge", "--no-ff", "--no-commit", candidateHead,
+    ], { cwd: copy });
+  } catch {
+    // Conflicts and refusals share an exit status here exactly as they do for merge-tree; the
+    // conflicted index read below is what distinguishes them.
+    merged = false;
+  }
+  const unmerged = (await execFileAsync("git", ["ls-files", "-u", "-z"], { cwd: copy })).stdout;
+  // One conflicted path yields up to three stage rows, so the paths are a set, and order is git's
+  // business rather than a fact the preview should have to reproduce.
+  const conflicts = [...new Set(unmerged.split("\0").filter((entry) => entry !== "")
+    .map((entry) => entry.slice(entry.indexOf("\t") + 1)))].sort();
+  return { merged, conflicts };
 }
 
 test("candidate lifecycle preserves dirty main and completes only a committed recoverable snapshot", async (t) => {
@@ -2471,4 +2564,462 @@ test("a recovering retry whose prior owner is this process keeps that reservatio
   assert.deepEqual(storedRequest(path, input.clientRequestId), { state: "pending", receipt: null });
   assert.equal(registry.inventory().tasks, 1);
   assert.equal(countRequests(path), 1);
+});
+
+test("completion preview names a pure mode change and a submodule pointer instead of an ordinary edit", async (t) => {
+  const { source, data } = await fixture(t);
+  const pointers = await nestedRepository(join(source, "vendor"));
+  // Recorded at the nested repository's current HEAD, so main is clean and the candidate is the only
+  // thing that moves the pointer.
+  await execFileAsync("git", ["update-index", "--add", "--cacheinfo", `160000,${pointers.second},vendor`], { cwd: source });
+  await commitIndex(source, "track the vendor pointer");
+  const registry = new CandidateRegistry(data);
+  t.after(() => registry.close());
+  const task = await registry.start({
+    actor: "codex", clientRequestId: key(), roomId: "demo", mainPath: source, task: "mode and pointer preview",
+  });
+  await chmod(join(task.candidatePath, "README.md"), 0o755);
+  await execFileAsync("git", ["update-index", "--chmod=+x", "--", "README.md"], { cwd: task.candidatePath });
+  await execFileAsync("git", ["update-index", "--cacheinfo", `160000,${pointers.first},vendor`], { cwd: task.candidatePath });
+  await commitIndex(task.candidatePath, "permission bit and submodule pointer only");
+
+  const completed = await registry.complete({
+    actor: "codex", clientRequestId: key(), taskId: task.taskId, roomId: "demo", mainPath: source,
+    summary: "nothing but modes and a pointer",
+  });
+  const preview = completed.completion.preview;
+  // The only lines in this diff are the submodule's own pointer line. The permission change on
+  // README.md contributes nothing at all, which is exactly why a line-oriented preview cannot see it.
+  assert.equal(preview.additions, 1);
+  assert.equal(preview.deletions, 1);
+  assert.equal(preview.modeChanges, 1);
+  assert.deepEqual(preview.files.find((file) => file.path === "README.md"), {
+    path: "README.md", operation: "modify", mode: { from: "100644", to: "100755" }, bytes: 15,
+  });
+  const vendor = preview.files.find((file) => file.path === "vendor");
+  assert.equal(vendor?.operation, "modify");
+  assert.equal(vendor?.submodule, true);
+  // Both sides of a pointer move are 160000, so there is no mode change to report — and a gitlink has
+  // no blob whose size could be asked for.
+  assert.equal(vendor?.mode, undefined);
+  assert.equal(vendor?.bytes, undefined);
+  assert.deepEqual(preview.submodules, ["vendor"]);
+  assert.equal(preview.submodulesTruncated, false);
+  assert.equal(preview.mergeable, true);
+  assert.deepEqual(preview.mergeConflicts, []);
+  assert.equal(preview.mergeConflictsTruncated, false);
+
+  // The digest and the read-path validation must both accept every new field, or the stored
+  // completion becomes unreadable the moment the owner reopens it.
+  const reopened = new CandidateRegistry(data);
+  t.after(() => reopened.close());
+  assert.deepEqual(reopened.get(task.taskId)?.completion?.preview, preview);
+  assert.equal(reopened.get(task.taskId)?.completion?.previewDigest, completed.completion.previewDigest);
+});
+
+test("a simulated merge names the conflicting paths and never touches main", async (t) => {
+  const { source, data } = await fixture(t);
+  const registry = new CandidateRegistry(data);
+  t.after(() => registry.close());
+  const task = await registry.start({
+    actor: "codex", clientRequestId: key(), roomId: "demo", mainPath: source, task: "real conflict preview",
+  });
+  await commit(task.candidatePath, "README.md", "candidate rewrite\n", "candidate edit");
+  const mainHead = await commit(source, "README.md", "main rewrite\n", "main edit");
+  const candidateHead = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: task.candidatePath })).stdout.trim();
+  const refsBefore = (await execFileAsync("git", ["for-each-ref", "--format=%(refname) %(objectname)"], { cwd: source })).stdout;
+
+  const completed = await registry.complete({
+    actor: "codex", clientRequestId: key(), taskId: task.taskId, roomId: "demo", mainPath: source,
+    summary: "this candidate does not merge cleanly",
+  });
+  const preview = completed.completion.preview;
+  assert.equal(preview.mergeable, false);
+  assert.deepEqual(preview.mergeConflicts, ["README.md"]);
+  assert.equal(preview.mergeConflictsTruncated, false);
+  // Drift and a conflict are different facts and stay in different fields: the advisory list still
+  // says only that main moved, and the simulated result is the one that names a path.
+  assert.deepEqual(preview.conflicts, ["MAIN_DRIFT_REQUIRES_FRESH_MERGE_PREVIEW"]);
+  assert.match(completed.completion.prompt, /1 個檔案衝突/u);
+
+  // The simulation writes no ref, no index and no file, in either workspace.
+  assert.equal((await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: source })).stdout.trim(), mainHead);
+  assert.equal((await execFileAsync("git", ["status", "--porcelain=v1"], { cwd: source })).stdout, "");
+  assert.equal(await readFile(join(source, "README.md"), "utf8"), "main rewrite\n");
+  assert.equal(
+    (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: task.candidatePath })).stdout.trim(),
+    candidateHead,
+  );
+  assert.equal((await execFileAsync("git", ["status", "--porcelain=v1"], { cwd: task.candidatePath })).stdout, "");
+  for (const workspace of [source, task.candidatePath]) {
+    await assert.rejects(execFileAsync("git", ["rev-parse", "--verify", "MERGE_HEAD"], { cwd: workspace }));
+  }
+  // The only ref this completion is allowed to add is its own recovery checkpoint. A merge that had
+  // been carried out, rather than simulated, would show up here.
+  const refsAfter = (await execFileAsync("git", ["for-each-ref", "--format=%(refname) %(objectname)"], { cwd: source })).stdout;
+  assert.deepEqual(
+    refsAfter.split("\n").filter(Boolean).filter((line) => !refsBefore.includes(line)),
+    [`${completed.completion.preview.recovery.ref} ${candidateHead}`],
+  );
+});
+
+test("main drift that still merges cleanly is reported mergeable with an empty conflict list", async (t) => {
+  const { source, data } = await fixture(t);
+  const registry = new CandidateRegistry(data);
+  t.after(() => registry.close());
+  const task = await registry.start({
+    actor: "codex", clientRequestId: key(), roomId: "demo", mainPath: source, task: "clean merge preview",
+  });
+  await commit(task.candidatePath, "candidate.txt", "candidate work\n", "candidate work");
+  await commit(source, "main-only.txt", "main work\n", "main work");
+  const completed = await registry.complete({
+    actor: "codex", clientRequestId: key(), taskId: task.taskId, roomId: "demo", mainPath: source,
+    summary: "drifted but mergeable",
+  });
+  const preview = completed.completion.preview;
+  assert.equal(preview.mainDrift, true);
+  assert.deepEqual(preview.conflicts, ["MAIN_DRIFT_REQUIRES_FRESH_MERGE_PREVIEW"]);
+  // Drift alone never meant a conflict; now the difference is measured instead of assumed.
+  assert.equal(preview.mergeable, true);
+  assert.deepEqual(preview.mergeConflicts, []);
+  assert.equal(preview.mergeConflictsTruncated, false);
+  assert.match(completed.completion.prompt, /沒有衝突/u);
+});
+
+test("every preview verdict is confirmed against a merge that really happens", async (t) => {
+  const scenarios: Array<{
+    name: string;
+    mergeable: boolean;
+    conflicts: string[];
+    base?: (source: string) => Promise<void>;
+    diverge: (source: string, candidatePath: string) => Promise<void>;
+  }> = [
+    {
+      name: "both sides rewrite the same line",
+      mergeable: false,
+      conflicts: ["README.md"],
+      diverge: async (source, candidatePath) => {
+        await commit(candidatePath, "README.md", "candidate rewrite\n", "candidate edit");
+        await commit(source, "README.md", "main rewrite\n", "main edit");
+      },
+    },
+    {
+      name: "each side adds a file of its own",
+      mergeable: true,
+      conflicts: [],
+      diverge: async (source, candidatePath) => {
+        await commit(candidatePath, "candidate.txt", "candidate work\n", "candidate work");
+        await commit(source, "main-only.txt", "main work\n", "main work");
+      },
+    },
+    {
+      // The case a "same file touched ⇒ conflict" heuristic gets wrong. Git merges these two hunks,
+      // so a preview that reasoned about paths rather than content would report a conflict the owner
+      // would never have hit.
+      name: "both sides touch one file in hunks git merges on its own",
+      mergeable: true,
+      conflicts: [],
+      base: async (source) => {
+        await commit(source, "shared.txt", longFile("line 01", "line 40"), "shared base");
+      },
+      diverge: async (source, candidatePath) => {
+        await commit(candidatePath, "shared.txt", longFile("candidate rewrote the top", "line 40"),
+          "candidate edits the top");
+        await commit(source, "shared.txt", longFile("line 01", "main rewrote the bottom"),
+          "main edits the bottom");
+      },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async (child) => {
+      const { root, source, data } = await fixture(child);
+      await scenario.base?.(source);
+      const registry = new CandidateRegistry(data);
+      child.after(() => registry.close());
+      const task = await registry.start({
+        actor: "codex", clientRequestId: key(), roomId: "demo", mainPath: source, task: scenario.name,
+      });
+      await scenario.diverge(source, task.candidatePath);
+      const mainHead = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: source })).stdout.trim();
+      const mainTree = (await execFileAsync("git", ["rev-parse", "HEAD^{tree}"], { cwd: source })).stdout.trim();
+      const refsBefore = (await execFileAsync("git", [
+        "for-each-ref", "--format=%(refname) %(objectname)",
+      ], { cwd: source })).stdout;
+
+      const completed = await registry.complete({
+        actor: "codex", clientRequestId: key(), taskId: task.taskId, roomId: "demo", mainPath: source,
+        summary: "a preview that is about to be merged for real",
+      });
+      const preview = completed.completion.preview;
+      assert.equal(preview.mergeConflictsTruncated, false);
+
+      const actual = await actualMerge(root, "merge-check", source, preview.candidateHead);
+      // The fixture's own expectation is asserted first: a fixture that quietly stopped conflicting
+      // would otherwise keep passing by agreeing with a preview that had stopped conflicting too.
+      assert.equal(actual.merged, scenario.mergeable);
+      assert.deepEqual(actual.conflicts, scenario.conflicts);
+      // The bar itself — the verdict and the path set the owner will be asked to approve are the
+      // ones a real merge produces.
+      assert.equal(preview.mergeable, actual.merged);
+      assert.deepEqual([...preview.mergeConflicts].sort(), actual.conflicts);
+
+      // Neither the simulation nor the merge carried out on the copy may leave a mark on main. Its
+      // head, its tree, its worktree and its index all have to be where they were, and the only ref
+      // the completion may add is its own recovery checkpoint.
+      assert.equal((await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: source })).stdout.trim(), mainHead);
+      assert.equal((await execFileAsync("git", ["rev-parse", "HEAD^{tree}"], { cwd: source })).stdout.trim(), mainTree);
+      assert.equal((await execFileAsync("git", ["status", "--porcelain=v1"], { cwd: source })).stdout, "");
+      await assert.rejects(execFileAsync("git", ["rev-parse", "--verify", "MERGE_HEAD"], { cwd: source }));
+      const refsAfter = (await execFileAsync("git", [
+        "for-each-ref", "--format=%(refname) %(objectname)",
+      ], { cwd: source })).stdout;
+      assert.deepEqual(
+        refsAfter.split("\n").filter(Boolean).filter((line) => !refsBefore.includes(line)),
+        [`${preview.recovery.ref} ${preview.candidateHead}`],
+      );
+    });
+  }
+});
+
+test("submodule and merge-conflict lists are bounded and report their own truncation", {
+  timeout: 120_000,
+}, async (t) => {
+  const { source, data } = await fixture(t);
+  const registry = new CandidateRegistry(data);
+  t.after(() => registry.close());
+  const task = await registry.start({
+    actor: "codex", clientRequestId: key(), roomId: "demo", mainPath: source, task: "bounded preview lists",
+  });
+  const mainBlob = (await gitWithInput(source, ["hash-object", "-w", "--stdin"], "main side\n")).trim();
+  const candidateBlob = (await gitWithInput(source, ["hash-object", "-w", "--stdin"], "candidate side\n")).trim();
+  const baseTree = (await execFileAsync("git", ["ls-tree", "-z", "HEAD"], { cwd: source })).stdout;
+  const conflicting = Array.from({ length: MAX_MERGE_CONFLICTS + 50 }, (_, index) =>
+    `conflict-${String(index).padStart(4, "0")}.txt`);
+  const pointers = Array.from({ length: MAX_PREVIEW_SUBMODULES + 20 }, (_, index) =>
+    `vendor-${String(index).padStart(4, "0")}`);
+
+  const mainTree = (await gitWithInput(source, ["mktree", "-z"],
+    baseTree + conflicting.map((name) => `100644 blob ${mainBlob}\t${name}\0`).join(""))).trim();
+  const mainCommit = (await gitWithInput(source, [
+    "-c", "user.name=Candidate Test", "-c", "user.email=test@example.invalid",
+    "commit-tree", mainTree, "-p", task.baseMainHead,
+  ], "main adds every contested path\n")).trim();
+  await execFileAsync("git", ["merge", "--ff-only", mainCommit], { cwd: source });
+
+  // The candidate adds the same paths with different content, plus more submodule pointers than the
+  // preview will ever list.
+  const candidateTree = (await gitWithInput(task.candidatePath, ["mktree", "-z"],
+    baseTree
+      + conflicting.map((name) => `100644 blob ${candidateBlob}\t${name}\0`).join("")
+      + pointers.map((name) => `160000 commit ${task.baseMainHead}\t${name}\0`).join(""))).trim();
+  const candidateCommit = (await gitWithInput(task.candidatePath, [
+    "-c", "user.name=Candidate Test", "-c", "user.email=test@example.invalid",
+    "commit-tree", candidateTree, "-p", task.baseMainHead,
+  ], "candidate adds contested paths and pointers\n")).trim();
+  await execFileAsync("git", ["merge", "--ff-only", candidateCommit], { cwd: task.candidatePath });
+
+  const completed = await registry.complete({
+    actor: "codex", clientRequestId: key(), taskId: task.taskId, roomId: "demo", mainPath: source,
+    summary: "more conflicts and pointers than either list reports",
+  });
+  const preview = completed.completion.preview;
+  assert.equal(preview.fileCount, conflicting.length + pointers.length);
+  assert.equal(preview.filesTruncated, false);
+  // Reaching the bound is reported as truncation, exactly as filesTruncated does; it never means the
+  // list is the whole answer.
+  assert.equal(preview.submodules.length, MAX_PREVIEW_SUBMODULES);
+  assert.equal(preview.submodulesTruncated, true);
+  assert.equal(preview.submodules[0], "vendor-0000");
+  assert.equal(preview.files.filter((file) => file.submodule === true).length, pointers.length);
+  assert.equal(preview.files.filter((file) => file.bytes !== undefined).length, conflicting.length);
+  assert.equal(preview.modeChanges, 0);
+  assert.equal(preview.mergeable, false);
+  assert.equal(preview.mergeConflicts.length, MAX_MERGE_CONFLICTS);
+  assert.equal(preview.mergeConflictsTruncated, true);
+  assert.equal(preview.mergeConflicts[0], "conflict-0000.txt");
+  assert.match(completed.completion.prompt, /（已截斷）/u);
+  assert.deepEqual(new CandidateRegistry(data).get(task.taskId)?.completion?.preview, preview);
+});
+
+test("a merge that cannot be simulated fails closed instead of claiming the candidate is mergeable", async (t) => {
+  await t.test("git refuses the merge outright", async (child) => {
+    const { source, data } = await fixture(child);
+    const registry = new CandidateRegistry(data);
+    child.after(() => registry.close());
+    const task = await registry.start({
+      actor: "codex", clientRequestId: key(), roomId: "demo", mainPath: source, task: "unmergeable main",
+    });
+    await commit(task.candidatePath, "candidate.txt", "candidate work\n", "candidate work");
+    // Main is rewritten onto a root commit that shares no history with the candidate. merge-tree
+    // reports that on stderr and exits 1 — the same status a real conflict uses.
+    await execFileAsync("git", ["checkout", "--orphan", "rewritten"], { cwd: source });
+    const rewritten = await commitIndex(source, "unrelated root");
+    const requests = countRequests(registry.path);
+    await assert.rejects(
+      registry.complete({
+        actor: "codex", clientRequestId: key(), taskId: task.taskId, roomId: "demo", mainPath: source,
+        summary: "must not be answered with mergeable",
+      }),
+      /CANDIDATE_MERGE_PREVIEW_UNAVAILABLE/u,
+    );
+    assert.equal(registry.get(task.taskId)?.status, "active");
+    assert.equal(registry.get(task.taskId)?.completion, undefined);
+    assert.equal(countRequests(registry.path), requests);
+    assert.equal((await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: source })).stdout.trim(), rewritten);
+  });
+
+  await t.test("the main head cannot be vouched for", async (child) => {
+    const { source, data } = await fixture(child);
+    const gitBroker = new UnverifiedHeadGitBroker();
+    const registry = new CandidateRegistry(data, { gitBroker });
+    child.after(() => registry.close());
+    const task = await registry.start({
+      actor: "codex", clientRequestId: key(), roomId: "demo", mainPath: source, task: "unverifiable main head",
+    });
+    await commit(task.candidatePath, "candidate.txt", "candidate work\n", "candidate work");
+    // Nothing that is not a commit id may reach git's argument list, whatever produced it.
+    gitBroker.head = "--upload-pack=touch-main";
+    await assert.rejects(
+      registry.complete({
+        actor: "codex", clientRequestId: key(), taskId: task.taskId, roomId: "demo", mainPath: source,
+        summary: "must not reach git",
+      }),
+      /CANDIDATE_MERGE_PREVIEW_UNAVAILABLE/u,
+    );
+    assert.equal(registry.get(task.taskId)?.status, "active");
+  });
+});
+
+test("a merge simulation that outgrows its output budget fails closed rather than truncating", {
+  timeout: 180_000,
+}, async (t) => {
+  const { source, data } = await fixture(t);
+  const registry = new CandidateRegistry(data, { maxFiles: 1 });
+  t.after(() => registry.close());
+  const task = await registry.start({
+    actor: "codex", clientRequestId: key(), roomId: "demo", mainPath: source, task: "oversized merge output",
+  });
+  const mainBlob = (await gitWithInput(source, ["hash-object", "-w", "--stdin"], "main side\n")).trim();
+  const candidateBlob = (await gitWithInput(source, ["hash-object", "-w", "--stdin"], "candidate side\n")).trim();
+  const baseTree = (await execFileAsync("git", ["ls-tree", "-z", "HEAD"], { cwd: source })).stdout;
+  // Enough contested paths that the conflict list alone exceeds the streamed byte budget. A half-read
+  // list would understate the conflicts the owner is being asked to approve.
+  const contested = Array.from({ length: 5_200 }, (_, index) =>
+    `contested-${String(index).padStart(5, "0")}-${"z".repeat(200)}`);
+  const mainTree = (await gitWithInput(source, ["mktree", "-z"],
+    baseTree + contested.map((name) => `100644 blob ${mainBlob}\t${name}\0`).join(""))).trim();
+  const mainCommit = (await gitWithInput(source, [
+    "-c", "user.name=Candidate Test", "-c", "user.email=test@example.invalid",
+    "commit-tree", mainTree, "-p", task.baseMainHead,
+  ], "main bulk\n")).trim();
+  await execFileAsync("git", ["merge", "--ff-only", mainCommit], { cwd: source, maxBuffer: 8 * 1_048_576 });
+  const candidateTree = (await gitWithInput(task.candidatePath, ["mktree", "-z"],
+    baseTree + contested.map((name) => `100644 blob ${candidateBlob}\t${name}\0`).join(""))).trim();
+  const candidateCommit = (await gitWithInput(task.candidatePath, [
+    "-c", "user.name=Candidate Test", "-c", "user.email=test@example.invalid",
+    "commit-tree", candidateTree, "-p", task.baseMainHead,
+  ], "candidate bulk\n")).trim();
+  await execFileAsync("git", ["merge", "--ff-only", candidateCommit], {
+    cwd: task.candidatePath, maxBuffer: 8 * 1_048_576,
+  });
+
+  await assert.rejects(
+    registry.complete({
+      actor: "codex", clientRequestId: key(), taskId: task.taskId, roomId: "demo", mainPath: source,
+      summary: "output budget exceeded",
+    }),
+    /CANDIDATE_MERGE_PREVIEW_UNAVAILABLE/u,
+  );
+  assert.equal(registry.get(task.taskId)?.status, "active");
+});
+
+test("a raw diff record this parser does not fully understand is refused, never guessed at", () => {
+  assert.deepEqual(parseRawDiffRecord(":100644 100755 7898192 7898192 M"), {
+    from: "100644", to: "100755", code: "M",
+  });
+  assert.deepEqual(parseRawDiffRecord(":100644 100644 6178079 6178079 R100"), {
+    from: "100644", to: "100644", code: "R",
+  });
+  assert.deepEqual(parseRawDiffRecord(":000000 160000 0000000 ab02cc4 A"), {
+    from: "000000", to: "160000", code: "A",
+  });
+  for (const malformed of [
+    "",
+    "M",
+    "100644 100755 7898192 7898192 M",
+    ":100644 100755 7898192 M",
+    // A mode this parser cannot read must never be treated as "no mode change".
+    ":10064 100755 7898192 7898192 M",
+    ":100644 10075x 7898192 7898192 M",
+    ":100644 100755 789819g 7898192 M",
+    ":100644 100755 7898192 7898192 m",
+    ":100644 100755 7898192 7898192 M100000",
+    ":100644 100755 7898192 7898192 M extra",
+    ":100644 100755 7898192 7898192 M\n:100644 100755 7898192 7898192 M",
+    "::100644 100644 100755 7898192 7898192 7898192 MM",
+  ]) {
+    assert.throws(() => parseRawDiffRecord(malformed), /CANDIDATE_DIFF_INVALID/u, malformed);
+  }
+});
+
+test("a stored preview whose merge facts do not hold up is refused on reopen", async (t) => {
+  const { source, data } = await fixture(t);
+  const registry = new CandidateRegistry(data);
+  const task = await registry.start({
+    actor: "codex", clientRequestId: key(), roomId: "demo", mainPath: source, task: "stored preview validation",
+  });
+  await commit(task.candidatePath, "README.md", "candidate rewrite\n", "candidate edit");
+  await commit(source, "README.md", "main rewrite\n", "main edit");
+  const completed = await registry.complete({
+    actor: "codex", clientRequestId: key(), taskId: task.taskId, roomId: "demo", mainPath: source,
+    summary: "stored for re-validation",
+  });
+  const pristine = completed.completion.preview as unknown as Record<string, unknown>;
+  const path = registry.path;
+  registry.close();
+  assert.deepEqual(new CandidateRegistry(data).get(task.taskId)?.completion?.preview.mergeConflicts, ["README.md"]);
+
+  // Every corruption below is re-digested and re-hashed, so it is refused on what it claims rather
+  // than on a checksum. A stored preview is the thing the owner approves a merge from.
+  const corruptions: Array<[string, (preview: Record<string, unknown>) => void]> = [
+    ["mergeable while naming conflicts", (preview) => { preview.mergeable = true; }],
+    ["mergeable while claiming truncation", (preview) => {
+      preview.mergeable = true;
+      preview.mergeConflicts = [];
+      preview.mergeConflictsTruncated = true;
+    }],
+    ["a non-boolean mergeable", (preview) => { preview.mergeable = "no"; }],
+    ["a non-boolean truncation flag", (preview) => { preview.submodulesTruncated = 0; }],
+    ["conflicts that are not a list", (preview) => { preview.mergeConflicts = "README.md"; }],
+    ["more conflicts than the bound allows", (preview) => {
+      preview.mergeConflicts = Array.from({ length: MAX_MERGE_CONFLICTS + 1 }, (_, index) => `c-${index}`);
+    }],
+    ["a conflict path that is not a path", (preview) => { preview.mergeConflicts = [{ path: "README.md" }]; }],
+    ["more submodules than the bound allows", (preview) => {
+      preview.submodules = Array.from({ length: MAX_PREVIEW_SUBMODULES + 1 }, (_, index) => `s-${index}`);
+    }],
+    ["a negative mode-change count", (preview) => { preview.modeChanges = -1; }],
+    ["more mode changes than files", (preview) => { preview.modeChanges = Number(preview.fileCount) + 1; }],
+    ["files that are not a list", (preview) => { preview.files = "README.md"; }],
+    ["a file entry that is not an object", (preview) => { preview.files = [1]; }],
+    ["a submodule flag that is not true", (preview) => { preview.files = [{ path: "a", operation: "modify", submodule: "yes" }]; }],
+    ["a mode that is not a pair", (preview) => { preview.files = [{ path: "a", operation: "modify", mode: "100755" }]; }],
+    ["a mode whose source is not a mode", (preview) => {
+      preview.files = [{ path: "a", operation: "modify", mode: { from: "100", to: "100755" } }];
+    }],
+    ["a mode whose target is not a mode", (preview) => {
+      preview.files = [{ path: "a", operation: "modify", mode: { from: "100644", to: "rwxrwx" } }];
+    }],
+    ["a mode that did not change", (preview) => {
+      preview.files = [{ path: "a", operation: "modify", mode: { from: "100644", to: "100644" } }];
+    }],
+  ];
+  for (const [name, mutate] of corruptions) {
+    // Each case starts from the pristine preview, so what is refused is the one fact it corrupts.
+    const preview = structuredClone(pristine);
+    mutate(preview);
+    storeCompletionPreview(path, task.taskId, preview);
+    assert.throws(() => new CandidateRegistry(data), /CANDIDATE_COMPLETION_PREVIEW_INVALID/u, name);
+  }
 });

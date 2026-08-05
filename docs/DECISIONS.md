@@ -355,3 +355,112 @@ Migration 只接受精確已知 schema/index/CHECK fingerprint 與有效 row has
 public asset。若正式安裝直接連著開發 repo，就可能形成舊 backend＋新 frontend；開發中的中途 schema
 也可能先改到正式 DB。版本與資料成對切割，才能讓 candidate/main 分流之外也有可靠的 runtime/data
 復原邊界。
+
+## ADR-030：本機模型只走 loopback-only adapter，且必須由 Owner 明確設定
+
+**狀態：Accepted / Normative**
+
+**日期：2026-08-05**
+
+**決策：** 新增 `local` provider adapter，透過既有 `ProviderAdapter` 介面與 registry 註冊，用來驅動
+Ollama、LM Studio 與 llama.cpp 這類提供 OpenAI 相容 HTTP 介面的本機模型伺服器。Base URL 由 Owner
+提供，未提供時不註冊該 provider，任何查詢 fail closed。
+
+Endpoint 驗證是硬性安全邊界：只接受 `http://127.0.0.1:<port>`、`http://[::1]:<port>` 與
+`http://localhost:<port>`，且 `localhost` 會被固定成 `127.0.0.1`。非 loopback host、非 http scheme、
+帶帳號密碼的 URL、含 path/query/fragment 的 URL 以及缺少 port 一律以穩定代碼拒絕。Adapter 不跟隨
+redirect，收到任何 3xx 直接失敗。每次呼叫只嘗試一次，具明確 timeout 與輸出 byte 上限，模型探索
+（`/v1/models`，缺席時退到 `/api/tags`）必須 schema 驗證且不得退化成空清單。傳輸錯誤只以
+`LOCAL_*` 代碼呈現，不外洩原始 socket／errno 字串。
+
+本機模型不使用 credential、不進入 API 模式，因此也不進入計費預算路徑；`prepareApiCall` 對 `local`
+直接 fail closed。Writer 能力關閉，只作為唯讀 provider。
+
+**理由：** 本機模型不消耗訂閱額度，是明顯的產品需求；但「可設定 base URL 的 provider」若不限制目的地，
+等於在產品內建一條把 prompt 與 source 外送任意主機的通道。把目的地限制在 loopback、拒絕 redirect，
+並讓未設定時完全不存在，才能在提供功能的同時維持預設拒絕。
+
+**誠實限制：** 同帳號程序仍可在本機 port 上架反向代理再往外轉送；本 ADR 只保證連線目的地是本機
+介面，不保證本機那個程序的行為。本機模型輸出與其他 provider 輸出一樣是不可信內容。
+
+**尚未完成：** GUI/TUI 進入點（provider 選單、endpoint 設定畫面）由後續工作負責；在那之前 `local`
+無法被 workflow request 選取。無成本預算路徑已由 ADR-031 補上。
+
+## ADR-031：無金額成本是 provider 明確宣告，且只免除金額預留一項
+
+**狀態：Accepted / Normative**
+
+**日期：2026-08-05**
+
+**決策：** 新增 `src/providers/billing.ts`，以兩張對 `ProviderId` 完整（`satisfies Record<ProviderId, …>`）
+的宣告表定義每個 provider 的 `ProviderBillingModel`（`billed` / `no-cost`）與 `ProviderExecutionModel`
+（`subprocess` / `in-process`）。`fake` 與 `local` 宣告為 `no-cost` 與 `in-process`；`codex`／`claude`／
+`grok` 為 `billed` 與 `subprocess`。查表落空時丟 `PROVIDER_BILLING_MODEL_UNDECLARED`／
+`PROVIDER_EXECUTION_MODEL_UNDECLARED` 而非回傳預設值。
+
+`WorkflowService` 依宣告分流：`no-cost` 不執行 `reserveApiBudget`，改以 `provider.no-cost` 事件記錄
+「刻意跳過金額預留」；`billed` 維持原本的 `prepareApiCall` ＋ per-call／per-run／per-day／per-month
+預留。宣告為 `no-cost` 的 provider 若帶 `authMode: "api"`，直接 `NO_COST_PROVIDER_HAS_NO_API_MODE`
+fail closed。子程序計數改由 `ProviderExecutionModel` 決定，`local` 不再佔用 `maxSubprocesses` 名額。
+`provider.completed` 事件一律帶 `billing`，且 `no-cost` 呼叫必定帶 `estimatedCostUsd: 0`；TUI dashboard
+把 no-cost provider 顯示為 `no cost` 而非 `subscription`，usage 明細另列一行標明 `measured cost $0.00`。
+
+**理由：** 產品規範要求 API 模式必須有四層金額上限，但本機模型沒有金額可扣，硬要預留只會擋掉它或
+寫下無意義數字。相對地，「沒有金額成本」絕不等於「沒有限制」：免費端點上的 agent loop 正是硬上限
+要擋的失控情境。把兩者分開，並讓免除路徑成為必須逐 provider 宣告的能力，才能同時避免「本機模型被
+預算擋死」與「未來 provider 因遺漏而默默免預算」。
+
+**誠實限制：** `local` 不啟動子程序，所以 `maxSubprocesses` 對它不適用；其資源消耗只由呼叫數、輪數與
+時間上限間接約束。本機推論仍可長時間佔用 CPU／RAM／磁碟，Orchestratory 沒有、也不宣稱有主機資源
+配額控制。詳見威脅模型 F22。
+
+**尚未完成：** `local` 仍未進入任何 GUI/TUI provider allowlist（`src/ui/request.ts`、`src/ui/tui.ts`、
+`src/ui/web.ts`、`src/core/workflow-request-store.ts`），因此本次變更後仍無法由 workflow request 選取。
+
+## ADR-032：Merge preview 以 `git merge-tree --write-tree` 實際試算，而非以啟發式推測
+
+**日期：** 2026-08-06
+**狀態：** Accepted
+
+### 背景
+
+`candidate_complete` 產生的 preview 是 Owner 決定是否 merge 的唯一依據，而 Phase 5-3 之後
+**核准會綁定 `previewDigest`**。在此之前，preview 的 `conflicts` 只有三句與 drift／dirty main 有關的
+罐頭字串——**從未實際試算過合併**，等於請 Owner 對一個「衝突未知」的 merge 簽名。
+
+同時 `#diff` 使用 `git diff --name-status`，該格式丟棄 file mode，因此純權限變更（644→755）與
+submodule 指標變更（mode `160000`）都與一般 modify 無法區分。
+
+### 決策
+
+1. **改用 `git diff --raw -z --find-renames`** 保留新舊 mode，並以錨定的精確 regex 解析；不符即以
+   `CANDIDATE_DIFF_INVALID` 拒絕，不做猜測。`mode` 只在兩側皆非零且相異時輸出（對 `000000` 的
+   新增／刪除不是權限變更）。
+2. **新增 `#mergePreview`，執行 `git merge-tree --write-tree --name-only -z`**，cwd 設為 candidate
+   worktree（與 main 共用 object store）。它不動任何 ref、index 或工作樹，符合「preview 不得修改
+   canonical main」的規則。
+3. **退出碼單獨決定不了任何事。** git 對自身錯誤同樣回 exit 1（實測：`not something we can merge`），
+   因此只有 stdout 形狀吻合兩種已記載格式之一才接受結果，其餘一律以
+   `CANDIDATE_MERGE_PREVIEW_UNAVAILABLE` fail closed——**絕不以省略或預設值回報 `mergeable: true`**。
+4. 新欄位（`mergeable`／`mergeConflicts`／`modeChanges`／`submodules` 與其截斷旗標）全部位於
+   `preview` 內，因此自動納入 `previewDigest`，並在讀取路徑以同等嚴格度驗證。
+
+### 為什麼不是啟發式
+
+「同一個檔案兩邊都改就算衝突」這類啟發式會在最常見的情況下答錯：兩邊改同一檔的不重疊區段，
+git 會自動合併。實際試算是唯一能讓 preview 與真實 merge 一致的方法，而一致性正是 5-3 綁定核准的前提。
+
+### 代價與殘餘風險
+
+- `--write-tree` 會在共用 object store 寫入不可達的 tree/blob（實測 `git fsck --unreachable` 確認），
+  不影響 main 的可見狀態，待 gc 回收。
+- **merge driver 會執行**：`.gitattributes` 指定的 driver 來自 repo 自身 `.git/config`，preview 因此
+  會 spawn `/bin/sh -c <字串>`。保真度因此優於原先預期（兩邊都跑、結果一致），但安全面須誠實記載，
+  見威脅模型 **F23**。global／system 設定與 hooks 已由 `minimalGitEnvironment` 抑制。
+- **Hooks 不執行**，而實際 merge 會跑；實測分歧方向為真（preview 說可合併，實際 merge 因
+  `pre-merge-commit` 失敗而停在中途）。**必須在 Phase 5-5 promotion 之前處理。**
+- 清單有上限（衝突與 submodule 各 100 筆）並回報截斷旗標。**Phase 5-5 之前必須改為「截斷即不可核准」
+  或提供分頁**——否則 Owner 是對看不到的內容簽名。
+- `mergeable: true` 的語意是「沒有內容衝突」，不是「merge 一定會成功」：dirty main 會讓實際 merge
+  在進入衝突解析前就中止。該情況由 `conflicts` 的 `CURRENT_DIRTY_MAIN_CHANGES_ARE_EXCLUDED_FROM_CANDIDATE`
+  與完整的 `mainDirty` baseline 另行呈現；**5-5 必須要求乾淨的 main 工作樹**。
