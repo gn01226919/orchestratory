@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { runCli } from "../src/cli-entry.ts";
 import { helpText } from "../src/help.ts";
+import { describeOrphanRecoveryRefs } from "../src/main.ts";
 import { defaultNaturalLanguageTeam } from "../src/ui/tui.ts";
 
 test("global CLI help and safe entrypoint remain bounded", async () => {
@@ -20,6 +21,51 @@ test("global CLI help and safe entrypoint remain bounded", async () => {
   assert.equal(errorOutput, "Error: UNKNOWN_COMMAND\n");
   assert.doesNotMatch(errorOutput, /\bat main\b|file:\/\//u);
   assert.equal(await runCli(async () => undefined), 0);
+});
+
+test("orphan recovery refs are reportable, explained, and never offered for deletion", () => {
+  // The command has to exist in help at all: an accumulating recovery point nobody can see is the
+  // defect this exit closes, and an undiscoverable command is the same defect one step removed.
+  assert.match(helpText(), /candidates orphan-refs/u);
+  assert.match(helpText(), /read-only; lists, never deletes/u);
+
+  const known = "11111111-1111-4111-8111-111111111111";
+  const unknown = "22222222-2222-4222-8222-222222222222";
+  const empty = describeOrphanRecoveryRefs({
+    mainPath: "/workspace/project", orphans: [], limit: 100, taskStatus: () => undefined,
+  });
+  assert.match(empty, /^No orphan recovery refs under refs\/orchestratory\/checkpoints in \/workspace\/project\.\n$/u);
+
+  const report = describeOrphanRecoveryRefs({
+    mainPath: "/workspace/project",
+    orphans: [
+      { ref: `refs/orchestratory/checkpoints/${known}/33333333-3333-4333-8333-333333333333`, head: "a".repeat(40) },
+      { ref: `refs/orchestratory/checkpoints/${unknown}/44444444-4444-4444-8444-444444444444`, head: "b".repeat(40) },
+    ],
+    limit: 100,
+    taskStatus: (taskId) => (taskId === known ? "completed" : undefined),
+  });
+  // Which ref, what it points at, which task, and why it counts as an orphan.
+  assert.match(report, /Orphan recovery refs under refs\/orchestratory\/checkpoints in \/workspace\/project: 2\n/u);
+  assert.match(report, new RegExp(`refs/orchestratory/checkpoints/${known}/33333333-3333-4333-8333-333333333333`, "u"));
+  assert.match(report, /commit {6}a{40}/u);
+  assert.match(report, new RegExp(`task {8}${known} \\(candidate status: completed\\)`, "u"));
+  assert.match(report, new RegExp(`task {8}${unknown} \\(no candidate row on record\\)`, "u"));
+  assert.match(report, /checkpoint {2}33333333-3333-4333-8333-333333333333 \(no checkpoint row on record\)/u);
+  assert.match(report, /no owning checkpoint row in the candidate ledger/u);
+  // Read-only by construction: the report must not advertise a removal path that does not exist.
+  assert.match(report, /Listed only\. Removing a recovery ref is a destructive Git action and is not offered here\./u);
+  assert.doesNotMatch(report, /--execute|--delete|update-ref -d/u);
+  assert.doesNotMatch(report, /\(scan limit/u);
+
+  // A truncated scan says so rather than reading as a complete inventory.
+  const capped = describeOrphanRecoveryRefs({
+    mainPath: "/workspace/project",
+    orphans: [{ ref: `refs/orchestratory/checkpoints/${known}/55555555-5555-4555-8555-555555555555`, head: "c".repeat(40) }],
+    limit: 1,
+    taskStatus: () => "active",
+  });
+  assert.match(capped, /\(scan limit 1 reached — more may exist\)/u);
 });
 
 test("natural-language mode defaults to Codex 5.6 Sol with a Claude Fable 5 writer", () => {

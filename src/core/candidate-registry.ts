@@ -569,6 +569,54 @@ const MERGE_APPROVAL_TERMINAL: ReadonlySet<MergeApprovalState> =
   new Set<MergeApprovalState>(["consumed", "rejected", "invalidated", "expired"]);
 
 /**
+ * Failures that are a VERDICT about this logical request, and are therefore the only ones allowed to
+ * write the terminal `failed` state onto an idempotency key.
+ *
+ * `failed` is unrecoverable by design: #beginRequest answers every later use of that key with
+ * CANDIDATE_REQUEST_FAILED_RETRY_WITH_NEW_KEY, and a new key is a new logical request that knows
+ * nothing about what the burnt one may already have persisted. Spending that on "the external disk
+ * blinked", "a permission flickered", "git took longer than the deadline on a large repository" or
+ * "git could not be spawned at all" destroys work that nothing was wrong with, and restoring the
+ * machine does not bring it back — the same defect the merge-approval binding check was carrying
+ * (see #verifyMergeBinding), one layer down.
+ *
+ * So the list is an allowlist, not a denylist, and the default is "outcome unknown". Every entry
+ * here is a fact about the request that no amount of environmental recovery can change:
+ *
+ * - the reserved recovery ref already exists naming a different commit, so this key's reserved
+ *   checkpoint identity can never be written;
+ * - the reserved identifiers are not well formed, so every retry composes the same invalid ref;
+ * - main moved off the base head this key recorded, so the candidate this key reserved can no
+ *   longer be branched from what it was reserved against;
+ * - the worktree that was created is not the one that was asked for, which is a scope refusal;
+ * - git read the repository's local config successfully and it configures a clean/smudge filter or
+ *   fsmonitor, which is a policy refusal about the repository, not a failed read of it. (The failed
+ *   read has its own code and is deliberately not on this list.)
+ *
+ * Anything else — including the deliberately ambiguous CANDIDATE_GIT_COMMAND_FAILED, every SQLite
+ * error, and every spawn failure — leaves the key `pending`, which is exactly what `pending` means:
+ * outcome unknown, retry the same key, converge on whatever was persisted. Fail closed on the
+ * action, open on the key.
+ */
+const DETERMINATE_REQUEST_FAILURES: ReadonlySet<string> = new Set([
+  "CANDIDATE_CHECKPOINT_REF_CONFLICT",
+  "CANDIDATE_CHECKPOINT_REF_INVALID",
+  "CANDIDATE_MAIN_HEAD_CHANGED",
+  "CANDIDATE_WORKTREE_SCOPE_MISMATCH",
+  "CANDIDATE_ID_INVALID",
+  "CANDIDATE_BASE_HEAD_INVALID",
+  "UNSAFE_LOCAL_GIT_FILTER_OR_FSMONITOR_CONFIG",
+]);
+
+/**
+ * True only for a failure this module can name as a verdict. A non-Error throw, an aggregate, a
+ * wrapped cause or an unrecognised code is "unknown", never "failed".
+ */
+function determinateRequestFailure(error: unknown): boolean {
+  return error instanceof Error && DETERMINATE_REQUEST_FAILURES.has(error.message);
+}
+
+/**
  * Durable idempotency ledger for candidate mutations, keyed by clientRequestId alone.
  *
  * The seat identity is deliberately NOT part of the key. `actor` is a presence display name that is
@@ -1169,8 +1217,16 @@ export class CandidateRegistry {
       this.#settleSucceeded(clientRequestId, ownerToken);
       return active;
     } catch (error) {
-      try { this.#transition(row, { status: "failed", updated_at_ms: this.#now() }); } catch { /* retain original failure */ }
-      try { this.#settleRequest(clientRequestId, ownerToken, "failed"); } catch { /* retain original failure */ }
+      // The task verdict and the key verdict are written together or not at all. A worktree that was
+      // built and then failed only its final read is a `creating` row with a real candidate behind
+      // it; calling that `failed` orphans the worktree and the branch, and burning the key with it
+      // removes the only handle entitled to them. Left alone, the row stays half-created — which is
+      // what it is — and reconcileCreating resolves it from the evidence on disk once no live
+      // reservation holds it, activating it when the worktree is there and failing it when it is not.
+      if (determinateRequestFailure(error)) {
+        try { this.#transition(row, { status: "failed", updated_at_ms: this.#now() }); } catch { /* retain original failure */ }
+        this.#settleFailedVerdict(clientRequestId, ownerToken, error);
+      }
       throw error;
     }
   }
@@ -1242,9 +1298,11 @@ export class CandidateRegistry {
     try {
       await this.#createCheckpointRef(task.mainPath, recoveryRef, candidate.headSha);
     } catch (error) {
-      // Ref creation sits outside the DB transaction, so record the verdict here or the key would
-      // stay `pending` and retry the same deterministic failure forever.
-      try { this.#settleRequest(clientRequestId, ownerToken, "failed"); } catch { /* retain original failure */ }
+      // Ref creation sits outside the DB transaction, so a verdict recorded here is the only thing
+      // that stops a key retrying the same deterministic failure forever. It is recorded ONLY for a
+      // verdict: an unwritable ref store or a git that could not be spawned says nothing about this
+      // request, and the same key must still be able to converge once the repository is writable.
+      this.#settleFailedVerdict(clientRequestId, ownerToken, error);
       throw error;
     }
     const bare: Omit<CheckpointRow, "row_hash"> = {
@@ -1270,7 +1328,10 @@ export class CandidateRegistry {
       this.#db.exec("COMMIT");
     } catch (error) {
       this.#db.exec("ROLLBACK");
-      try { this.#settleRequest(clientRequestId, ownerToken, "failed"); } catch { /* retain original failure */ }
+      // The transaction rolled back, so nothing about this key was persisted here and a lost race,
+      // a busy database or an I/O error is an unknown outcome rather than a verdict. The ref written
+      // just above survives, and the retry adopts it rather than conflicting with it.
+      this.#settleFailedVerdict(clientRequestId, ownerToken, error);
       throw error;
     }
     this.#settleSucceeded(clientRequestId, ownerToken);
@@ -1410,7 +1471,11 @@ export class CandidateRegistry {
     try {
       await this.#createCheckpointRef(task.mainPath, recoveryRef, candidate.headSha);
     } catch (error) {
-      try { this.#settleRequest(clientRequestId, ownerToken, "failed"); } catch { /* retain original failure */ }
+      // The costliest key in the system to burn: by this line the candidate is finished work that
+      // an owner is about to be asked to merge. A read-only ref store or a git that failed to spawn
+      // must therefore leave the key retryable — the alternative is merge-ready work reachable only
+      // through a new key, which knows nothing about what this one already wrote.
+      this.#settleFailedVerdict(clientRequestId, ownerToken, error);
       throw error;
     }
     const completionJson = JSON.stringify(completion);
@@ -1437,7 +1502,9 @@ export class CandidateRegistry {
       this.#db.exec("COMMIT");
     } catch (error) {
       this.#db.exec("ROLLBACK");
-      try { this.#settleRequest(clientRequestId, ownerToken, "failed"); } catch { /* retain original failure */ }
+      // Same rule as the checkpoint transaction: a rollback persisted nothing, so the outcome is
+      // unknown unless the failure names itself as a verdict.
+      this.#settleFailedVerdict(clientRequestId, ownerToken, error);
       throw error;
     }
     this.#settleSucceeded(clientRequestId, ownerToken);
@@ -2807,6 +2874,22 @@ export class CandidateRegistry {
   /** Best-effort settle for an already-committed mutation; never converts success into failure. */
   #settleSucceeded(clientRequestId: string, ownerToken: string): void {
     try { this.#settleRequest(clientRequestId, ownerToken, "succeeded"); } catch { /* row stays pending; retry converges */ }
+  }
+
+  /**
+   * The only path that writes the terminal `failed` state, and it refuses to do so for a failure it
+   * cannot name as a verdict (see DETERMINATE_REQUEST_FAILURES).
+   *
+   * Declining to settle is not "assume it worked" — the caller still rethrows, so the action is
+   * refused either way. It changes one thing only: whether the idempotency key survives to be
+   * retried. An unknown outcome leaves the row `pending`, which is precisely what `pending` records,
+   * and the next attempt with that key re-reads durable state and converges on whatever it finds.
+   * Every write it could make is still guarded by #writeRequest's ownership and
+   * already-succeeded checks, so a late settle can never demote a mutation that landed.
+   */
+  #settleFailedVerdict(clientRequestId: string, ownerToken: string, error: unknown): void {
+    if (!determinateRequestFailure(error)) return;
+    try { this.#settleRequest(clientRequestId, ownerToken, "failed"); } catch { /* retain original failure */ }
   }
 
   #assertRequestRow(row: RequestRow): void {

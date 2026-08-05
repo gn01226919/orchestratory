@@ -18,6 +18,7 @@ export function helpText(): string {
     "  orchestrator daemon install|uninstall|status   (GUI as login service)",
     "  orchestrator workspaces list|allow <path> [--label <name>]",
     "  orchestrator worktrees list|cleanup <run-id> [--execute]",
+    "  orchestrator candidates orphan-refs <workspace>   # read-only; lists, never deletes",
     "  orchestrator data inventory|integrity|purge [--execute]",
     "  orchestrator data retention show|set [--terminal-days N] [--max-runs N]",
     "  orchestrator config show",
