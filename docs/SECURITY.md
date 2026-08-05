@@ -49,7 +49,13 @@ Orchestratory 承諾：
 - Main path 必須有醒目標記，避免 Agent 因 cwd 或多 worktree 混淆。
 - Agent 準備直接修改 main 時，依 `AGENTS.md` 主動說明並等待使用者同意。
 - 任務完成由 Completion Service 凍結 snapshot 並主動建立 merge decision。
-- Approval 是 single-use、short-lived、task/path/HEAD/preview-bound。
+- Approval 是 single-use、short-lived、task/path/HEAD/preview-bound。Agent 只能**提出請求**；請求不含
+  token、授權不了任何事，核准只能由本機 owner 介面以精確短語 `MERGE INTO MAIN` 與 dialog 實際顯示的
+  `previewDigest` 產生。綁定在建立、核准與消耗三個時點各驗一次，任一值改變即拒絕並指名改變的欄位，
+  不靜默重算。Single-use 由持久狀態的 compare-and-set 保證，並行消耗只有一個成功。
+- 截斷或模擬出衝突的 preview 完全不可核准：Owner 不對看不到的內容簽名。
+- Approval 只授權「把這個 snapshot merge 進 main」，並在授權物件內明列不被授權的動作；拒絕、失效與
+  逾時不執行任何 Git 指令，candidate、checkpoint 與 recovery ref 完整保留。
 - Promotion 前建立 recovery point；建立或驗證失敗時不得宣稱 ready。
 - Main/candidate drift、preview mismatch、scope expansion 或未預期 conflict 均停止並重新詢問。
 - Merge 後不自動 push、publish、deploy 或 cleanup。

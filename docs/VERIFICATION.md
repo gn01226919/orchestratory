@@ -57,6 +57,42 @@ Phase 5-1 在**沒有通過標準**的情況下跑了十輪對抗式審查，十
 - **`orphanRecoveryRefs()` 沒有任何 CLI／GUI／MCP 出口**：recovery ref 是 promotion 唯一的回復路徑，
   Owner 目前看不到它。
 
+## Phase 5-3 通過標準（開工前先訂，2026-08-06）
+
+同 5-2：**第一輪對抗式審查只准對照本節裁決**，要新增要求者須說明它為何屬於標準而非殘餘風險。
+
+### 不變式
+
+> **一個 approval ⇒ 至多一次 promotion，且只適用於它綁定的那個精確 snapshot。**
+
+5-5 會依這個 approval 寫入 canonical main。**approval 一旦能被重放、能套用到別的 snapshot、
+或能在綁定值改變後仍生效，Owner 核准的就不是他看到的那個東西。**
+
+### Yes 標準（六條）
+
+1. **綁定完整**：approval 至少綁 `taskId`、`candidateHead`、`mainHead`、`previewDigest` 與目標路徑。
+   任一綁定值改變即失效，且失效必須是**拒絕**而非靜默重新計算。
+2. **Single-use**：已使用的 approval 不可重放；兩個並行使用只有一個能成功，另一個以穩定錯誤碼拒絕。
+   短效——逾時後失效。
+3. **拒絕不等於刪除授權**：Owner 拒絕或不決定時，candidate、checkpoint 與 recovery ref 完整保留，
+   且可重新 preview 再問一次。拒絕本身不得觸發任何清理。
+4. **授權不得外溢**：approval 只授權「把這個 snapshot merge 進 main」。不得被當成 push、publish、
+   deploy、刪除或任何其他外部副作用的授權。
+5. **截斷的 preview 不可核准**（提前關閉 5-2 記錄的到期項）：`filesTruncated`、`submodulesTruncated`
+   或 `mergeConflictsTruncated` 任一為真時，approval 必須拒絕。**Owner 不得對看不到的內容簽名。**
+6. **核准介面**（D-001／D-002 已由 Owner 核准）：頁內 dialog，**不得使用 `window.prompt`／`alert`／
+   `confirm`**；短語為語意化的 `MERGE INTO MAIN`（不含 taskId）；**scroll-gate**——diff 未捲到底或
+   衝突區有未確認項目時，輸入框與主要按鈕保持 disabled；說明文字採中英對照。
+
+### 可接受的殘餘風險（本階段）
+
+| 項目 | 理由 | 5-5 前是否失效 |
+|---|---|---|
+| approval 不涵蓋 hooks 行為（`pre-merge-commit` 等） | preview 本身不跑 hooks（見 5-2 表） | **會失效**——5-5 執行真實 merge 時 hooks 會跑，approval 綁的 preview 沒算進去 |
+| approval 不保證 merge 一定成功，只保證「沒有內容衝突」 | dirty main 會讓實際 merge 在衝突解析前中止 | **會失效**——5-5 必須要求乾淨的 main 工作樹 |
+| 同帳號程序可直接改 approval store | 與整個產品的信任模型一致（見 §2 非安全保證） | 否 |
+| approval 過期後需重新 preview，成本由 Owner 承擔 | 這是刻意的摩擦，不是缺陷 | 否 |
+
 ## ADR-028 vNext 待驗證矩陣
 
 | 範圍 | 狀態 | 必要證據 |
@@ -68,7 +104,7 @@ Phase 5-1 在**沒有通過標準**的情況下跑了十輪對抗式審查，十
 | Candidate lifecycle | 已實作／synthetic 已驗證；live 待驗收 | Git worktree＋row-hash SQLite 保存 task/base/main/candidate/checkpoint；dirty main 原地保留且不複製，ignored 只記數量／路徑指紋；每個 checkpoint 建立並驗證獨立 Git ref；超過舊 2 MiB ceiling 的 diff/dirty/untracked/ignored inventory 仍以串流精確計數；所有 changed content（含超過 50 MiB）在每次 inspection 共用 30 秒 deadline 內串流雜湊，逾時 fail closed；clean committed HEAD、跨程序狀態、篡改、realpath、unsafe filter、HEAD/dirty/ignored drift、deterministic TOCTOU 拒絕與 canonical main branch/worktree 不變測試；`candidate_status` 對同一查詢的 main snapshot 只讀一次；`test/candidate-registry.test.ts`、`test/worktree-broker.test.ts`、`test/process-runner.test.ts`、`test/git-broker.test.ts`、`test/collaboration-service.test.ts`、`test/collab-mcp.test.ts` |
 | Task completion merge prompt | 已實作／synthetic 已驗證；GUI/live 待驗收 | `candidate_complete` 直接詢問是否將精確 snapshot merge 到 main，並回傳 digest、diff/test/risk/conflict/drift/recovery ref 與 `owner-required`；目前不改 canonical main branch/worktree，但會建立 shared Git recovery ref；`test/candidate-registry.test.ts`、`test/collab-mcp.test.ts` |
 | Candidate mutation request idempotency | 已實作／synthetic 已驗證；live 待驗收 | `candidate_start`／`candidate_checkpoint`／`candidate_complete` 均要求 stable UUID `clientRequestId`。Registry schema v3 的 `candidate_requests` **以 `client_request_id` 單欄為主鍵**：seat 身分刻意不入 key，因為 presence lease 逾時後重連會重鑄 display name（`codex1`→`codex2`），而那正是本 ledger 要存活的故障；若把它放進 key，重連後的重試會鑄出第二個 candidate。`actor` 保留供稽核。Replay 仍要求 operation、room 與 input digest 三者完全相同，因此重用 key 只可能取回同一個邏輯請求；不同則回 `CANDIDATE_REQUEST_IDEMPOTENCY_CONFLICT` 且不執行任何 mutation。reserve 時即鑄造 taskId／candidateId／checkpointId／completionId 並持久化；replay 與 crash 後的收斂**一律從 durable state 重建答案**，receipt 只是固定大小標記，故大型 completion 不可能撐破 receipt 上限。checkpoint ref 建立採「已存在且指向同一 head 即採納」，避免中斷留下的孤兒 ref 讓同一把 key 永久失敗，指向不同 commit 才回 `CANDIDATE_CHECKPOINT_REF_CONFLICT`。**同一程序內的併發以記憶體內精確鎖處理**：同一把 key 同時只允許一個執行中，併發呼叫回 `CANDIDATE_REQUEST_IN_FLIGHT`（另有 `CANDIDATE_REQUEST_RECOVERING` 表示先前嘗試留下半建立的 candidate：該列由 `CREATING_RECOVERY_GRACE_MS` 的 wall clock **與** 保留的 `owner_pid` liveness 共同決定——擁有者仍存活即持續守護，可證明已死則交由既有 worktree 證據解析，**且不寫入帳本**，因此同一把 key 的重試仍能收斂而非被迫鑄新 key；liveness 判準的不確定性見 [[THREAT_MODEL]] F20）；**跨 OS process** 則由 reservation 的不透明 `owner_token` 擋下——採用既有保留時會重鑄該 token，原建立者中止時的 discard CAS 因此不再匹配，無法刪除他人正在使用的保留。token 刻意不從時鐘推導（時間戳在同一毫秒內不會改變，曾因此讓保護在窄窗內失效），且**每一個對 `candidate_requests` 的寫入都必須帶 token**——這是結構性不變式而非逐呼叫點檢查，因為先前只有 discard 帶 token、settle 沒有，陳舊席位得以覆寫現任持有者的判決並讓一個邏輯請求產出兩份 durable 成果；schema 因此升至 v3，v2→v3 直接重建這張輔助表（僅使升級當下在途的 key 停止重播，不觸碰任何權威資料）；`succeeded` 為終局狀態，輸家無法覆寫贏家的判決（內部不變式，非對外狀態碼）；`start` 的 replay 不會回傳已離開 `active` 的 task，改回 `CANDIDATE_REQUEST_TASK_NO_LONGER_ACTIVE`，避免把已完成甚至已合併的 candidate 當成新 start 交還；已記錄 `failed` 的 key 回 `CANDIDATE_REQUEST_FAILED_RETRY_WITH_NEW_KEY`，並保證換新 key 有前進路徑。**本次呼叫自己建立、且尚未產生任何 durable artifact 就中止的嘗試會刪除該保留**。採用他人保留的嘗試即使沒產生成果也不刪除（保留可能已擁有 candidate row、worktree 或 ref），因此**採用路徑的中止仍會留下 `pending` 列**；ref 建立失敗則會記為 `failed`，即使當次沒有產生任何成果。room id 在寫入 request row 前即以 ROOM_PATTERN 驗證，未知或跨房間 taskId 在 reserve 前即被 `#assertScoped` 擋下，寫入嚴格度不低於讀取。**`candidate_requests` 刻意不納入開啟時的 `#verify()`**：它是輔助重試帳本，`candidates`／`candidate_checkpoints` 才是權威記錄，一列不可讀不得讓 durable 資料整體無法開啟；每列改於讀取時以 row-hash 驗證，壞列只毒化自己那把 key。v1 資料庫以純加表方式升級，既有 row 與其 hash 不變。孤兒 recovery ref 可由 `orphanRecoveryRefs()` 唯讀列出且**不自行刪除**（刪 ref 屬破壞性 Git 操作，需 scoped approval），但**目前沒有任何 CLI／GUI／MCP 出口呼叫它**，Owner 實務上看不到。帳本無 TTL 亦無 prune，僅由 `inventory()` 的 `requests`／`requestsPending` 曝露成長。`test/candidate-registry.test.ts`、`test/collab-mcp.test.ts`、`test/collaboration-service.test.ts` |
-| Snapshot-bound approval | 待實作／待驗證 | replay、candidate drift、main drift、preview mismatch 全部拒絕 |
+| Snapshot-bound approval | 已實作（後端）／synthetic 已驗證；頁內 dialog 與 live 待驗收 | `main_merge_preview` 由 live state 重算整份 snapshot 且**不寫入任何東西**（無 row、無 ref、無 worktree）；`main_merge_request` 以 stable UUID `clientRequestId` 建立 `requested` 記錄，**要求不等於核准**——它不含 token、不授權任何事。核准只能由 owner 介面經 `POST /api/rooms/merge-approvals/approve` 產生，需精確短語 `MERGE INTO MAIN` 與 dialog 實際顯示的 `previewDigest`。approval 至少綁 `taskId`／`completionId`／`roomId`／`mainPath`／`mainBranch`／`candidatePath`／`baseMainHead`／`candidateHead`／`mainHead`／main dirty 與 ignored fingerprint／`recoveryRef`／`previewDigest`；**綁定在建立、核准與消耗三個時點各驗一次**，任一值改變即以 `MAIN_MERGE_APPROVAL_BINDING_CHANGED:<改變的欄位名>` 拒絕並把該 approval 轉為終局 `invalidated`，不靜默重算。single-use 由 `state`＋`row_hash` 的 compare-and-set 保證：兩個並行消耗只有一個成功，輸家得到 `MAIN_MERGE_APPROVAL_ALREADY_CONSUMED`；token 只在 `approved` 期間以 SHA-256 存在，離開該狀態即清除。短效：request 15 分鐘、grant 5 分鐘，逾時記為 `expired` 並拒絕。截斷（`filesTruncated`／`submodulesTruncated`／`mergeConflictsTruncated`）與模擬出的衝突都使 preview 不可核准，**寫入路徑與讀取路徑都擋**。拒絕、失效與逾時皆不執行任何 Git 指令，candidate、checkpoint 與 recovery ref 逐位元不變，owner 可重新 preview 再問一次。approval 只授權 `merge-candidate-into-main`，消耗時帶其他 action 一律 `MAIN_MERGE_APPROVAL_ACTION_NOT_GRANTED`，並在授權物件內明列 `notAuthorized`（push／publish／deploy／delete／cleanup…）。**本階段不寫入 canonical main**：`consumeMainMerge` 只做驗證與狀態轉移，沒有任何 MCP／HTTP 出口，promotion 屬 5-5。schema v4 新增獨立 `candidate_merge_approvals` 表（row-hash 完整性、scalar 與 preview 互為冗餘校驗、`state IN ('requested','approved')` 的 partial unique index 保證每個 task 同時只有一個未決問題），未動 v3 的 `candidate_requests` 帳本。`test/merge-approval.test.ts`、`test/merge-approval-web.test.ts`、`test/collab-mcp.test.ts`、`test/candidate-registry.test.ts` |
 | Promotion/recovery | 待實作／待驗證 | recovery point 可讀、conflict/scope expansion 重批、成功/失敗/rollback 可驗證 |
 | GUI Managed 隔離 | 待實作／待驗證 | Managed policy 不會改變已加入 Native terminal 的 capability |
 

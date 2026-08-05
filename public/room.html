@@ -55,6 +55,9 @@
           </form>
           <div id="sidebar-managed-agent-list" class="office-presence-list managed-agent-list"></div>
         </section>
+        <button id="merge-approvals-open" class="agent-requests-open merge-approvals-open" type="button" aria-haspopup="dialog" disabled>
+          <span>⑂ 合併進 main 待核准 · Merge into main</span><b id="merge-approval-count" hidden>0</b>
+        </button>
         <label class="field" for="room-search">搜尋帳本
           <input id="room-search" type="search" placeholder="關鍵字，清空回直播">
         </label>
@@ -206,5 +209,55 @@
         </form>
       </main>
     </div>
+    <section id="merge-approval" class="workspace-onboarding merge-approval" hidden role="dialog" aria-modal="true" aria-labelledby="merge-approval-title">
+      <div class="workspace-onboarding-card merge-approval-card">
+        <header>
+          <span><small>MERGE CANDIDATE INTO MAIN</small><b id="merge-approval-title">合併進 main · Merge candidate into main</b></span>
+          <button id="merge-approval-close" type="button" aria-label="關閉合併核准 · Close merge approval">×</button>
+        </header>
+        <div class="merge-approval-head">
+          <div class="merge-approval-identity">
+            <em id="merge-approval-risk" class="merge-approval-risk">風險 · RISK</em>
+            <code id="merge-approval-task">—</code>
+          </div>
+          <p id="merge-approval-route" class="merge-approval-route">候選 worktree → 目標分支 · candidate worktree → target branch</p>
+          <label class="field merge-approval-switch" for="merge-approval-select" id="merge-approval-switch" hidden>其他待核准項目 · Other pending approvals
+            <select id="merge-approval-select"></select>
+          </label>
+          <div id="merge-approval-risks" class="merge-approval-risks"></div>
+        </div>
+        <section id="merge-approval-blocking" class="merge-approval-blocking" aria-live="polite" hidden>
+          <b>無法核准 · Blocking</b>
+          <p>下列項目存在期間，確認輸入與「合併進 main」保持停用。 · While any of these is present the confirmation input and the primary button stay disabled.</p>
+          <ul id="merge-approval-blockers"></ul>
+          <button id="merge-approval-repreview" type="button">↻ 重新產生預覽 · Re-preview</button>
+        </section>
+        <div id="merge-approval-stats" class="merge-approval-stats"></div>
+        <p class="merge-approval-diff-label" id="merge-approval-diff-label">變更檔案（預設收合，請捲到底） · Changed files (collapsed by default, scroll to the bottom)</p>
+        <div id="merge-approval-diff" class="merge-approval-diff" tabindex="0" role="group" aria-labelledby="merge-approval-diff-label"></div>
+        <p id="merge-approval-scroll-hint" class="merge-approval-scroll-hint" aria-live="polite"></p>
+        <section class="merge-approval-recovery">
+          <b>復原點 · Recovery point</b>
+          <div id="merge-approval-recovery-facts" class="merge-approval-recovery-facts"></div>
+          <code id="merge-approval-restore">—</code>
+          <button id="merge-approval-copy" type="button">⧉ 複製還原指令 · Copy restore command</button>
+          <small>Orchestratory 不會替你執行這段指令；它只是把復原路徑寫成可直接貼上的形式。 · Orchestratory never runs this for you; it only writes the recovery path out in copy-paste form.</small>
+        </section>
+        <div class="merge-approval-ttl">
+          <span><small>核准視窗剩餘 · Approval window</small><b id="merge-approval-ttl">—</b></span>
+          <button id="merge-approval-refresh" type="button">↻ 重新產生預覽 · Re-preview</button>
+        </div>
+        <div id="merge-approval-confirm-area">
+          <label for="merge-approval-confirmation">捲完 diff 且沒有阻擋項目後，輸入 <code id="merge-approval-phrase">MERGE INTO MAIN</code> 解鎖 · Once the diff is read to the end and nothing is blocking, type the phrase to enable</label>
+          <input id="merge-approval-confirmation" type="text" maxlength="64" autocomplete="off" spellcheck="false" disabled>
+        </div>
+        <div class="workspace-onboarding-actions merge-approval-actions">
+          <button id="merge-approval-reject" type="button">拒絕並保留候選 · Reject &amp; keep candidate</button>
+          <button id="merge-approval-cancel" type="button">取消 · Cancel</button>
+          <button id="merge-approval-confirm" class="danger" type="button" disabled>合併進 main · Merge into main</button>
+        </div>
+        <p id="merge-approval-status" class="workspace-onboarding-status" aria-live="polite"></p>
+      </div>
+    </section>
   </body>
 </html>

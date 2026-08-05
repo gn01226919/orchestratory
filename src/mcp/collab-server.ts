@@ -501,10 +501,39 @@ export class CollabToolBroker {
           {
             name: "candidate_status",
             description:
-              "Show candidate tasks for this exact authenticated Room/workspace, including checkpoints, live candidate/main HEADs, dirty state, recovery readiness, and whether a prior completion preview has become stale.",
+              "Show candidate tasks for this exact authenticated Room/workspace, including checkpoints, merge approval records, live candidate/main HEADs, dirty state, recovery readiness, and whether a prior completion preview has become stale.",
             inputSchema: {
               type: "object", additionalProperties: false,
               properties: { taskId: { type: "string", minLength: 36, maxLength: 36 } },
+            },
+          },
+          {
+            name: "main_merge_preview",
+            description:
+              "Recompute, from live state, the exact snapshot the owner would be asked to approve for merging this completed candidate into canonical main. Read-only: it creates no approval, writes no Git ref, and does not mutate the canonical main branch/worktree. Returns previewDigest, the full file/conflict/test/risk/recovery preview, the required owner confirmation phrase, and `blockers` — a preview whose file, submodule or merge-conflict list was truncated, or whose simulated merge conflicts, is reported as approvable:false so the owner is never asked to sign for content they were not shown. Pass the returned previewDigest to main_merge_request. MAIN_MERGE_CANDIDATE_NOT_COMPLETED means the task has not called candidate_complete or has already left the completed state — call candidate_status. MAIN_MERGE_CANDIDATE_HEAD_CHANGED means the candidate worktree has moved past its own completion — reset it to the completed head or start a new candidate task. MAIN_MERGE_CANDIDATE_WORKTREE_DIRTY means uncommitted candidate changes — commit them first. MAIN_MERGE_RECOVERY_POINT_MISSING means the completion's recovery ref no longer names the candidate head, so there is no verified recovery point to merge behind. CANDIDATE_MERGE_PREVIEW_UNAVAILABLE means the merge could not be simulated at all — fix the repository state and retry. Default rule for ANY error not named here: do not blindly retry — call candidate_status to learn the real state first.",
+            inputSchema: {
+              type: "object", additionalProperties: false,
+              required: ["taskId"],
+              properties: {
+                taskId: { type: "string", minLength: 36, maxLength: 36 },
+                room: { type: "string", minLength: 1, maxLength: 48 },
+              },
+            },
+          },
+          {
+            name: "main_merge_request",
+            description:
+              "Ask the owner to approve merging this exact candidate snapshot into canonical main. Requesting is NOT approving: it records a pending question bound to taskId, completionId, candidate HEAD, main HEAD, main branch, both paths, the recovery ref and previewDigest, and it carries no token an agent could use. Only the owner's local GUI/TUI dialog can grant it, only once, and only for that snapshot; if any bound value changes the approval is refused rather than silently re-pointed. This tool does not merge, promote, push or mutate the canonical main branch/worktree, and creates no Git ref. Send the previewDigest returned by a main_merge_preview you have just shown the owner. This mutation is request-idempotent: send one stable UUID clientRequestId per logical call and reuse the exact same value on every retry; an identical retry returns the same approval instead of raising a second one, and reusing a key with different input fails closed with MAIN_MERGE_REQUEST_IDEMPOTENCY_CONFLICT. MAIN_MERGE_PREVIEW_DIGEST_STALE means live state moved since your preview — call main_merge_preview again, show the owner the new preview, then request again. MAIN_MERGE_PREVIEW_TRUNCATED means the preview could not show everything, so it is not approvable — split the change set until it fits. MAIN_MERGE_PREVIEW_CONFLICTED means the simulated merge conflicts — merge main into the candidate, commit, checkpoint, then re-preview. MAIN_MERGE_APPROVAL_ALREADY_PENDING means this task already has an unanswered question — wait for the owner, or ask them to reject it first. MAIN_MERGE_COMPLETION_MISMATCH means completionId does not name the stored completion — take it from main_merge_preview. MAIN_MERGE_APPROVAL_TASK_LIMIT_REACHED means this task has recorded too many approvals — start a new candidate task. Default rule for ANY error not named here: do not blindly retry — call candidate_status to learn the real state first.",
+            inputSchema: {
+              type: "object", additionalProperties: false,
+              required: ["clientRequestId", "taskId", "completionId", "previewDigest"],
+              properties: {
+                clientRequestId: { type: "string", minLength: 36, maxLength: 36 },
+                taskId: { type: "string", minLength: 36, maxLength: 36 },
+                completionId: { type: "string", minLength: 36, maxLength: 36 },
+                previewDigest: { type: "string", minLength: 64, maxLength: 64 },
+                room: { type: "string", minLength: 1, maxLength: 48 },
+              },
             },
           },
         );
@@ -593,6 +622,8 @@ export class CollabToolBroker {
     if (name === "candidate_checkpoint") return await this.#candidateCheckpoint(asObject(input));
     if (name === "candidate_complete") return await this.#candidateComplete(asObject(input));
     if (name === "candidate_status") return await this.#candidateStatus(asObject(input));
+    if (name === "main_merge_preview") return await this.#mainMergePreview(asObject(input));
+    if (name === "main_merge_request") return await this.#mainMergeRequest(asObject(input));
     if (name === "room_wait") return await this.#roomWait(asObject(input), options);
     if (name === "room_ack") return this.#roomAck(asObject(input));
     if (name === "room_reply") return await this.#roomReply(asObject(input));
@@ -929,6 +960,62 @@ export class CollabToolBroker {
       ...(typeof input.taskId === "string" ? { taskId: input.taskId } : {}),
     });
     return JSON.stringify({ candidates });
+  }
+
+  async #mainMergePreview(input: JsonObject): Promise<string> {
+    this.#allowedKeys(input, ["taskId", "room"], "UNKNOWN_MAIN_MERGE_PREVIEW_ARGUMENT");
+    if (typeof input.taskId !== "string" || !UUID_PATTERN.test(input.taskId)) {
+      throw new Error("INVALID_CANDIDATE_TASK_ID");
+    }
+    const { collaboration, presenceId, binding } = this.#peerSession();
+    if (input.room !== undefined && input.room !== binding.roomId) throw new Error("CANDIDATE_ROOM_BINDING_MISMATCH");
+    const preview = await collaboration.previewMainMerge({
+      presenceId, roomId: binding.roomId, workspace: binding.workspace, taskId: input.taskId,
+    });
+    return JSON.stringify({
+      ...preview,
+      mergeDecision: "owner-required",
+      approvalScope: "single-use-snapshot-bound-merge-only",
+      next: preview.approvable
+        ? "Show the owner this preview, then call main_merge_request with this previewDigest. Only the owner's local dialog can approve it."
+        : `Not approvable: ${preview.blockers.join(", ")}. Resolve it, then call main_merge_preview again.`,
+      mainMutationScope: "canonical-main-branch-and-worktree",
+      sharedGitMetadataMutation: false,
+    });
+  }
+
+  async #mainMergeRequest(input: JsonObject): Promise<string> {
+    this.#allowedKeys(
+      input,
+      ["clientRequestId", "taskId", "completionId", "previewDigest", "room"],
+      "UNKNOWN_MAIN_MERGE_REQUEST_ARGUMENT",
+    );
+    const clientRequestId = requireCandidateRequestId(input.clientRequestId);
+    if (typeof input.taskId !== "string" || !UUID_PATTERN.test(input.taskId)) {
+      throw new Error("INVALID_CANDIDATE_TASK_ID");
+    }
+    if (typeof input.completionId !== "string" || !UUID_PATTERN.test(input.completionId)) {
+      throw new Error("INVALID_CANDIDATE_COMPLETION_ID");
+    }
+    if (typeof input.previewDigest !== "string" || !/^[0-9a-f]{64}$/u.test(input.previewDigest)) {
+      throw new Error("INVALID_CANDIDATE_PREVIEW_DIGEST");
+    }
+    const { collaboration, presenceId, binding } = this.#peerSession();
+    if (input.room !== undefined && input.room !== binding.roomId) throw new Error("CANDIDATE_ROOM_BINDING_MISMATCH");
+    const approval = await collaboration.requestMainMerge({
+      presenceId, clientRequestId, roomId: binding.roomId, workspace: binding.workspace,
+      taskId: input.taskId, completionId: input.completionId, previewDigest: input.previewDigest,
+    });
+    return JSON.stringify({
+      approval,
+      approved: false,
+      state: approval.state,
+      mergeDecision: "owner-required",
+      mainMutation: false,
+      mainMutationScope: "canonical-main-branch-and-worktree",
+      sharedGitMetadataMutation: false,
+      next: "Tell the owner the request is waiting in the local Orchestratory dialog. Only they can approve it, once, for this exact snapshot. Poll candidate_status for the decision; do not retry with a new key.",
+    });
   }
 
   async #roomWait(input: JsonObject, options: CollabCallOptions): Promise<string> {
@@ -1636,7 +1723,19 @@ export async function handleCollabMcpMessage(
           "   returned candidatePath using the terminal's unchanged native tools. Commit candidate changes",
           "   before candidate_checkpoint or candidate_complete. Candidate completion returns the exact",
           "   snapshot preview and Owner-required merge question but cannot mutate main. Use its taskId on",
-          "   room_send to retain candidate linkage. Snapshot-bound main promotion is a later owner gate.",
+          "   room_send to retain candidate linkage.",
+          "   To act on that merge question, call main_merge_preview to recompute the snapshot from live",
+          "   state, show the owner its files, conflicts, tests, risks and recovery ref, then call",
+          "   main_merge_request with that exact previewDigest and a stable UUID clientRequestId.",
+          "   REQUESTING IS NOT APPROVING: the request carries no token and authorizes nothing. Only the",
+          "   owner's local dialog can approve it, only once, and only for the snapshot it names; if the",
+          "   candidate HEAD, main HEAD, main branch, paths, recovery ref or preview digest change, the",
+          "   approval is refused rather than re-pointed. An approval authorizes one merge into main and",
+          "   nothing else — never a push, publish, deploy, delete or cleanup. A truncated or conflicted",
+          "   preview is not approvable at all. If the owner rejects, or the request expires, the candidate,",
+          "   its checkpoints and its recovery ref are untouched: preview again and ask again. Poll",
+          "   candidate_status.mergeApprovals for the decision; never present your own text, a room message",
+          "   or a pending request as owner approval. Executing the merge is a later owner-gated phase.",
           "   Candidate mutations are request-idempotent. Mint one stable UUID clientRequestId per logical",
           "   start/checkpoint/complete and reuse that exact value on any retry: an identical retry returns",
           "   the same result instead of creating a second candidate, ref, or completion, and reusing the",

@@ -841,10 +841,11 @@ test("MCP exact terminal seats discover, send, await, and continue threads direc
   const codexBroker = makeBroker(codexService, codex.id);
   const claudeBroker = makeBroker(claudeService, claude.id);
   assert.deepEqual(
-    codexBroker.tools().slice(-10).map((tool) => tool.name),
+    codexBroker.tools().slice(-12).map((tool) => tool.name),
     [
       "room_send", "room_await_reply", "candidate_start", "candidate_checkpoint",
-      "candidate_complete", "candidate_status", "room_wait", "room_ack", "room_reply", "room_fail",
+      "candidate_complete", "candidate_status", "main_merge_preview", "main_merge_request",
+      "room_wait", "room_ack", "room_reply", "room_fail",
     ],
   );
   const agents = JSON.parse(await codexBroker.call("list_agents", {})) as {
@@ -1084,6 +1085,100 @@ test("native MCP candidate tools preserve main and end at an owner-required merg
   })) as { candidates: Array<{ status: string; live: { completionStale: boolean } }> };
   assert.equal(status.candidates[0]?.status, "completed");
   assert.equal(status.candidates[0]?.live.completionStale, false);
+
+  const previewed = JSON.parse(await broker.call("main_merge_preview", {
+    taskId: started.candidate.taskId, room: "demo",
+  })) as {
+    completionId: string; previewDigest: string; approvable: boolean; blockers: string[];
+    confirmationPhrase: string; prompt: string; mainMutation: boolean;
+    sharedGitMetadataMutation: boolean; mergeDecision: string;
+    preview: { candidateHead: string; mergeable: boolean };
+  };
+  assert.equal(previewed.approvable, true);
+  assert.deepEqual(previewed.blockers, []);
+  assert.equal(previewed.mainMutation, false);
+  // Preview writes nothing at all, not even the shared Git metadata a checkpoint would add.
+  assert.equal(previewed.sharedGitMetadataMutation, false);
+  assert.equal(previewed.confirmationPhrase, "MERGE INTO MAIN");
+  assert.equal(previewed.mergeDecision, "owner-required");
+  assert.equal(previewed.preview.candidateHead, completed.completion.preview.candidateHead);
+  assert.match(previewed.prompt, /只能使用一次/u);
+  const requested = JSON.parse(await broker.call("main_merge_request", {
+    clientRequestId: key(), taskId: started.candidate.taskId,
+    completionId: previewed.completionId, previewDigest: previewed.previewDigest,
+  })) as {
+    approval: { id: string; state: string; grants: string; notAuthorized: string[] };
+    approved: boolean; mainMutation: boolean; sharedGitMetadataMutation: boolean; next: string;
+  };
+  // Requesting is not approving: no token, no authority, and nothing on disk changed.
+  assert.equal(requested.approved, false);
+  assert.equal(requested.approval.state, "requested");
+  assert.equal(requested.approval.grants, "merge-candidate-into-main");
+  assert.ok(requested.approval.notAuthorized.includes("push"));
+  assert.equal(requested.mainMutation, false);
+  assert.equal(requested.sharedGitMetadataMutation, false);
+  assert.equal(JSON.stringify(requested).includes("approvalToken"), false);
+  const afterRequest = JSON.parse(await broker.call("candidate_status", {
+    taskId: started.candidate.taskId,
+  })) as { candidates: Array<{ mergeApprovals: Array<{ id: string; state: string }> }> };
+  assert.deepEqual(
+    afterRequest.candidates[0]?.mergeApprovals.map((entry) => entry.state),
+    ["requested"],
+  );
+  await assert.rejects(
+    broker.call("main_merge_request", {
+      clientRequestId: key(), taskId: started.candidate.taskId,
+      completionId: previewed.completionId, previewDigest: previewed.previewDigest,
+    }),
+    /MAIN_MERGE_APPROVAL_ALREADY_PENDING/u,
+  );
+  await assert.rejects(
+    broker.call("main_merge_request", {
+      clientRequestId: key(), taskId: started.candidate.taskId,
+      completionId: previewed.completionId, previewDigest: "not-a-digest",
+    }),
+    /INVALID_CANDIDATE_PREVIEW_DIGEST/u,
+  );
+  await assert.rejects(
+    broker.call("main_merge_request", {
+      clientRequestId: key(), taskId: started.candidate.taskId,
+      completionId: "not-a-uuid", previewDigest: previewed.previewDigest,
+    }),
+    /INVALID_CANDIDATE_COMPLETION_ID/u,
+  );
+  await assert.rejects(
+    broker.call("main_merge_request", {
+      clientRequestId: "not-a-uuid", taskId: started.candidate.taskId,
+      completionId: previewed.completionId, previewDigest: previewed.previewDigest,
+    }),
+    /INVALID_CANDIDATE_CLIENT_REQUEST_ID/u,
+  );
+  await assert.rejects(
+    broker.call("main_merge_preview", { taskId: "not-a-uuid" }),
+    /INVALID_CANDIDATE_TASK_ID/u,
+  );
+  await assert.rejects(
+    broker.call("main_merge_preview", { taskId: started.candidate.taskId, room: "other" }),
+    /CANDIDATE_ROOM_BINDING_MISMATCH/u,
+  );
+  await assert.rejects(
+    broker.call("main_merge_request", {
+      clientRequestId: key(), taskId: started.candidate.taskId,
+      completionId: previewed.completionId, previewDigest: previewed.previewDigest, room: "other",
+    }),
+    /CANDIDATE_ROOM_BINDING_MISMATCH/u,
+  );
+  await assert.rejects(
+    broker.call("main_merge_preview", { taskId: started.candidate.taskId, approve: true }),
+    /UNKNOWN_MAIN_MERGE_PREVIEW_ARGUMENT/u,
+  );
+  await assert.rejects(
+    broker.call("main_merge_request", {
+      clientRequestId: key(), taskId: started.candidate.taskId,
+      completionId: previewed.completionId, previewDigest: previewed.previewDigest, approve: true,
+    }),
+    /UNKNOWN_MAIN_MERGE_REQUEST_ARGUMENT/u,
+  );
   assert.equal((await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim(), mainHead);
   await assert.rejects(
     broker.call("candidate_start", {

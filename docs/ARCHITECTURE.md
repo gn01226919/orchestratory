@@ -121,12 +121,32 @@ canonical main 的前提下先告訴 Owner 會不會衝突、衝突在哪些路�
 模擬失敗（git 拒絕合併、輸出超出 byte 預算、逾時或輸出格式無法解析）一律 fail closed，回報
 `CANDIDATE_MERGE_PREVIEW_UNAVAILABLE`，不得推定 `mergeable: true`。
 
-目前 MCP completion 已產生上述 preview 與 Owner-required 問句，但不含 approval token，也沒有 main
-mutation 工具；single-use snapshot-bound approval 從 3.6 Promotion Service 階段開始實作。
+MCP completion 產生上述 preview 與 Owner-required 問句，但不含 approval token，也沒有 main mutation
+工具；single-use snapshot-bound approval 由 3.6 Merge Approval Service 承接。
 
-### 3.6 Promotion Service
+### 3.6 Merge Approval Service 與 Promotion Service
 
-只接受 single-use snapshot-bound approval。流程為：
+**Merge Approval Service（已實作）** 把「Agent 提出請求」與「Owner 授權」分成兩件事。
+`main_merge_preview` 由 live state 重算整份 snapshot 且不寫入任何東西；`main_merge_request` 以 stable
+UUID `clientRequestId` 建立一筆 `requested` 記錄——它不含 token，也授權不了任何事。核准只能由本機
+owner 介面產生，需精確短語 `MERGE INTO MAIN` 與 dialog 實際顯示的 `previewDigest`。
+
+Approval 存在 candidate registry schema v4 的獨立 `candidate_merge_approvals` 表，沿用同一套 row-hash
+完整性紀律；它刻意不是 `candidate_requests` 的擴充，因為那張表記錄「mutation 有沒有發生」，這張表記錄
+「Owner 授權了什麼」，兩者的生命週期、終局狀態與出錯後果都不同。scalar 欄位與存下來的 preview 互為
+冗餘校驗，因此改動任一單一欄位都無法改變 approval 看起來綁定了什麼。`state IN ('requested','approved')`
+的 partial unique index 結構性保證每個 task 同時只有一個未決問題。
+
+綁定至少涵蓋 `taskId`、`completionId`、`roomId`、`mainPath`、`mainBranch`、`candidatePath`、
+`baseMainHead`、`candidateHead`、`mainHead`、main dirty 與 ignored fingerprint、`recoveryRef` 與
+`previewDigest`，並在**建立、核准與消耗三個時點各驗一次**——只在建立時驗證等於放行期間發生的一切變化。
+任一值改變即以 `MAIN_MERGE_APPROVAL_BINDING_CHANGED:<欄位名>` 拒絕並轉為終局 `invalidated`，不靜默重算。
+Single-use 由 `state` ＋ `row_hash` 的 compare-and-set 保證，並行消耗只有一個贏家。Token 只在 `approved`
+期間以 SHA-256 存在。截斷或有衝突的 preview 完全不可核准（寫入與讀取路徑都擋）。拒絕、失效與逾時
+不執行任何 Git 指令，candidate、checkpoint 與 recovery ref 逐位元不變，Owner 可重新 preview 再問一次。
+Approval 只授權 `merge-candidate-into-main`，消耗時帶其他 action 一律拒絕，授權物件並明列 `notAuthorized`。
+
+**Promotion Service（待實作）** 只接受 single-use snapshot-bound approval。流程為：
 
 1. 重新驗證 candidate/main identity、HEAD 與 working state；
 2. 建立並驗證 recovery point；

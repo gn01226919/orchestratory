@@ -1398,6 +1398,122 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomStyles, /\.presence-stage\.is-waiting/u);
   assert.match(roomStyles, /\.office-notification-action/u);
 
+  // ── Phase 5-3 bar item 6: the merge-into-main approval dialog ──────────────
+  // The highest-risk pending action gets the same global count badge as agent requests.
+  assert.match(roomHtml, /id="merge-approvals-open"/u);
+  assert.match(roomHtml, /id="merge-approval-count" hidden>0</u);
+  assert.match(roomHtml, /class="agent-requests-open merge-approvals-open"/u);
+  // It reuses the .workspace-onboarding dialog component as a variant, not a new design language.
+  assert.match(
+    roomHtml,
+    /<section id="merge-approval" class="workspace-onboarding merge-approval" hidden role="dialog" aria-modal="true" aria-labelledby="merge-approval-title">/u,
+  );
+  assert.match(roomHtml, /class="workspace-onboarding-card merge-approval-card"/u);
+  // Layout, top to bottom: header, blocking section above the diff, diff, recovery, TTL, actions.
+  assert.match(roomHtml, /id="merge-approval-risk"/u);
+  assert.match(roomHtml, /id="merge-approval-task"/u);
+  assert.match(roomHtml, /候選 worktree → 目標分支 · candidate worktree → target branch/u);
+  assert.match(roomHtml, /id="merge-approval-risks"/u);
+  assert.match(roomHtml, /無法核准 · Blocking/u);
+  assert.match(
+    roomHtml,
+    /下列項目存在期間，確認輸入與「合併進 main」保持停用。 · While any of these is present the confirmation input and the primary button stay disabled\./u,
+  );
+  assert.match(roomHtml, /id="merge-approval-repreview" type="button">↻ 重新產生預覽 · Re-preview/u);
+  assert.match(roomHtml, /變更檔案（預設收合，請捲到底） · Changed files \(collapsed by default, scroll to the bottom\)/u);
+  assert.match(roomHtml, /id="merge-approval-diff"/u);
+  assert.match(roomHtml, /復原點 · Recovery point/u);
+  assert.match(roomHtml, /id="merge-approval-restore"/u);
+  assert.match(roomHtml, /⧉ 複製還原指令 · Copy restore command/u);
+  assert.match(roomHtml, /核准視窗剩餘 · Approval window/u);
+  assert.match(roomHtml, /id="merge-approval-refresh" type="button">↻ 重新產生預覽 · Re-preview/u);
+  // The dialog blocks the confirmation input until the gate opens, so it ships disabled.
+  assert.match(roomHtml, /id="merge-approval-confirmation" type="text" maxlength="64" autocomplete="off" spellcheck="false" disabled/u);
+  assert.match(roomHtml, /<code id="merge-approval-phrase">MERGE INTO MAIN<\/code>/u);
+  // Cancel takes default focus; the merge button is the only primary and is styled danger.
+  assert.match(roomHtml, /id="merge-approval-cancel" type="button">取消 · Cancel/u);
+  assert.match(roomHtml, /id="merge-approval-confirm" class="danger" type="button" disabled>合併進 main · Merge into main/u);
+  assert.match(roomHtml, /id="merge-approval-reject" type="button">拒絕並保留候選 · Reject &amp; keep candidate/u);
+  assert.doesNotMatch(roomHtml, /id="merge-approval-confirm"[^>]*class="[^"]*primary/u);
+
+  const mergeDialogStart = roomScript.indexOf("merge-into-main approval dialog");
+  assert.ok(mergeDialogStart > 0, "room.js must carry the merge-into-main approval dialog");
+  const mergeDialogScript = roomScript.slice(mergeDialogStart);
+  // D-001: no native dialog may ever gate the highest-risk action — they can be silenced,
+  // they freeze the page, and a TTL countdown is physically impossible underneath them.
+  assert.doesNotMatch(mergeDialogScript, /window\.(?:alert|confirm|prompt)\s*\(/u);
+  assert.doesNotMatch(mergeDialogScript, /(?<![.\w])(?:alert|confirm|prompt)\s*\(/u);
+  // The phrase is exact, semantic and carries no taskId; the backend value wins if it differs.
+  assert.match(mergeDialogScript, /const MERGE_CONFIRMATION_PHRASE = "MERGE INTO MAIN";/u);
+  assert.match(mergeDialogScript, /state\.mergeConfirmationPhrase = value\.confirmationPhrase/u);
+  // Scroll-gate: bottom of the diff AND an empty blocking section, then type-to-enable.
+  assert.match(mergeDialogScript, /function mergeDiffScrolledToBottom\(/u);
+  assert.match(mergeDialogScript, /region\.scrollTop \+ region\.clientHeight >= region\.scrollHeight - 4/u);
+  assert.match(mergeDialogScript, /const ready = !blocked && scrolled && !state\.mergeApprovalDecided;/u);
+  assert.match(mergeDialogScript, /if \(!ready\) input\.value = "";/u);
+  assert.match(mergeDialogScript, /input\.disabled = !ready;/u);
+  assert.match(mergeDialogScript, /confirm\.disabled = !ready \|\| input\.value !== mergeConfirmationPhrase\(\);/u);
+  assert.match(mergeDialogScript, /byId\("merge-approval-diff"\)\.addEventListener\("scroll"/u);
+  assert.match(mergeDialogScript, /byId\("merge-approval-diff"\)\.addEventListener\("toggle"/u);
+  assert.match(
+    mergeDialogScript,
+    /byId\("merge-approval-confirmation"\)\.value !== mergeConfirmationPhrase\(\)/u,
+  );
+  // Blocking section: conflicts, every truncation flag and an invalid binding keep it disabled.
+  assert.match(mergeDialogScript, /function mergeApprovalBlockers\(/u);
+  assert.match(mergeDialogScript, /binding\.valid === false/u);
+  assert.match(mergeDialogScript, /preview\.mergeable === false/u);
+  assert.match(mergeDialogScript, /preview\.mergeConflictsTruncated/u);
+  assert.match(mergeDialogScript, /preview\.filesTruncated/u);
+  assert.match(mergeDialogScript, /preview\.submodulesTruncated/u);
+  assert.match(mergeDialogScript, /preview\.largeFileScanTruncated/u);
+  assert.match(mergeDialogScript, /blockingSection\.hidden = blockers\.length === 0;/u);
+  assert.match(mergeDialogScript, /function repreviewMergeApproval\(/u);
+  // Mode changes, submodules and opaque files are marked as such, not as ordinary edits.
+  assert.match(mergeDialogScript, /模式變更 \$\{file\.mode\.from\} → \$\{file\.mode\.to\}，不是一般檔案編輯 · mode change, not an ordinary edit/u);
+  assert.match(mergeDialogScript, /Submodule 指標變更，不是一般檔案編輯 · submodule pointer, not an ordinary edit/u);
+  assert.match(mergeDialogScript, /二進位／過大：無法顯示，將整檔取代 · binary or oversized: cannot be shown, replaced whole-file/u);
+  assert.match(mergeDialogScript, /二進位項目 · Binary/u);
+  // Recovery point: base SHA, the recovery ref and a one-click-copy restore command.
+  assert.match(mergeDialogScript, /基準 main SHA · Base main head/u);
+  assert.match(mergeDialogScript, /復原點 ref · Recovery ref/u);
+  assert.match(mergeDialogScript, /navigator\.clipboard\.writeText/u);
+  assert.match(mergeDialogScript, /git -C \$\{mainPath\} rev-parse \$\{ref\}/u);
+  // TTL countdown, which window.prompt made physically impossible.
+  assert.match(mergeDialogScript, /function formatCountdown\(/u);
+  assert.match(mergeDialogScript, /setInterval\(tickMergeApprovalTtl, 1000\)/u);
+  assert.match(mergeDialogScript, /已逾時 · expired/u);
+  // The digest sent on approve is the one that was rendered; inspect stays read-only polling.
+  assert.match(mergeDialogScript, /previewDigest: approval\.previewDigest,/u);
+  assert.match(mergeDialogScript, /\/api\/rooms\/merge-approvals\/approve/u);
+  assert.match(mergeDialogScript, /\/api\/rooms\/merge-approvals\/inspect\?room=/u);
+  assert.match(mergeDialogScript, /setInterval\(\(\) => void repollMergeApproval\(\), 5000\)/u);
+  // A no-op poll must not re-render: rebuilding the diff would reset the scroll position and
+  // silently close a scroll-gate the owner had already passed.
+  assert.match(mergeDialogScript, /function mergeApprovalSignature\(/u);
+  assert.match(
+    mergeDialogScript,
+    /=== mergeApprovalSignature\(approval, state\.mergeApprovalBinding\)\) return;/u,
+  );
+  assert.match(mergeDialogScript, /mainMutation: false/u);
+  // Rejection states plainly that nothing is deleted, using the flags the response returns.
+  assert.match(mergeDialogScript, /value\.candidateRetained/u);
+  assert.match(mergeDialogScript, /value\.checkpointsRetained/u);
+  assert.match(mergeDialogScript, /value\.recoveryRefRetained/u);
+  assert.match(mergeDialogScript, /拒絕不等於刪除授權/u);
+  // Bilingual state text, and a binding refusal that says which bound values moved.
+  assert.match(mergeDialogScript, /Blocking items remain; the confirmation input and the primary button stay disabled\./u);
+  assert.match(mergeDialogScript, /Scroll the change list to the bottom to enable the confirmation input\./u);
+  assert.match(roomScript, /MAIN_MERGE_APPROVAL_BINDING_CHANGED:/u);
+  assert.match(roomScript, /const MERGE_BINDING_LABELS = \{/u);
+  assert.match(roomScript, /function renderMergeApprovalBadge\(/u);
+  assert.match(roomScript, /function refreshMergeApprovals\(/u);
+  assert.match(roomStyles, /\.merge-approvals-open b \{/u);
+  assert.match(roomStyles, /\.merge-approval-blocking \{/u);
+  assert.match(roomStyles, /\.merge-approval-diff \{/u);
+  assert.match(roomStyles, /\.merge-file-tag\.is-mode/u);
+  assert.match(roomStyles, /\.merge-approval-recovery \{/u);
+
   const usageView = await fetch(
     `${server.url}/api/view?runId=${restoreRunId}&kind=usage`,
     { headers: { Cookie: cookie } },

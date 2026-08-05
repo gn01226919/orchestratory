@@ -2178,9 +2178,82 @@ button.cancel-pending:hover { border-color: var(--warn); }
 .workspace-onboarding-status { min-height: 18px; padding-top: 8px; color: #ec9da0; font-size: 10px; text-align: center; }
 body.workspace-modal-open { overflow: hidden; }
 
+/* ── Merge-into-main approval · the same dialog component, one variant ─── */
+
+.merge-approvals-open { border-color: #5c3a3d; color: #eab9bb; background: #241a1c; }
+.merge-approvals-open b { color: #2a1013; background: #ef9096; }
+.merge-approval-card { display: grid; gap: 12px; width: min(760px, 100%); }
+.merge-approval-head { display: grid; gap: 8px; padding-top: 14px; }
+.merge-approval-identity { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
+.merge-approval-risk { padding: 4px 8px; border-radius: 999px; font: normal 800 8px/1.4 var(--font-mono); letter-spacing: .08em; }
+.merge-approval-risk.is-low { color: #79dba7; background: rgb(62 207 142 / 10%); }
+.merge-approval-risk.is-medium { color: var(--warn); background: rgb(245 166 35 / 12%); }
+.merge-approval-risk.is-high { color: #f19a9e; background: rgb(229 72 77 / 14%); }
+.merge-approval-identity code { color: #cdd3d9; font: 11px/1.4 var(--font-mono); overflow-wrap: anywhere; }
+.merge-approval-route { color: #9aa1a9; font: 10px/1.6 var(--font-mono); overflow-wrap: anywhere; }
+.merge-approval-switch { font-size: 10px; }
+.merge-approval-risks { display: grid; gap: 5px; }
+.merge-approval-risks p { padding: 7px 9px; border: 1px solid #2c3036; border-left: 2px solid var(--warn); border-radius: 6px; color: #b8bec5; background: #181a1f; font-size: 10px; line-height: 1.55; overflow-wrap: anywhere; }
+.merge-approval-blocking { display: grid; gap: 8px; padding: 11px 12px; border: 1px solid #5b2a2e; border-radius: 9px; background: rgb(229 72 77 / 7%); }
+.merge-approval-blocking > b { color: #f3a5a8; font-size: 12px; }
+.merge-approval-blocking > p { color: #c8a6a8; font-size: 10px; line-height: 1.6; }
+.merge-approval-blocking ul { display: grid; gap: 5px; padding-left: 16px; }
+.merge-approval-blocking li { color: #e8c3c5; font: 10px/1.55 var(--font-mono); overflow-wrap: anywhere; }
+.merge-approval-blocking button { justify-self: start; }
+.merge-approval-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); gap: 7px; }
+.merge-approval-stats span { display: grid; gap: 3px; padding: 8px 9px; border: 1px solid #2c3036; border-radius: 7px; background: #181a1f; }
+.merge-approval-stats small { color: var(--faint); font-size: 8px; }
+.merge-approval-stats b { color: #d3d8dd; font: 700 11px/1.3 var(--font-mono); }
+.merge-approval-diff-label { color: var(--muted); font-size: 10px; }
+.merge-approval-diff { display: grid; gap: 5px; max-height: min(38vh, 320px); padding: 8px; overflow-y: auto; border: 1px solid var(--border-strong); border-radius: 8px; background: #101216; }
+.merge-approval-diff:focus-visible { outline: 1px solid var(--accent-dim); }
+.merge-file { border: 1px solid #2c3036; border-radius: 6px; background: #16181c; }
+.merge-file > summary { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; padding: 7px 9px; cursor: pointer; }
+.merge-file[open] > summary { border-bottom: 1px solid #2c3036; }
+.merge-file-op { padding: 2px 6px; border-radius: 4px; color: #9fd9bb; background: rgb(62 207 142 / 9%); font: normal 800 8px/1.5 var(--font-mono); }
+.merge-file-op.is-delete { color: #ef9296; background: rgb(229 72 77 / 10%); }
+.merge-file-op.is-rename, .merge-file-op.is-copy, .merge-file-op.is-type-change { color: var(--warn); background: rgb(245 166 35 / 10%); }
+.merge-file-op.is-unmerged, .merge-file-op.is-unknown { color: #cbb6e0; background: rgb(160 130 200 / 12%); }
+.merge-file > summary > b { flex: 1 1 210px; color: #d6dbe0; font: 500 10px/1.5 var(--font-mono); overflow-wrap: anywhere; }
+.merge-file-delta { color: #8b929a; font: normal 700 9px/1.4 var(--font-mono); }
+.merge-file-tag { flex-basis: 100%; color: #b6bcc3; font: normal 500 9px/1.5 var(--font-mono); text-decoration: none; }
+.merge-file-tag.is-submodule { color: #9fc7e8; }
+.merge-file-tag.is-mode { color: var(--warn); }
+.merge-file-tag.is-opaque { color: #c9b5d8; }
+.merge-file-tag.is-conflict { color: #f19a9e; }
+.merge-file-detail { display: grid; gap: 4px; padding: 8px 9px; }
+.merge-file-detail p { color: #8f959d; font: 9px/1.55 var(--font-mono); overflow-wrap: anywhere; }
+.merge-file-empty, .merge-file-truncated, .merge-diff-end { color: var(--faint); font: 9px/1.6 var(--font-mono); text-align: center; }
+.merge-file-truncated { color: #f19a9e; }
+.merge-approval-scroll-hint { min-height: 16px; color: #9aa1a9; font-size: 10px; line-height: 1.55; }
+.merge-approval-recovery { display: grid; gap: 8px; padding: 11px 12px; border: 1px solid #2a5340; border-radius: 9px; background: rgb(62 207 142 / 6%); }
+.merge-approval-recovery > b { color: #8fe0b4; font-size: 12px; }
+.merge-approval-recovery > small { color: #7f9b8c; font-size: 9px; line-height: 1.5; }
+.merge-approval-recovery > button { justify-self: start; }
+.merge-approval-recovery-facts { display: grid; gap: 5px; }
+.merge-approval-recovery-facts span { display: grid; grid-template-columns: minmax(120px, .34fr) minmax(0, 1fr); gap: 8px; align-items: baseline; }
+.merge-approval-recovery-facts small { color: var(--faint); font-size: 9px; }
+.merge-approval-recovery-facts code { color: #bfe4d0; font: 10px/1.5 var(--font-mono); overflow-wrap: anywhere; }
+#merge-approval-restore { display: block; padding: 9px 10px; border: 1px solid var(--border); border-radius: 6px; color: #d3d8dd; background: #101216; font: 10px/1.7 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.merge-approval-ttl { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 9px; padding: 9px 11px; border: 1px solid var(--border-strong); border-radius: 8px; background: #181a1f; }
+.merge-approval-ttl span { display: grid; gap: 2px; }
+.merge-approval-ttl small { color: var(--faint); font-size: 8px; }
+.merge-approval-ttl b { color: #d3d8dd; font: 700 13px/1.2 var(--font-mono); }
+.merge-approval-ttl b.is-urgent { color: var(--warn); }
+.merge-approval-ttl b.is-expired { color: var(--danger); }
+#merge-approval-confirm-area { display: grid; gap: 6px; padding: 10px; border: 1px solid #3a4145; border-radius: 8px; background: #151a19; }
+#merge-approval-confirm-area label { color: var(--muted); font-size: 10px; line-height: 1.6; }
+#merge-approval-confirm-area code { color: #86dfad; font-family: var(--font-mono); }
+#merge-approval-confirmation { font-family: var(--font-mono); font-size: 11px; }
+.merge-approval-actions { flex-wrap: wrap; }
+.merge-approval-actions #merge-approval-reject { margin-right: auto; }
+#merge-approval .workspace-onboarding-status { color: #9aa1a9; text-align: left; }
+
 @media (max-width: 620px) {
   .workspace-onboarding { padding: 10px; }
   .workspace-onboarding-card { max-height: calc(100vh - 20px); padding: 15px; }
   .workspace-preview-check { grid-template-columns: 20px minmax(78px, .42fr) minmax(0, 1fr); }
   #workspace-path-form > div { flex-direction: column; }
+  .merge-approval-recovery-facts span { grid-template-columns: minmax(0, 1fr); }
+  .merge-approval-actions #merge-approval-reject { margin-right: 0; }
 }

@@ -43,6 +43,18 @@ const state = {
   officePositions: {},
   officeLayouts: {},
   writerCompleteConfirm: "",
+  mergeApprovals: [],
+  mergeApproval: null,
+  mergeApprovalBinding: { valid: true, changed: [] },
+  mergeApprovalBlockers: [],
+  mergeApprovalScrolled: false,
+  mergeApprovalDecided: false,
+  mergeApprovalReturnFocus: null,
+  mergeApprovalTicker: null,
+  mergeApprovalPoll: null,
+  mergeConfirmationPhrase: "MERGE INTO MAIN",
+  mergeNotAuthorized: [],
+  mergeApprovalsRoom: "",
 };
 const byId = (id) => document.getElementById(id);
 let sessionRecovery;
@@ -155,10 +167,52 @@ const ROOM_ERROR_MESSAGES = {
   PROVIDER_EXITED: "模型程序已結束，請確認對應的 CLI 已登入後重試。",
   REQUEST_BODY_TOO_LARGE: "內容太長，請縮短後再送出。",
   UI_PROTOCOL_MISMATCH_RESTART_REQUIRED: "網頁版本與後端不一致；請重新啟動 Orchestrator 或重新整理頁面。",
+  MAIN_MERGE_APPROVAL_NOT_FOUND: "找不到這筆合併核准，可能已由其他介面決定；main 沒有被修改。",
+  MAIN_MERGE_APPROVAL_NOT_PENDING: "這筆合併核准已經有結果，不能再決定一次；main 沒有被修改。",
+  MAIN_MERGE_APPROVAL_ALREADY_CONSUMED: "這筆核准已經被使用過，single-use 不可重放；main 沒有被再次修改。",
+  MAIN_MERGE_APPROVAL_EXPIRED: "核准視窗已逾時，必須重新產生預覽再問一次；main 沒有被修改。",
+  MAIN_MERGE_APPROVAL_NOT_APPROVED: "這筆核准目前不在已核准狀態；main 沒有被修改。",
+  MAIN_MERGE_CONFIRMATION_MISMATCH: "確認短語不相符，必須完全等於 MERGE INTO MAIN；main 沒有被修改。",
+  MAIN_MERGE_PREVIEW_DIGEST_MISMATCH: "送出的預覽摘要與後端記錄不同，已拒絕；請重新產生預覽。",
+  MAIN_MERGE_PREVIEW_DIGEST_STALE: "這份預覽已經不是目前的狀態，已拒絕；請重新產生預覽。",
+  MAIN_MERGE_PREVIEW_TRUNCATED: "預覽被截斷，看不到全部內容就不可核准；請重新產生預覽。",
+  MAIN_MERGE_PREVIEW_CONFLICTED: "模擬 merge 有衝突，這份預覽不可核准；請先在候選端解決衝突。",
+  MAIN_MERGE_CANDIDATE_WORKTREE_DIRTY: "候選 worktree 有未提交變更，已拒絕；請先在候選端提交或整理。",
+  MAIN_MERGE_CANDIDATE_HEAD_CHANGED: "候選 HEAD 在預覽之後改變，已拒絕；請重新產生預覽。",
+  MAIN_MERGE_RECOVERY_POINT_MISSING: "找不到復原點 ref，為安全起見已拒絕；請重新產生預覽。",
+  MAIN_MERGE_APPROVAL_CONCURRENT_UPDATE: "同一筆核准正在被另一個操作更新，請重新讀取後再決定。",
+  MAIN_MERGE_APPROVAL_ACTION_NOT_GRANTED: "這筆核准只授權把候選合併進 main，其他動作都不在授權範圍。",
+  INVALID_MERGE_APPROVAL_ID: "核准編號格式不正確，沒有送出任何決定。",
+  INVALID_MERGE_APPROVAL_REQUEST: "核准請求格式不正確，沒有送出任何決定。",
 };
+
+const MERGE_BINDING_LABELS = {
+  taskId: "任務 taskId",
+  completionId: "完成紀錄 completionId",
+  roomId: "房間 roomId",
+  mainPath: "main 路徑 mainPath",
+  mainBranch: "main 分支 mainBranch",
+  candidatePath: "候選路徑 candidatePath",
+  baseMainHead: "基準 main baseMainHead",
+  candidateHead: "候選 HEAD candidateHead",
+  mainHead: "main HEAD mainHead",
+  mainFingerprint: "main 工作樹指紋 mainFingerprint",
+  mainIgnoredFingerprint: "main ignored 指紋 mainIgnoredFingerprint",
+  recoveryRef: "復原點 recoveryRef",
+  previewDigest: "預覽摘要 previewDigest",
+};
+
+function bindingFieldLabel(field) {
+  return MERGE_BINDING_LABELS[field] || String(field);
+}
 
 function humanError(error) {
   const code = error instanceof Error ? error.message : String(error);
+  if (code.startsWith("MAIN_MERGE_APPROVAL_BINDING_CHANGED:")) {
+    const changed = code.slice("MAIN_MERGE_APPROVAL_BINDING_CHANGED:".length)
+      .split(",").filter(Boolean).map(bindingFieldLabel);
+    return `綁定值已改變，這份核准只適用於它綁定的那個 snapshot，已拒絕（${changed.join("、")}）；main 沒有被修改，請重新產生預覽再問一次。`;
+  }
   return ROOM_ERROR_MESSAGES[code] || code;
 }
 
@@ -932,6 +986,10 @@ async function selectRoom(id) {
   state.writers = { leases: [], delegations: [], candidates: [], busyLeaseIds: [] };
   state.knownExternalNames = new Set();
   state.deliveries = [];
+  closeMergeApprovalDialog();
+  state.mergeApprovals = [];
+  state.mergeApprovalsRoom = "";
+  renderMergeApprovalBadge();
   state.selectedPresenceId = "";
   state.presenceLabels = {};
   state.presenceViewSignature = "";
@@ -959,6 +1017,7 @@ async function selectRoom(id) {
     await refreshPresence(true);
     await poll();
   }
+  await refreshMergeApprovals();
 }
 
 function roomOptionLabel(room) {
@@ -1404,6 +1463,22 @@ function renderOfficeNotifications() {
           row.append(done);
         }
       }
+      if (item.action?.kind === "merge-approval") {
+        const approval = (state.mergeApprovals || []).find((entry) => entry.id === item.action.approvalId);
+        if (mergeApprovalPending(approval)) {
+          const open = document.createElement("button");
+          open.type = "button";
+          open.className = "office-notification-action";
+          open.textContent = "檢視合併預覽 · Review merge preview";
+          open.addEventListener("click", () => openMergeApprovalDialog(item.action.approvalId));
+          row.append(open);
+        } else {
+          const done = document.createElement("small");
+          done.className = "office-notification-done";
+          done.textContent = "這筆合併核准已有結果 · already decided";
+          row.append(done);
+        }
+      }
       list.append(row);
     }
   }
@@ -1537,6 +1612,7 @@ async function refreshOfficeControlPlane(initialValue) {
         state.trackedRuns.delete(runId);
       }
     }
+    await refreshMergeApprovals();
     state.controlInitialized = true;
     renderTaskCenter();
     renderOfficeNotifications();
@@ -2625,6 +2701,634 @@ byId("office-chat-form").addEventListener("submit", async (event) => {
   } finally {
     button.disabled = false;
     button.textContent = "送出";
+  }
+});
+
+/*
+ * ── 合併進 main 的核准對話框 · merge-into-main approval dialog ─────────────
+ * 沿用 .workspace-onboarding 元件（role="dialog" aria-modal、Esc 關閉、背景點擊關閉、焦點返回、
+ * 輸入短語才解鎖），只多一個 variant。全程不得使用 window.alert／confirm／prompt：原生對話框
+ * 可被瀏覽器永久靜音，而且在它開啟期間頁面凍結，TTL 倒數物理上不可能顯示。
+ */
+
+const MERGE_CONFIRMATION_PHRASE = "MERGE INTO MAIN";
+const MERGE_OPERATION_LABELS = {
+  add: "新增 · Added",
+  modify: "修改 · Modified",
+  delete: "刪除 · Deleted",
+  rename: "重新命名 · Renamed",
+  copy: "複製 · Copied",
+  "type-change": "類型變更 · Type change",
+  unmerged: "未合併 · Unmerged",
+  unknown: "未知 · Unknown",
+};
+const MERGE_TEST_LABELS = {
+  passed: "通過 · passed",
+  failed: "失敗 · failed",
+  "not-run": "未執行 · not run",
+};
+
+function mergeApprovalPending(approval) {
+  return Boolean(approval) && approval.state === "requested" && approval.expired !== true;
+}
+
+function mergeConfirmationPhrase() {
+  return state.mergeConfirmationPhrase || MERGE_CONFIRMATION_PHRASE;
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes)) return "—";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function shortSha(value) {
+  return typeof value === "string" && value.length > 12 ? value.slice(0, 12) : String(value || "—");
+}
+
+function renderMergeApprovalBadge() {
+  const button = byId("merge-approvals-open");
+  const badge = byId("merge-approval-count");
+  if (!button || !badge) return;
+  const pending = (state.mergeApprovals || []).filter(mergeApprovalPending);
+  badge.textContent = String(pending.length);
+  badge.hidden = pending.length === 0;
+  button.disabled = pending.length === 0;
+  const label = button.querySelector("span");
+  if (label) {
+    label.textContent = pending.length > 0
+      ? `⑂ ${pending.length} 件合併進 main 待核准 · pending merge approval`
+      : "⑂ 合併進 main 待核准 · Merge into main";
+  }
+}
+
+async function refreshMergeApprovals() {
+  if (!state.room) {
+    state.mergeApprovals = [];
+    renderMergeApprovalBadge();
+    return [];
+  }
+  try {
+    const value = await api(`/api/rooms/merge-approvals?room=${encodeURIComponent(state.room)}`);
+    const approvals = Array.isArray(value.approvals) ? value.approvals : [];
+    const known = new Set((state.mergeApprovals || []).map((approval) => approval.id));
+    /* 剛切換房間時整批都是「新的」，那不是新事件，不該灌通知。 */
+    const sameRoom = state.mergeApprovalsRoom === state.room;
+    const initialized = state.controlInitialized && sameRoom;
+    state.mergeApprovalsRoom = state.room;
+    state.mergeApprovals = approvals;
+    if (typeof value.confirmationPhrase === "string") state.mergeConfirmationPhrase = value.confirmationPhrase;
+    if (Array.isArray(value.notAuthorized)) state.mergeNotAuthorized = value.notAuthorized;
+    for (const approval of approvals.filter(mergeApprovalPending)) {
+      if (initialized && !known.has(approval.id)) {
+        addOfficeNotification(
+          "proposal",
+          "有候選要求合併進 main · merge into main requested",
+          `${approval.taskId} · 需要 Owner 逐項檢視後核准；核准前 main 不會被修改。`,
+          true,
+          { kind: "merge-approval", approvalId: approval.id },
+        );
+      }
+    }
+    renderMergeApprovalBadge();
+    return approvals;
+  } catch {
+    /* 待核准計數失敗不得影響帳本輪詢；徽章維持上一次已知值。 */
+    return state.mergeApprovals || [];
+  }
+}
+
+function mergeApprovalBlockers(approval, binding) {
+  const blockers = [];
+  if (!approval) return blockers;
+  const preview = approval.preview || {};
+  if (approval.state !== "requested") {
+    blockers.push(`這筆核准已是終局狀態「${approval.state}」，不能再核准。 · This approval is terminal (${approval.state}).`);
+  } else if (approval.expired) {
+    blockers.push("核准視窗已逾時，必須重新產生預覽再問一次。 · The approval window expired; a fresh preview is required.");
+  }
+  if (binding && binding.valid === false) {
+    const changed = (binding.changed || []).map(bindingFieldLabel);
+    blockers.push(`綁定值已改變，這份核准只適用於它綁定的 snapshot：${changed.join("、") || "未知欄位"} · Bound values changed; this approval no longer describes what you are looking at.`);
+  }
+  if (preview.mergeable === false) {
+    blockers.push(`模擬 merge 有內容衝突，共 ${(preview.mergeConflicts || []).length} 個檔案。 · The simulated merge conflicts.`);
+  }
+  for (const path of preview.mergeConflicts || []) {
+    blockers.push(`衝突檔案 · Conflicting file：${path}`);
+  }
+  if (preview.mergeConflictsTruncated) {
+    blockers.push("衝突清單已截斷，看不到全部衝突就不可核准。 · The conflict list is truncated.");
+  }
+  if (preview.filesTruncated) {
+    blockers.push("檔案清單已截斷，Owner 不得對看不到的內容簽名。 · The file list is truncated; you must not sign for content you cannot see.");
+  }
+  if (preview.submodulesTruncated) {
+    blockers.push("Submodule 清單已截斷，看不到全部指標變更就不可核准。 · The submodule list is truncated.");
+  }
+  if (preview.largeFileScanTruncated) {
+    blockers.push("大型檔案掃描已截斷，可能還有未列出的大檔。 · The large-file scan is truncated.");
+  }
+  return blockers;
+}
+
+function mergeRiskLevel(approval, blockers) {
+  const preview = approval?.preview || {};
+  if (blockers.length > 0) return { key: "high", text: "高風險 · HIGH" };
+  const risky = (preview.knownRisks || []).length > 0
+    || (preview.largeFiles || []).length > 0
+    || (preview.submodules || []).length > 0
+    || Number(preview.modeChanges || 0) > 0
+    || Boolean(preview.mainDirty?.dirty)
+    || (preview.tests || []).some((entry) => entry.status !== "passed");
+  return risky ? { key: "medium", text: "中風險 · MEDIUM" } : { key: "low", text: "低風險 · LOW" };
+}
+
+function renderMergeRisks(approval) {
+  const host = byId("merge-approval-risks");
+  if (!host) return;
+  host.textContent = "";
+  const preview = approval?.preview || {};
+  const lines = [];
+  for (const risk of preview.knownRisks || []) lines.push(`已宣告風險 · Declared risk：${risk}`);
+  for (const conflict of preview.conflicts || []) lines.push(`預覽形狀提醒 · Preview advisory：${conflict}`);
+  for (const test of preview.tests || []) {
+    lines.push(`測試 · Test：${test.command} — ${MERGE_TEST_LABELS[test.status] || test.status}${test.summary ? `（${test.summary}）` : ""}`);
+  }
+  if (preview.mainDirty?.dirty) {
+    lines.push(`main 工作樹目前不乾淨 · main worktree is dirty：${preview.mainDirty.statusSummary || ""}`);
+  }
+  if (!lines.length) {
+    lines.push("這份預覽沒有附帶任何已宣告風險；這不等於沒有風險，仍請逐檔檢視下方變更。 · No risks were declared with this preview; that is not the same as there being none.");
+  }
+  for (const line of lines) {
+    const row = document.createElement("p");
+    row.textContent = line;
+    host.append(row);
+  }
+}
+
+function renderMergeStats(approval) {
+  const host = byId("merge-approval-stats");
+  if (!host) return;
+  host.textContent = "";
+  const preview = approval?.preview || {};
+  const entries = [
+    ["檔案 · Files", String(preview.fileCount ?? 0)],
+    ["新增行 · Additions", `+${preview.additions ?? 0}`],
+    ["刪除行 · Deletions", `−${preview.deletions ?? 0}`],
+    ["二進位項目 · Binary", `${preview.binaryEntries ?? 0}（無法顯示，將整檔取代）`],
+    ["模式變更 · Mode changes", String(preview.modeChanges ?? 0)],
+    ["Submodule 指標 · Submodules", String((preview.submodules || []).length)],
+  ];
+  for (const [label, value] of entries) {
+    const cell = document.createElement("span");
+    const name = document.createElement("small");
+    name.textContent = label;
+    const text = document.createElement("b");
+    text.textContent = value;
+    cell.append(name, text);
+    host.append(cell);
+  }
+}
+
+function mergeFileDelta(file) {
+  const size = formatBytes(Number(file.bytes));
+  if (file.operation === "add") return `+${size}`;
+  if (file.operation === "delete") return `−${size}`;
+  return `±${size}`;
+}
+
+function renderMergeDiff(approval) {
+  const region = byId("merge-approval-diff");
+  if (!region) return;
+  region.textContent = "";
+  const preview = approval?.preview || {};
+  const files = Array.isArray(preview.files) ? preview.files : [];
+  const largeFiles = new Set(preview.largeFiles || []);
+  const submodules = new Set(preview.submodules || []);
+  const conflicts = new Set(preview.mergeConflicts || []);
+  if (!files.length) {
+    const empty = document.createElement("p");
+    empty.className = "merge-file-empty";
+    empty.textContent = "這份預覽沒有列出任何檔案變更。 · This preview lists no file changes.";
+    region.append(empty);
+  }
+  for (const file of files) {
+    const item = document.createElement("details");
+    item.className = "merge-file";
+    const summary = document.createElement("summary");
+    const operation = document.createElement("i");
+    operation.className = `merge-file-op is-${file.operation}`;
+    operation.textContent = MERGE_OPERATION_LABELS[file.operation] || String(file.operation);
+    const path = document.createElement("b");
+    path.textContent = file.path;
+    const delta = document.createElement("em");
+    delta.className = "merge-file-delta";
+    delta.textContent = mergeFileDelta(file);
+    summary.append(operation, path, delta);
+    if (file.submodule || submodules.has(file.path)) {
+      const tag = document.createElement("u");
+      tag.className = "merge-file-tag is-submodule";
+      tag.textContent = "Submodule 指標變更，不是一般檔案編輯 · submodule pointer, not an ordinary edit";
+      summary.append(tag);
+    }
+    if (file.mode) {
+      const tag = document.createElement("u");
+      tag.className = "merge-file-tag is-mode";
+      tag.textContent = `模式變更 ${file.mode.from} → ${file.mode.to}，不是一般檔案編輯 · mode change, not an ordinary edit`;
+      summary.append(tag);
+    }
+    if (largeFiles.has(file.path)) {
+      const tag = document.createElement("u");
+      tag.className = "merge-file-tag is-opaque";
+      tag.textContent = "二進位／過大：無法顯示，將整檔取代 · binary or oversized: cannot be shown, replaced whole-file";
+      summary.append(tag);
+    }
+    if (conflicts.has(file.path)) {
+      const tag = document.createElement("u");
+      tag.className = "merge-file-tag is-conflict";
+      tag.textContent = "此檔在模擬 merge 中衝突 · conflicts in the simulated merge";
+      summary.append(tag);
+    }
+    const detail = document.createElement("div");
+    detail.className = "merge-file-detail";
+    const facts = [
+      `動作 · Operation：${MERGE_OPERATION_LABELS[file.operation] || file.operation}`,
+      ...(file.previousPath ? [`原路徑 · Previous path：${file.previousPath}`] : []),
+      `大小 · Size：${formatBytes(Number(file.bytes))}`,
+      ...(file.mode ? [`檔案模式 · File mode：${file.mode.from} → ${file.mode.to}`] : []),
+      ...(file.submodule ? ["這是 submodule 指標；merge 不會遞迴進 submodule。 · submodule pointer; the merge does not recurse into it."] : []),
+      ...(largeFiles.has(file.path)
+        ? ["內容無法顯示，合併時會整檔取代。 · Content cannot be displayed; the whole file is replaced."]
+        : ["這份預覽只帶檔案層級事實（動作、大小、模式），不含逐行內容。 · This preview carries file-level facts only, not line-level content."]),
+    ];
+    for (const fact of facts) {
+      const line = document.createElement("p");
+      line.textContent = fact;
+      detail.append(line);
+    }
+    item.append(summary, detail);
+    region.append(item);
+  }
+  if (preview.filesTruncated) {
+    const note = document.createElement("p");
+    note.className = "merge-file-truncated";
+    note.textContent = "檔案清單已被截斷，上面不是完整清單。 · The file list is truncated; what you see above is not the whole change.";
+    region.append(note);
+  }
+  const end = document.createElement("p");
+  end.className = "merge-diff-end";
+  end.textContent = "── 變更清單結束 · end of change list ──";
+  region.append(end);
+}
+
+function renderMergeRecovery(approval) {
+  const host = byId("merge-approval-recovery-facts");
+  const command = byId("merge-approval-restore");
+  if (!host || !command) return;
+  host.textContent = "";
+  const binding = approval?.binding || {};
+  const recovery = approval?.preview?.recovery || {};
+  const facts = [
+    ["基準 main SHA · Base main head", binding.baseMainHead],
+    ["合併前 main HEAD · main head now", binding.mainHead],
+    ["候選 HEAD · Candidate head", binding.candidateHead],
+    ["復原點 ref · Recovery ref", recovery.ref || binding.recoveryRef],
+    ["復原點指向 · Recovery ref points at", recovery.head],
+  ];
+  for (const [label, value] of facts) {
+    const row = document.createElement("span");
+    const name = document.createElement("small");
+    name.textContent = label;
+    const text = document.createElement("code");
+    text.textContent = String(value || "—");
+    row.append(name, text);
+    host.append(row);
+  }
+  const mainPath = binding.mainPath || ".";
+  const mainHead = binding.mainHead || "";
+  const ref = recovery.ref || binding.recoveryRef || "";
+  command.textContent = [
+    `git -C ${mainPath} branch orchestratory-main-before-${shortSha(mainHead)} ${mainHead}`,
+    `git -C ${mainPath} reset --hard ${mainHead}`,
+    `git -C ${mainPath} rev-parse ${ref}`,
+  ].join("\n");
+}
+
+function formatCountdown(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const minutes = String(Math.floor(total / 60)).padStart(2, "0");
+  const seconds = String(total % 60).padStart(2, "0");
+  return `${minutes}:${seconds}`;
+}
+
+function tickMergeApprovalTtl() {
+  const node = byId("merge-approval-ttl");
+  const approval = state.mergeApproval;
+  if (!node || !approval) return;
+  const deadline = Date.parse(approval.expiresAt);
+  if (!Number.isFinite(deadline)) {
+    node.textContent = "—";
+    return;
+  }
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    node.textContent = "已逾時 · expired";
+    node.className = "is-expired";
+    if (!approval.expired) {
+      approval.expired = true;
+      renderMergeApproval();
+      byId("merge-approval-status").textContent =
+        "核准視窗已逾時；這是刻意的摩擦，不是錯誤。請按「重新產生預覽」再問一次。 · The approval window expired; re-preview and ask again.";
+    }
+    return;
+  }
+  node.textContent = `${formatCountdown(remaining)}（${new Date(deadline).toLocaleTimeString()} 到期 · expires）`;
+  node.className = remaining < 60_000 ? "is-urgent" : "";
+}
+
+function mergeDiffScrolledToBottom() {
+  const region = byId("merge-approval-diff");
+  if (!region) return false;
+  return region.scrollTop + region.clientHeight >= region.scrollHeight - 4;
+}
+
+/*
+ * Scroll-gate：diff 未捲到底或阻擋區還有項目時，確認輸入框與主要按鈕都保持 disabled。
+ * 「我捲完了」比「我抄完了」更能證明使用者看過內容。
+ */
+function updateMergeApprovalGate() {
+  const input = byId("merge-approval-confirmation");
+  const confirm = byId("merge-approval-confirm");
+  const hint = byId("merge-approval-scroll-hint");
+  if (!input || !confirm || !hint) return;
+  const blocked = (state.mergeApprovalBlockers || []).length > 0;
+  const scrolled = Boolean(state.mergeApprovalScrolled);
+  const ready = !blocked && scrolled && !state.mergeApprovalDecided;
+  if (!ready) input.value = "";
+  input.disabled = !ready;
+  confirm.disabled = !ready || input.value !== mergeConfirmationPhrase();
+  hint.textContent = state.mergeApprovalDecided
+    ? "這筆核准已經有結果，不能再決定一次。 · This approval has already been decided."
+    : blocked
+      ? "阻擋區還有項目：確認輸入與「合併進 main」保持停用，請先重新產生預覽。 · Blocking items remain; the confirmation input and the primary button stay disabled."
+      : scrolled
+        ? `變更清單已捲到底：輸入 ${mergeConfirmationPhrase()} 即可解鎖「合併進 main」。 · Diff read to the end; type the phrase to enable the primary button.`
+        : "請把上面的變更清單捲到底（展開檔案後會重新計算），確認輸入才會解鎖。 · Scroll the change list to the bottom to enable the confirmation input.";
+}
+
+function renderMergeApprovalPicker() {
+  const field = byId("merge-approval-switch");
+  const select = byId("merge-approval-select");
+  if (!field || !select) return;
+  const pending = (state.mergeApprovals || []).filter(mergeApprovalPending);
+  field.hidden = pending.length < 2;
+  select.textContent = "";
+  for (const approval of pending) select.append(new Option(`${approval.taskId} · ${approval.id.slice(0, 8)}`, approval.id));
+  if (state.mergeApproval) select.value = state.mergeApproval.id;
+}
+
+function renderMergeApproval() {
+  const approval = state.mergeApproval;
+  if (!byId("merge-approval")) return;
+  const blockers = mergeApprovalBlockers(approval, state.mergeApprovalBinding);
+  state.mergeApprovalBlockers = blockers;
+  const risk = mergeRiskLevel(approval, blockers);
+  const badge = byId("merge-approval-risk");
+  badge.textContent = risk.text;
+  badge.className = `merge-approval-risk is-${risk.key}`;
+  byId("merge-approval-task").textContent = approval ? `taskId ${approval.taskId}` : "—";
+  const binding = approval?.binding || {};
+  byId("merge-approval-route").textContent = approval
+    ? `候選 worktree · candidate worktree：${binding.candidatePath} → 目標分支 · target branch：${binding.mainBranch}（${binding.mainPath}）`
+    : "候選 worktree → 目標分支 · candidate worktree → target branch";
+  byId("merge-approval-phrase").textContent = mergeConfirmationPhrase();
+  renderMergeApprovalPicker();
+  renderMergeRisks(approval);
+  renderMergeStats(approval);
+  renderMergeDiff(approval);
+  renderMergeRecovery(approval);
+  const blockingSection = byId("merge-approval-blocking");
+  const list = byId("merge-approval-blockers");
+  list.textContent = "";
+  blockingSection.hidden = blockers.length === 0;
+  for (const blocker of blockers) {
+    const row = document.createElement("li");
+    row.textContent = blocker;
+    list.append(row);
+  }
+  byId("merge-approval-reject").disabled = !approval || approval.state !== "requested" || state.mergeApprovalDecided;
+  tickMergeApprovalTtl();
+  /* 內容比視窗短時本來就已經在底部；展開檔案會讓它重新變成未讀完。 */
+  state.mergeApprovalScrolled = mergeDiffScrolledToBottom();
+  updateMergeApprovalGate();
+}
+
+async function loadMergeApproval(approvalId) {
+  const status = byId("merge-approval-status");
+  if (!state.room || !approvalId) return;
+  status.textContent = "正在重新讀取預覽與綁定值（唯讀，不會決定任何事）… · Re-reading the preview and its bindings (read-only)…";
+  try {
+    const value = await api(
+      `/api/rooms/merge-approvals/inspect?room=${encodeURIComponent(state.room)}&approvalId=${encodeURIComponent(approvalId)}`,
+    );
+    state.mergeApproval = value.approval;
+    state.mergeApprovalBinding = value.binding || { valid: true, changed: [] };
+    if (typeof value.confirmationPhrase === "string") state.mergeConfirmationPhrase = value.confirmationPhrase;
+    state.mergeApprovalDecided = value.approval?.state !== "requested";
+    renderMergeApproval();
+    status.textContent = "";
+  } catch (error) {
+    status.textContent = `讀取失敗 · Failed to load：${humanError(error)}`;
+  }
+}
+
+function mergeApprovalSignature(approval, binding) {
+  return [
+    approval?.state, approval?.expired, approval?.updatedAt, approval?.expiresAt,
+    approval?.previewDigest, binding?.valid, (binding?.changed || []).join(","),
+  ].join("|");
+}
+
+/*
+ * 對話框開著時持續重讀 inspect。它是唯讀端點，輪詢不可能讓任何核准落定；
+ * 綁定值在期間改變時，阻擋區會立刻出現、確認輸入被清空並停用。
+ * 沒有實質變化就不重繪：重繪會重建 diff 並把捲動位置歸零，等於把使用者剛通過的
+ * scroll-gate 無聲關掉。
+ */
+async function repollMergeApproval() {
+  const approval = state.mergeApproval;
+  if (!approval || byId("merge-approval").hidden || state.mergeApprovalDecided) return;
+  try {
+    const value = await api(
+      `/api/rooms/merge-approvals/inspect?room=${encodeURIComponent(state.room)}&approvalId=${encodeURIComponent(approval.id)}`,
+    );
+    if (mergeApprovalSignature(value.approval, value.binding)
+      === mergeApprovalSignature(approval, state.mergeApprovalBinding)) return;
+    const wasValid = state.mergeApprovalBinding?.valid !== false;
+    state.mergeApproval = value.approval;
+    state.mergeApprovalBinding = value.binding || { valid: true, changed: [] };
+    renderMergeApproval();
+    if (wasValid && state.mergeApprovalBinding.valid === false) {
+      byId("merge-approval-status").textContent =
+        `綁定值在你檢視期間改變了（${(state.mergeApprovalBinding.changed || []).map(bindingFieldLabel).join("、")}）；`
+        + "確認輸入已停用並清空，請重新產生預覽再決定。main 沒有被修改。 · Bound values moved while the dialog was open; the confirmation input is disabled again.";
+    }
+  } catch { /* 輪詢失敗不改變畫面上的決定狀態 */ }
+}
+
+function openMergeApprovalDialog(approvalId) {
+  const dialog = byId("merge-approval");
+  if (!dialog) return;
+  const pending = (state.mergeApprovals || []).filter(mergeApprovalPending);
+  const target = approvalId || pending[0]?.id;
+  if (!target) return;
+  state.mergeApprovalReturnFocus = document.activeElement;
+  state.mergeApprovalDecided = false;
+  state.mergeApprovalScrolled = false;
+  dialog.hidden = false;
+  document.body.classList.add("workspace-modal-open");
+  byId("merge-approval-status").textContent = "";
+  void loadMergeApproval(target);
+  if (!state.mergeApprovalTicker) state.mergeApprovalTicker = setInterval(tickMergeApprovalTtl, 1000);
+  if (!state.mergeApprovalPoll) state.mergeApprovalPoll = setInterval(() => void repollMergeApproval(), 5000);
+  /* 取消是預設焦點：最高風險動作不得預先對準破壞性按鈕。 */
+  byId("merge-approval-cancel").focus();
+}
+
+function closeMergeApprovalDialog() {
+  const dialog = byId("merge-approval");
+  if (!dialog || dialog.hidden) return;
+  dialog.hidden = true;
+  document.body.classList.remove("workspace-modal-open");
+  if (state.mergeApprovalTicker) clearInterval(state.mergeApprovalTicker);
+  if (state.mergeApprovalPoll) clearInterval(state.mergeApprovalPoll);
+  state.mergeApprovalTicker = null;
+  state.mergeApprovalPoll = null;
+  state.mergeApproval = null;
+  state.mergeApprovalScrolled = false;
+  state.mergeApprovalBlockers = [];
+  byId("merge-approval-confirmation").value = "";
+  byId("merge-approval-confirmation").disabled = true;
+  byId("merge-approval-confirm").disabled = true;
+  state.mergeApprovalReturnFocus?.focus?.();
+  state.mergeApprovalReturnFocus = null;
+}
+
+async function approveMergeIntoMain() {
+  const approval = state.mergeApproval;
+  const status = byId("merge-approval-status");
+  const confirm = byId("merge-approval-confirm");
+  if (!approval || (state.mergeApprovalBlockers || []).length > 0 || !state.mergeApprovalScrolled) return;
+  const confirmation = byId("merge-approval-confirmation").value;
+  confirm.disabled = true;
+  status.textContent = "正在重新驗證每一個綁定值與這份預覽摘要… · Re-verifying every bound value against the digest you were shown…";
+  try {
+    const value = await api("/api/rooms/merge-approvals/approve", {
+      method: "POST",
+      body: JSON.stringify({
+        room: state.room,
+        approvalId: approval.id,
+        /* 必須是畫面上實際渲染的那一份 digest；後端會拒絕任何不相符。 */
+        previewDigest: approval.previewDigest,
+        confirmation,
+      }),
+    });
+    state.mergeApproval = value.approval;
+    state.mergeApprovalDecided = true;
+    renderMergeApproval();
+    status.textContent = `已核准 ${approval.taskId}：授權在 ${new Date(value.expiresAt).toLocaleTimeString()} 前有效、single-use，`
+      + `且只授權 ${approval.grants}。這一步本身沒有寫入 main（mainMutation: false）；`
+      + `不授權 ${(state.mergeNotAuthorized || approval.notAuthorized || []).join("、")}。`
+      + " · Approved: single-use, short-lived, and it does not write to main by itself.";
+  } catch (error) {
+    /* 先重新讀取（會清空狀態列），再寫入失敗原因，否則訊息會被覆蓋掉。 */
+    await loadMergeApproval(approval.id);
+    status.textContent = `核准失敗 · Approval refused：${humanError(error)}`;
+  }
+  await refreshMergeApprovals();
+}
+
+async function rejectMergeIntoMain() {
+  const approval = state.mergeApproval;
+  const status = byId("merge-approval-status");
+  if (!approval) return;
+  byId("merge-approval-reject").disabled = true;
+  status.textContent = "正在記錄拒絕… · Recording the rejection…";
+  try {
+    const value = await api("/api/rooms/merge-approvals/reject", {
+      method: "POST",
+      body: JSON.stringify({ room: state.room, approvalId: approval.id }),
+    });
+    state.mergeApproval = value.approval;
+    state.mergeApprovalDecided = true;
+    renderMergeApproval();
+    const retained = [
+      value.candidateRetained ? "候選 worktree · candidate" : "",
+      value.checkpointsRetained ? "全部 checkpoints · checkpoints" : "",
+      value.recoveryRefRetained ? `復原點 ref ${approval.binding?.recoveryRef || ""} · recovery ref` : "",
+    ].filter(Boolean);
+    status.textContent = `已拒絕合併，沒有觸發任何清理：${retained.join("、")} 全部完整保留，`
+      + "拒絕不等於刪除授權；之後可以重新產生預覽再問一次。 · Rejected. The candidate, its checkpoints and its recovery ref are all kept; a rejection is never a deletion.";
+  } catch (error) {
+    await loadMergeApproval(approval.id);
+    status.textContent = `拒絕失敗 · Rejection failed：${humanError(error)}`;
+  }
+  await refreshMergeApprovals();
+}
+
+async function repreviewMergeApproval() {
+  const approval = state.mergeApproval;
+  const status = byId("merge-approval-status");
+  if (!approval) return;
+  state.mergeApprovalScrolled = false;
+  await loadMergeApproval(approval.id);
+  const blockers = state.mergeApprovalBlockers || [];
+  status.textContent = blockers.length === 0
+    ? "已依 live state 重新產生預覽，阻擋項目已清空。 · Re-previewed against live state; nothing is blocking now."
+    : "已依 live state 重新產生預覽；阻擋項目仍在。這份 snapshot 已經無法核准，請讓候選端重新提出一次合併要求（main_merge_request）。 · Re-previewed; this snapshot can no longer be approved — the candidate has to request a fresh one.";
+}
+
+byId("merge-approvals-open").addEventListener("click", () => openMergeApprovalDialog(""));
+byId("merge-approval-close").addEventListener("click", closeMergeApprovalDialog);
+byId("merge-approval-cancel").addEventListener("click", closeMergeApprovalDialog);
+byId("merge-approval").addEventListener("click", (event) => {
+  if (event.target === byId("merge-approval")) closeMergeApprovalDialog();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !byId("merge-approval").hidden) closeMergeApprovalDialog();
+});
+byId("merge-approval-diff").addEventListener("scroll", () => {
+  if (mergeDiffScrolledToBottom()) state.mergeApprovalScrolled = true;
+  updateMergeApprovalGate();
+});
+/* 展開一個檔案會多出使用者還沒看過的內容，因此重新評估捲動門檻，而不是沿用舊結果。 */
+byId("merge-approval-diff").addEventListener("toggle", () => {
+  state.mergeApprovalScrolled = mergeDiffScrolledToBottom();
+  updateMergeApprovalGate();
+}, true);
+byId("merge-approval-confirmation").addEventListener("input", () => {
+  byId("merge-approval-confirm").disabled = byId("merge-approval-confirmation").disabled ||
+    byId("merge-approval-confirmation").value !== mergeConfirmationPhrase();
+});
+byId("merge-approval-confirm").addEventListener("click", () => void approveMergeIntoMain());
+byId("merge-approval-reject").addEventListener("click", () => void rejectMergeIntoMain());
+byId("merge-approval-repreview").addEventListener("click", () => void repreviewMergeApproval());
+byId("merge-approval-refresh").addEventListener("click", () => void repreviewMergeApproval());
+byId("merge-approval-select").addEventListener("change", () => {
+  state.mergeApprovalDecided = false;
+  state.mergeApprovalScrolled = false;
+  void loadMergeApproval(byId("merge-approval-select").value);
+});
+byId("merge-approval-copy").addEventListener("click", async () => {
+  const status = byId("merge-approval-status");
+  try {
+    await navigator.clipboard.writeText(byId("merge-approval-restore").textContent || "");
+    status.textContent = "已複製還原指令；Orchestratory 沒有執行它。 · Restore command copied; Orchestratory did not run it.";
+  } catch {
+    status.textContent = "瀏覽器不允許自動複製，請手動選取上面的指令。 · Clipboard access was refused; select the command above manually.";
   }
 });
 
