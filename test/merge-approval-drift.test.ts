@@ -397,42 +397,89 @@ test("changes that do not touch a bound value never invalidate", async (t) => {
   };
   await stillValid("baseline");
 
-  // 1. An ignored file's CONTENT changes. The fingerprint covers ignored paths, not their bytes.
-  await writeFile(join(fixture.source, "editor.cache"), "state after, quite different\n", "utf8");
-  await stillValid("ignored file content");
-
-  // 2. A merge driver is defined with nothing in .gitattributes binding it. It lives in .git/config,
-  //    which is not in the working tree, and an unreferenced driver changes no merge result.
-  await execFileAsync("git", ["config", "--local", "merge.orchestratory-test.driver", "true %O %A %B"], {
-    cwd: fixture.source,
-  });
-  await execFileAsync("git", ["config", "--local", "merge.orchestratory-test.name", "unreferenced"], {
-    cwd: fixture.source,
-  });
-  await stillValid("unreferenced merge driver");
-
-  // 3. An unrelated branch and tag. Neither is the branch this approval bound, and neither is its
+  // 1. An unrelated branch and tag. Neither is the branch this approval bound, and neither is its
   //    recovery ref.
   await execFileAsync("git", ["branch", "unrelated-work"], { cwd: fixture.source });
   await execFileAsync("git", ["tag", "unrelated-tag"], { cwd: fixture.source });
   await stillValid("unrelated branch and tag");
 
-  // 4. An index refresh after an mtime-only touch. The content is identical, so a fingerprint that
+  // 2. An index refresh after an mtime-only touch. The content is identical, so a fingerprint that
   //    is content-based must not move.
   const touched = new Date(Date.now() + 2_000);
   await utimes(join(fixture.source, "README.md"), touched, touched);
   await execFileAsync("git", ["update-index", "--refresh"], { cwd: fixture.source });
   await stillValid("index refresh");
 
-  // Still the owner's decision after all four, and still usable for the one thing it authorizes —
-  // which is the real proof that none of them quietly degraded it.
-  const consumed = await fixture.registry.consumeMainMerge({
+  // Still the owner's decision after both, and still usable for the one thing it authorizes —
+  // which is the real proof that neither of them quietly degraded it.
+  const { authorization: consumed } = await fixture.registry.promoteMainMerge({
     approvalId: approval.id,
     token,
     action: MERGE_APPROVAL_GRANT,
     taskId: fixture.task.taskId, roomId: "demo", mainPath: fixture.source,
   });
   assert.equal(consumed.binding.previewDigest, approval.binding.previewDigest);
+});
+
+/*
+ * The mirror image of the test above, and the reason two of its four cases moved here.
+ *
+ * Until promotion existed, an ignored file's contents and an unreferenced merge driver genuinely
+ * could not change what the owner was shown. Once promotion writes to main, both become facts about
+ * what the merge will DO: git silently overwrites ignored files at paths the merge writes, and a
+ * merge driver is a command a real merge executes. Both are now inside the preview digest, so
+ * changing either after approval is drift — named, and refused before anything is spent.
+ */
+test("values that only matter once main is written are bound, and moving them is drift", async (t) => {
+  for (const change of [
+    {
+      label: "an ignored file's contents",
+      field: "mainIgnoredContent",
+      apply: async (fixture: Ready): Promise<void> => {
+        // Exactly the same length as the original. A fingerprint that only covered paths and sizes
+        // would report this file as unchanged, which is the whole failure being guarded against —
+        // and a mutation test confirmed that a size-only hash lets a differently sized edit through.
+        await writeFile(join(fixture.source, "editor.cache"), "state AFTER\n", "utf8");
+      },
+    },
+    {
+      label: "a merge driver the real merge could execute",
+      field: "hookEnvironment",
+      apply: async (fixture: Ready): Promise<void> => {
+        await execFileAsync(
+          "git", ["config", "--local", "merge.orchestratory-test.driver", "true %O %A %B"],
+          { cwd: fixture.source },
+        );
+      },
+    },
+  ]) {
+    await t.test(change.label, async (child) => {
+      const fixture = await ready(child);
+      await writeFile(join(fixture.source, "editor.cache"), "state prior\n", "utf8");
+      const approval = await raise(fixture);
+      const token = await grant(fixture, approval);
+      const before = await preserved(fixture);
+      await change.apply(fixture);
+      await assert.rejects(
+        fixture.registry.promoteMainMerge({
+          approvalId: approval.id, token, action: MERGE_APPROVAL_GRANT,
+          taskId: fixture.task.taskId, roomId: "demo", mainPath: fixture.source,
+        }),
+        (error: Error) => {
+          assert.equal(error.name, "MergeApprovalBindingError");
+          assert.match(error.message, /^MAIN_MERGE_APPROVAL_BINDING_CHANGED:/u);
+          return true;
+        },
+      );
+      // Refused before anything was spent or written: the approval is terminal, main is untouched,
+      // and no promotion was ever started.
+      assert.equal(storedApproval(fixture.path, approval.id).state, "invalidated");
+      const after = await preserved(fixture);
+      assert.equal(after.mainHead, before.mainHead);
+      assert.deepEqual(after.checkpoints, before.checkpoints);
+      assert.equal(tableRows(fixture.path, "candidate_merge_promotions").length, 0);
+    });
+  }
 });
 
 test("a binding check that cannot be completed does not invalidate the owner's decision", async (t) => {
@@ -724,7 +771,7 @@ test("a real transient failure refuses the action without burning the owner's de
         // Acting on it now is refused, under a code of its own that is not the drift code. The
         // action fails closed; the decision does not.
         await assert.rejects(
-          fixture.registry.consumeMainMerge({
+          fixture.registry.promoteMainMerge({
             approvalId: approval.id, token, action: MERGE_APPROVAL_GRANT,
             taskId: fixture.task.taskId, roomId: "demo", mainPath: fixture.source,
           }),
@@ -746,15 +793,26 @@ test("a real transient failure refuses the action without burning the owner's de
       assert.deepEqual(recovered.bindingCheck, { checked: true, valid: true, changed: [] });
       assert.deepEqual(fixture.drift, []);
 
-      // The assertion the whole fix exists for: it can still be spent.
-      const consumed = await fixture.registry.consumeMainMerge({
+      // The failure disturbed nothing it was forbidden to disturb — asserted BEFORE the promotion,
+      // because the promotion is now allowed to move exactly one of these values on purpose.
+      assert.deepEqual(await preserved(fixture), intact);
+
+      // The assertion the whole fix exists for: it can still be spent, and spending it now really
+      // merges. "Recovered" has to mean the owner gets their merge, not merely that a check passes.
+      const { authorization: consumed, promotion, mainMutated } = await fixture.registry.promoteMainMerge({
         approvalId: approval.id, token, action: MERGE_APPROVAL_GRANT,
         taskId: fixture.task.taskId, roomId: "demo", mainPath: fixture.source,
       });
       assert.equal(consumed.grants, MERGE_APPROVAL_GRANT);
       assert.equal(consumed.binding.previewDigest, approval.binding.previewDigest);
-      // And the failure disturbed nothing it was forbidden to disturb.
-      assert.deepEqual(await preserved(fixture), intact);
+      assert.equal(mainMutated, true);
+      assert.equal(promotion.state, "applied");
+      // The candidate, its checkpoints and its recovery ref are still exactly as they were; only
+      // main's head moved, and it moved to the merge commit this promotion recorded.
+      const after = await preserved(fixture);
+      assert.deepEqual(after.checkpoints, intact.checkpoints);
+      assert.equal(after.candidateHead, intact.candidateHead);
+      assert.notEqual(after.mainHead, intact.mainHead);
     });
   }
 });
@@ -792,7 +850,7 @@ test("a transient failure at grant leaves the owner's question open instead of d
   // The owner answers the same question again once the repository is readable, and it works.
   const token = await grant(fixture, approval);
   assert.equal(storedApproval(fixture.path, approval.id).state, "approved");
-  const consumed = await fixture.registry.consumeMainMerge({
+  const { authorization: consumed } = await fixture.registry.promoteMainMerge({
     approvalId: approval.id, token, action: MERGE_APPROVAL_GRANT,
     taskId: fixture.task.taskId, roomId: "demo", mainPath: fixture.source,
   });

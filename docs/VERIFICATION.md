@@ -300,7 +300,9 @@ Owner 自己的工作，`git clean` 更會刪掉未追蹤與 ignored 檔案—�
 
 4. **失敗必須可回復，用真實失敗證明，而且「回到操作前」以指紋定義。**
    「操作前的狀態」＝意圖紀錄中的 pre-op 指紋，逐項比對：HEAD、index、tracked 工作樹內容、
-   **未追蹤檔案**、**ignored 檔案的路徑與內容**、stash、reflog、`.git/config`、`core.hooksPath`、
+   **未追蹤檔案**、**ignored 檔案的路徑與內容**、stash、
+   **reflog（判準為「既有項目不得被移除或改寫、順序不變」，不是逐位元相等）**、
+   `.git/config`、`core.hooksPath`、
    worktree 註冊、submodule 的 HEAD 與工作樹、sparse-checkout／`skip-worktree` 位元，
    以及 `.git` 內不得殘留 `MERGE_HEAD`／`AUTO_MERGE`／`MERGE_MSG`／任何 `*.lock`。
    至少用**五種**真實失敗各驗一次：磁碟唯讀、hook 非零退出、merge driver 失敗、中途 kill、
@@ -350,6 +352,19 @@ Owner 自己的工作，`git clean` 更會刪掉未追蹤與 ignored 檔案—�
 10. **明文承認並列入殘餘風險表**：promotion 會以 Owner 身分、在無沙箱的情況下執行 repo `.git` 內
     設定的 hook 與 merge driver。此項若不納入第 3 項的綁定與揭露，**即為未關閉的前置條件，
     不得以殘餘風險接受**。
+
+### v2 的一處更正（2026-08-06，由實作代理指出、經主代理親手實測確認）
+
+v2 第 4 項原本要求回滾後 reflog 回到操作前的狀態。**這在結構上不可能滿足**：
+reflog 是 append-only，`git merge --abort` **必然** append 一筆 `reset: moving to HEAD`，
+且既有項目的選擇器全部往後移一位（`HEAD@{0}`→`HEAD@{1}`）。已用獨立的臨時 repo 實測確認。
+
+因此判準改為「**既有項目不得被移除或改寫、順序不變**」——這才是真正的安全屬性，
+而且比原本的寫法更有意義（逐位元相等會逼出破壞性改寫 reflog 的「合規」實作）。
+實作上比對必須用 `%gs`（訊息）不能用 `%gd`（選擇器），後者會重新編號。
+
+**這是修掉一個不可能滿足的要求，不是移動終點線。** 把它留著只會逼出假的合規。
+記為 [[PITFALLS]] #96。
 
 ### 可接受的殘餘風險（連同「何時失效」一起列，未列出的不得事後補認）
 
@@ -411,6 +426,34 @@ Owner 自己的工作，`git clean` 更會刪掉未追蹤與 ignored 檔案—�
 **仍未關閉的第三條路徑**：`public/room.js:2561` 的 Writer apply-back（P0-2）**仍是 `window.prompt`**，
 短語仍是識別碼化的 `APPLY WRITER <taskId> TO PROJECT`。P0-3 修完後落差從 2:1 變成 1:2，並未消滅。
 
+## Merge approval reject 路徑瀏覽器驗收（2026-08-06）＋ digest guard 自身的缺陷修復
+
+**發現經過**：Phase 5-5 的實作代理改掉了 `rejectMergeIntoMain()` 印出的那句謊話
+（原本讀伺服器寫死為 `true` 的三個常數，印「candidate、checkpoint 與復原點完整保留」——
+而拒絕這條路徑一個 Git 指令都沒跑，根本沒觀察過任何東西），
+**但 `test/merge-dialog-acceptance.test.ts` 沒有變紅**。它自己回報了這件事。
+
+**原因是 guard 本身的缺陷**：擷取樣式只認 `^function NAME(`，
+而 `rejectMergeIntoMain` 是 **`async function`**。**任何 async 的 dialog 函式都會被靜默漏掉。**
+已修為 `^(?:async )?function`，並把 `rejectMergeIntoMain` 納入涵蓋清單。
+
+**瀏覽器實測**（真實 `public/room.js`，攔截 `api()` 模擬伺服器回應，
+腳本開頭先斷言執行中的函式含新文案，舊快取會直接拋錯——[[PITFALLS]] #90）：
+
+| 檢查 | 結果 |
+| --- | --- |
+| 狀態文字不含「完整保留」 | 通過 |
+| 明說「未重新讀取 <recoveryRef> 目前的狀態」 | 通過 |
+| 只描述本次動作（「這次拒絕沒有刪除…」） | 通過 |
+| `mergeApprovalDecided` 設起、核准按鈕停用 | 通過 |
+| 送出的請求路徑與 approvalId 正確 | 通過 |
+
+**已接受的 gate digest（room.js，含 reject 路徑）**：
+`2c86245615897263677a73481ed39895f3c294fd3f13c05b4290d1ac8ea24488`
+
+**教訓**：一個防「紀錄過期」的機制，自己也會有涵蓋不到的角落。
+它這次是**被它想守護的那個變更本身**揭露的——實作代理誠實回報了「我改了但測試沒紅」。
+
 ## ADR-028 vNext 待驗證矩陣
 
 | 範圍 | 狀態 | 必要證據 |
@@ -424,7 +467,7 @@ Owner 自己的工作，`git clean` 更會刪掉未追蹤與 ignored 檔案—�
 | Candidate mutation request idempotency | 已實作／synthetic 已驗證；live 待驗收 | `candidate_start`／`candidate_checkpoint`／`candidate_complete` 均要求 stable UUID `clientRequestId`。Registry schema v3 的 `candidate_requests` **以 `client_request_id` 單欄為主鍵**：seat 身分刻意不入 key，因為 presence lease 逾時後重連會重鑄 display name（`codex1`→`codex2`），而那正是本 ledger 要存活的故障；若把它放進 key，重連後的重試會鑄出第二個 candidate。`actor` 保留供稽核。Replay 仍要求 operation、room 與 input digest 三者完全相同，因此重用 key 只可能取回同一個邏輯請求；不同則回 `CANDIDATE_REQUEST_IDEMPOTENCY_CONFLICT` 且不執行任何 mutation。reserve 時即鑄造 taskId／candidateId／checkpointId／completionId 並持久化；replay 與 crash 後的收斂**一律從 durable state 重建答案**，receipt 只是固定大小標記，故大型 completion 不可能撐破 receipt 上限。checkpoint ref 建立採「已存在且指向同一 head 即採納」，避免中斷留下的孤兒 ref 讓同一把 key 永久失敗，指向不同 commit 才回 `CANDIDATE_CHECKPOINT_REF_CONFLICT`。**同一程序內的併發以記憶體內精確鎖處理**：同一把 key 同時只允許一個執行中，併發呼叫回 `CANDIDATE_REQUEST_IN_FLIGHT`（另有 `CANDIDATE_REQUEST_RECOVERING` 表示先前嘗試留下半建立的 candidate：該列由 `CREATING_RECOVERY_GRACE_MS` 的 wall clock **與** 保留的 `owner_pid` liveness 共同決定——擁有者仍存活即持續守護，可證明已死則交由既有 worktree 證據解析，**且不寫入帳本**，因此同一把 key 的重試仍能收斂而非被迫鑄新 key；liveness 判準的不確定性見 [[THREAT_MODEL]] F20）；**跨 OS process** 則由 reservation 的不透明 `owner_token` 擋下——採用既有保留時會重鑄該 token，原建立者中止時的 discard CAS 因此不再匹配，無法刪除他人正在使用的保留。token 刻意不從時鐘推導（時間戳在同一毫秒內不會改變，曾因此讓保護在窄窗內失效），且**每一個對 `candidate_requests` 的寫入都必須帶 token**——這是結構性不變式而非逐呼叫點檢查，因為先前只有 discard 帶 token、settle 沒有，陳舊席位得以覆寫現任持有者的判決並讓一個邏輯請求產出兩份 durable 成果；schema 因此升至 v3，v2→v3 直接重建這張輔助表（僅使升級當下在途的 key 停止重播，不觸碰任何權威資料）；`succeeded` 為終局狀態，輸家無法覆寫贏家的判決（內部不變式，非對外狀態碼）；`start` 的 replay 不會回傳已離開 `active` 的 task，改回 `CANDIDATE_REQUEST_TASK_NO_LONGER_ACTIVE`，避免把已完成甚至已合併的 candidate 當成新 start 交還；已記錄 `failed` 的 key 回 `CANDIDATE_REQUEST_FAILED_RETRY_WITH_NEW_KEY`，並保證換新 key 有前進路徑。**本次呼叫自己建立、且尚未產生任何 durable artifact 就中止的嘗試會刪除該保留**。採用他人保留的嘗試即使沒產生成果也不刪除（保留可能已擁有 candidate row、worktree 或 ref），因此**採用路徑的中止仍會留下 `pending` 列**；ref 建立失敗**不再一律記為 `failed`**：只有 allowlist `DETERMINATE_REQUEST_FAILURES` 內的確定性錯誤碼才終局化，暫時性失敗（權限瞬斷、spawn 失敗、SQLite 錯誤、刻意模糊的 `CANDIDATE_GIT_COMMAND_FAILED`）讓該列維持 `pending` 以便同一把 key 收斂。已用真實失敗驗證（`chmod 500 .git/refs`、`PATH=""`、`chmod 500 .git/worktrees`、以及**時鐘倒退**打在啟用那一刻導致 worktree 已建好卻被判 failed），每一條都先在修復前的基準確認會失敗，且都斷言「環境恢復後同一把 key 仍能成功」。room id 在寫入 request row 前即以 ROOM_PATTERN 驗證，未知或跨房間 taskId 在 reserve 前即被 `#assertScoped` 擋下，寫入嚴格度不低於讀取。**`candidate_requests` 刻意不納入開啟時的 `#verify()`**：它是輔助重試帳本，`candidates`／`candidate_checkpoints` 才是權威記錄，一列不可讀不得讓 durable 資料整體無法開啟；每列改於讀取時以 row-hash 驗證，壞列只毒化自己那把 key。v1 資料庫以純加表方式升級，既有 row 與其 hash 不變。孤兒 recovery ref 可由 `orphanRecoveryRefs()` 唯讀列出且**不自行刪除**（刪 ref 屬破壞性 Git 操作，需 scoped approval），現已有唯讀 CLI 出口 `orchestrator candidates orphan-refs <workspace>`：只列不刪（刪 ref 屬破壞性 Git 操作，需 scoped approval），路徑過 `workspaces.assertAllowed()`，輸出只含 ref 名、commit id、task id 與孤兒理由，掃描達上限會標示。帳本無 TTL 亦無 prune，僅由 `inventory()` 的 `requests`／`requestsPending` 曝露成長。`test/candidate-registry.test.ts`、`test/collab-mcp.test.ts`、`test/collaboration-service.test.ts` |
 | Snapshot-bound approval | 已實作（後端）／synthetic 已驗證；頁內 dialog 與 live 待驗收 | `main_merge_preview` 由 live state 重算整份 snapshot 且**不寫入任何東西**（無 row、無 ref、無 worktree）；`main_merge_request` 以 stable UUID `clientRequestId` 建立 `requested` 記錄，**要求不等於核准**——它不含 token、不授權任何事。核准只能由 owner 介面經 `POST /api/rooms/merge-approvals/approve` 產生，需精確短語 `MERGE INTO MAIN` 與 dialog 實際顯示的 `previewDigest`。approval 至少綁 `taskId`／`completionId`／`roomId`／`mainPath`／`mainBranch`／`candidatePath`／`baseMainHead`／`candidateHead`／`mainHead`／main dirty 與 ignored fingerprint／`recoveryRef`／`previewDigest`；**綁定在建立、核准與消耗三個時點各驗一次**，任一值改變即以 `MAIN_MERGE_APPROVAL_BINDING_CHANGED:<改變的欄位名>` 拒絕並把該 approval 轉為終局 `invalidated`，不靜默重算。single-use 由 `state`＋`row_hash` 的 compare-and-set 保證：兩個並行消耗只有一個成功，輸家得到 `MAIN_MERGE_APPROVAL_ALREADY_CONSUMED`；token 只在 `approved` 期間以 SHA-256 存在，離開該狀態即清除。短效：request 15 分鐘、grant 5 分鐘，逾時記為 `expired` 並拒絕。截斷（`filesTruncated`／`submodulesTruncated`／`mergeConflictsTruncated`）與模擬出的衝突都使 preview 不可核准，**寫入路徑與讀取路徑都擋**。拒絕、失效與逾時皆不執行任何 Git 指令，candidate、checkpoint 與 recovery ref 逐位元不變，owner 可重新 preview 再問一次。approval 只授權 `merge-candidate-into-main`，消耗時帶其他 action 一律 `MAIN_MERGE_APPROVAL_ACTION_NOT_GRANTED`，並在授權物件內明列 `notAuthorized`（push／publish／deploy／delete／cleanup…）。**本階段不寫入 canonical main**：`consumeMainMerge` 只做驗證與狀態轉移，沒有任何 MCP／HTTP 出口，promotion 屬 5-5。schema v4 新增獨立 `candidate_merge_approvals` 表（row-hash 完整性、scalar 與 preview 互為冗餘校驗、`state IN ('requested','approved')` 的 partial unique index 保證每個 task 同時只有一個未決問題），未動 v3 的 `candidate_requests` 帳本。`test/merge-approval.test.ts`、`test/merge-approval-web.test.ts`、`test/collab-mcp.test.ts`、`test/candidate-registry.test.ts` |
 | Merge approval drift invalidation | 已實作（後端）／synthetic 已驗證；GUI/live 待驗收 | 每一條 approval 讀取路徑（`candidate_status`、`GET /api/rooms/merge-approvals`、`GET /api/rooms/merge-approvals/inspect`，以及 `main_merge_request` 重新提出請求時）在回報那一列之前先對 live state 重驗綁定，共用單一 `#observeMergeApproval`；漂移者在被回報前即持久轉為終局 `invalidated`，`refusal` 帶 5-3 同一套欄位名稱與 `drift-detected-on:<介面>`。**已核准後才漂移**的 approval 逐一驗證九個綁定值（`mainHead`／`mainBranch`／`mainDirtyFingerprint`／`mainIgnoredFingerprint`／`candidateHead`／`candidateWorktreeClean`／`recoveryRef`／`previewDigest`／`candidateStatus`）× 三條讀取路徑皆顯示失效並具名，且其餘兩條路徑立即一致；`token_hash` 於失效時清除。失效為 compare-and-set，三條路徑並行觀察同一次漂移只產生一筆事件，輸家改讀 store 現況回報。durable 那一列保留 `decided_by`，audit 鏈另記 `ownerHadGranted`／`observedOn`／`previousState`，因此「Owner 核准過但漂移作廢」與「從未有人核准」可區分；Room ledger（公開面）只列改變的欄位名，不含路徑、approval id 或 token，chain 與 audit chain 皆 verify 通過。失效後 `candidates`／`candidate_checkpoints` 兩張表、`refs/**`、main HEAD／tree／status 與 candidate HEAD／status 逐位元不變，recovery ref 仍指向該 candidate head，且可立即重新 preview 並提出新請求（`main_merge_request` 本身即為觀察路徑，漂移者不會佔住每個 task 唯一的未決名額）。**不誤殺**：ignored 檔案內容變動、無 `.gitattributes` 綁定的 merge driver、無關 branch／tag、mtime-only touch 後的 `update-index --refresh` 四者累加後 approval 仍為 `approved`、`bindingCheck` 仍為 `{checked:true,valid:true,changed:[]}`，且仍可被消耗。**暫時性失敗不燒核准**：綁定檢查逐欄位獨立探測，讀到且值不同才進 `changed`，讀不到一律進 `unverified`，任何例外都不會轉成「已改變」。`changed` 為空而 `unverified` 非空時，approval **不**失效、`token_hash` **不**清除、**不寫任何列**，只回 `{checked:false, valid:false, changed:[], unverified:[…], unavailable:"MAIN_MERGE_APPROVAL_BINDING_CHECK_FAILED"}`；環境恢復後下一次觀察回到 `{checked:true, valid:true, changed:[]}` 且**仍可成功 consume**。`grant`／`consume` 以獨立錯誤型別 `MergeApprovalBindingUnverifiableError`（`MAIN_MERGE_APPROVAL_BINDING_CHECK_FAILED:<欄位名>`）拒絕該次動作，但不轉為任何終局狀態（requested 仍 requested、approved 仍 approved）。已用**真實** Git／檔案系統失敗驗證三種形狀：main `.git` `chmod 000`、candidate worktree 改名離開再放回、PATH 內無 git 造成 spawn 失敗；三者皆斷言恢復後仍可 consume。反向亦驗證：真的刪掉 recovery ref 仍算漂移（`rev-parse --verify --quiet` exit 1 = ref 不存在，其餘 = 讀不到才拋錯）。同時「有欄位變了」又「有欄位讀不到」時仍以漂移處理，但 `changed` 只列實際比對過的那個。**紀錄不寫死事實斷言**：audit detail 的 `candidateRetained`／`checkpointsRetained`／`recoveryRefRetained` 三個常數已移除（先刪 recovery ref 再觀察，舊版仍宣稱「復原點完整保留」），改為只描述本次動作的 `deletedByThisInvalidation: "nothing"`，帳本文案同步改為「這次失效沒有刪除 candidate、checkpoint 或復原點」。逾時與終局列不重驗。**未動 schema**（v4 既有語意已足），v1→v4／v3→v4 升級與 v2 拒絕不變；未動 `candidate_requests`、`#mergePreview` 或 `#diff`；本階段仍不寫入 canonical main。`test/merge-approval-drift.test.ts`、`test/merge-approval.test.ts`、`test/merge-approval-web.test.ts` |
-| Promotion/recovery | 待實作／待驗證 | recovery point 可讀、conflict/scope expansion 重批、成功/失敗/rollback 可驗證 |
+| Promotion/recovery（Phase 5-5，第一輪：核心路徑，**尚無 HTTP／MCP／GUI 出口**） | 核心已實作／synthetic＋真實 git 已驗證；**GUI 與 live 驗收未做**  | `promoteMainMerge()` 是全產品唯一寫入 canonical main 的路徑，順序固定為「驗證綁定 → 寫入 durable `applying` 意圖紀錄 → 消耗核准 → `git merge --no-ff --no-edit` → 寫入終局結果」。意圖紀錄（schema v5 新表 `candidate_merge_promotions`，純加表升級，v1/v3/v4 皆不動既有列與 row hash）在任何 Git 寫入前就含 pre-HEAD、pre-index 指紋（`ls-files --stage`，非 `write-tree`，因為後者會寫物件並可能取 `index.lock`）、tracked 工作樹指紋、**未追蹤與 ignored 檔案的路徑＋內容指紋**、stash、reflog 與將執行的 hook 清單＋SHA-256，另存 `owner_pid` 以區分「執行中」與「已崩潰」。**崩潰後的 reconciliation 一律唯讀**：不 `reset`／`checkout`／`merge --abort`／`clean`／`stash`／改 `.git/config`／刪 `*.lock`，只讀取、逐項比對指紋、回報三態之一，並具名列出每一個不同的面向與一行可複製的 `git -C <main> reset --hard <pre-HEAD>`。`merged` 為終局：成功後 candidate 轉 `merged`，再次 preview／request 一律 `MAIN_MERGE_CANDIDATE_ALREADY_MERGED`。同一 approval 的併發 promotion 由 `approval_id` UNIQUE 索引序列化，輸家在跑任何 Git 指令前就被擋下。**已用真實 git 實測**（`test/merge-promotion.test.ts`，21 條）：hook 真的被執行（hook 寫檔、斷言檔案存在）而 preview 一次都沒執行；`pre-merge-commit` 非零退出後 main 的 HEAD／index／工作樹／未追蹤／ignored／stash／reflog 逐項回到 pre-op 指紋且移除外部條件後可重新成功；`post-merge` 非零退出時 merge 已完成，紀錄照實記為 `applied` 而非失敗；會掛住的 hook 被逾時終止且 **hook 自己的 pid 被斷言已消失**；main 有 ignored 檔案位於 merge 會寫入的路徑時**逐一具名列出並在核准前拒絕**（實測 git 會靜默覆蓋、exit 0、事後仍報工作樹乾淨）；八種「不乾淨」條件各有一條拒絕測試（tracked 變更、未追蹤檔案、`skip-worktree`、sparse-checkout、`MERGE_HEAD`、`index.lock`、submodule、LFS/clean-smudge filter）；`.git` 唯讀與 merge driver 失敗兩種真實失敗各驗一次回滾與「恢復後重新發起成功」；核准後才出現的 `index.lock`／`MERGE_HEAD` **拒絕但不消耗核准**，清除後同一把 token 仍可成功；**真實 `kill -9` 打在 hook 執行中**，由**另一個新 OS 程序**重開 registry，回報 `needs-manual-review`、具名列出 `index`／`trackedWorkingTree` 等差異、給出可複製的復原指令、不自行重試也不自行回滾，candidate 與 recovery ref 完好。hook 環境與 ignored 內容指紋納入 `previewDigest`（因此納入綁定），消耗前再比對一次；**live 的 `.git` 狀態刻意不納入 digest**——實測發現納入會讓別的程序短暫持有的 `index.lock` 永久燒掉 Owner 的核准（PITFALLS #85 同形）。三次突變測試證明測試不是空的：拿掉 ignored 內容雜湊、拿掉 authorize 端 gate、拿掉 hook 綁定，各自都讓對應測試變紅。 | **未做，需第二輪**：HTTP／MCP／GUI 出口（因此 `promoteMainMerge` 目前只有測試會呼叫）、audit／room ledger 的 promotion 紀錄、v2 標準第 1／2 項要求的四個 kill 窗中另外三個（意圖紀錄寫入中、核准消耗的 SQLite 寫入中、終局結果寫入中）、第 7 項的「promotion 期間外部程序推進 main」測試、第 8 項取消語意的 UI、第 9 項在拋棄式 repo 上的 Owner 瀏覽器驗收（成功一次＋真實失敗回滾一次）與涵蓋伺服器端函式的 gate digest |
 | GUI Managed 隔離 | 待實作／待驗證 | Managed policy 不會改變已加入 Native terminal 的 capability |
 
 本表區分「程式已實作且有本機自動證據」與「需要 owner 額度、外部 runtime 或發布決策」。

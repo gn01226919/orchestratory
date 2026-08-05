@@ -1576,10 +1576,15 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
     /=== mergeApprovalSignature\(approval, state\.mergeApprovalBinding\)\) return;/u,
   );
   assert.match(mergeDialogScript, /mainMutation: false/u);
-  // Rejection states plainly that nothing is deleted, using the flags the response returns.
-  assert.match(mergeDialogScript, /value\.candidateRetained/u);
-  assert.match(mergeDialogScript, /value\.checkpointsRetained/u);
-  assert.match(mergeDialogScript, /value\.recoveryRefRetained/u);
+  // Rejection describes what this ACTION did and never declares the current state of anything: the
+  // three `*Retained` constants it used to print were assertions made by a path that reads nothing.
+  assert.match(mergeDialogScript, /value\.deletedByThisRejection === "nothing"/u);
+  assert.doesNotMatch(mergeDialogScript, /value\.candidateRetained/u);
+  assert.doesNotMatch(mergeDialogScript, /value\.checkpointsRetained/u);
+  assert.doesNotMatch(mergeDialogScript, /value\.recoveryRefRetained/u);
+  // And it says so: the rendered sentence states that this view did not re-read the current state,
+  // instead of declaring one. (Matching on the old wording would hit the comment explaining it.)
+  assert.match(mergeDialogScript, /未重新讀取/u);
   assert.match(mergeDialogScript, /拒絕不等於刪除授權/u);
   // Bilingual state text, and a binding refusal that says which bound values moved.
   assert.match(mergeDialogScript, /Blocking items remain; the confirmation input and the primary button stay disabled\./u);

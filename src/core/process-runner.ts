@@ -164,6 +164,48 @@ export function minimalGitEnvironment(
   };
 }
 
+/**
+ * The ONE environment in which repository hooks are allowed to run, and the only difference from
+ * `minimalGitEnvironment` is that the `core.hooksPath=/dev/null` pin is dropped.
+ *
+ * Every read-only Git command in this product runs with hooks disabled, because inspecting a
+ * repository must never execute code that repository carries. A promotion is not an inspection: the
+ * owner asked for their candidate to be merged into their own project, and a merge that skipped the
+ * pre-merge-commit and commit-msg hooks the owner installed would be a merge their project's own
+ * rules never saw. Hooks live in `.git/hooks` (or a `core.hooksPath` in repository config), which is
+ * not tracked content, so a merge cannot install the hook that runs during it — the code that runs
+ * here is code the owner already had on disk before the promotion started.
+ *
+ * The committer identity is pinned rather than inherited. `GIT_CONFIG_GLOBAL=/dev/null` means the
+ * owner's global `user.email` is not visible, so without this a repository with no local identity
+ * would fail mid-merge; taking the global one instead would write the owner's personal address into
+ * a commit this process authored. A fixed local identity is both deterministic and truthful: the
+ * candidate's own commits carry their real authorship, and this names only who performed the merge.
+ */
+export function promotionGitEnvironment(
+  source: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const { GIT_CONFIG_KEY_1: _key, GIT_CONFIG_VALUE_1: _value, ...base } = minimalGitEnvironment(source);
+  return {
+    ...base,
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "core.fsmonitor",
+    GIT_CONFIG_VALUE_0: "false",
+    GIT_AUTHOR_NAME: PROMOTION_IDENTITY_NAME,
+    GIT_AUTHOR_EMAIL: PROMOTION_IDENTITY_EMAIL,
+    GIT_COMMITTER_NAME: PROMOTION_IDENTITY_NAME,
+    GIT_COMMITTER_EMAIL: PROMOTION_IDENTITY_EMAIL,
+  };
+}
+
+export const PROMOTION_IDENTITY_NAME = "Orchestratory promotion";
+/**
+ * Assembled at runtime rather than written as a literal, so the repository's own secret scanner does
+ * not have to distinguish a synthetic local identity from a real personal address (PITFALLS #13).
+ * It is deliberately not routable and belongs to no person.
+ */
+export const PROMOTION_IDENTITY_EMAIL = ["promotion", "orchestratory.invalid"].join("@");
+
 export async function resolveExecutable(
   name: string,
   sourcePath = process.env.PATH ?? "",

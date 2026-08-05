@@ -788,14 +788,20 @@ export class CollaborationService {
         approvalId: approval.id,
         decidedBy: input.decidedBy,
         reason: approval.refusal?.reason ?? null,
-        candidateRetained: true,
-        checkpointsRetained: true,
-        recoveryRefRetained: true,
+        // PITFALLS #86, the same shape that was already fixed on the invalidation path in 6f194af
+        // and left standing here: `candidateRetained` / `checkpointsRetained` / `recoveryRefRetained`
+        // were the constant `true`, so the record asserted that the recovery point was intact
+        // whether or not it was — measured on the neighbouring path by deleting the recovery ref and
+        // watching the entry still claim it was fully retained. A rejection cannot observe the state
+        // of anything, because it deliberately runs no Git command at all, so it describes only what
+        // it DID rather than declaring what now IS.
+        deletedByThisRejection: "nothing",
         mainMutation: false,
       },
     });
     this.#candidateLedger(input.roomId, approval.binding.taskId,
-      `Owner 未同意這次 main merge；candidate、checkpoint 與復原點完整保留，可重新 preview 後再詢問。`,
+      `Owner 未同意這次 main merge；這次拒絕沒有刪除 candidate、checkpoint 或復原點，也沒有修改 main，`
+        + `可重新 preview 後再詢問。`,
       `candidate:merge-approval:${approval.id}:rejected`);
     return approval;
   }

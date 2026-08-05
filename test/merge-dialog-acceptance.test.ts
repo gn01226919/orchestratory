@@ -38,6 +38,7 @@ const ACCEPTED_FUNCTIONS = [
   "renderMergeApproval",
   "openMergeApprovalDialog",
   "closeMergeApprovalDialog",
+  "rejectMergeIntoMain",
 ] as const;
 
 function acceptedSource(file: string, names: readonly string[]): string {
@@ -45,7 +46,9 @@ function acceptedSource(file: string, names: readonly string[]): string {
   return names.map((name) => {
     // Top-level declarations in this file start at column 0 and end with a closing
     // brace at column 0, so the first such brace terminates the body.
-    const pattern = new RegExp(String.raw`^function ${name}\([\s\S]*?^\}$`, "mu");
+    // Both forms: an async dialog handler was silently uncovered because the pattern
+    // only matched `function`, which is how a changed reject path slipped past this guard.
+    const pattern = new RegExp(String.raw`^(?:async )?function ${name}\([\s\S]*?^\}$`, "mu");
     const found = pattern.exec(source);
     assert.ok(
       found,

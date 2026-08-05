@@ -3302,13 +3302,19 @@ async function rejectMergeIntoMain() {
     state.mergeApproval = value.approval;
     state.mergeApprovalDecided = true;
     renderMergeApproval();
-    const retained = [
-      value.candidateRetained ? "候選 worktree · candidate" : "",
-      value.checkpointsRetained ? "全部 checkpoints · checkpoints" : "",
-      value.recoveryRefRetained ? `復原點 ref ${approval.binding?.recoveryRef || ""} · recovery ref` : "",
-    ].filter(Boolean);
-    status.textContent = `已拒絕合併，沒有觸發任何清理：${retained.join("、")} 全部完整保留，`
-      + "拒絕不等於刪除授權；之後可以重新產生預覽再問一次。 · Rejected. The candidate, its checkpoints and its recovery ref are all kept; a rejection is never a deletion.";
+    /*
+     * PITFALLS #86／#89：這裡原本讀三個伺服器寫死為 true 的常數，然後印「全部完整保留」——
+     * 那是一句對現況的宣告，而拒絕這條路徑一個 Git 指令都沒跑，根本沒有觀察過任何東西。
+     * 修正是說實話，不是沉默：改成只描述這次動作做了什麼（沒刪任何東西），
+     * 並明說「現況要自己去看」，而不是替使用者宣告現況。
+     */
+    const deleted = value.deletedByThisRejection === "nothing"
+      ? "這次拒絕沒有刪除 candidate、checkpoint 或復原點，也沒有修改 main"
+      : `伺服器回報這次拒絕刪除了：${String(value.deletedByThisRejection || "未說明")}`;
+    status.textContent = `已拒絕合併。${deleted}；拒絕不等於刪除授權，之後可以重新產生預覽再問一次。`
+      + `（本頁只描述這次動作，未重新讀取 ${approval.binding?.recoveryRef || "復原點"} 目前的狀態。）`
+      + " · Rejected. This action deleted nothing and did not modify main; it does not re-read the"
+      + " current state of the recovery point.";
   } catch (error) {
     await loadMergeApproval(approval.id);
     status.textContent = `拒絕失敗 · Rejection failed：${humanError(error)}`;

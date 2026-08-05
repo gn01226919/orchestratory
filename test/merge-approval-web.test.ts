@@ -178,8 +178,12 @@ test("the merge approval dialog contract lists, inspects, approves once, and ref
   });
   assert.equal(rejected.status, 200);
   assert.equal((rejected.body.approval as { state: string }).state, "rejected");
-  assert.equal(rejected.body.candidateRetained, true);
-  assert.equal(rejected.body.recoveryRefRetained, true);
+  // The response describes this action, not the state of the repository: rejection runs no Git
+  // command, so it is in no position to assert that anything is still there (PITFALLS #86).
+  assert.equal(rejected.body.deletedByThisRejection, "nothing");
+  assert.equal(rejected.body.mainMutation, false);
+  assert.equal(rejected.body.candidateRetained, undefined);
+  assert.equal(rejected.body.recoveryRefRetained, undefined);
   // Withdrawing an approval is not a cleanup authorization.
   assert.equal((await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspace })).stdout, mainHead);
   assert.equal(
