@@ -366,6 +366,44 @@ reflog 是 append-only，`git merge --abort` **必然** append 一筆 `reset: mo
 **這是修掉一個不可能滿足的要求，不是移動終點線。** 把它留著只會逼出假的合規。
 記為 [[PITFALLS]] #96。
 
+### v2 的第二處補正（2026-08-06，第一輪審查後）
+
+第一輪審查不通過，並指出**標準本身的三個漏洞**——其中一個讓本輪最嚴重的損害
+**完整滿足了十項的每一個字**。補正如下，新增為第 11～13 項：
+
+11. **升級與向後相容。** 用**前一個 commit 寫出的資料庫**開啟一次，斷言**每一個既有讀寫面都可用**
+    （list／inspect／reject／request／promote／expiry sweep）。
+    「儲存層是純加表」不足以證明相容——本輪的洞完全在**讀取層的 assert**：
+    一筆 row_hash 驗過且未變的既有核准被讀成 `MAIN_MERGE_APPROVAL_ROW_TAMPERED`，
+    而正確的具名答案就在同一份程式碼裡卻永遠到不了。
+    **「這份快照早於某個 gate」與「這列資料被竄改」必須是兩個不同的答案**（[[PITFALLS]] #85／#100）。
+    另：任何會佔用「每 task 一個未決問題」這個結構性槽位的狀態，
+    **必須有產品側路徑可以釋放它**，否則一次失敗就永久報廢該 task。
+
+12. **促進程序被殺之後，它啟動的破壞性子程序也必須被涵蓋。**
+    原第 2 項只要求「子程序在結束或中止時已終止」——但 `detached: true` 讓 `git merge` 自成
+    process group，`kill -9` orchestrator 之後它 PPID 變 1 **繼續把 main 寫完**。
+    因此：**merge 子程序的 pgid 必須寫進意圖紀錄，且在該 pgid 仍存在時不得下任何結論。**
+    測試必須涵蓋「發起者已死、被它啟動的 merge 還活著」這個組合。
+
+13. **凡是還會變的狀態，紀錄不得一次寫死。**
+    每次讀取重新觀察，或紀錄自稱「as observed at T」並可重算。
+    實測後果：reconciliation 寫成 `needs-manual-review` 後永不再觀察，於是
+    **main 已完整套用且乾淨，紀錄卻說「不確定」，`mainHeadAfter` 記的是 pre-op HEAD，
+    而且仍在叫 Owner 執行 `git reset --hard <pre-HEAD>`——照做會靜默丟掉一次真的成功了的 merge。**
+    一次觀察後凍結，是 [[PITFALLS]] #86 戴上「這是觀察來的」徽章的版本。
+
+**另外補正第 3 項的措辭**：「乾淨」清單裡每一個項目都必須寫**用什麼證據判定**，不只寫要檢查什麼。
+實測本輪三處都選了最省事的讀法：`.gitattributes` 只掃根目錄（子目錄與 `.git/info/attributes` 皆漏）、
+sparse-checkout 用字串 `=== "true"` 比對（`1`／`yes`／`on` 皆漏而 git 確實照做）、
+submodule 只看 `.gitmodules` 是否存在（index 有 `160000` gitlink 但無該檔時零 blocker）。
+判準明定為：`.gitattributes` **掃全部層級＋`.git/info/attributes`**；
+boolean **一律 `git config --type=bool`**；submodule **看 index 的 `160000` 條目**。
+
+**第 5 項的分輪裁決**：audit chain 與 room ledger 的 promotion 紀錄在「刻意不接出口」的第一輪
+結構上不可能完成。標準因此區分**核心紀錄**（第一輪必須有）與 **ledger／audit 紀錄**（第二輪），
+否則被切成兩輪的階段無法被公平裁決。
+
 ### 可接受的殘餘風險（連同「何時失效」一起列，未列出的不得事後補認）
 
 | 殘餘風險 | 為什麼此階段可接受 | 何時失效 |
