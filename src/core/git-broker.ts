@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { open, readdir, readFile, stat, type FileHandle } from "node:fs/promises";
+import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { canonicalWorkspace, resolveExistingInside } from "../security/workspace.ts";
@@ -107,6 +108,38 @@ const MAX_ATTRIBUTES_FILES = 256;
 const MAX_ATTRIBUTES_BYTES = 1_048_576;
 /** A `filter=` on any path is a clean/smudge round trip this product cannot promise to roll back. */
 const ATTRIBUTES_DECLARE_FILTER = /(?:^|\s)filter=/mu;
+/**
+ * Path names handed to `git check-attr` so that git itself, rather than this file's idea of where
+ * attributes live, answers whether a filter would apply.
+ *
+ * Enumerating attributes files was measurably incomplete twice over: git expands `~` in
+ * `core.attributesFile` while this product joined it under the workspace, and with no
+ * `core.attributesFile` at all git still reads `$XDG_CONFIG_HOME/git/attributes` —
+ * `GIT_CONFIG_GLOBAL=/dev/null` overrides the global CONFIG file, not the global ATTRIBUTES file.
+ * Both were found by asking `git check-attr` in the product's exact environment. Any enumeration can
+ * be outrun by the next git release or the next configuration key; asking git cannot.
+ *
+ * The list is representative rather than exhaustive, and that limit is stated instead of papered
+ * over: it is combined with (not replaced by) the repository's own tracked and ignored paths, so an
+ * attributes file whose pattern matches nothing in this repository AND none of these names is the
+ * one shape neither half sees.
+ */
+const ATTRIBUTES_PROBE_PATHS: readonly string[] = [
+  "probe", "probe.txt", "probe.md", "probe.json", "probe.xml", "probe.csv",
+  "probe.bin", "probe.dat", "probe.pack", "probe.lock",
+  "probe.png", "probe.jpg", "probe.gif", "probe.svg", "probe.pdf", "probe.psd", "probe.ai",
+  "probe.zip", "probe.tar", "probe.gz", "probe.7z", "probe.iso", "probe.dmg",
+  "probe.mp3", "probe.mp4", "probe.mov", "probe.wav", "probe.avi",
+  "probe.so", "probe.dylib", "probe.dll", "probe.exe", "probe.jar", "probe.class", "probe.o",
+  "probe.sh", "probe.ts", "probe.js", "probe.py", "probe.go", "probe.rs", "probe.c", "probe.h",
+  ".gitattributes", ".gitignore", "probe/probe.bin", "probe/deep/probe.bin",
+];
+/** Bounded path list for the `check-attr` probe; the index listing that feeds it is already bounded. */
+const MAX_ATTRIBUTES_PROBE_PATHS = 200_000;
+/** Values `git check-attr` prints when no filter would run. Anything else is a filter. */
+const ATTRIBUTES_NO_FILTER = new Set(["unspecified", "unset"]);
+/** Bounded read of one promotion's trace file; exceeding it reports "not read", never "no hooks". */
+const MAX_HOOK_TRACE_BYTES = 16 * 1024 * 1024;
 /** The index mode git gives a submodule (gitlink). `.gitmodules` is documentation; this is the fact. */
 const GITLINK_MODE = "160000";
 /**
@@ -124,6 +157,78 @@ const PROMOTION_STATE_FILES: ReadonlyArray<readonly [string, string]> = [
   ["index.lock", "MAIN_INDEX_LOCKED"],
 ];
 const SENSITIVE_UNTRACKED_PATH = /(?:^|\/)(?:\.env(?:\.[^/]*)?|[^/]+\.(?:pem|key|p12|pfx))$/iu;
+
+/**
+ * git's `expand_user_path`, for the two spellings this product can resolve honestly.
+ *
+ * `~/x` is the owner's home; a bare `~` is the home itself. `~someone/x` needs a passwd lookup this
+ * process does not do, so it throws rather than resolving to something git would not read — a path
+ * that silently fails to exist turns this gate off.
+ */
+function expandUserPath(value: string, workspace: string): string {
+  if (value === "~") return homedir();
+  if (value.startsWith("~/")) return join(homedir(), value.slice(2));
+  if (value.startsWith("~")) throw new Error("UNSUPPORTED_ATTRIBUTES_FILE_PATH");
+  return isAbsolute(value) ? value : join(workspace, value);
+}
+
+/** One hook git actually ran during a promotion, as reported by git's own trace stream. */
+export interface ObservedHookRun {
+  /** The hook name git reports, e.g. `pre-merge-commit`. */
+  name: string;
+  /** The command line git executed, first argument only, so it names the file that ran. */
+  path: string;
+  /** The hook's exit status, or null when the trace recorded a start with no matching exit. */
+  exitCode: number | null;
+}
+
+/**
+ * The hooks a single `git merge` executed, and what each of them returned, read back from git.
+ *
+ * `runProcess` only ever sees the merge's own exit code, so without this the record could say no
+ * more than "the merge failed" — and "hooks: ok" written from a flag is exactly the constant-shaped
+ * assertion PITFALLS #86 is about. `GIT_TRACE2_EVENT` makes git report every child it starts, with
+ * `child_class: "hook"`, the hook name and, in a later event with the same `child_id`, the exit
+ * code. Those are observations, not intentions: a hook that did not run does not appear.
+ *
+ * Returns null when the trace could not be read at all. Null and `[]` mean different things — "not
+ * observed" and "observed that none ran" — and collapsing them is how a record starts lying.
+ */
+export async function readExecutedHooks(traceFile: string): Promise<ObservedHookRun[] | null> {
+  let contents: string;
+  try {
+    const info = await stat(traceFile);
+    if (!info.isFile() || info.size > MAX_HOOK_TRACE_BYTES) return null;
+    contents = await readFile(traceFile, "utf8");
+  } catch { return null; }
+  const started = new Map<string, ObservedHookRun>();
+  const order: string[] = [];
+  for (const line of contents.split("\n")) {
+    if (line.length === 0) continue;
+    let event: Record<string, unknown>;
+    try { event = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
+    const sid = typeof event.sid === "string" ? event.sid : "";
+    const childId = typeof event.child_id === "number" ? String(event.child_id) : undefined;
+    if (childId === undefined) continue;
+    const id = `${sid}#${childId}`;
+    if (event.event === "child_start" && event.child_class === "hook") {
+      const argv = Array.isArray(event.argv) ? event.argv : [];
+      const run: ObservedHookRun = {
+        name: typeof event.hook_name === "string" ? event.hook_name : "",
+        path: typeof argv[0] === "string" ? argv[0] : "",
+        exitCode: null,
+      };
+      if (!started.has(id)) order.push(id);
+      started.set(id, run);
+      continue;
+    }
+    if (event.event === "child_exit") {
+      const run = started.get(id);
+      if (run && typeof event.code === "number") run.exitCode = event.code;
+    }
+  }
+  return order.map((id) => started.get(id)).filter((run): run is ObservedHookRun => run !== undefined);
+}
 
 export class GitBroker {
   async #git(
@@ -476,7 +581,9 @@ export class GitBroker {
   }
 
   /**
-   * Every attributes file this repository would actually consult, as absolute paths.
+   * Attributes files this repository is KNOWN to consult, as absolute paths. Deliberately not
+   * claimed to be every one of them — see `#attributesBlockers`, which is where the completeness
+   * of the gate actually comes from.
    *
    * Measured, not assumed: `git ls-files -- '*.gitattributes'` really does match nested files (the
    * default pathspec glob crosses `/`), and a root-only read reports `sub/deep/.gitattributes
@@ -485,7 +592,10 @@ export class GitBroker {
    * already refused by `MAIN_STATUS_NOT_EMPTY` before this matters.
    *
    * `core.attributesFile` is read from the repository's own config, which is writable by any linked
-   * worktree sharing this common `.git` — the same surface the hook binding exists for.
+   * worktree sharing this common `.git` — the same surface the hook binding exists for. git expands
+   * a leading `~` in that value with `expand_user_path`; joining it under the workspace instead
+   * produced `<main>/~/attrs`, an ENOENT, and a silently empty gate. `~user/` cannot be resolved
+   * here without a passwd lookup, so it is refused rather than guessed at.
    */
   async #attributesFiles(workspace: string, ignoredPaths: readonly string[]): Promise<string[]> {
     const found = new Set<string>();
@@ -499,16 +609,83 @@ export class GitBroker {
     found.add(join(await this.#gitPath(workspace, "info"), "attributes"));
     const configured = (await this.#git(workspace, ["config", "--get", "core.attributesFile"], 8_192)
       .catch(() => "")).trim();
-    if (configured) found.add(isAbsolute(configured) ? configured : join(workspace, configured));
+    if (configured) found.add(expandUserPath(configured, workspace));
     return [...found].sort();
   }
 
   /**
-   * Whether any attributes file declares a `filter=`, or an explicit refusal when that cannot be
-   * decided. Unread is never "no filter": this gate is the only thing standing between a promotion
-   * and a clean/smudge round trip whose rollback this product cannot promise.
+   * Asks git itself whether a filter would apply to any of a bounded set of path names.
+   *
+   * This is the half of the gate that does not depend on knowing where attributes live. It runs
+   * under `promotionGitEnvironment()` — the exact environment the merge will run under — because the
+   * answer depends on it: `GIT_CONFIG_GLOBAL=/dev/null` suppresses the global config file but NOT
+   * `$XDG_CONFIG_HOME/git/attributes`, which git reads whenever `core.attributesFile` is unset.
+   *
+   * A non-zero exit, a termination or a malformed stream throws, and the caller turns that into a
+   * refusal. "I could not ask" is never "no filter".
    */
-  async #attributesBlockers(workspace: string, ignoredPaths: readonly string[]): Promise<string[]> {
+  async #attributesFilterDeclared(workspace: string, paths: readonly string[]): Promise<boolean> {
+    const unique = [...new Set(paths)]
+      .filter((path) => path.length > 0 && !path.includes("\0") && !path.startsWith("-"));
+    if (unique.length === 0) return false;
+    if (unique.length > MAX_ATTRIBUTES_PROBE_PATHS) throw new Error("GIT_ATTRIBUTES_PROBE_TOO_LARGE");
+    const decoder = new StringDecoder("utf8");
+    let pending = "";
+    let fields: string[] = [];
+    let declared = false;
+    let answers = 0;
+    const result = await runProcess({
+      executable: await resolveExecutable("git"),
+      args: ["check-attr", "-z", "--stdin", "filter"],
+      cwd: workspace,
+      stdin: `${unique.join("\0")}\0`,
+      timeoutMs: 30_000,
+      outputLimitBytes: 262_144,
+      env: promotionGitEnvironment(),
+      stdoutConsumer: (chunk) => {
+        pending += decoder.write(chunk);
+        for (;;) {
+          const boundary = pending.indexOf("\0");
+          if (boundary < 0) return;
+          fields.push(pending.slice(0, boundary));
+          pending = pending.slice(boundary + 1);
+          if (fields.length < 3) continue;
+          answers += 1;
+          if (!ATTRIBUTES_NO_FILTER.has(fields[2] ?? "")) declared = true;
+          fields = [];
+        }
+      },
+    });
+    if (result.exitCode !== 0 || result.terminationReason) throw new Error("GIT_COMMAND_FAILED");
+    pending += decoder.end();
+    if (pending.length > 0 || fields.length > 0) throw new Error("INVALID_GIT_CHECK_ATTR_STREAM");
+    // git answers once per path. Fewer answers than questions means the stream was cut short, which
+    // would otherwise read as "none of the missing ones had a filter".
+    if (answers !== unique.length) throw new Error("INVALID_GIT_CHECK_ATTR_STREAM");
+    return declared;
+  }
+
+  /**
+   * Whether a `filter=` would apply anywhere in this repository, or an explicit refusal when that
+   * cannot be decided. Unread is never "no filter": this gate is the only thing standing between a
+   * promotion and a clean/smudge round trip whose rollback this product cannot promise.
+   *
+   * Two independent halves, because each covers what the other cannot. Reading the attributes files
+   * catches a pattern that matches no path present today — a rule for `*.psd` in a repository with
+   * no `.psd` yet. Asking `git check-attr` catches attributes files this code does not know how to
+   * find, which is not hypothetical: `core.attributesFile` spelled `~/attrs` and the XDG global
+   * attributes file were both invisible to the enumeration and both visible to git.
+   */
+  async #attributesBlockers(
+    workspace: string, ignoredPaths: readonly string[], trackedPaths: readonly string[],
+  ): Promise<string[]> {
+    try {
+      if (await this.#attributesFilterDeclared(
+        workspace, [...ATTRIBUTES_PROBE_PATHS, ...trackedPaths, ...ignoredPaths],
+      )) return ["MAIN_ATTRIBUTES_DECLARE_FILTER"];
+    } catch {
+      return ["MAIN_ATTRIBUTES_UNREADABLE"];
+    }
     let files: string[];
     try {
       files = await this.#attributesFiles(workspace, ignoredPaths);
@@ -605,7 +782,13 @@ export class GitBroker {
     } else if (await this.#present(join(workspace, ".gitmodules"))) blockers.push("MAIN_HAS_SUBMODULES");
     if (hooks.filters.length > 0) blockers.push("MAIN_HAS_CONTENT_FILTERS");
     if (hooks.unreadable) blockers.push("MAIN_HOOK_DIRECTORY_UNREADABLE");
-    blockers.push(...await this.#attributesBlockers(workspace, ignored.paths));
+    // The same index listing the gitlink gate reads, reused for the paths git is asked about: every
+    // tracked path, so a filter declared for something this repository actually contains is found
+    // whatever spelling put it there.
+    const trackedPaths = indexStage.split("\0").filter(Boolean)
+      .map((entry) => entry.slice(entry.indexOf("\t") + 1))
+      .filter((path) => path.length > 0);
+    blockers.push(...await this.#attributesBlockers(workspace, ignored.paths, trackedPaths));
     const reflogEntries = reflog.split("\n").filter(Boolean);
     return {
       head,
@@ -753,19 +936,31 @@ export class GitBroker {
   async mergeIntoHead(
     workspaceInput: string, commit: string, timeoutMs = MERGE_TIMEOUT_MS,
     onSpawn?: (processGroupId: number) => void,
+    /**
+     * Absolute path git writes its trace event stream to, so the hooks it runs and their exit codes
+     * can be READ back afterwards. It must be outside the repository: a file written inside main
+     * would itself become an untracked file and change the very fingerprints this promotion compares.
+     */
+    traceEventFile?: string,
   ): Promise<{
     exitCode: number;
     timedOut: boolean;
   }> {
     if (!/^[0-9a-f]{40,64}$/u.test(commit)) throw new Error("INVALID_GIT_HEAD");
     const workspace = await canonicalWorkspace(workspaceInput);
+    if (traceEventFile !== undefined && !isAbsolute(traceEventFile)) {
+      throw new Error("INVALID_GIT_TRACE_PATH");
+    }
     const result = await runProcess({
       executable: await resolveExecutable("git"),
       args: ["merge", "--no-ff", "--no-edit", commit],
       cwd: workspace,
       timeoutMs,
       outputLimitBytes: 262_144,
-      env: promotionGitEnvironment(),
+      env: {
+        ...promotionGitEnvironment(),
+        ...(traceEventFile === undefined ? {} : { GIT_TRACE2_EVENT: traceEventFile }),
+      },
       ...(onSpawn === undefined ? {} : { onSpawn }),
     });
     return { exitCode: result.exitCode, timedOut: result.terminationReason === "timeout" };

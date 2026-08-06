@@ -47,6 +47,7 @@ import {
   type MergeApproval,
   type MergeApprovalBindingCheck,
   type MergeApprovalDriftEvent,
+  type MergePromotionEvent,
   type MergeApprovalPreview,
 } from "./candidate-registry.ts";
 
@@ -120,6 +121,7 @@ export class CollaborationService {
     this.candidates = new CandidateRegistry(dataDirectory, {
       ...(options.maxCandidateFiles === undefined ? {} : { maxFiles: options.maxCandidateFiles }),
       onMergeApprovalInvalidated: (event) => this.#recordMergeApprovalDrift(event),
+      onMergePromotion: (event) => this.#recordMergePromotion(event),
     });
     this.#worktrees = new WorktreeBroker(dataDirectory);
     this.#writerWorktrees = options.writerWorktrees;
@@ -1308,6 +1310,93 @@ export class CollaborationService {
         + `；這次失效沒有刪除 candidate、checkpoint 或復原點，也沒有修改 main，`
         + `請重新 preview 後再詢問。`,
       `candidate:merge-approval:${event.approvalId}:invalidated`);
+  }
+
+  /**
+   * The audit and ledger trail for the one operation in this product that writes to the owner's
+   * project. Both paths, success and failure, and every fact copied from what the promotion row
+   * OBSERVED — no constants, no summaries computed here (bar item 5).
+   *
+   * Nothing in this method can reach main. It runs after the durable transition has committed, and
+   * a failure here is recorded under its own name rather than being allowed to change what happened:
+   * an applied merge stays applied whether or not its ledger entry survived, and the promotion row
+   * is what the next start rebuilds the answer from.
+   */
+  #recordMergePromotion(event: MergePromotionEvent): void {
+    const observation = event.observation;
+    const hooks = observation.hooksExecuted;
+    const detail: Record<string, unknown> = {
+      promotionId: event.promotionId,
+      approvalId: event.approvalId,
+      phase: event.phase,
+      state: event.state,
+      code: observation.code,
+      // Both observations of HEAD, kept apart. A single commit id with "applied" beside it cannot be
+      // told from a promotion that produced nothing at all.
+      mainHeadBefore: event.mainHeadBefore,
+      mainHeadAfter: event.mainHeadAfter,
+      mainHeadUnchanged: event.mainHeadUnchanged,
+      mainMutation: event.mainMutated,
+      authorizedMergeCommit: observation.authorizedMergeCommit,
+      candidateHead: event.candidateHead,
+      recoveryRef: event.recoveryRef,
+      recoveryRefIntact: observation.recoveryRefIntact,
+      // Read back from git's own trace stream. Absent means it was not read; an empty array means it
+      // was read and no hook ran. `hooks: ok` would be neither.
+      ...(hooks === undefined ? {} : { hooksExecuted: hooks }),
+      ...(observation.attempt === undefined ? {} : { attempt: observation.attempt }),
+      ...(observation.differences === undefined ? {} : { differences: observation.differences }),
+      ...(observation.recovery === undefined ? {} : { recovery: observation.recovery }),
+      ...(observation.mergeGroupSurvivors === undefined
+        ? {} : { mergeGroupSurvivors: observation.mergeGroupSurvivors }),
+      ...(observation.mergeGroupDisowned === undefined
+        ? {} : { mergeGroupDisowned: observation.mergeGroupDisowned }),
+      // Who approved it, taken from the approval row rather than written as text here.
+      decidedBy: event.decidedBy,
+      previewDigest: event.previewDigest,
+      approvalState: event.approvalState,
+      observedAt: observation.observedAt,
+      ...(event.detail ?? {}),
+    };
+    const outcome = event.phase === "started"
+      ? "allowed"
+      : event.state === "applied" ? "succeeded" : event.state === "rolled-back" ? "failed" : "denied";
+    let audited = true;
+    try {
+      this.audit.append({
+        roomId: event.roomId, taskId: event.taskId,
+        type: `candidate.main-merge-${event.phase}`, actor: "orchestratory",
+        executedBy: "orchestratory", action: "promote-candidate-into-main", path: event.mainPath,
+        outcome, detail,
+      });
+    } catch { audited = false; }
+    const head = (value: string | null): string => value === null ? "未讀到" : value.slice(0, 12);
+    const hookText = hooks === undefined
+      ? "本次未讀到 git 的 hook 追蹤"
+      : hooks.length === 0
+        ? "git 追蹤顯示本次沒有執行任何 hook"
+        : `執行過的 hook：${hooks.map((run) => `${run.name}(exit ${run.exitCode ?? "未讀到"})`).join("、")}`;
+    const summary = event.phase === "started"
+      ? `已記錄 promotion 意圖（尚未寫入 main）；main HEAD 寫入前為 ${head(event.mainHeadBefore)}`
+      : event.phase === "merge-group-abandoned"
+        ? `Owner 宣告不再等待 promotion 的程序群；本次沒有修改 main，下次讀取會重新觀察`
+        : event.state === "applied"
+          ? `promotion 已套用；main HEAD ${head(event.mainHeadBefore)} → ${head(event.mainHeadAfter)}`
+          : event.state === "rolled-back"
+            ? `promotion 未套用，main 已回到操作前指紋；HEAD 仍為 ${head(event.mainHeadBefore)}`
+            : `promotion 需要人工檢查（${observation.code}）；`
+              + `main HEAD 寫入前 ${head(event.mainHeadBefore)}、目前 ${head(event.mainHeadAfter)}；`
+              + `差異：${(observation.differences ?? ["未讀到"]).join("、")}`;
+    this.#candidateLedger(event.roomId, event.taskId,
+      `${summary}；`
+      + (event.mainHeadUnchanged === true && event.phase !== "started"
+        ? "main 沒有產生新的 commit（no-op）；" : "")
+      // The room ledger is public. It names the decision and what was observed; the approval id, the
+      // project path and the preview digest stay in the owner-only audit chain.
+      + `${hookText}；核准者 ${event.decidedBy ?? "未讀到"}`
+      + (audited ? "" : "；CANDIDATE_PROMOTION_AUDIT_WRITE_FAILED：這一筆沒有寫進 audit chain，"
+        + "促進紀錄本身仍在 candidate registry 內，可用 promotions() 重建"),
+      `candidate:main-merge:${event.promotionId}:${event.phase}:${event.state}`);
   }
 
   #candidateLedger(roomId: string, taskId: string | undefined, message: string, key: string): void {
