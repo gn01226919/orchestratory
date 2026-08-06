@@ -351,13 +351,21 @@ approval 之前對 live state 重驗綁定：漂移者在被回報前即持久�
 ### `main_merge_execute`（Phase 5-5，尚未實作）
 
 由本機 GUI/TUI Owner action 或受保護 promotion service 消耗 single-use approval；一般 Agent tool 不
-直接接收可重放 token。核心已提供 `CandidateRegistry.consumeMainMerge({ approvalId, token, action,
-taskId, roomId, mainPath })`：它會第三度重驗 candidate/main HEAD、branch、paths、dirty/ignored
-fingerprint、recovery readiness 與 preview digest，以 compare-and-set 把 approval 轉為 `consumed`
-（並行只會有一個贏家，輸家收到 `MAIN_MERGE_APPROVAL_ALREADY_CONSUMED`），然後回傳一份只描述
-「這一次 merge」的授權物件，其中 `grants: "merge-candidate-into-main"` 與 `notAuthorized`
+直接接收可重放 token。
+
+**2026-08-06 更正**：這裡原本寫「核心已提供 `CandidateRegistry.consumeMainMerge(...)`」——**該方法已完全
+移除**，5-5 把「消耗核准」與「寫入 main」合併成單一不可分割的操作，正是為了消除「核准被消耗但 merge
+沒發生」這個中間態。現在唯一的入口是 `CandidateRegistry.promoteMainMerge({ approvalId, token, action,
+taskId, roomId, mainPath, mergeTimeoutMs? })`：它第三度重驗 candidate/main HEAD、branch、paths、
+dirty/ignored fingerprint、recovery readiness 與 preview digest，再重跑針對 **live main** 的 promotion
+gates（工作樹乾淨、hook 指紋、會被覆蓋的 ignored 檔案），然後依固定順序**寫入 `applying` 意圖紀錄 →
+以 compare-and-set 消耗核准 → `git merge --no-ff --no-edit` → 寫入終局結果**。並行只會有一個贏家
+（`approval_id` UNIQUE 索引在任何 Git 指令之前就擋下輸家），回傳的授權物件內
+`grants: "merge-candidate-into-main"` 與 `notAuthorized`
 （push／publish／deploy／delete-candidate／delete-recovery-ref／cleanup-worktree…）皆為明文。
 帶其他 `action` 消耗一律 `MAIN_MERGE_APPROVAL_ACTION_NOT_GRANTED`。
+
+**目前仍無 MCP／HTTP 出口**：`promoteMainMerge` 只有測試會呼叫，第二輪才接線。
 
 **它本身不修改 canonical main**，目前也刻意沒有任何 MCP 或 HTTP 出口——實際寫入 main 屬 5-5。
 

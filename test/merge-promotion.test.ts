@@ -3,12 +3,15 @@ import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rm, stat, writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
+import { DatabaseSync } from "node:sqlite";
 import {
   CandidateRegistry,
   MERGE_APPROVAL_CONFIRMATION,
@@ -130,6 +133,90 @@ async function status(workspace: string): Promise<string> {
 
 async function exists(path: string): Promise<boolean> {
   return await stat(path).then(() => true).catch(() => false);
+}
+
+/** Whether a whole process group still exists, asked the same way the product asks. */
+function groupAlive(pgid: number): boolean {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+async function waitForGroupExit(pgid: number, attempts = 600): Promise<void> {
+  for (let attempt = 0; attempt < attempts && groupAlive(pgid); attempt += 1) await delay(100);
+}
+
+/**
+ * Content and mode of every file under a directory, `.git` included, as one digest.
+ *
+ * The whole point of crash reconciliation is that it only READS. A product claim that broad cannot
+ * be guarded by checking a few chosen paths — a `merge --abort`, a `reset`, a removed lock file or a
+ * rewritten `.git/config` all land somewhere a spot check was not looking. So the assertion is the
+ * strongest one available: nothing anywhere under the repository moved by a single byte.
+ */
+async function treeDigest(root: string): Promise<string> {
+  const entries: string[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    for (const name of (await readdir(dir)).sort()) {
+      const path = join(dir, name);
+      const info = await lstat(path);
+      const relative = path.slice(root.length);
+      if (info.isDirectory()) {
+        entries.push(`d ${relative}`);
+        await walk(path);
+      } else if (info.isSymbolicLink()) entries.push(`l ${relative} ${await readlink(path)}`);
+      else {
+        entries.push(`f ${relative} ${info.size} ${(info.mode & 0o777).toString(8)} ${
+          createHash("sha256").update(await readFile(path)).digest("hex")}`);
+      }
+    }
+  };
+  await walk(root);
+  return createHash("sha256").update(entries.join("\n")).digest("hex");
+}
+
+/**
+ * Starts a promotion in a SEPARATE OS process and returns once its merge is provably under way.
+ *
+ * A reconcile function called inside the process that crashed is not a restart; every crash test
+ * here kills a real child and rebuilds the answer in a new `CandidateRegistry` from durable state.
+ */
+async function promoteInChild(
+  f: Fixture, approval: MergeApproval, token: string,
+): Promise<ReturnType<typeof spawn>> {
+  const module = fileURLToPath(new URL("../src/core/candidate-registry.ts", import.meta.url));
+  const script = join(f.root, `promote-child-${randomUUID()}.mjs`);
+  await writeFile(script, [
+    "const [data, source, approvalId, token, taskId] = process.argv.slice(2);",
+    `const { CandidateRegistry } = await import(${JSON.stringify(module)});`,
+    "const registry = new CandidateRegistry(data);",
+    "process.stdout.write('ready\\n');",
+    "await registry.promoteMainMerge({",
+    "  approvalId, token, action: 'merge-candidate-into-main', taskId, roomId: 'demo', mainPath: source,",
+    "});",
+  ].join("\n"), { encoding: "utf8", mode: 0o600 });
+  return spawn(process.execPath, [script, f.data, f.source, approval.id, token, f.task.taskId], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+function readable(entry: Awaited<ReturnType<CandidateRegistry["promotions"]>>[number] | undefined): {
+  state: string;
+  mainHeadAfter?: string;
+  mainPath: string;
+  observation: {
+    code: string;
+    recovery?: string;
+    recoveryKind?: string;
+    differences?: string[];
+    mergePgid?: number | null;
+  };
+} {
+  assert.ok(entry && !("unreadable" in entry), "the promotion row could not be read");
+  return entry as never;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -309,13 +396,16 @@ test("main is refused for every condition that makes a working tree unable to re
         await execFileAsync("git", ["update-index", "--skip-worktree", "README.md"], { cwd: f.source });
       },
     },
-    {
-      label: "sparse checkout",
+    // Every spelling git itself accepts as true, because `=== "true"` is not how git reads a boolean
+    // and a gate that only recognises one of these is a gate the next repository walks past.
+    // Measured: `git config --type=bool` returns "true" for all four.
+    ...["true", "1", "yes", "on"].map((value) => ({
+      label: `sparse checkout written as ${value}`,
       code: "MAIN_SPARSE_CHECKOUT_ENABLED",
       apply: async (f: Fixture) => {
-        await execFileAsync("git", ["config", "core.sparseCheckout", "true"], { cwd: f.source });
+        await execFileAsync("git", ["config", "core.sparseCheckout", value], { cwd: f.source });
       },
-    },
+    })),
     {
       label: "a merge already in progress",
       code: "MAIN_MERGE_HEAD_PRESENT",
@@ -329,15 +419,85 @@ test("main is refused for every condition that makes a working tree unable to re
       apply: async (f: Fixture) => await writeFile(join(f.source, ".git", "index.lock"), "", "utf8"),
     },
     {
-      label: "submodules",
+      label: "submodules declared in .gitmodules",
       code: "MAIN_HAS_SUBMODULES",
       apply: async (f: Fixture) => await writeFile(join(f.source, ".gitmodules"), "[submodule \"x\"]\n", "utf8"),
+    },
+    {
+      // The fact, rather than the description of it. `.gitmodules` is tracked content a repository
+      // may simply not have; the gitlink in the index is what makes a submodule a submodule, and a
+      // committed one leaves `git status --porcelain` completely empty.
+      label: "a 160000 gitlink in the index with no .gitmodules at all",
+      code: "MAIN_HAS_SUBMODULES",
+      apply: async (f: Fixture) => {
+        const inner = join(f.source, "vendor", "mod");
+        await mkdir(inner, { recursive: true });
+        await execFileAsync("git", ["init", "-b", "main"], { cwd: inner });
+        await writeFile(join(inner, "a.txt"), "a\n", "utf8");
+        await execFileAsync("git", ["add", "-A"], { cwd: inner });
+        await execFileAsync("git", [...author, "commit", "-m", "inner"], { cwd: inner });
+        await execFileAsync("git", ["update-index", "--add", "--cacheinfo",
+          `160000,${await head(inner)},vendor/mod`], { cwd: f.source });
+        await execFileAsync("git", [...author, "commit", "-m", "gitlink"], { cwd: f.source });
+        assert.equal(await status(f.source), "", "the gitlink was supposed to leave status empty");
+      },
     },
     {
       label: "an LFS or other content filter",
       code: "MAIN_HAS_CONTENT_FILTERS",
       apply: async (f: Fixture) => {
         await execFileAsync("git", ["config", "filter.lfs.clean", "git-lfs clean -- %f"], { cwd: f.source });
+      },
+    },
+    // git consults an attributes file in every directory it descends into, plus the git directory's
+    // own `info/attributes` and `core.attributesFile`. Reading only the root one reported each of
+    // these as a repository with no filters at all.
+    {
+      label: "a filter declared in the root .gitattributes",
+      code: "MAIN_ATTRIBUTES_DECLARE_FILTER",
+      apply: async (f: Fixture) => {
+        await writeFile(join(f.source, ".gitattributes"), "*.bin filter=lfs -text\n", "utf8");
+        await execFileAsync("git", ["add", "-A"], { cwd: f.source });
+        await execFileAsync("git", [...author, "commit", "-m", "attrs"], { cwd: f.source });
+      },
+    },
+    {
+      label: "a filter declared in a NESTED .gitattributes",
+      code: "MAIN_ATTRIBUTES_DECLARE_FILTER",
+      apply: async (f: Fixture) => {
+        await mkdir(join(f.source, "sub", "deep"), { recursive: true });
+        await writeFile(join(f.source, "sub", "deep", ".gitattributes"), "*.bin filter=lfs -text\n", "utf8");
+        await execFileAsync("git", ["add", "-A"], { cwd: f.source });
+        await execFileAsync("git", [...author, "commit", "-m", "attrs"], { cwd: f.source });
+      },
+    },
+    {
+      label: "a filter declared in an IGNORED .gitattributes",
+      code: "MAIN_ATTRIBUTES_DECLARE_FILTER",
+      apply: async (f: Fixture) => {
+        await writeFile(join(f.source, ".gitignore"), "*.cache\nvendorattrs/\n", "utf8");
+        await execFileAsync("git", ["add", "-A"], { cwd: f.source });
+        await execFileAsync("git", [...author, "commit", "-m", "ignore"], { cwd: f.source });
+        await mkdir(join(f.source, "vendorattrs"), { recursive: true });
+        await writeFile(join(f.source, "vendorattrs", ".gitattributes"), "*.bin filter=lfs -text\n", "utf8");
+        assert.equal(await status(f.source), "", "the ignored attributes file was supposed to be invisible");
+      },
+    },
+    {
+      label: "a filter declared in .git/info/attributes",
+      code: "MAIN_ATTRIBUTES_DECLARE_FILTER",
+      apply: async (f: Fixture) => {
+        await mkdir(join(f.source, ".git", "info"), { recursive: true });
+        await writeFile(join(f.source, ".git", "info", "attributes"), "*.bin filter=lfs -text\n", "utf8");
+      },
+    },
+    {
+      label: "a filter declared in a core.attributesFile outside the repository",
+      code: "MAIN_ATTRIBUTES_DECLARE_FILTER",
+      apply: async (f: Fixture) => {
+        const path = join(f.root, "external-attributes");
+        await writeFile(path, "*.bin filter=lfs -text\n", "utf8");
+        await execFileAsync("git", ["config", "core.attributesFile", path], { cwd: f.source });
       },
     },
   ]) {
@@ -504,16 +664,21 @@ test("a candidate that has been merged is terminal and cannot be promoted a seco
   // exists for: the owner reverts the merge, and a second promotion silently re-applies exactly the
   // change they deliberately took back.
   await execFileAsync("git", [...author, "revert", "--no-edit", "-m", "1", "HEAD"], { cwd: f.source });
-  for (const attempt of [
+  // One at a time, deliberately. Building both promises up front leaves the second one rejected with
+  // no handler attached for a turn of the loop, which node reports as an unhandled rejection — an
+  // intermittent failure in a test whose subject has nothing to do with scheduling.
+  await assert.rejects(
     f.registry.previewMainMerge({ taskId: f.task.taskId, roomId: "demo", mainPath: f.source }),
+    /MAIN_MERGE_CANDIDATE_ALREADY_MERGED/u,
+  );
+  await assert.rejects(
     f.registry.requestMainMerge({
       actor: "codex1", clientRequestId: key(), taskId: f.task.taskId, roomId: "demo",
       mainPath: f.source, completionId: approval.binding.completionId,
       previewDigest: approval.binding.previewDigest,
     }),
-  ]) {
-    await assert.rejects(attempt, /MAIN_MERGE_CANDIDATE_ALREADY_MERGED/u);
-  }
+    /MAIN_MERGE_CANDIDATE_ALREADY_MERGED/u,
+  );
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -532,21 +697,7 @@ test("a promotion killed during a hook is reported by a new process as needing a
   const token = await grant(f, approval);
   const beforeHead = await head(f.source);
 
-  const module = fileURLToPath(new URL("../src/core/candidate-registry.ts", import.meta.url));
-  const script = join(f.root, "promote-child.mjs");
-  await writeFile(script, [
-    "const [data, source, approvalId, token, taskId] = process.argv.slice(2);",
-    `const { CandidateRegistry } = await import(${JSON.stringify(module)});`,
-    "const registry = new CandidateRegistry(data);",
-    "process.stdout.write('ready\\n');",
-    "await registry.promoteMainMerge({",
-    "  approvalId, token, action: 'merge-candidate-into-main', taskId, roomId: 'demo', mainPath: source,",
-    "});",
-  ].join("\n"), { encoding: "utf8", mode: 0o600 });
-
-  const child = spawn(process.execPath, [script, f.data, f.source, approval.id, token, f.task.taskId], {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const child = await promoteInChild(f, approval, token);
   t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
   // Wait for the merge to actually be in progress, observed rather than timed.
   for (let attempt = 0; attempt < 300 && !await exists(started); attempt += 1) await delay(100);
@@ -557,6 +708,22 @@ test("a promotion killed during a hook is reported by a new process as needing a
   // A NEW process, opening the same durable state, with no memory of the attempt.
   const reopened = new CandidateRegistry(f.data);
   t.after(() => reopened.close());
+
+  // Killing the orchestrator does NOT kill the merge: the subprocess is detached, so `git merge` and
+  // the hook it is running are still alive right now. While that is true there is no answer to give
+  // — main is still being written — and the record must say the write is in flight rather than
+  // freeze a verdict over a moving repository.
+  const inFlight = readable((await reopened.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  assert.equal(inFlight.state, "applying");
+  const pgid = inFlight.observation.mergePgid;
+  assert.ok(typeof pgid === "number" && pgid > 1, "the merge process group was never recorded");
+  assert.equal(groupAlive(pgid), true, "the orphaned merge was expected to still be running");
+
+  // Now the machine really is gone: the whole orphaned group dies. THIS is the state the crash
+  // report is about, and it is reached without this product running one writing Git command.
+  process.kill(-pgid, "SIGKILL");
+  await waitForGroupExit(pgid);
+
   const promotions = await reopened.promotions({ roomId: "demo", mainPath: f.source });
   assert.equal(promotions.length, 1);
   const promotion = promotions[0];
@@ -574,6 +741,7 @@ test("a promotion killed during a hook is reported by a new process as needing a
   // Built only from what was recorded before the attempt, and against the canonical path the
   // registry bound (macOS reports /var and /private/var for the same directory).
   assert.equal(promotion.observation.recovery, `git -C ${promotion.mainPath} reset --hard ${beforeHead}`);
+  assert.equal(promotion.observation.recoveryKind, "reset-to-pre-promotion");
   assert.equal(await realpath(f.source), promotion.mainPath);
   // Nothing was retried and nothing was rolled back: HEAD is exactly where it was, and the half
   // applied state is still on disk for the owner to look at rather than silently discarded.
@@ -599,3 +767,440 @@ test("a promotion killed during a hook is reported by a new process as needing a
     );
   });
 });
+
+/*
+ * The merge subprocess is spawned `detached`, so `kill -9` on the orchestrator does not stop it. It
+ * keeps running and finishes writing canonical main. Measured: HEAD moved to a real authorized merge
+ * commit AFTER the crash, main's `git status` came back completely clean, and the durable record
+ * still said "undetermined" with a `reset --hard <pre-promotion head>` on offer — a command that,
+ * followed, would have silently thrown away a merge that succeeded.
+ */
+test("a merge orphaned by a crash that finishes is later observed as applied, not frozen as unknown", async (t) => {
+  const f = await fixture(t);
+  const started = join(f.root, "hook-entered");
+  // Long enough that the kill lands inside it, short enough that the merge then completes on its own.
+  await hook(f, "pre-merge-commit", `#!/bin/sh\ntouch ${JSON.stringify(started)}\nsleep 6\nexit 0\n`);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const beforeHead = await head(f.source);
+
+  const child = await promoteInChild(f, approval, token);
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  for (let attempt = 0; attempt < 300 && !await exists(started); attempt += 1) await delay(100);
+  assert.equal(await exists(started), true, "the hook never ran, so nothing was interrupted");
+  child.kill("SIGKILL");
+  await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+
+  const reopened = new CandidateRegistry(f.data);
+  t.after(() => reopened.close());
+  const inFlight = readable((await reopened.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  // While the orphan is still writing there is nothing to conclude, and no conclusion is written.
+  assert.equal(inFlight.state, "applying");
+  const pgid = inFlight.observation.mergePgid;
+  assert.ok(typeof pgid === "number" && pgid > 1, "the merge process group was never recorded");
+
+  // Deliberately NOT killed: the orphan is allowed to do exactly what it does in the wild.
+  await waitForGroupExit(pgid);
+  const mergedHead = await head(f.source);
+  assert.notEqual(mergedHead, beforeHead, "the orphaned merge did not finish");
+  // Measured: main's porcelain status comes back completely empty, which is exactly why a record
+  // frozen on "undetermined" was so dangerous — nothing on the surface contradicted it.
+  assert.equal(await status(f.source), "");
+
+  const observed = readable((await reopened.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  // Killed after committing but before git cleared MERGE_HEAD, so this is not finished — but it is
+  // named, and it is not "undetermined": the record says the authorized merge is in main.
+  assert.equal(observed.observation.code, "AUTHORIZED_MERGE_COMMIT_OBSERVED_WITH_MERGE_STATE_LEFT_BEHIND");
+  assert.equal(observed.mainHeadAfter, mergedHead, "the record still points at the pre-operation head");
+  assert.equal(observed.observation.recoveryKind, "inspect-observed-merge");
+  assert.ok(!(observed.observation.recovery ?? "").includes("reset --hard"),
+    `a command that would discard a successful merge was offered: ${observed.observation.recovery}`);
+  assert.ok((observed.observation.differences ?? []).includes("leftover:MAIN_MERGE_HEAD_PRESENT"));
+
+  // The owner clears what the record named. The product does none of it.
+  for (const name of ["MERGE_HEAD", "AUTO_MERGE", "MERGE_MSG"]) {
+    await rm(join(f.source, ".git", name), { force: true });
+  }
+  const settled = readable((await reopened.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  assert.equal(settled.state, "applied");
+  assert.equal(settled.observation.code, "AUTHORIZED_MERGE_COMMIT_OBSERVED_IN_MAIN");
+  assert.equal(settled.mainHeadAfter, mergedHead);
+  // The candidate reaches its terminal state even though the process that started it never returned.
+  assert.equal(reopened.get(f.task.taskId)?.status, "merged");
+});
+
+/*
+ * Bar item 2, the read-only half, guarded at full strength.
+ *
+ * The claim "crash reconciliation never writes to main" was in the commit message, in ADR-035, in
+ * F26 and in VERIFICATION, and a mutation that inserted `git merge --abort` into the reconciliation
+ * path left the whole suite green. Nothing was watching. This watches the only way that claim can be
+ * watched: every byte under the repository, `.git` included.
+ */
+test("crash reconciliation does not change one byte of the repository, .git included", async (t) => {
+  for (const scenario of [
+    {
+      // HEAD unmoved, no MERGE_HEAD, index and working tree fully rewritten. `git merge --abort`
+      // cannot undo this one, so it is the case a careless "tidy up" would get away with.
+      label: "after a kill during a hook, with no MERGE_HEAD to abort",
+      hook: "sleep 600",
+      killOrphan: true,
+    },
+    {
+      // The orphan finished the merge and was killed before git cleared MERGE_HEAD. Here
+      // `git merge --abort` DOES work — and would throw away a merge that succeeded. This is the
+      // scenario in which a reconciliation that writes is not untidy but destructive.
+      label: "after an orphaned merge finished and left MERGE_HEAD behind",
+      hook: "sleep 6",
+      killOrphan: false,
+    },
+  ]) {
+    await t.test(scenario.label, async (child) => {
+      const f = await fixture(child);
+      const started = join(f.root, "hook-entered");
+      await hook(f, "pre-merge-commit", `#!/bin/sh\ntouch ${JSON.stringify(started)}\n${scenario.hook}\n`);
+      const approval = await raise(f);
+      const token = await grant(f, approval);
+
+      const worker = await promoteInChild(f, approval, token);
+      child.after(() => { if (worker.exitCode === null) worker.kill("SIGKILL"); });
+      for (let attempt = 0; attempt < 300 && !await exists(started); attempt += 1) await delay(100);
+      assert.equal(await exists(started), true, "the hook never ran, so nothing was interrupted");
+      worker.kill("SIGKILL");
+      await new Promise<void>((resolve) => worker.once("exit", () => resolve()));
+
+      const reopened = new CandidateRegistry(f.data);
+      child.after(() => reopened.close());
+      const inFlight = readable((await reopened.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+      const pgid = inFlight.observation.mergePgid;
+      assert.ok(typeof pgid === "number" && pgid > 1);
+      if (scenario.killOrphan) process.kill(-pgid, "SIGKILL");
+      await waitForGroupExit(pgid);
+
+      // The precondition that makes this mean something: the crash really did leave main altered, so
+      // a reconciliation that "tidied up" would have plenty to do and the digest would move.
+      const before = await treeDigest(f.source);
+      const first = readable((await reopened.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+      assert.equal(first.state, "needs-manual-review");
+      assert.ok((first.observation.differences ?? []).length > 0, "the crash left main unchanged");
+      // Every read surface that reaches the reconciliation path, not just the one that reports it.
+      await reopened.promotions({ roomId: "demo", mainPath: f.source });
+      await reopened.status({ roomId: "demo", mainPath: f.source });
+      await assert.rejects(
+        reopened.requestMainMerge({
+          actor: "codex1", clientRequestId: key(), taskId: f.task.taskId, roomId: "demo",
+          mainPath: f.source, completionId: approval.binding.completionId,
+          previewDigest: approval.binding.previewDigest,
+        }),
+        /MAIN_MERGE_PROMOTION_UNRESOLVED|MAIN_MERGE_PREVIEW_DIGEST_STALE/u,
+      );
+      assert.equal(await treeDigest(f.source), before, "reconciliation wrote to the repository");
+    });
+  }
+});
+
+/*
+ * Bar item 4's other half, and the way out of `needs-manual-review`.
+ *
+ * A hook that merely runs too long is not a crash: nothing is killed, the process tree is cleaned up
+ * correctly, and yet main is left half applied and the promotion ends unresolved. Before this, that
+ * task could never be promoted again by any path — the gate read a conclusion somebody wrote once.
+ * The owner restoring their own repository has to be enough, and the product must reach that answer
+ * by looking rather than by being told.
+ */
+test("an owner who restores main themselves clears a needs-manual-review promotion", async (t) => {
+  const f = await fixture(t);
+  await hook(f, "pre-merge-commit", "#!/bin/sh\nsleep 600\n");
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const beforeHead = await head(f.source);
+
+  const timedOut = await f.registry.promoteMainMerge({
+    approvalId: approval.id, token, action: MERGE_APPROVAL_GRANT,
+    taskId: f.task.taskId, roomId: "demo", mainPath: f.source, mergeTimeoutMs: 3_000,
+  });
+  assert.equal(timedOut.promotion.state, "needs-manual-review");
+  assert.equal(timedOut.promotion.observation.attempt?.timedOut, true);
+  assert.ok((timedOut.promotion.observation.differences ?? []).length > 0);
+  // Until the owner acts, the owner cannot even be asked again.
+  await assert.rejects(
+    f.registry.requestMainMerge({
+      actor: "codex1", clientRequestId: key(), taskId: f.task.taskId, roomId: "demo",
+      mainPath: f.source, completionId: approval.binding.completionId,
+      previewDigest: approval.binding.previewDigest,
+    }),
+    /MAIN_MERGE_PROMOTION_UNRESOLVED/u,
+  );
+
+  // The owner does what the record told them to, in their own terminal. The product does none of it.
+  await execFileAsync("git", ["reset", "--hard", beforeHead], { cwd: f.source });
+  await rm(join(f.source, ".git", "AUTO_MERGE"), { force: true });
+  await rm(join(f.source, ".git", "MERGE_MSG"), { force: true });
+  await rm(join(f.source, ".git", "hooks", "pre-merge-commit"), { force: true });
+  assert.equal(await status(f.source), "");
+
+  // Reopened in a new registry, so the answer comes from the repository and durable state alone.
+  const reopened = new CandidateRegistry(f.data);
+  t.after(() => reopened.close());
+  const resolved = readable((await reopened.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  assert.equal(resolved.state, "rolled-back");
+  assert.equal(resolved.observation.code, "MAIN_OBSERVED_IDENTICAL_TO_PRE_PROMOTION_FINGERPRINTS");
+  // Removing the hook that hung is the ONLY way a retry can ever succeed, so it must not be the
+  // thing that seals the previous attempt as unresolved forever. It is reported, not disqualifying.
+  assert.deepEqual(resolved.observation.differences, ["hookEnvironment"]);
+  // And the owner can be asked again — the single previous answer no longer holds the task shut.
+  const second = await reopened.previewMainMerge({
+    taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+  });
+  assert.equal(second.approvable, true, `not approvable: ${second.blockers.join(",")}`);
+  const request = await reopened.requestMainMerge({
+    actor: "codex1", clientRequestId: key(), taskId: f.task.taskId, roomId: "demo",
+    mainPath: f.source, completionId: second.completionId, previewDigest: second.previewDigest,
+  });
+  const retried = await reopened.promoteMainMerge({
+    approvalId: request.id,
+    token: (await reopened.grantMainMerge({
+      approvalId: request.id, roomId: "demo", mainPath: f.source,
+      previewDigest: request.binding.previewDigest,
+      confirmation: MERGE_APPROVAL_CONFIRMATION, decidedBy: "local-web",
+    })).approvalToken,
+    action: MERGE_APPROVAL_GRANT, taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+  });
+  assert.equal(retried.mainMutated, true);
+});
+
+/*
+ * The same gate, on the CONSUME side.
+ *
+ * A mutation is why this exists: deleting `#assertNoUnresolvedPromotion` from the authorization path
+ * left the whole suite green, which means the only thing standing between an unknown main and a
+ * second write to it had no test at all. It is the first refusal an unresolved task gets, and it is
+ * the one that names the actual problem rather than a consequence of it.
+ */
+test("an approval cannot be spent while the task's last promotion is unresolved", async (t) => {
+  const f = await fixture(t);
+  const started = join(f.root, "hook-entered");
+  await hook(f, "pre-merge-commit", `#!/bin/sh\ntouch ${JSON.stringify(started)}\nsleep 600\n`);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+
+  const child = await promoteInChild(f, approval, token);
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  for (let attempt = 0; attempt < 300 && !await exists(started); attempt += 1) await delay(100);
+  assert.equal(await exists(started), true, "the hook never ran, so nothing was interrupted");
+  child.kill("SIGKILL");
+  await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+
+  const reopened = new CandidateRegistry(f.data);
+  t.after(() => reopened.close());
+  const inFlight = readable((await reopened.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  const pgid = inFlight.observation.mergePgid;
+  assert.ok(typeof pgid === "number" && pgid > 1);
+  process.kill(-pgid, "SIGKILL");
+  await waitForGroupExit(pgid);
+  assert.equal(
+    readable((await reopened.promotions({ roomId: "demo", mainPath: f.source }))[0]).state,
+    "needs-manual-review",
+  );
+
+  // The same token, against a main nobody can describe. It is refused by the unresolved-promotion
+  // gate specifically — not by the single-use check that happens to also be closed here — because
+  // "main is in an unknown state" is what the owner has to act on.
+  await assert.rejects(
+    reopened.promoteMainMerge({
+      approvalId: approval.id, token, action: MERGE_APPROVAL_GRANT,
+      taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+    }),
+    /^Error: MAIN_MERGE_PROMOTION_UNRESOLVED$/u,
+  );
+  // And nothing about main moved because of the attempt.
+  assert.equal(
+    readable((await reopened.promotions({ roomId: "demo", mainPath: f.source }))[0]).state,
+    "needs-manual-review",
+  );
+});
+
+// ---------------------------------------------------------------------------------------------
+// The upgrade: an owner decision recorded by the PREVIOUS release
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Turns a live v5 database into a genuine v4 one, without touching anything the upgrade preserves.
+ *
+ * Two facts make this a faithful reproduction rather than an approximation, and both were measured
+ * against the previous commit's code rather than assumed: the v4→v5 upgrade is exactly one
+ * `CREATE TABLE`, and a v4 `preview_json` is byte-for-byte a v5 one minus the trailing `promotion`
+ * key (same keys, same order, same structure). So removing that key and the promotion table, and
+ * rewinding `user_version`, produces the same bytes the previous release wrote — with correct
+ * hashes, because a real v4 row is not tampered with and must not read as if it were.
+ */
+function rewindToV4(path: string, taskId: string): { approvalHash: string; approvalState: string } {
+  const db = new DatabaseSync(path);
+  const candidate = db.prepare("SELECT * FROM candidates WHERE task_id=?")
+    .get(taskId) as unknown as Record<string, unknown>;
+  const completion = JSON.parse(String(candidate.completion_json)) as {
+    preview: Record<string, unknown>; previewDigest: string;
+  };
+  delete completion.preview.promotion;
+  completion.previewDigest = createHash("sha256")
+    .update(JSON.stringify(completion.preview), "utf8").digest("hex");
+  const completionJson = JSON.stringify(completion);
+  const candidateHash = createHash("sha256").update(JSON.stringify([
+    candidate.task_id, candidate.candidate_id, candidate.room_id, candidate.main_path,
+    candidate.main_branch, candidate.base_main_head, candidate.candidate_path,
+    candidate.candidate_branch, candidate.task_text, candidate.acceptance_criteria,
+    candidate.status, candidate.baseline_json, completionJson, candidate.created_at_ms,
+    candidate.updated_at_ms, candidate.completed_at_ms,
+  ]), "utf8").digest("hex");
+  assert.equal(Number(db.prepare("UPDATE candidates SET completion_json=?,row_hash=? WHERE task_id=?")
+    .run(completionJson, candidateHash, taskId).changes), 1);
+
+  const approval = db.prepare("SELECT * FROM candidate_merge_approvals WHERE task_id=?")
+    .get(taskId) as unknown as Record<string, unknown>;
+  const preview = JSON.parse(String(approval.preview_json)) as Record<string, unknown>;
+  delete preview.promotion;
+  const previewJson = JSON.stringify(preview);
+  const previewDigest = createHash("sha256").update(previewJson, "utf8").digest("hex");
+  const approvalHash = createHash("sha256").update(JSON.stringify([
+    approval.id, approval.client_request_id, approval.input_digest, approval.task_id,
+    approval.completion_id, approval.room_id, approval.main_path, approval.main_branch,
+    approval.candidate_path, approval.base_main_head, approval.candidate_head, approval.main_head,
+    approval.main_fingerprint, approval.main_ignored_fingerprint, approval.recovery_ref,
+    previewDigest, previewJson, approval.grant_action, approval.state, approval.token_hash,
+    approval.actor, approval.decided_by, approval.refusal_json, approval.created_at_ms,
+    approval.updated_at_ms, approval.expires_at_ms,
+  ]), "utf8").digest("hex");
+  assert.equal(Number(db.prepare(
+    "UPDATE candidate_merge_approvals SET preview_json=?,preview_digest=?,row_hash=? WHERE id=?",
+  ).run(previewJson, previewDigest, approvalHash, String(approval.id)).changes), 1);
+
+  db.exec("DROP TABLE candidate_merge_promotions; PRAGMA user_version=4;");
+  db.close();
+  return { approvalHash, approvalState: String(approval.state) };
+}
+
+function storedApproval(path: string, id: string): { state: string; row_hash: string; refusal_json: string | null } {
+  const db = new DatabaseSync(path);
+  const row = db.prepare("SELECT state,row_hash,refusal_json FROM candidate_merge_approvals WHERE id=?")
+    .get(id) as unknown as { state: string; row_hash: string; refusal_json: string | null };
+  db.close();
+  return row;
+}
+
+function schemaVersion(path: string): number {
+  const db = new DatabaseSync(path, { readOnly: true });
+  const version = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
+  db.close();
+  return version;
+}
+
+/**
+ * The blast radius of a perfectly legitimate approval written by the previous release.
+ *
+ * Measured on the shipped code: an owner-GRANTED v4 approval made every single read and write
+ * surface throw `MAIN_MERGE_APPROVAL_ROW_TAMPERED` — list, inspect, reject, promote — while its
+ * `row_hash` was, and still is, exactly right. Nothing was tampered with. Because the row could
+ * never be read it could never be rejected and never expire either, so it held the task's one open
+ * question slot permanently: `requestMainMerge` answered `ALREADY_PENDING` forever, at 24 hours as
+ * readily as at one second. The task could never be promoted again by any path, and the product
+ * offered none to clear it. This is PITFALLS #85 exactly: "this snapshot is older than the feature"
+ * folded into "this row was tampered with", with the destructive answer as the default.
+ */
+test("an owner's approval from the previous release upgrades to a terminal state, not a wedged task", async (t) => {
+  const f = await fixture(t);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  f.registry.close();
+
+  const before = rewindToV4(f.path, f.task.taskId);
+  assert.equal(before.approvalState, "approved", "the owner really had granted it");
+  assert.equal(schemaVersion(f.path), 4);
+
+  // Opening runs the real v4→v5 upgrade. It reads no approval row and rewrites none.
+  const upgraded = new CandidateRegistry(f.data);
+  t.after(() => upgraded.close());
+  assert.equal(schemaVersion(f.path), 5);
+  assert.equal(storedApproval(f.path, approval.id).row_hash, before.approvalHash,
+    "the upgrade rewrote an existing approval row");
+
+  // Every surface answers. None of them throws an integrity error about a row whose integrity is
+  // perfect, and the answer names the real reason.
+  assert.deepEqual((await upgraded.status({ roomId: "demo", mainPath: f.source })).map((row) => row.status),
+    ["completed"]);
+  const listed = await upgraded.mergeApprovals({ roomId: "demo", mainPath: f.source });
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0]?.state, "invalidated");
+  assert.equal(listed[0]?.refusal?.code, "PREVIEW_PREDATES_PROMOTION_GATES");
+  const inspected = await upgraded.inspectMergeApproval({
+    approvalId: approval.id, roomId: "demo", mainPath: f.source,
+  });
+  assert.equal(inspected.approval.state, "invalidated");
+  // Terminal, durably — so it is not holding anything open in the next process either.
+  assert.equal(storedApproval(f.path, approval.id).state, "invalidated");
+
+  // The token the owner was handed under the previous release cannot write main, and says why.
+  await assert.rejects(
+    upgraded.promoteMainMerge({
+      approvalId: approval.id, token, action: MERGE_APPROVAL_GRANT,
+      taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+    }),
+    /MAIN_MERGE_APPROVAL_NOT_APPROVED|PREVIEW_PREDATES_PROMOTION_GATES/u,
+  );
+
+  // And the whole point: the slot is free, so the owner can be asked again against a fresh snapshot
+  // that HAS been checked against the promotion gates, and that promotion works.
+  const second = await raise({ ...f, registry: upgraded });
+  const result = await promote({ ...f, registry: upgraded }, second,
+    await grant({ ...f, registry: upgraded }, second));
+  assert.equal(result.mainMutated, true);
+});
+
+test("a previous-release approval can still be rejected, and rejecting it frees the task", async (t) => {
+  const f = await fixture(t);
+  const approval = await raise(f);
+  f.registry.close();
+  rewindToV4(f.path, f.task.taskId);
+
+  const upgraded = new CandidateRegistry(f.data);
+  t.after(() => upgraded.close());
+  // Reject is the owner's own way out, and it is reached without any other surface being read first.
+  const rejected = await upgraded.rejectMainMerge({
+    approvalId: approval.id, roomId: "demo", mainPath: f.source,
+    decidedBy: "local-web", reason: "raised before the promotion gates existed",
+  });
+  assert.equal(rejected.state, "rejected");
+  const second = await raise({ ...f, registry: upgraded });
+  assert.notEqual(second.id, approval.id);
+});
+
+test("a previous-release approval cannot be granted, and says so by name", async (t) => {
+  const f = await fixture(t);
+  const approval = await raise(f);
+  f.registry.close();
+  rewindToV4(f.path, f.task.taskId);
+
+  const upgraded = new CandidateRegistry(f.data);
+  t.after(() => upgraded.close());
+  await assert.rejects(
+    upgraded.grantMainMerge({
+      approvalId: approval.id, roomId: "demo", mainPath: f.source,
+      previewDigest: storedApprovalDigest(f.path, approval.id),
+      confirmation: MERGE_APPROVAL_CONFIRMATION, decidedBy: "local-web",
+    }),
+    /^Error: PREVIEW_PREDATES_PROMOTION_GATES$/u,
+  );
+  assert.equal(storedApproval(f.path, approval.id).state, "invalidated");
+  // The refusal names the reason rather than reporting drift in values that never moved.
+  assert.equal(
+    JSON.parse(storedApproval(f.path, approval.id).refusal_json ?? "{}").code,
+    "PREVIEW_PREDATES_PROMOTION_GATES",
+  );
+});
+
+function storedApprovalDigest(path: string, id: string): string {
+  const db = new DatabaseSync(path, { readOnly: true });
+  const row = db.prepare("SELECT preview_digest FROM candidate_merge_approvals WHERE id=?")
+    .get(id) as unknown as { preview_digest: string };
+  db.close();
+  return row.preview_digest;
+}
