@@ -632,8 +632,18 @@ candidate 動了，approval 依然在每一條讀取路徑上顯示成 `approved
   submodule 與 LFS／clean-smudge filter 一律**偵測到即拒絕**，不做部分支援。
 - **Promotion 執行 repo hook，preview 永遠不執行。** 這是 5-5 引入的新信任邊界（[[THREAT_MODEL]] F26）：
   所有唯讀 Git 指令固定 `core.hooksPath=/dev/null`，只有 `promotionGitEnvironment()` 解除它。
-  因此本次會執行的 hook 檔名與內容雜湊、`core.hooksPath`、`merge.*.driver` 與 `filter.*` 全部納入
+  因此本次會執行的 hook 檔名與內容雜湊、`core.hooksPath`、`merge.*.driver` 與 `filter.*` 納入
   `previewDigest`（＝納入 approval 綁定）並在核准畫面逐項揭露，消耗前再比對一次。
+  **2026-08-06 更正（第三輪審查）**：上一句原本寫「全部納入」，而那是**四個鍵的清單**，不是判準——
+  實測 `commit.gpgsign`＋`gpg.program` 在核准後寫入即以 Owner 身分被執行，三道防線都沒看到。
+  現在的判準是「**不要列舉 git，直接問它**」：main 在 promotion 環境下的**整份 effective config**
+  （`git config --list -z` 原始輸出）雜湊進 `hookEnvironment().configDigest` → `previewDigest` → 綁定 →
+  消耗前重驗，因此**核准後新增的任何設定鍵**（包含這份程式碼從未聽過的）都會變成
+  `MAIN_MERGE_APPROVAL_BINDING_CHANGED`。已知會 spawn 程式的行為另以 `GIT_CONFIG_KEY_n` 釘死
+  （`core.fsmonitor`／`commit.gpgsign`／`tag.gpgsign`／`merge.verifySignatures` 全部 false），
+  **代價是 promotion 產生的 merge commit 不簽章、也不驗證被合併方的簽章**——明寫的取捨。
+  揭露側的 `programs`（可指名程式的設定鍵，**只列鍵名不列值**，因為 `credential.helper` 之類的值可能夾帶秘密）
+  是一份**明確不宣稱完整**的清單，只決定哪些鍵會被逐項顯示；完整性由 digest 那一半承擔。
   merge 子程序有固定逾時、輸出上限與整個 PGID 的終止。
 - **live 的 `.git` 狀態刻意不納入 digest。** 第一版把它放進去，實測立刻顯示：別的程序短暫持有一秒的
   `index.lock` 會讓綁定「改變」，永久燒掉 Owner 的核准——PITFALLS #85 的同形違反。
@@ -643,6 +653,9 @@ candidate 動了，approval 依然在每一條讀取路徑上顯示成 `approved
 
 **殘餘風險。** hook 一旦通過綁定就是以 Owner 權限執行的任意程式碼，本產品不沙箱它；
 `.git/config` 可被有終端的 Native agent 直接寫入，保護來自「綁定＋揭露＋消耗前重驗」而非阻止寫入。
+把整份 config 納入綁定的**代價**是：核准存活期間任何一次對 main 的 `git config` 寫入（包含良性的）
+都會讓該次核准以 `MAIN_MERGE_APPROVAL_BINDING_CHANGED` 終局失效，Owner 必須重新 preview 與核准。
+這是刻意選的方向（fail closed），不是疏漏。
 promotion 期間若外部程序推進 main，目前是**事後偵測**（觀察到的 HEAD 不是被授權的 merge commit →
 `needs-manual-review` 並具名），不是期間中止；**2026-08-06 更正**：這一項已於第二輪補上測試
 （見下方「第二輪對抗式審查後的修正」），但「事後偵測是否足以取代期間偵測」仍待 Owner 裁決。
