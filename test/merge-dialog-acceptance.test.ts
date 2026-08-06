@@ -36,6 +36,16 @@ const ACCEPTED_FUNCTIONS = [
   "mergeApprovalBlockers",
   "mergeRiskLevel",
   "renderMergeApproval",
+  // What the promotion would EXECUTE and OVERWRITE is rendered inside the scroll-gated region, so
+  // these two are part of the gate rather than decoration beside it: the owner cannot reach the
+  // bottom without passing them. Accepted in a browser together with the gate itself.
+  "renderMergePromotionDisclosure",
+  "renderMergeDiff",
+  // Carries the live overwrite scan onto the screen, and decides whether a poll re-renders when an
+  // ignored file appears mid-review. Both were exercised in the same browser pass.
+  "loadMergeApproval",
+  "mergeApprovalSignature",
+  "repollMergeApproval",
   "openMergeApprovalDialog",
   "closeMergeApprovalDialog",
   "rejectMergeIntoMain",

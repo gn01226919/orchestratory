@@ -70,6 +70,8 @@ const state = {
   mergeApprovals: [],
   mergeApproval: null,
   mergeApprovalBinding: { valid: true, changed: [] },
+  /* null＝這個對話框還沒拿到覆蓋掃描的結果，而不是「掃過了，沒有東西會被覆蓋」。 */
+  mergeApprovalOverwrites: null,
   mergeApprovalBlockers: [],
   mergeApprovalScrolled: false,
   mergeApprovalDecided: false,
@@ -2823,10 +2825,30 @@ async function refreshMergeApprovals() {
   }
 }
 
-function mergeApprovalBlockers(approval, binding) {
+function mergeApprovalBlockers(approval, binding, overwrites) {
   const blockers = [];
   if (!approval) return blockers;
   const preview = approval.preview || {};
+  // 促進閘門的三件事，在畫面上各自是一個阻擋條件而不是一句提醒。
+  // 「沒讀到」與「讀到而為空」不折疊：前者是阻擋，後者不是（PITFALLS #85）。
+  const hooks = preview.promotion?.hooks;
+  if (!hooks) {
+    blockers.push("這份快照產生於 hook 與設定綁定存在之前，畫面無法列出這次會執行什麼；不可核准。 · This snapshot predates the promotion gates, so what would run cannot be shown.");
+  } else if (hooks.unreadable === true) {
+    blockers.push("main 的 hook 目錄讀不到，因此不知道這次合併會執行哪些程式。 · main's hook directory could not be read, so what this merge would execute is unknown.");
+  }
+  if (!overwrites) {
+    blockers.push("沒有拿到「會覆蓋哪些檔案」的掃描結果，看不到就不可核准。 · The overwrite scan result was not received.");
+  } else if (overwrites.checked !== true) {
+    blockers.push(`覆蓋掃描沒有執行（${overwrites.unavailable || "OVERWRITE_SCAN_UNAVAILABLE"}）；這不等於沒有檔案會被覆蓋。 · The overwrite scan did not run; that is not the same as nothing being overwritten.`);
+  } else {
+    for (const path of overwrites.ignored || []) {
+      blockers.push(`合併會靜默覆蓋 main 上這個 ignored 檔案 · This merge would silently overwrite an ignored file in main：${path}`);
+    }
+    for (const path of overwrites.untracked || []) {
+      blockers.push(`合併會覆蓋 main 上這個未追蹤檔案 · This merge would overwrite an untracked file in main：${path}`);
+    }
+  }
   if (approval.state !== "requested") {
     blockers.push(`這筆核准已是終局狀態「${approval.state}」，不能再核准。 · This approval is terminal (${approval.state}).`);
   } else if (approval.expired) {
@@ -2937,10 +2959,88 @@ function mergeFileDelta(file) {
   return `±${size}`;
 }
 
+/*
+ * 這次促進會執行什麼、會覆蓋什麼——逐項列出，不是一句通用警告。
+ *
+ * 這些事實一直都在 payload 裡（hook 清單與設定鍵在 `preview.promotion.hooks`，是綁在核准上的；
+ * 覆蓋清單是 live main 的觀察），但畫面上一個字都沒有：Owner 在打 MERGE INTO MAIN 的那一頁
+ * 看不到會以自己的身分執行哪些程式、雜湊是多少，也看不到哪些 ignored 檔案會被靜默覆蓋。
+ * 只顯示數量或一句警告不算揭露（PITFALLS #86）。
+ *
+ * 它渲染在 scroll-gate 量的那個區域「之內」，而且在檔案清單之前，所以 Owner 必須捲過它
+ * 才可能到底、才可能解開確認輸入。放在區域外面就會變成一段可以完全不看的文字。
+ */
+function renderMergePromotionDisclosure(region, approval, overwrites) {
+  const section = document.createElement("section");
+  section.className = "merge-promotion-disclosure";
+  const block = (title, lines) => {
+    const heading = document.createElement("h4");
+    heading.textContent = title;
+    section.append(heading);
+    for (const line of lines) {
+      const row = document.createElement("p");
+      if (Array.isArray(line)) {
+        const name = document.createElement("b");
+        name.textContent = line[0];
+        const value = document.createElement("code");
+        value.textContent = line[1];
+        row.append(name, value);
+      } else row.textContent = line;
+      section.append(row);
+    }
+  };
+  const hooks = approval?.preview?.promotion?.hooks;
+  if (!hooks) {
+    block("這次合併會執行的程式 · What this merge would execute", [
+      "這份快照產生於促進閘門存在之前，沒有記錄任何 hook 或設定；畫面無法列出會執行什麼。 · This snapshot predates the promotion gates and records nothing about what would run.",
+    ]);
+  } else {
+    const lines = [["hook 目錄 · hooksPath", hooks.hooksPath || "（未設定，git 使用預設 .git/hooks）"]];
+    if (hooks.unreadable === true) {
+      lines.push("hook 目錄讀不到；這不等於沒有 hook。 · The hook directory could not be read; that is not the same as there being none.");
+    } else if ((hooks.hooks || []).length === 0) {
+      lines.push("已讀取 hook 目錄，裡面沒有可執行的 hook。 · The hook directory was read and holds no executable hook.");
+    }
+    for (const entry of hooks.hooks || []) lines.push([`${entry.name} · SHA-256`, String(entry.sha256)]);
+    for (const driver of hooks.drivers || []) lines.push(["merge driver", String(driver)]);
+    for (const filter of hooks.filters || []) lines.push(["clean/smudge filter", String(filter)]);
+    block("這次合併會以你的身分、無沙箱執行的 hook · Hooks this merge runs as you, unsandboxed", lines);
+    block("設定裡可能指名程式的鍵 · Configuration keys that can name a program", [
+      ...((hooks.programs || []).length === 0
+        ? ["這次讀取沒有匹配到任何這類鍵。 · No such key matched on this read."]
+        : (hooks.programs || []).map((program) => ["設定鍵 · key", String(program)])),
+      // 值不顯示（`credential.helper` 之類可能夾帶秘密），而且這份清單刻意不宣稱完整——
+      // 完整性由整份 config 的雜湊承擔，未列出的鍵一樣被綁定。
+      `這份清單只列鍵名、不列值，且不宣稱完整；沒列出的鍵仍被整份設定的雜湊綁定：configDigest ${shortSha(hooks.configDigest || "")} · Keys only, values never shown, and not claimed to be complete; the whole configuration is bound by digest.`,
+    ]);
+  }
+  if (!overwrites) {
+    block("這次合併會覆蓋 main 上的哪些檔案 · Files in main this merge would overwrite", [
+      "沒有拿到覆蓋掃描的結果。 · The overwrite scan result was not received.",
+    ]);
+  } else if (overwrites.checked !== true) {
+    block("這次合併會覆蓋 main 上的哪些檔案 · Files in main this merge would overwrite", [
+      `掃描沒有執行（${overwrites.unavailable || "OVERWRITE_SCAN_UNAVAILABLE"}）；這不等於沒有檔案會被覆蓋。 · The scan did not run; that is not the same as nothing being overwritten.`,
+    ]);
+  } else {
+    const paths = [
+      ...(overwrites.ignored || []).map((path) => ["ignored（會被靜默覆蓋）", String(path)]),
+      ...(overwrites.untracked || []).map((path) => ["untracked", String(path)]),
+    ];
+    block("這次合併會覆蓋 main 上的哪些檔案 · Files in main this merge would overwrite", [
+      ...(paths.length === 0
+        ? ["掃描已執行：這次合併會寫入的路徑上，main 目前沒有未追蹤或 ignored 的檔案。 · The scan ran and found no untracked or ignored file at the paths this merge writes."]
+        : paths),
+    ]);
+  }
+  region.append(section);
+}
+
 function renderMergeDiff(approval) {
   const region = byId("merge-approval-diff");
   if (!region) return;
   region.textContent = "";
+  renderMergePromotionDisclosure(region, approval, state.mergeApprovalOverwrites);
   const preview = approval?.preview || {};
   const files = Array.isArray(preview.files) ? preview.files : [];
   const largeFiles = new Set(preview.largeFiles || []);
@@ -3130,7 +3230,7 @@ function renderMergeApprovalPicker() {
 function renderMergeApproval() {
   const approval = state.mergeApproval;
   if (!byId("merge-approval")) return;
-  const blockers = mergeApprovalBlockers(approval, state.mergeApprovalBinding);
+  const blockers = mergeApprovalBlockers(approval, state.mergeApprovalBinding, state.mergeApprovalOverwrites);
   state.mergeApprovalBlockers = blockers;
   const risk = mergeRiskLevel(approval, blockers);
   const badge = byId("merge-approval-risk");
@@ -3173,6 +3273,8 @@ async function loadMergeApproval(approvalId) {
     );
     state.mergeApproval = value.approval;
     state.mergeApprovalBinding = value.binding || { valid: true, changed: [] };
+    /* 缺席與空清單不折疊：沒拿到掃描結果是阻擋，拿到而為空不是。 */
+    state.mergeApprovalOverwrites = value.overwrites || null;
     if (typeof value.confirmationPhrase === "string") state.mergeConfirmationPhrase = value.confirmationPhrase;
     state.mergeApprovalDecided = value.approval?.state !== "requested";
     renderMergeApproval();
@@ -3182,10 +3284,15 @@ async function loadMergeApproval(approvalId) {
   }
 }
 
-function mergeApprovalSignature(approval, binding) {
+function mergeApprovalSignature(approval, binding, overwrites) {
   return [
     approval?.state, approval?.expired, approval?.updatedAt, approval?.expiresAt,
     approval?.previewDigest, binding?.valid, (binding?.changed || []).join(","),
+    // 覆蓋清單是 live main 的觀察，會在對話框開著的期間改變（有人剛建立了一個 ignored 檔案）。
+    // 不納入簽章就等於「畫面上那份揭露不會更新」，而它是阻擋條件之一。
+    overwrites === undefined || overwrites === null
+      ? "no-overwrite-scan"
+      : `${overwrites.checked}:${(overwrites.ignored || []).join(",")}:${(overwrites.untracked || []).join(",")}`,
   ].join("|");
 }
 
@@ -3202,11 +3309,12 @@ async function repollMergeApproval() {
     const value = await api(
       `/api/rooms/merge-approvals/inspect?room=${encodeURIComponent(state.room)}&approvalId=${encodeURIComponent(approval.id)}`,
     );
-    if (mergeApprovalSignature(value.approval, value.binding)
-      === mergeApprovalSignature(approval, state.mergeApprovalBinding)) return;
+    if (mergeApprovalSignature(value.approval, value.binding, value.overwrites || null)
+      === mergeApprovalSignature(approval, state.mergeApprovalBinding, state.mergeApprovalOverwrites)) return;
     const wasValid = state.mergeApprovalBinding?.valid !== false;
     state.mergeApproval = value.approval;
     state.mergeApprovalBinding = value.binding || { valid: true, changed: [] };
+    state.mergeApprovalOverwrites = value.overwrites || null;
     renderMergeApproval();
     if (wasValid && state.mergeApprovalBinding.valid === false) {
       byId("merge-approval-status").textContent =
@@ -3225,6 +3333,8 @@ function openMergeApprovalDialog(approvalId) {
   state.mergeApprovalReturnFocus = document.activeElement;
   state.mergeApprovalDecided = false;
   state.mergeApprovalScrolled = false;
+  /* 上一筆核准的掃描結果不得沿用到這一筆：那會讓「我沒看過」長得像「我看過，沒事」。 */
+  state.mergeApprovalOverwrites = null;
   dialog.hidden = false;
   document.body.classList.add("workspace-modal-open");
   byId("merge-approval-status").textContent = "";

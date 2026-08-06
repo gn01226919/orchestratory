@@ -31,9 +31,15 @@ export interface HookEnvironment {
   /** Configured clean/smudge filters, including LFS. Their presence is a refusal, not a warning. */
   filters: string[];
   /**
-   * Every configuration key present in this repository whose value can name a program git runs, by
-   * KEY only. Disclosure, itemised, so the owner is shown what the merge could execute rather than a
-   * fingerprint that changed.
+   * Configuration keys present in this repository that `CONFIG_NAMES_A_PROGRAM` recognises as able
+   * to name a program git runs, by KEY only. Disclosure, itemised, so the owner is shown what the
+   * merge could execute rather than a fingerprint that changed.
+   *
+   * NOT every such key, and the difference is measured rather than theoretical: this list was
+   * written claiming to be every one of them while `gpg.ssh.defaultKeyCommand` — a key git really
+   * does execute, under `commit.gpgsign` with `gpg.format=ssh` — matched nothing in it. See the
+   * comment on `CONFIG_NAMES_A_PROGRAM`, which says the same thing about the same set; completeness
+   * belongs to `configDigest`, not here.
    *
    * Values are deliberately absent: `credential.helper` and friends can carry a shell snippet with a
    * secret in it, and this list is rendered on an approval screen. The values are covered by
@@ -166,12 +172,17 @@ const ATTRIBUTES_NO_FILTER = new Set(["unspecified", "unset"]);
  *
  * It cannot be all of them: the set is defined by another program's source and grows with its
  * releases, and this project has already been caught twice writing "exhaustive" beside such a list
- * (PITFALLS #103, #104). What stands behind it is `configDigest`, which hashes the whole listing and
+ * (PITFALLS #103, #104) — and then a third time: the round that added this expression described it
+ * on `HookEnvironment.programs` as "every configuration key … whose value can name a program git
+ * runs" while `gpg.ssh.defaultKeyCommand` matched nothing here. That key is now listed, which is a
+ * repair of one omission and NOT a claim that the next one has been anticipated.
+ *
+ * What stands behind it is `configDigest`, which hashes the whole listing and
  * therefore covers every key this expression does not match, and `PROMOTION_CONFIG_PINS`, which
  * makes the reachable ones unreachable. This expression only decides what gets ITEMISED to the owner.
  */
 const CONFIG_NAMES_A_PROGRAM =
-  /^(?:core\.(?:fsmonitor|sshcommand|askpass|editor|pager|alternaterefscommand|gitproxy)|sequence\.editor|gpg\.program|gpg\..+\.program|commit\.gpgsign|tag\.gpgsign|merge\.verifysignatures|credential\.(?:.+\.)?helper|diff\.external|diff\..+\.(?:command|textconv)|merge\..+\.driver|mergetool\..+\.cmd|difftool\..+\.cmd|filter\..+\.(?:clean|smudge|process)|pager\..+|trailer\..+\.command|uploadpack\.packobjectshook|guitool\..+\.cmd|browser\..+\.cmd|web\.browser)$/u;
+  /^(?:core\.(?:fsmonitor|sshcommand|askpass|editor|pager|alternaterefscommand|gitproxy)|sequence\.editor|gpg\.program|gpg\..+\.(?:program|defaultkeycommand)|commit\.gpgsign|tag\.gpgsign|merge\.verifysignatures|credential\.(?:.+\.)?helper|diff\.external|diff\..+\.(?:command|textconv)|merge\..+\.driver|mergetool\..+\.cmd|difftool\..+\.cmd|filter\..+\.(?:clean|smudge|process)|pager\..+|trailer\..+\.command|uploadpack\.packobjectshook|guitool\..+\.cmd|browser\..+\.cmd|web\.browser)$/u;
 /** Bounded itemised config disclosure. The digest always covers every key; this list is the display. */
 const MAX_REPORTED_CONFIG_PROGRAMS = 64;
 /** Bounded read of one promotion's trace file; exceeding it reports "not read", never "no hooks". */

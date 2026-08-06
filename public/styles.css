@@ -2207,6 +2207,13 @@ body.workspace-modal-open { overflow: hidden; }
 .merge-approval-diff-label { color: var(--muted); font-size: 10px; }
 .merge-approval-diff { display: grid; gap: 5px; max-height: min(38vh, 320px); padding: 8px; overflow-y: auto; border: 1px solid var(--border-strong); border-radius: 8px; background: #101216; }
 .merge-approval-diff:focus-visible { outline: 1px solid var(--accent-dim); }
+.merge-promotion-disclosure { display: grid; gap: 5px; padding: 9px 10px; border: 1px solid #4a3a22; border-radius: 6px; background: rgb(245 166 35 / 6%); }
+.merge-promotion-disclosure h4 { margin: 4px 0 1px; color: var(--warn); font: 700 10px/1.5 var(--font-sans, inherit); }
+.merge-promotion-disclosure h4:first-child { margin-top: 0; }
+.merge-promotion-disclosure p { display: grid; grid-template-columns: minmax(110px, .3fr) minmax(0, 1fr); gap: 8px; align-items: baseline; color: #b6bcc3; font: 9px/1.6 var(--font-mono); overflow-wrap: anywhere; }
+.merge-promotion-disclosure p:not(:has(code)) { display: block; }
+.merge-promotion-disclosure b { color: #d3d8dd; font-weight: 700; }
+.merge-promotion-disclosure code { color: #e3c894; font: 9px/1.6 var(--font-mono); overflow-wrap: anywhere; }
 .merge-file { border: 1px solid #2c3036; border-radius: 6px; background: #16181c; }
 .merge-file > summary { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; padding: 7px 9px; cursor: pointer; }
 .merge-file[open] > summary { border-bottom: 1px solid #2c3036; }

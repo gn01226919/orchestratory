@@ -623,6 +623,73 @@ Owner 必須重新 preview 與核准。這是刻意選的方向（fail closed）
 `MAIN_MERGE_PROMOTION_UNRESOLVED` 同類：不含路徑、commit、指紋或 pid，且昂貴的重新觀察沿用同一套
 「便宜探測 → 節流 → 只對能出示 token 者無條件提供」。
 
+### 第五輪修正紀錄（2026-08-07，對照第四輪審查的 P0／P1／P2）
+
+第四輪不通過。根因是**第 3 項與第 10 項要求的揭露「根本沒有到達 Owner」**：資料在 payload 裡，
+`public/room.js` 一個字都沒有渲染。以下逐項對照，每一列的「守它的測試」都指名檔案與測試名，
+每一列的「突變」都是**實際跑過整份檔案**的（清單與輸出見本節末）。
+
+| 發現 | 修正 | 守它的測試 |
+| --- | --- | --- |
+| **P0（BLOCKER）** 揭露那半沒有到達 Owner。實測：`public/room.js` 對 `promotion`／`hooks`／`programs`／`configDigest`／`overwrites`／`ignored` 的引用次數**全部為 0**，33 個 `merge-approval-*` DOM 元素裡沒有任何一個是給 hook 清單、設定鍵或被覆蓋的 ignored 路徑用的，`renderMergeRisks()` 只印 `knownRisks`／`conflicts`／`tests`／`mainDirty`。因此 Owner 在打 `MERGE INTO MAIN` 的那一頁看不到會以自己的身分執行哪些程式、雜湊是多少、哪些 ignored 檔案會被靜默覆蓋。`grantMainMerge` 有 GUI 出口（`src/ui/web.ts:1192`），所以不適用「第一輪刻意不接出口」的分輪豁免 | 三件事。(a) **新增 `renderMergePromotionDisclosure()`**，把 hook 檔名＋完整 SHA-256、`hooksPath`、`merge.*.driver`、`filter.*`、`programs` 鍵名與 `configDigest` 逐項渲染；(b) **覆蓋清單成為核准畫面的一等資料**：`inspectMergeApproval()` 每次回傳 live 的 `overwrites{checked,ignored,untracked,unavailable}`（先前只有 agent 面的 `previewMainMerge` 有，核准畫面只有一個數量與指紋——[[PITFALLS]] #86 的形狀），並納入輪詢簽章，所以對話框開著期間新出現的 ignored 檔案會重新渲染並重新上鎖；(c) **計入 scroll-gate**：揭露渲染在 `#merge-approval-diff`（scroll-gate 量測的那個區域）**之內**且在檔案清單之前，因此 Owner 必須捲過它才可能到底。四種情況各自是**具名阻擋條件**，且「沒讀到」與「讀到而為空」不折疊：快照早於閘門、`hooks.unreadable`、`overwrites` 缺席、`overwrites.checked !== true`（帶 unavailable 代碼），以及每一條 ignored／untracked 路徑各一條 | 兩層。**行為層（Node）**：`test/merge-promotion.test.ts`「the approval surface carries what would run and what would be silently overwritten」——真實 repo，斷言 approval 上的 hook 檔名與**實際檔案內容算出的 SHA-256**相等、driver 列出、`programs` 含 `gpg.ssh.defaultkeycommand`、`configDigest` 為 64 hex、`programs` **不含任何值**；接著在**核准之後**才於 main 放一個 ignored 檔案（`git status` 完全空白），斷言 `inspectMergeApproval().overwrites.ignored` 精確等於 `["secrets.env"]` 且該檔案的位元組未被動過。**渲染與閘門層**：真實瀏覽器 DOM 驗收，八個情境，見下方專節與 gate digest |
+| **P0（文字）** 兩句全稱宣稱被證偽（[[PITFALLS]] #104）：`git-broker.ts:34`「Every configuration key present in this repository whose value can name a program git runs」與 `candidate-registry.ts:436`「every key in main's config that can name a program git runs」。反例 `gpg.ssh.defaultKeyCommand` 不在 `programs` 裡，而同檔 `git-broker.ts:165-170` 的註解**正確地**寫「explicitly NOT claimed to be all of them」——同一份程式碼裡兩句互相矛盾 | 兩句都改寫成「這個表達式**認得**的鍵，明確不是全部」，並把被證偽的那個反例寫進註解本身，讓下一個讀者看到的是證據不是保證。另把 `gpg\..+\.(?:program\|defaultkeycommand)` 加進 `CONFIG_NAMES_A_PROGRAM`——**這是修掉一個遺漏，不是宣稱下一個已被預料到**；完整性仍然只由 `configDigest` 承擔 | 同上那條測試斷言 `programs` 含 `gpg.ssh.defaultkeycommand`（突變 M8 拿掉該分支即變紅） |
+| **P1／F-A（嚴重）** 兩個釋放動作互相鎖死，產生零產品路徑的死結。實測（審查員 `p-deadend.mjs`）：真實 merge 已被完全殺掉、`owner_pid` 與 `mergePgid` 各自被回收給同一使用者的活程序（同一次開機，正是 [[PITFALLS]] #105 的形狀）→ `abandonMergeProcessGroup` 回 `MAIN_MERGE_PROMOTION_STILL_OWNED`、`abandonPromotionOwnerProcess` 回 `MERGE_ABANDON_REFUSED_MERGE_STILL_RUNNING`、`can the task ever be promoted again: NO` | 三件事。(a) **具名**：`promotionPending` 把「兩個號碼同時活著」報成它自己的狀態 `PROMOTION_OWNER_AND_MERGE_STILL_RUNNING`，兩個 pid 都列出（`pid` ＋ `alsoBlockedBy.pid`），`release` 給的是真的能用的短語；(b) **第三條出路** `abandonPromotionEntirely()`，短語 `STOP WAITING FOR BOTH PROCESSES OF A PROMOTION THAT MAY STILL BE WRITING TO MAIN`——依補正 (D) 它**說出正在放棄的是兩個程序，而且其中一個可能還在寫 main**；要求記錄上的**兩個**確切號碼，**不殺任何程序、不碰 main**，並歸屬給 Owner；(c) **拒絕即路線**：兩個窄的釋放在這個狀態下都改丟 `MergePromotionDoublyBlockedError`（帶兩個 pid、兩條唯讀 `ps` 指令、能用的短語），不再是牆。順帶移除 `abandonPromotionOwnerProcess` 內已成為**不可達**的 `group === "merge-running"` 分支——不可達的守衛無法被測試 | 「both of a promotion's waits can be opened together when neither can be opened alone」：斷言 pending 具名且兩個 pid 都在、兩條 inspect 指令都不含 `reset`／`kill`／`clean`／`checkout`、兩個窄釋放各被 `MERGE_ABANDON_REFUSED_BOTH_PROCESSES_RUNNING` 拒絕一次、錯短語／錯 pid／錯 pgid 各拒一次、成功後**整棵樹逐位元不變**、**程序仍活著**、`recoveryKind === "inspect-live-merge"` 且指令不含 `reset`、宣告重讀後仍有效，最後 **Owner 自己結束 merge 並復原 main 後同一個 task 重新 promote 成功**（＝把 `NO` 變成 `YES`）。既有的兩條窄釋放測試各自調整成**只有一個**號碼在檔，所以它們仍然守著自己的狀態 |
+| **P1／F-B（嚴重）** 排他索引把「一列讀不了」的爆炸半徑從一個 task 放大成整個專案。實測（`p-tamper.mjs`）：損毀一列 `applying` 的 `row_hash` 後，`promotions()` 具名回報 `unreadable`（好），但 task B 的 promote 被 `MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY` 永久擋住，而唯一的釋放動作因為 `#promotionRow` 丟掉讀不了的列而回 `MAIN_MERGE_PROMOTION_NOT_FOUND`。[[PITFALLS]] #100 在新粒度上復發 | 兩件事。(a) **具名**：`#assertMainNotBusy` 對讀不了的列改丟 `MergeUnreadablePromotionError`（`MAIN_MERGE_PROMOTION_ROW_UNREADABLE`，帶該用的短語）——兩者都拒絕是對的（讀不了不等於 main 沒事），但那是兩個不同的問題、兩個不同的出口；(b) **受理**：`abandonMergeProcessGroup` 先用**不驗證完整性**的讀取取得那一列，讀不了時走 `#releaseUnreadablePromotion`，短語 `STOP LETTING AN UNREADABLE PROMOTION RECORD BLOCK THIS PROJECT`，只把 `state` 從 `applying` 移出，**刻意用裸 UPDATE 而不是 `#writePromotion`**——後者會重算 row hash，等於替一列損壞資料重新背書（[[PITFALLS]] #28／#57）。**該列仍然讀不了、仍然未結案**，它自己的 task 仍被 `#assertNoUnresolvedPromotion` 擋著；改變的只有「一列壞資料不再退休整個專案」 | 「one unreadable promotion row is named, and does not retire the whole project」：兩個 task 共用一個 main，第二個的核准在任何東西開始寫入**之前**取得（所以拒絕不可能來自髒工作樹），斷言拒絕碼是 `MAIN_MERGE_PROMOTION_ROW_UNREADABLE` 且帶短語、錯短語被同一個具名錯誤拒絕、釋放後**整棵樹逐位元不變**、程序沒有被殺、該列**仍為 `unreadable`**（沒有被「修好」）、`storedState` 為 `needs-manual-review`，最後 Owner 復原 main 後**第二個 task 一路 promote 成功** |
+| **P1／F-C（文件）** 殘餘風險表寫「Owner 的路徑是 CLI／API 的 `promotions()`」，而 `grep -rn promotions src/main.ts src/ui src/mcp` 為零，`orchestrator candidates` 只有 `orphan-refs` 一個子指令 | 該欄改寫為更正，明說**沒有任何 CLI／HTTP 出口**、唯一呼叫方式是自己寫 Node script，並把「目前 Owner 沒有可用的成品路徑」列為未關閉項而不是既有能力（[[PITFALLS]] #77／#109 同形） | — |
+| **P2** `promotionFacts()` 的第二個條件從未被測試到達（既有測試用 `rewindToV4()` 會整個 drop 掉 `promotion` 鍵，第一行 `if (facts === undefined)` 先接住）。[[PITFALLS]] #106 同形 | 程式不變（它本來就是對的），補測試 | 「a v5 snapshot taken before the configuration fields existed is terminal, not usable」：**v5 資料庫、`promotion` 鍵在、user_version 仍為 5**，只刪掉本輪新增的欄位，`configDigest` 與 `programs` **各跑一次**；在一個什麼都還沒讀過的 registry 上**先呼叫 `grantMainMerge`**（所以拒絕是 grant 路徑自己產生的，不是繼承自某次讀取），斷言 `PREVIEW_PREDATES_PROMOTION_GATES`、該列終局 `invalidated`、槽位釋放後可重新 request |
+| **P2** 對活著的 merge 放棄等待**不會**釋放 task | 文件（見殘餘風險表新增列）。這是刻意的：釋放改變的是「這筆紀錄還在不在等某個 pid」，不是「main 發生了什麼」；後者只能靠重新觀察指紋收斂 | 既有的兩條釋放測試都在結尾斷言「Owner 自己復原 main 後才 `rolled-back` 並可重新 promote」，本輪新增的兩條也是 |
+
+**一項刻意的行為改變，分開講。** `inspectMergeApproval` 現在每次都跑一次覆蓋掃描（一條有界 pathspec 的
+`git` 指令）。它比同一條路徑上原本就在跑的綁定重驗便宜得多，但它確實是新增的每次輪詢成本，
+且揭露的是 live main 的檔案路徑——那是 Owner 自己的專案，而這個端點本來就已回傳 `mainPath`
+與逐檔清單，因此不擴大既有的揭露面。
+
+**一項刻意的取捨，分開講。** 前端把「沒拿到 `overwrites`」當成阻擋條件，也就是說**舊 backend 配新前端**
+會讓核准畫面完全鎖住。這是 fail closed 的方向，而反過來（沒拿到就當成沒事）正是 [[PITFALLS]] #89
+說的 fail-open。
+
+### 第五輪的突變測試（十個，全部實際跑過並附輸出）
+
+方法與前三輪相同：把工作樹複製一份到臨時目錄、套用**一個**編輯、跑完整份
+`test/merge-promotion.test.ts`、記下變紅的測試名，然後把該檔案從原始樹複製回去並以 SHA-256 確認
+逐位元相同（每一列都印出 `restored=true`）。**基準線 `pass=77 fail=0`**（同一份臨時樹先跑過一次）。
+**全綠要當成發現回報，不是好消息**（[[PITFALLS]] #97）——本輪**沒有任何一個是全綠**。
+
+| # | 突變 | 結果 |
+| --- | --- | --- |
+| M1 | `promotionPending` 不再把「兩個號碼同時活著」報成它自己的狀態（退回第四輪的行為） | `pass=75 fail=2`：both of a promotion's waits can be opened together／the owner can stop a promotion waiting on its own owner process |
+| M2 | `abandonPromotionEntirely` 不比對 pgid | `pass=76 fail=1`：both of a promotion's waits can be opened together |
+| M3 | `abandonPromotionEntirely` 不比對確認短語 | `pass=76 fail=1`：同上 |
+| M4 | `#assertMainNotBusy` 對讀不了的列退回 `MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY` | `pass=76 fail=1`：one unreadable promotion row is named |
+| M5 | `abandonMergeProcessGroup` 退回「讀不了就 NOT_FOUND」 | `pass=76 fail=1`：同上 |
+| M6 | 讀不了的列不需要短語即可釋放 | `pass=76 fail=1`：同上 |
+| M7 | `promotionFacts()` 改回 `return facts`（**審查員指名的那一個**） | `pass=76 fail=1`：a v5 snapshot taken before the configuration fields existed |
+| M8 | `CONFIG_NAMES_A_PROGRAM` 拿掉 `defaultkeycommand`（改動 `src/core/git-broker.ts`） | `pass=76 fail=1`：the approval surface carries what would run |
+| M9 | `inspectMergeApproval` 不再回傳被覆蓋的 ignored 路徑 | `pass=76 fail=1`：同上 |
+| M12 | **反方向**（[[PITFALLS]] #107）：`mergeBlocking` 一律為真，也就是把「已結束的 group」也當成還在擋 | `pass=61 fail=16`，含 crash reconciliation、orphaned merge、pgid 身分、owner pid 身分等既有測試全部變紅 |
+
+**兩件事沒有被自動化突變覆蓋，分開講。**
+- **`public/room.js` 的渲染與 scroll-gate**：拿掉 `renderMergePromotionDisclosure()` 的呼叫只會讓
+  `test/merge-dialog-acceptance.test.ts` 的 digest guard 變紅（那正是它的設計），**不會有任何行為測試變紅**，
+  因為專案沒有 DOM 測試執行器。守它的是本輪的真實瀏覽器驗收＋digest guard，已列入殘餘風險表。
+- **`collaboration-service.ts` 新增的兩段 ledger 文案分支**（`promotion-abandoned`、
+  `unreadable-record-released`）**沒有測試**。它們只決定公開帳本上顯示哪一句中文，寫入 audit 的
+  `detail` 由同一份既有程式碼組出；既有的 `merge-group-abandoned`／`owner-process-abandoned`
+  兩段（第三／四輪加的）同樣沒有測試。**這是明說的缺口，不是宣稱已覆蓋。**
+
+**另外兩個直接對審查員自己的 probe 跑的實測**（不是我的測試，是把 `/tmp/r4probes/` 的腳本
+加上對新出口的呼叫後重跑）：
+
+- `p-deadend.mjs`：`pending.code` 為 `PROMOTION_OWNER_AND_MERGE_STILL_RUNNING`、
+  兩個 pid 都列出、四種窄釋放全部回 `MERGE_ABANDON_REFUSED_BOTH_PROCESSES_RUNNING`、
+  `abandonPromotionEntirely(both numbers)` **ACCEPTED**，Owner 自行復原 main 後狀態轉 `rolled-back`，
+  最後一行從 **`can the task ever be promoted again: NO`** 變成 **`YES requested`**。
+- `p-tamper.mjs`：`task B promote` 從 `REFUSED MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY` 變成
+  `REFUSED MAIN_MERGE_PROMOTION_ROW_UNREADABLE`（具名），
+  `release the unreadable row (correct phrase)` **ACCEPTED**，
+  之後 task B 的拒絕碼變成 `MAIN_MERGE_APPROVAL_BINDING_CHANGED:mainDirtyFingerprint`
+  ——也就是**不再被那一列擋住**，改為被「main 現在真的很髒」這個完全不同的條件擋住。
+
 ### 可接受的殘餘風險（連同「何時失效」一起列，未列出的不得事後補認）
 
 | 殘餘風險 | 為什麼此階段可接受 | 何時失效 |
@@ -633,7 +700,7 @@ Owner 必須重新 preview 與核准。這是刻意選的方向（fail closed）
 | submodule 與 LFS **偵測到即拒絕**，不做完整支援 | 兩者都會讓「回到操作前」變成無法保證 | 若 Owner 的專案開始使用，必須改為完整支援；**不檢查不算可接受** |
 | P0-2（Writer apply-back 仍是 `window.prompt`）不在 5-5 範圍 | 那是另一條寫回路徑，與 candidate promotion 不同機制 | **9/1 之前必須有結論**：要嘛做，要嘛明文記為不做 |
 | **一次促進失敗（hook 逾時、hook 非零退出、崩潰）可以把 main 留在半套用狀態，而清乾淨它是 Owner 的手動工作。** 產品不會替 Owner 動手，只會逐項具名並提供一行可複製的指令 | 這是刻意的：實測 C 證明半套用的 index 與 Owner 自己 stage 的工作在位元層級無法區分，`git clean` 更會刪掉未追蹤與 ignored 檔案（[[PITFALLS]] #94）。自動清理的期望值是負的 | **若 5-6 提供 rollback 介面即失效**——屆時必須是 preview-first、指紋綁定、single-use approval，且仍不得使用 `git clean` 的任何形式 |
-| **`needs-manual-review` 沒有「Owner 按一下就結案」的按鈕**；它只能藉由 Owner 真的把 main 復原（或那次 merge 真的完成）而在下一次讀取時自行收斂 | 這正是「唯讀 reconciliation」的必然結果：能結案的唯一證據是重新觀察到的指紋，不是一個宣告。第一輪的缺陷不是「沒有按鈕」，而是**寫死之後永不再觀察**，那已修復並有測試（見下） | **若第二輪接上 GUI 出口**，必須同時提供「重新觀察」的顯式動作與逐項差異的畫面；在那之前 Owner 的路徑是 CLI／API 的 `promotions()` |
+| **`needs-manual-review` 沒有「Owner 按一下就結案」的按鈕**；它只能藉由 Owner 真的把 main 復原（或那次 merge 真的完成）而在下一次讀取時自行收斂 | 這正是「唯讀 reconciliation」的必然結果：能結案的唯一證據是重新觀察到的指紋，不是一個宣告。第一輪的缺陷不是「沒有按鈕」，而是**寫死之後永不再觀察**，那已修復並有測試（見下） | **若第二輪接上 GUI 出口**，必須同時提供「重新觀察」的顯式動作與逐項差異的畫面。**2026-08-06 第四輪審查更正（本輪接受）**：上一版這一欄寫「在那之前 Owner 的路徑是 CLI／API 的 `promotions()`」——**那句話與實作不符**。`grep -rn promotions src/main.ts src/ui src/mcp` 為零，`orchestrator candidates` 只有 `orphan-refs` 一個子指令，**`promotions()` 沒有任何 CLI 或 HTTP 出口**；唯一的呼叫方式是自己寫 Node script 直接 `new CandidateRegistry(dataDir)`。這是 [[PITFALLS]] #77／#109 同形（未經驗證就把「有出口」寫進文件）。**目前 Owner 沒有可用的成品路徑**，這件事本身列為未關閉項而不是既有能力 |
 | **attributes 閘門不宣稱完備。** 兩半合起來仍看不到一種形狀：一份**全域** attributes 檔，其 pattern 既不匹配本 repo 任何 tracked／ignored 路徑，也不匹配 `ATTRIBUTES_PROBE_PATHS` 那份代表性清單 | 這種規則按定義不會套用到本 repo 現有的任何檔案；要生效必須同時有人在 candidate 內新增一個匹配它的新路徑。而 `filter.*.clean/smudge` 的**設定**本身仍是獨立的拒絕條件，那才是 LFS 之類的實際形狀 | **若 promotion 開始接受會新增任意副檔名的 candidate 而不逐一詢問 git**，或若代表性清單停止跟著實務更新，即失效。正確的下一步是把 candidate 即將寫入的**確切路徑**也餵給 `check-attr` |
 | **`#upgrade` 的 `from === 1` / `from === 3` 分支對含 completed candidate 的舊庫是假支援**：加表本身成功，但 registry 隨後在讀取層以 `CANDIDATE_COMPLETION_PREVIEW_INVALID` 開不起來 | 這是 `a75e904` 引入的、不是 5-5 造成的，且 v1／v3 都是**未發布**的內部版本；Owner 目前的正式 DB 是 v4→v5 路徑，該路徑有真實資料庫的回歸測試 | **若任何 v1／v3 資料庫需要真的被打開即失效**——屆時必須是真正的 completion 升級，或至少一個具名的 fail-loud 錯誤碼取代目前的通用解析失敗。第二輪已把它記為必須具名；本輪**未實作**，維持列在此處 |
 | **每一次 promotion 會在 owner-only data directory 留下一份 git trace 檔案（`promotion-traces/<id>.jsonl`），產品不刪除它。** 檔案內含這次執行過的 hook argv，也就是 Owner 自己 repo 內的指令；`GIT_TRACE2_EVENT` 的路徑同時會出現在 hook 的環境變數裡 | 它是「哪些 hook 真的跑過、退出碼是多少」的**唯一觀察來源**，而且崩潰後仍可讀——刪掉它就等於把第 5 項的事實斷言換回常數。目錄是 0700，hook 本來就以 Owner 身分執行、看得到的東西不比它自己多 | **若 promotion 變成高頻操作即失效**（磁碟成長無上限）；屆時需要有界保留策略，且刪除必須走本專案的兩段式刪除規則 |
@@ -641,6 +708,11 @@ Owner 必須重新 preview 與核准。這是刻意選的方向（fail closed）
 | **把整份 config 納入綁定，代價是良性的 `git config` 寫入也會燒掉核准。** 核准存活期間對 main 的任何一次設定寫入都讓它終局 `invalidated`，Owner 必須重新 preview 與核准 | 這是 fail-closed 的方向，而反過來（只綁一份鍵名清單）已經被實測證明會放行 `gpg.program`。core config 在核准的 15／5 分鐘窗內本來就極少改動 | **若 promotion 變成高頻操作、或 Owner 的工作流程會在該窗內動 `.git/config`（例如自動化的 `git remote`／`branch --track`）即失效**；屆時要改為「只綁會導致執行的鍵，並且那份清單本身要有跟得上 git 的機制」 |
 | **`programs`（核准畫面上逐項揭露的設定鍵）明確不宣稱完整。** 它是一條正規表達式，只決定哪些鍵會被**顯示**；沒有匹配到的鍵仍然被 `configDigest` 綁定，但 Owner 在畫面上看不到它的名字 | 完整性由 digest 那一半承擔：沒被列出不等於沒被綁定。要讓一個未列出的鍵生效，攻擊者仍必須在核准之前就把它放好，而那會改變 digest 之外的東西嗎——不會，所以這一條的真正邊界寫在下一欄 | **若某個 git 版本新增一個「core config 已存在、preview 當下就在那裡」的程式執行鍵**，它會被綁定（所以核准後改它會被擋）但**不會被揭露**，Owner 看不到它。修法是把 `programs` 的判準改為「白名單允許的鍵以外，任何值看起來像路徑或指令的鍵一律列出」，或直接拒絕未知鍵 |
 | **promotion 產生的 merge commit 不簽章，也不驗證被合併方的簽章**（`commit.gpgsign`／`tag.gpgsign`／`merge.verifySignatures` 被釘為 false） | 促進的授權來自 approval row，不是簽章；而讓 merge 依賴一個由「不可信 worktree 可改寫的同一份設定檔」指名的程式，是用一個有紀錄的缺口換任意程式碼執行 | **若 Owner 的專案要求 main 上每個 commit 都必須有簽章即失效**——屆時正確做法是讓 Owner 明確提供一份簽章設定（不從 repo config 讀），並在核准畫面上揭露將使用哪一個程式 |
+| **對活著的 merge 放棄等待，不會釋放那個 task。** 三個釋放動作（process group／owner process／兩者一起）改變的都只是「這筆紀錄還在不在等某個 pid」；task 能不能再促進，取決於下一次重新觀察到的指紋。實測：釋放後 `ps` 仍顯示 merge leader 活著、整棵樹逐位元不變、而 task 仍為 `MAIN_MERGE_PROMOTION_UNRESOLVED` | 這是「唯讀 reconciliation」的必然結果，而且是刻意的：把它做成「釋放＝task 解封」會讓一個 Owner 的宣告蓋過一個還在進行的寫入。Owner 的路徑是先讓那個 merge 真的結束（或自己復原 main），紀錄下一次讀取就自己收斂 | **若 5-6 提供 rollback 介面即失效**——屆時「結束等待」與「決定結果」必須是兩個各自有 approval 的動作，而不是一個 |
+| **`abandonPromotionEntirely()` 可以在 merge 真的還在寫 main 時被使用。** 產品不殺程序、不碰 main，但那一刻的「不再等待」是 Owner 的宣告而不是觀察 | 替代方案是把那個狀態留成死結，而死結已實測會永久報廢 task（第 11 項禁止）。風險被壓在三個地方：短語**說出**正在放棄兩個程序且其中一個可能還在寫 main；必須寫出記錄上的**兩個**確切號碼；只要那個 pid 還活著，`#recoveryHint` 一律只給唯讀的 `inspect-live-merge`，永遠不給 `reset --hard`（[[PITFALLS]] #94） | **若未來能對 merge 子程序做真正的身分驗證**（例如以 pidfd／程序啟動時刻比對），這條退化為不必要；在那之前不得再放寬短語或省略號碼 |
+| **一列讀不了的促進紀錄，釋放之後仍然讀不了，而它自己的 task 仍然沒有產品側出路。** `#assertNoUnresolvedPromotion` 會對它永遠回 `MAIN_MERGE_PROMOTION_UNRESOLVED` | 本輪修的是**爆炸半徑**（整個專案 → 一個 task），不是損壞本身。要給那個 task 出路，只能是「重算 row hash」，而那等於替一列來源不明的資料重新背書（[[PITFALLS]] #28／#57），代價比留著一個具名的死 task 高 | **若 SQLite 檔案損壞在實務上不只是理論**（例如 Owner 回報過一次）即失效；屆時正確做法是離線的 registry 修復工具＋逐列人工確認，而不是線上重新背書 |
+| **`promotions()` 與三個釋放動作沒有任何 CLI 或 HTTP 出口。** 唯一的呼叫方式是自己寫 Node script 直接 `new CandidateRegistry(dataDir)` | 第四輪之前這件事被文件誤記為「Owner 的路徑是 CLI／API 的 `promotions()`」，已更正。它不影響任何安全屬性——所有這些動作都不碰 main——但它確實表示**一個真正卡住的 Owner 現在沒有可用的成品路徑** | **本輪即失效**：這是未關閉項而不是可接受的殘餘風險，列在此處只是為了不再被寫成既有能力。5-6（或任何接上 GUI／CLI 出口的工作）必須把它關掉 |
+| **核准畫面上那段揭露的「渲染」與「scroll-gate 是否真的把它算進去」，只有手動瀏覽器驗收＋digest guard，沒有自動 DOM 測試** | 專案沒有 DOM 測試執行器，加一個是新相依（pending decision D-006，Owner 裁決）。行為那一半（事實有沒有到達 payload）有 Node 測試守著；渲染那一半有 digest guard，程式一改就紅燈，逼人重跑 | **若 Owner 核准新增 DOM 測試執行器即失效**；也**若 digest guard 再被發現有涵蓋不到的角落**（它已被抓到過一次：只認 `^function` 而漏掉 `async function`）即失效 |
 
 **已從殘餘風險移除、改列為必修**：
 
@@ -720,6 +792,62 @@ Owner 必須重新 preview 與核准。這是刻意選的方向（fail closed）
 **教訓**：一個防「紀錄過期」的機制，自己也會有涵蓋不到的角落。
 它這次是**被它想守護的那個變更本身**揭露的——實作代理誠實回報了「我改了但測試沒紅」。
 
+## Merge approval dialog 第三次瀏覽器驗收（2026-08-07）：促進揭露與 scroll-gate
+
+**背景**：Phase 5-5 第四輪審查 P0。標準第 3 項要求「在核准畫面上**逐項列出**本次會執行的 hook 檔名與
+雜湊」與「**逐一列出**這次合併會覆蓋的 ignored 檔案路徑」，第 10 項說沒納入揭露就是**未關閉的前置條件**。
+實測：`public/room.js` 對 `promotion`／`hooks`／`programs`／`configDigest`／`overwrites` 的引用次數
+**全部為 0**——資料在 payload 裡，畫面上一個字都沒有。
+
+**方法**：Chrome 載入**真實** `public/room.html` 與**真實** `public/room.js`（loopback 靜態伺服器，
+**換一個沒用過的 port** 強制重新載入——[[PITFALLS]] #90）。腳本**第一件事**是斷言執行中的程式碼確實是
+新版（`String(renderMergePromotionDisclosure).includes("configDigest")` 與
+`String(mergeApprovalBlockers).includes("OVERWRITE_SCAN_UNAVAILABLE")`，不成立就直接拋錯），
+再覆寫全域 `api()` 回傳受控的 inspect payload。之後走**真實流程**
+`openMergeApprovalDialog()` → `loadMergeApproval()` → `renderMergeApproval()`，
+以真實 DOM、真實 `scroll` / `input` 事件驅動，讀取真實的 `input.disabled` / `button.disabled`。
+
+**先斷言幾何真的溢出**（`clientHeight` 284 / `scrollHeight` 810），否則整個 scroll-gate 是空的；
+另外斷言**揭露區塊本身就比可視高度高**（330.98 > 284），也就是它不可能被一眼略過。
+
+| 檢查 | 實測結果 |
+| --- | --- |
+| 揭露渲染在 scroll-gate 量測的區域**之內** | 通過（`region.querySelector(".merge-promotion-disclosure")` 命中） |
+| 逐項列出 hook 檔名與**完整 SHA-256**（兩個 hook） | 通過（`pre-merge-commit` 與兩個 64-hex 雜湊都在畫面文字內） |
+| 列出 `merge.*.driver` 與 `filter.*` | 通過（`merge.custom.driver`、`filter.lfs.clean`） |
+| 逐項列出 `programs` 鍵名（三個，含 `gpg.ssh.defaultkeycommand`） | 通過 |
+| 明說這份清單**不宣稱完整**、完整性由 configDigest 承擔 | 通過 |
+| 未捲動 → 輸入框鎖住 | 通過（`inputDisabled true`、`scrolled false`） |
+| 捲到**揭露區塊的結尾**（`scrollTop 411`）→ 仍鎖住 | 通過（`scrolled false`——揭露被捲過了，但清單還沒到底） |
+| 捲到一半（`scrollTop 263`）→ 仍鎖住 | 通過 |
+| 捲到底（`scrollTop 526.5`）→ 輸入解鎖、按鈕仍鎖 | 通過 |
+| 短語全小寫 → 按鈕維持鎖住 | 通過 |
+| 短語精確相符 → 按鈕解鎖 | 通過 |
+| **ignored 檔案會被覆蓋** → 路徑出現在捲動區內，且**每一條路徑各一個阻擋項**，捲到底仍鎖住 | 通過（`.env.local`／`build/cache.bin`／untracked `notes.txt`＝3 個阻擋項，風險徽章 `高風險 · HIGH`） |
+| **`overwrites` 缺席** → 具名阻擋，捲到底仍鎖住 | 通過（畫面寫「沒有拿到覆蓋掃描的結果」） |
+| **掃描沒有執行**（`checked:false`）→ 阻擋項**帶出代碼** | 通過（`OVERWRITE_SCAN_PATHSPEC_TOO_LARGE` 出現在畫面與阻擋項） |
+| **快照早於促進閘門**（無 `promotion`）→ 具名阻擋 | 通過（畫面寫「這份快照產生於促進閘門存在之前」） |
+| **hook 目錄讀不到** → 具名阻擋，且**不**顯示「裡面沒有可執行的 hook」 | 通過（「沒讀到」與「讀到而為空」不折疊——[[PITFALLS]] #85） |
+| **讀到而為空** → 不同的句子，且**不是**阻擋項，捲到底可解鎖 | 通過（`blockers 0`） |
+| **對話框開著期間才出現的 ignored 檔案**（只有 live 掃描改變，approval 與 binding 逐位元相同）→ 輪詢重新渲染、路徑上畫面、阻擋項出現、輸入重新鎖住**且已輸入的短語被清空** | 通過（前：`inputDisabled false` / 已輸入 `MERGE INTO MAIN`；後：路徑在畫面上、阻擋項具名該路徑、`value === ""`、按鈕鎖住） |
+
+Console 無任何 error／exception。
+
+**已接受的 gate digest（room.js，含促進揭露與 scroll-gate）**：
+`4665b87688b354e2ee16c9fe4d0fda50731cbd9e09880b66d72e3b926f86306e`
+
+`test/merge-dialog-acceptance.test.ts` 的涵蓋清單同時新增
+`renderMergePromotionDisclosure`、`renderMergeDiff`、`loadMergeApproval`、
+`mergeApprovalSignature`、`repollMergeApproval`——**五個都在這次瀏覽器驗收裡被實際執行過**。
+
+**這一次沒有涵蓋的**：
+- 這是**手動**驗收，不在 CI 重跑；守它的只有 digest guard（改程式就紅燈，逼人重跑）。
+- payload 是受控的（覆寫 `api()`），所以它證明的是「拿到這些事實時畫面怎麼做」，
+  不證明伺服器會送出正確的事實——那一半由 `test/merge-promotion.test.ts` 的
+  「the approval surface carries what would run and what would be silently overwritten」以真實 repo 守著。
+- CSS 版面在其他視窗尺寸下的表現沒有測；scroll-gate 的判準是幾何，所以**極寬或極高的視窗**若讓區域不再
+  溢出，gate 會像先前一樣「已經在底部」——這是既有行為，不是本次引入的。
+
 ## ADR-028 vNext 待驗證矩陣
 
 | 範圍 | 狀態 | 必要證據 |
@@ -786,6 +914,13 @@ Owner 必須重新 preview 與核准。這是刻意選的方向（fail closed）
 
 ## 目前自動證據
 
+- 594/594 deterministic tests＋1/1 fuzz smoke（2026-08-07，Phase 5-5 **第五輪**對抗式審查修正後，
+  在靜止的工作樹上 `npm run check` **跑了三次，三次都 exit 0**；line 95.53／95.52／95.53、
+  branch 87.52／87.50／87.51、functions 97.18／97.10／97.18，gate 為 90／85／90。
+  第三次另外以「跑之前與跑之後對全部改動檔案取 SHA-256 並比對」證明樹在該次執行期間**逐位元未變**；
+  這一列的第三組數字是那次跑完之後才寫進本檔的，本檔不在覆蓋計算內）。
+  **被主張的只有 exit code**，見下方關於數字抖動的說明（[[PITFALLS]] #34）。
+  本輪尚未重跑乾淨 clone；branch 餘裕約 2.5 個百分點。
 - 576/576 deterministic tests＋1/1 fuzz smoke（2026-08-06，Phase 5-5 **第二輪**對抗式審查修正後，
   在靜止的工作樹上 `npm run check` 一次跑完，**exit 0**；跑了兩次，line 95.42／95.43、
   branch 87.62／87.61、functions 96.99／97.08，gate 為 90／85／90，**兩次都 exit 0**）。**被主張的只有 exit code**，見下方關於數字抖動的說明。
