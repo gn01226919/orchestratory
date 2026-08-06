@@ -644,7 +644,8 @@ candidate 動了，approval 依然在每一條讀取路徑上顯示成 `approved
 **殘餘風險。** hook 一旦通過綁定就是以 Owner 權限執行的任意程式碼，本產品不沙箱它；
 `.git/config` 可被有終端的 Native agent 直接寫入，保護來自「綁定＋揭露＋消耗前重驗」而非阻止寫入。
 promotion 期間若外部程序推進 main，目前是**事後偵測**（觀察到的 HEAD 不是被授權的 merge commit →
-`needs-manual-review` 並具名），不是期間中止；這一項尚未有測試，見 [[VERIFICATION]] 的待辦。
+`needs-manual-review` 並具名），不是期間中止；**2026-08-06 更正**：這一項已於第二輪補上測試
+（見下方「第二輪對抗式審查後的修正」），但「事後偵測是否足以取代期間偵測」仍待 Owner 裁決。
 
 ### 第一輪對抗式審查後的修正（2026-08-06）
 
@@ -683,3 +684,51 @@ promotion 期間若外部程序推進 main，目前是**事後偵測**（觀察�
 理由是它會製造死路：讓 promotion 失敗的往往就是那個 hook，而移除／修好它是重試唯一可能成功的前提，
 把它算成「main 沒回來」等於讓唯一的出路同時永久封死上一次嘗試，連帶封死整個 task。
 hook 清單真正把關的地方是 approval 綁定，在 merge 前一刻對 live main 不節流地重驗，不是這裡。
+
+### 第二輪對抗式審查後的修正（2026-08-06）
+
+第二輪也判定**不通過**。第一輪的七項必修經獨立複驗全部成立；新的問題有三處嚴重，全部收斂到同一句話：
+**一個名字不是一個身分。**
+
+- **pgid 被當成「還在寫入」的代理品，而代理品會退化。** 第一輪的修正 (a) 把「該 process **group** 仍存在」
+  當成「merge 還在寫 main」。實測：hook 只要在背景留下任何子程序（起 dev server、watcher、log tailer
+  都是這個形狀），group 就永遠活著——main 已完整套用且 `git status` 完全空白，紀錄卻永遠停在 `applying`，
+  且**產品側沒有任何路徑可以釋放它**，紀錄裡也沒告訴 Owner 該去看哪個程序。更糟的是它會傳染：
+  那個 pgid 被無限期帶進 `needs-manual-review` 的每一次後續觀察，而該 group 早已死透；
+  `mergeGroupStillRunning` 對它**沒有任何身分驗證**，非 `ESRCH` 錯誤（別的使用者持有該 pid 時的 `EPERM`）
+  一律算「還活著」，而 macOS pid 約 99999 回繞、**重開機後從低號重來——而重開機正是最可能留下
+  `needs-manual-review` 的原因**。這是 [[PITFALLS]] #67 的原地復發：擁有權一旦是別的東西的函數，
+  就會有一組輸入讓那個函數退化。四項修正：
+  **(a) 問的對象改成 group leader。** 子程序 `detached` 讓它自成 session／group，所以 leader 的 pid
+  就是 pgid，而 leader 就是那個 `git merge`——它的生死才是「main 是否還在被寫」的判準。
+  背景殘留的孫程序改為**具名回報**（`mergeGroupSurvivors` 附唯讀 `ps -g <pgid>`）而不再阻擋收斂。
+  **(b) 加上身分。** pgid 連同本機開機時刻一起記；跨開機的 pgid 一律不採信。
+  `EPERM` 從「還活著」改判為「這個 pid 屬於別人，因此不是我們的 merge」——先前的讀法把別人回收的 pid
+  當成我們的 merge 還在寫。
+  **(c) 觀察到結束就寫成 `null`**，拿掉無條件 carry-forward。
+  **(d) 給出路。** 新增 `abandonMergeProcessGroup()`：Owner 必須寫出紀錄上的**確切 pgid** 與確認短語，
+  產品**不殺任何程序、不碰 main**，只停止等待那一個 pid，並把這件事**歸屬給 Owner**
+  （`mergeGroupDisowned.decidedBy`），不偽裝成觀察（[[PITFALLS]] #86）。
+  這一項對應標準第 11 項的附帶條款：**任何佔用結構性槽位的狀態都必須有產品側路徑可以釋放。**
+- **列舉 attributes 檔的位置，本質上追不上 git。** 第一輪把來源從 root 一份擴為五個位置，並在註解與
+  [[THREAT_MODEL]] F26 宣稱窮盡。實測又漏兩個：`core.attributesFile` 寫成 `~/attrs` 時 git 用
+  `expand_user_path` 展開而產品 `join()` 到 workspace 底下（ENOENT → 零 blocker），
+  以及完全不設該鍵時 git 仍讀 `$XDG_CONFIG_HOME/git/attributes`——`GIT_CONFIG_GLOBAL=/dev/null`
+  只覆蓋全域 **config** 檔、不覆蓋全域 **attributes** 檔。**判準因此改成直接問 git**
+  （`git check-attr -z --stdin filter`，在 merge 會用的那個環境下），列舉保留為第二半，
+  因為它能答出「規則指向此刻不存在的路徑」這種 check-attr 答不出的形狀。**兩半合起來仍不宣稱完備**，
+  未覆蓋的形狀列入殘餘風險表。
+- **`hooks: ok` 之外的唯一誠實選項是去讀 git 自己的紀錄。** 標準第 5 項要求記錄實際執行過的 hook 檔名
+  與退出碼，而 `runProcess` 只拿得到 `git merge` 的整體退出碼。決定：merge 以 `GIT_TRACE2_EVENT` 寫出
+  git 的 trace（檔案在 owner-only data directory，**不在 repo 內**——寫在 repo 內它自己就會變成
+  未追蹤檔案並污染這次促進正要比對的指紋），事後解析 `child_class:"hook"` 取得 `hook_name` 與 `code`。
+  **未讀到是 `null`、讀到但沒有 hook 是 `[]`**，兩者不折疊。audit 與 room ledger 由新的
+  `onMergePromotion` sink 寫入，與既有的 drift sink 同形：durable 先行、listener 例外被吞、
+  帳本只登公開資訊（不含專案路徑、approval id、token）。
+
+**一項提交 Owner 裁決，未自行改標準。** 標準第 7 項要求「promotion 期間偵測外部推進並中止」。
+單機 git 上這做不到：`git merge` 是外部程序，控制面在它執行期間沒有中止點，任何輪詢只縮小 TOCTOU 窗。
+成立的是**事後偵測**——`authorizedMergeCommit` 要求 HEAD 是雙親 commit 且第一個 parent 恰為 pre-op HEAD，
+外部推進無法滿足它（已用「hook 途中 `git update-ref refs/heads/main`」實測：git 自己以 exit 128
+`cannot lock ref 'HEAD'` 中止，產品記為 `needs-manual-review` 並具名 `HEAD`，candidate 不轉 `merged`）。
+提議把「期間偵測」移入殘餘風險並註明失效條件；**待 Owner 裁決。**

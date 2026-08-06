@@ -332,10 +332,21 @@ Owner 自己的工作，`git clean` 更會刪掉未追蹤與 ignored 檔案—�
    若 Owner 在中間 revert 了那次合併，第二次 promotion 會**靜默地把 Owner 明確撤銷的變更重新套回去**。）
 
 7. **promotion 期間對 main 具有排他性。** 開始前必須確認 `.git/index.lock` 不存在
-   （存在即拒絕，**不等待**），並在整個期間持有一個可觀察的排他標記；
-   期間偵測到 main HEAD／index 被外部改動即中止並走第 4 項的回復路徑。
+   （存在即拒絕，**不等待**），並在整個期間持有一個可觀察的排他標記。
    必須有一條測試模擬外部程序在 checkout 與 commit 之間推進 main。
    （綁定檢查與實際 merge 之間的 TOCTOU 窗，在 5-5 從幾毫秒放大到整個 checkout＋hook 執行時間。）
+
+   **2026-08-06 主代理裁決：原本要求的「期間偵測到 main 被外部改動即中止」移入殘餘風險。**
+   這是**主代理的決定，不是實作者自行放寬**——記在此處是因為本專案反覆出現的失效模式，
+   正是「標準被實作者悄悄放寬」（見 [[PITFALLS]] #87）。放寬時更要留下痕跡。
+
+   **理由**：`git merge` 是外部程序，控制面在它執行期間**沒有中止點**，單機 git 上做不到「期間中止」。
+   成立的是**事後偵測**：`authorizedMergeCommit` 的雙親判準使「外部推進被誤記為 applied」
+   在結構上不可能——已實測，外部程序推進 main 時 git 自己就會 exit 128
+   （`cannot lock ref 'HEAD'`）。開始前的 `index.lock` 檢查與排他標記**仍為必要，未放寬**。
+
+   **何時失效**：若未來 promotion 改為由控制面自行實作 merge（而非呼叫 `git merge` 外部程序），
+   或開放多 candidate 併發 promotion，此項立即回復為必須。
 
 8. **取消語意明文化。** promotion 一旦開始即不可取消：UI 不得呈現取消控制項；
    任何關閉分頁／中斷連線都不影響已開始的 promotion，其結果由第 1／2 項的意圖紀錄決定。
@@ -428,7 +439,114 @@ approval 綁定，在 merge 前一刻對 live main **不節流**地重驗。
 **一處行為順序改變，分開講。** `#authorizeMainMerge` 內的「未結促進」檢查移到最前面，因此對一個
 已被消耗的核准，回答從 `MAIN_MERGE_APPROVAL_ALREADY_CONSUMED` 變成 `MAIN_MERGE_PROMOTION_UNRESOLVED`。
 兩者都拒絕、都不寫入任何東西；改變的是 Owner 被指向哪個問題——「你的 token 用過了」會把人帶去錯的地方，
-真正要處理的是那個沒人能描述狀態的 repository。資訊揭露沒有變化：核准狀態原本就在 token 檢查之前可見。
+真正要處理的是那個沒人能描述狀態的 repository。
+
+**關於資訊揭露的原句不精確，在此改寫（第二輪指出）。** 原文寫「資訊揭露沒有變化：核准狀態原本就在
+token 檢查之前可見」。核准狀態確實原本就可見，但**這次揭露的是一類新事實**：未認證呼叫者現在可以分辨
+「這個 task 的上一次促進未結」與「這個 task 一切正常」——那是促進帳本的狀態，不是核准的狀態，
+先前不存在於任何 token 前的回答裡。裁決是**接受這個揭露**（它只說「你的 repository 有個沒人能描述的
+狀態」，不含路徑、commit、指紋或 pid），但同時修掉它附帶的**成本**問題：未認證呼叫者原本可以無限次
+觸發最長 30 秒的全樹雜湊。現在的順序是「便宜的程序探測 → 節流 → 昂貴的重新觀察」，
+昂貴那一段只對能出示 token 的呼叫者無條件提供，其餘一律 fail closed 地拒絕
+（`test/merge-promotion.test.ts`「an unauthenticated caller cannot make the unresolved-promotion gate
+re-read the repository」以注入的 GitBroker **數**全樹讀取次數，不靠計時）。
+
+### 第三輪修正紀錄（2026-08-06，對照第二輪審查的七項發現）
+
+第二輪不通過。第一輪的七項必修經審查員獨立複驗確認全部真的修好；以下是**新**的問題與這一輪的處置。
+每一列的「突變」欄都是實際跑過的（清單與輸出見本節末）。
+
+| 發現 | 修正 | 守它的測試 |
+| --- | --- | --- |
+| **R1（嚴重）** pgid 被當成「還在寫入」的代理品：hook 只要在背景留下任何子程序（起 dev server／watcher／log tailer 都是這個形狀），整個 process **group** 就永遠活著，於是 main 已完整套用且乾淨、紀錄卻永遠停在 `applying`，且產品側零路徑可釋放。`mergeGroupStillRunning` 對該 group 沒有任何身分驗證，非 `ESRCH` 錯誤（如 `EPERM`）一律算「還活著」，而 pid 會回繞、重開機後從低號重來——[[PITFALLS]] #67 原地復發 | 四件事。(a) **改成問 group leader 而不是整個 group**：子程序 `detached`＝leader 的 pid 就是 pgid，leader 就是那個 `git merge`，它的生死才是「main 是否還在被寫」的判準；背景殘留的孫程序改為具名回報 `mergeGroupSurvivors`（含唯讀 `ps -g <pgid>` 指令）而不再阻擋收斂。(b) **加上身分**：pgid 連同 `bootAtSec`（本機開機時刻）一起記，跨開機的 pgid 一律不採信；`EPERM` 從「還活著」改判為「這個 pid 現在屬於別人，因此不是我們的 merge」。(c) **一旦觀察到已結束就把 `mergePgid`／`mergeGroup` 寫成 `null`**，拿掉無條件 carry-forward。(d) **具名 + 出路**：非終局的促進在每次讀取時重新導出 `pending.{code,pid,inspect,release}`，並新增產品側動作 `abandonMergeProcessGroup()`——Owner 必須寫出記錄上的**確切 pgid** 與確認短語 `STOP WAITING FOR THIS PROCESS GROUP`，產品**不殺任何程序、不碰 main**，只停止等待那一個 pid，並把這件事**歸屬給 Owner**（`mergeGroupDisowned.decidedBy`）而不是偽裝成觀察 | 四條：「a hook that leaves a background process behind does not freeze the promotion forever」（實測 group 在收斂當下仍活著）、「a promotion that has been observed to be over stops carrying its process group id」、「a process group recorded before a reboot is not believed to be the running merge」（只改寫記錄中的開機時刻、真實 merge 仍在跑）、「the owner can stop a promotion waiting on a process group, without anything being killed」（斷言整棵樹逐位元不變、程序仍活著、錯 pgid／錯短語各被拒絕一次） |
+| **R2（嚴重）** `.gitattributes` 還漏兩個 git 真的會讀的來源（`core.attributesFile` 寫成 `~/attrs`；`$XDG_CONFIG_HOME/git/attributes`），而註解與 F26 又宣稱窮盡 | 採納審查員的建議：**改成直接問 git**。`git check-attr -z --stdin filter` 在 `promotionGitEnvironment()`（merge 會用的那個環境）下詢問「代表性路徑＋本 repo 全部 tracked 路徑＋ignored 路徑」，任何答案不是 `unspecified`／`unset` 即拒絕；讀不到一律 `MAIN_ATTRIBUTES_UNREADABLE`。**列舉那一半保留**，理由分開講（見下）。`~` 展開一併修好。兩句假宣稱（`git-broker.ts` 註解、`THREAT_MODEL` F26）都已改寫 | 兩條新的拒絕測試，各自**先斷言 git 自己確實會套用 filter**（`git check-attr`），再斷言產品拒絕；原有的五個位置測試不動 |
+| **R3（嚴重）** 標準第 5 項（audit／room ledger）完全沒有實作，也沒有任何地方記錄實際執行過的 hook 檔名與退出碼 | 新增 `onMergePromotion` sink（與既有 `onMergeApprovalInvalidated` 同形），由 `CollaborationService` 接到 audit chain 與 room ledger；`started` 與 `settled` 兩個 phase 都寫，成功與失敗都寫。**hook 檔名與退出碼是觀察來的**：merge 以 `GIT_TRACE2_EVENT` 寫出 git 自己的 trace（檔案在 owner-only data directory，**不在 repo 內**，否則它自己就會變成未追蹤檔案並污染指紋），事後解析 `child_class:"hook"` 的 `child_start`／`child_exit` 取得 `hook_name` 與 `code`。**未讀到是 `null`、讀到但沒有 hook 是 `[]`**，兩者不折疊。before／after HEAD 各記一次並另記 `mainHeadUnchanged` | 一條測試走**產品接線**（`new CollaborationService(data)`）跑成功與失敗兩條路徑，斷言 `audit.verify()` 為 true **並且**斷言事件筆數（2）、`outcome`、兩個 HEAD、`decidedBy`／`previewDigest`／`approvalState` 指向真實 approval row，以及 `hooksExecuted` 精確等於 `[["pre-merge-commit",0],["post-merge",3]]`／`[["pre-merge-commit",1]]`；ledger `verifyChain` 為 true 且不含專案路徑或 approval id |
+| **R4（中）** 第 1 項另外三個 kill 窗仍無測試 | 新增 test-only `faultPoint` 注入點（前例：v5 migration rollback 的 fault point）。三條測試各自在**子程序內部**於指定步驟對自己送 `SIGKILL`，再由新程序從 durable 狀態重建答案 | 「intent-record 寫入中」（交易未 commit → 完全沒有促進列 → 同一把 token 仍可用並成功）、「核准消耗寫入中」（意圖列＋仍 `approved` 的核准＝沒有任何 Git 指令跑過 → `APPROVAL_NEVER_SPENT_NO_GIT_COMMAND_RAN`；同一把核准無法再啟動第二次促進，Owner 的路徑是 reject → 重新 request，已實測不卡死）、「終局結果寫入中」（merge 已完成 → 新程序重新觀察為 `applied`） |
+| **R5（中）** 第 7 項外部程序競態測試不存在 | 新增測試：`pre-merge-commit` hook 在 merge 途中把 `refs/heads/main` 推到另一個 commit。**實測結果**：git 自己偵測到並以 exit 128（`cannot lock ref 'HEAD'`）中止，main 的 HEAD 停在那個外部 commit，index 帶著已合併的內容。斷言產品**不**把它記成 `applied`（`authorizedMergeCommit` 為 false，因為第一個 parent 不是 pre-op HEAD）、具名列出 `HEAD` 差異、candidate **不**轉為 `merged` | 「an external process that advances main mid-merge is not reported as an applied promotion」。關於「事後偵測是否足夠」的提議見下方裁決請求 |
+| **R6（中）** preview 節流零測試 | 新增測試，fixture **真的**超過 deadline：`.gitattributes` 的 `f.txt merge=slow` ＋ `merge.slow.driver` 是一個在 gate 檔案存在時 `sleep 300` 的指令，`git merge-tree --write-tree` 確實會呼叫它（已實測）。第一次觀察耗時 >60 秒並回 `bindingCheck.unavailable = MAIN_MERGE_PREVIEW_DEADLINE_EXCEEDED`（可讀狀態、核准不失效），節流窗內第二次觀察 <5 秒且回同一個可讀狀態，移除 gate 後同一把核准仍可 promote 成功 | 「a preview recompute that exceeds its deadline is a readable state, throttled, and still grantable」。附帶實測發現：被中止的 merge driver 會在 candidate worktree 留下 git 自己的 `.merge_file_XXXXXX` 暫存檔，測試按名逐一移除以還原被綁定的狀態（**不是** `git clean`） |
+| **R7（低）** 其餘五項 | (a) `#assertNoUnresolvedPromotion` 順序不變（回答仍先指向 repository），但昂貴那一段改成「便宜的程序探測 → 節流 → 重新觀察」，且只對能出示 token 的呼叫者無條件提供；(b) `REBASE_HEAD`／`CHERRY_PICK_HEAD`／`REVERT_HEAD`／`AUTO_MERGE`／`MERGE_MSG` 各補一條拒絕測試（拒絕表 17 → 22 條）；(c) `VERIFICATION.md` 的「資訊揭露沒有變化」已改寫（見上）；(d) `#upgrade` 的 `from === 1`／`from === 3` 分支見殘餘風險表新增列 | 「an unauthenticated caller cannot make the unresolved-promotion gate re-read the repository」以**注入的 GitBroker 計數**全樹讀取次數（不靠計時）；五條新的 leftover 拒絕測試 |
+
+**兩項本輪自己找出來的問題，一併修掉並分開講。**
+
+- **`owner_pid` 有和 pgid 一模一樣的缺陷，只是高一層。** 修 pgid 的時候才看清楚：`applying` 的紀錄
+  以 `kill(owner_pid, 0)` 判斷「另一個視窗還在跑」，而重開機之後那個號碼指向別的程序、答案是「還活著」，
+  於是那一列永遠等下去——**而重開機正是最可能留下未結促進的原因**，本專案的 `THREAT_MODEL` F20 早就
+  對 `owner_pid` 寫過同一句話。修法與 pgid 相同：連同開機時刻一起記，跨開機的 owner pid 一律不採信。
+  測試把**這個測試程序自己的 pid**（保證活著）寫進 owner 欄位，先斷言它確實會被等待，
+  再只改記錄中的開機時刻，斷言它不再被等待。
+- **`#upgrade` 的 `from === 1`／`from === 3` 現在會以具名錯誤 fail loud。** 加表本身是純加表沒錯，
+  但那不等於資料庫打得開：`a75e904` 之前完成的 candidate 帶著現行 reader 讀不了的 `completion_json`，
+  於是整個 registry（含權威的 candidates 與 checkpoints）以一個既不指出原因也不指出版本的
+  `CANDIDATE_COMPLETION_PREVIEW_INVALID` 開不起來。現在在**任何 DDL 之前**先問一次，
+  讀不了就丟 `CANDIDATE_REGISTRY_PRE_V4_COMPLETION_UNSUPPORTED`，資料庫原樣不動、每次開啟答案一致。
+  **這不是修好那個缺口**，缺口本身仍列在殘餘風險表。
+
+**一處建議被採納但沒有照字面做，分開講。** 審查員建議「與其列舉檔案位置，改成用 `git check-attr` 直接問 git」，
+理由是任何列舉都會被 git 的下一個版本或下一個設定鍵繞過。**這一點完全同意，並已實作為主要判準。**
+但列舉那一半**保留**，理由是兩者各自覆蓋對方看不到的東西：`check-attr` 只能就**具體路徑**回答，
+所以一條指向「此刻不存在的路徑」的規則（repo 內還沒有 `.psd` 時的 `*.psd filter=lfs`）它答不出來；
+反過來，列舉答不出它不知道怎麼找到的檔案。合起來**仍不宣稱完備**，未覆蓋的形狀已列入殘餘風險表。
+
+**一項需要 Owner 裁決（不自行改標準）。** 標準第 7 項要求「在整個期間持有一個可觀察的排他標記；
+期間偵測到 main HEAD／index 被外部改動即中止」。實作提議：**真正的「期間偵測」在單機 git 上做不到**——
+`git merge` 是一個外部程序，控制面在它執行期間沒有任何 hook 點可以中止它，而任何輪詢都只是把 TOCTOU
+窗縮小而非關閉。目前成立的是**事後偵測**：`authorizedMergeCommit` 要求 HEAD 是一個雙親 commit，
+第一個 parent 恰為 pre-op HEAD、第二個恰為被授權的 candidate head，任何外部推進都無法滿足它，
+因此**不可能被誤記為 applied**，且差異會逐項具名。**提議把「期間偵測」從第 7 項移入殘餘風險表**，
+並註明失效條件：若未來 promotion 改為由控制面自己分步執行（checkout／commit 分離），
+或開放多 candidate 併發，事後偵測就不再足夠，必須改為真正的排他鎖。**此項待 Owner 裁決，尚未執行。**
+
+
+### 第三輪的突變測試（十四個，全部實際跑過並附輸出）
+
+方法與前兩輪相同：把樹複製一份、套用**一個**編輯、跑完整份 `test/merge-promotion.test.ts`、記下變紅的
+測試名。**全綠要當成發現回報，不是好消息**（[[PITFALLS]] #97）。
+
+| # | 突變 | 結果 |
+| --- | --- | --- |
+| A | `mergeGroupState` 改回問整個 process **group** 而不是 group leader | 1 條紅：a hook that leaves a background process behind does not freeze the promotion forever |
+| B | 拿掉 pgid 的開機時刻身分檢查 | 1 條紅：a process group recorded before a reboot is not believed to be the running merge |
+| C | 恢復「無條件 carry-forward pgid」 | 3 條紅：stops carrying its process group id／recorded before a reboot／a kill inside the final-result write |
+| D | 不再具名回報「是哪個程序讓它還沒有答案」 | 6 條紅：killed during a hook／orphaned merge finishes／stops carrying its pgid／recorded before a reboot／owner can stop a promotion waiting／owning process id from a previous boot |
+| E | 拿掉 attributes 閘門的 `check-attr` 那一半（只留列舉） | 1 條紅：a filter comes from the XDG global attributes file |
+| F | 不再讀回 git 實際執行了哪些 hook | 1 條紅：both promotion paths are written to the audit chain and the room ledger |
+| G | 不再通知 audit chain 與 ledger「促進已收斂」 | 1 條紅：both promotion paths are written to the audit chain and the room ledger |
+| H | 允許 Owner 不寫出紀錄上的 pgid 就釋放等待 | 1 條紅：the owner can stop a promotion waiting on a process group |
+| I | 未認證呼叫者也無條件跑昂貴的重新觀察 | **第一次全綠 → 這是一項發現**（見下）；修好測試後 1 條紅 |
+| J | 拿掉 `owner_pid` 的開機時刻身分檢查 | 1 條紅：an owning process id from a previous boot does not keep a promotion waiting |
+| K | 讓 pre-v4 資料庫在完成紀錄讀不了時照樣靜默升級 | 1 條紅：a pre-v4 database whose completions this release cannot read is refused by name |
+| L | `probe()` 的 `EPERM` 改回「還活著」（也就是修正前的舊解讀） | **主代理設計、第一次全綠 → 第二項發現**（見下）；補測試後 1 條紅：a process group id now held by another user is not our merge |
+| M | `probe()` 的第四個答案 `unknown` 改成「已死」（第二輪 N-2 的方向） | 1 條紅：a process group nobody can decide about blocks the answer |
+| N | 在呼叫端把 `unknown` 的 group 當成可以收斂 | 1 條紅：a process group nobody can decide about blocks the answer |
+
+**突變 I 第一次全綠，這是本輪最重要的發現，照規定當成發現回報。** 那條測試用一個 64 字元十六進位字串
+當「錯誤的 token」，而 `MERGE_APPROVAL_TOKEN_PATTERN` 是 43 個 base64url 字元——**形狀就不對，
+在到達那個閘門之前就被拒了**，所以整條測試從頭到尾沒有碰過它宣稱在測的東西。
+把 token 改成正確形狀（`"A".repeat(43)`）之後，同一個突變讓它變紅（`pass=56 fail=1`）。
+與 [[PITFALLS]] #97 同形：突變測試告訴你的不是「測試有沒有效」，而是**測試實際上在測什麼**。
+
+**突變 L 全綠，是本輪第二項發現，而且是主代理設計的突變抓到的，不是我的。** `probe()` 對 `EPERM` 的
+判讀（「這個 pid 存在但屬於別人，所以不是我們的 merge」）是本輪的核心安全決定之一——它決定「別人回收的
+pid」會不會讓一個已完成的 promotion 永遠無法收斂——而**我的十一個突變沒有一個碰到它**，
+第二輪審查員的 N-2 突變往相反方向打時**當時也是全綠**。也就是說這個分支**兩個方向都沒有任何測試在看**。
+與突變 I 同類：測試從沒到達它宣稱在測的地方。補上兩條測試：
+- **EPERM（真實）**：在執行期從 `ps` 找出一個屬於別的 uid、且 `kill(pid,0)` 確實回 `EPERM` 的 pid
+  （本機量到 211 個），先斷言這個前提成立，再把它寫進紀錄的 `mergePgid`，斷言紀錄**不再等待**它。
+  找不到這種 pid（例如以 root 執行）時測試**大聲失敗**，不靜靜通過。
+- **`unknown`（受限）**：POSIX 上 `kill(pid, 0)` 帶合法正整數只會回 `ESRCH` 或 `EPERM`，
+  所以第四個答案**在公開介面上不可達**。測試因此把全域 `process.kill`**只針對那一個 pid** 換掉
+  ——那正是模組實際呼叫的函式，分支真的被執行。**它證明的是分類與釋放路徑，不證明真實作業系統會產生
+  該錯誤**，這個界線寫在測試裡而不是含糊帶過。
+
+**`EPERM` 判成「不是我們的」是刻意的，不是漏判。** N-2 那個方向（非 `ESRCH` 一律當已死）現在有 M／N
+兩個突變守著 `unknown`；而 `EPERM` 本身被判為「已死」是**本輪的修正內容**（身分論證：這次 promotion 的
+merge 以 Owner 身分執行，一個屬於別人的 pid 不可能是它），由突變 L 反方向守著。
+
+**跑過的樹。** A–H 第一次是在加入 J／K 之前跑的，之後**在當時的最終樹上整批重跑一次**，每一個仍然
+變紅（A/B/E/F/G/H 各 `pass=58 fail=1`、C `pass=56 fail=3`、D `pass=53 fail=6`——D 多出來的一條是新加的
+owner-pid 測試）；I/J/K 在同一棵樹上跑（各 `fail=1`），基準線 `pass=59 fail=0`。
+L/M/N 是在**加入那兩條新測試之後**的樹上跑的，各 `pass=60 fail=1`，基準線 `pass=61 fail=0`。
+A–K 與 L/M/N 之間唯一的差異是那兩條新測試，它們只增加覆蓋、不改任何產品程式碼。
 
 ### 可接受的殘餘風險（連同「何時失效」一起列，未列出的不得事後補認）
 
@@ -441,6 +559,10 @@ approval 綁定，在 merge 前一刻對 live main **不節流**地重驗。
 | P0-2（Writer apply-back 仍是 `window.prompt`）不在 5-5 範圍 | 那是另一條寫回路徑，與 candidate promotion 不同機制 | **9/1 之前必須有結論**：要嘛做，要嘛明文記為不做 |
 | **一次促進失敗（hook 逾時、hook 非零退出、崩潰）可以把 main 留在半套用狀態，而清乾淨它是 Owner 的手動工作。** 產品不會替 Owner 動手，只會逐項具名並提供一行可複製的指令 | 這是刻意的：實測 C 證明半套用的 index 與 Owner 自己 stage 的工作在位元層級無法區分，`git clean` 更會刪掉未追蹤與 ignored 檔案（[[PITFALLS]] #94）。自動清理的期望值是負的 | **若 5-6 提供 rollback 介面即失效**——屆時必須是 preview-first、指紋綁定、single-use approval，且仍不得使用 `git clean` 的任何形式 |
 | **`needs-manual-review` 沒有「Owner 按一下就結案」的按鈕**；它只能藉由 Owner 真的把 main 復原（或那次 merge 真的完成）而在下一次讀取時自行收斂 | 這正是「唯讀 reconciliation」的必然結果：能結案的唯一證據是重新觀察到的指紋，不是一個宣告。第一輪的缺陷不是「沒有按鈕」，而是**寫死之後永不再觀察**，那已修復並有測試（見下） | **若第二輪接上 GUI 出口**，必須同時提供「重新觀察」的顯式動作與逐項差異的畫面；在那之前 Owner 的路徑是 CLI／API 的 `promotions()` |
+| **attributes 閘門不宣稱完備。** 兩半合起來仍看不到一種形狀：一份**全域** attributes 檔，其 pattern 既不匹配本 repo 任何 tracked／ignored 路徑，也不匹配 `ATTRIBUTES_PROBE_PATHS` 那份代表性清單 | 這種規則按定義不會套用到本 repo 現有的任何檔案；要生效必須同時有人在 candidate 內新增一個匹配它的新路徑。而 `filter.*.clean/smudge` 的**設定**本身仍是獨立的拒絕條件，那才是 LFS 之類的實際形狀 | **若 promotion 開始接受會新增任意副檔名的 candidate 而不逐一詢問 git**，或若代表性清單停止跟著實務更新，即失效。正確的下一步是把 candidate 即將寫入的**確切路徑**也餵給 `check-attr` |
+| **`#upgrade` 的 `from === 1` / `from === 3` 分支對含 completed candidate 的舊庫是假支援**：加表本身成功，但 registry 隨後在讀取層以 `CANDIDATE_COMPLETION_PREVIEW_INVALID` 開不起來 | 這是 `a75e904` 引入的、不是 5-5 造成的，且 v1／v3 都是**未發布**的內部版本；Owner 目前的正式 DB 是 v4→v5 路徑，該路徑有真實資料庫的回歸測試 | **若任何 v1／v3 資料庫需要真的被打開即失效**——屆時必須是真正的 completion 升級，或至少一個具名的 fail-loud 錯誤碼取代目前的通用解析失敗。第二輪已把它記為必須具名；本輪**未實作**，維持列在此處 |
+| **每一次 promotion 會在 owner-only data directory 留下一份 git trace 檔案（`promotion-traces/<id>.jsonl`），產品不刪除它。** 檔案內含這次執行過的 hook argv，也就是 Owner 自己 repo 內的指令；`GIT_TRACE2_EVENT` 的路徑同時會出現在 hook 的環境變數裡 | 它是「哪些 hook 真的跑過、退出碼是多少」的**唯一觀察來源**，而且崩潰後仍可讀——刪掉它就等於把第 5 項的事實斷言換回常數。目錄是 0700，hook 本來就以 Owner 身分執行、看得到的東西不比它自己多 | **若 promotion 變成高頻操作即失效**（磁碟成長無上限）；屆時需要有界保留策略，且刪除必須走本專案的兩段式刪除規則 |
+| **標準第 7 項的「期間偵測」目前是事後偵測**（見上方裁決請求），未取得 Owner 裁決前**不算已接受** | `authorizedMergeCommit` 的雙親判準使外部推進不可能被誤記為 applied，且差異逐項具名 | 若 promotion 改為控制面分步執行，或開放多 candidate 併發，立即失效 |
 
 **已從殘餘風險移除、改列為必修**：
 
@@ -533,7 +655,7 @@ approval 綁定，在 merge 前一刻對 live main **不節流**地重驗。
 | Candidate mutation request idempotency | 已實作／synthetic 已驗證；live 待驗收 | `candidate_start`／`candidate_checkpoint`／`candidate_complete` 均要求 stable UUID `clientRequestId`。Registry schema v3 的 `candidate_requests` **以 `client_request_id` 單欄為主鍵**：seat 身分刻意不入 key，因為 presence lease 逾時後重連會重鑄 display name（`codex1`→`codex2`），而那正是本 ledger 要存活的故障；若把它放進 key，重連後的重試會鑄出第二個 candidate。`actor` 保留供稽核。Replay 仍要求 operation、room 與 input digest 三者完全相同，因此重用 key 只可能取回同一個邏輯請求；不同則回 `CANDIDATE_REQUEST_IDEMPOTENCY_CONFLICT` 且不執行任何 mutation。reserve 時即鑄造 taskId／candidateId／checkpointId／completionId 並持久化；replay 與 crash 後的收斂**一律從 durable state 重建答案**，receipt 只是固定大小標記，故大型 completion 不可能撐破 receipt 上限。checkpoint ref 建立採「已存在且指向同一 head 即採納」，避免中斷留下的孤兒 ref 讓同一把 key 永久失敗，指向不同 commit 才回 `CANDIDATE_CHECKPOINT_REF_CONFLICT`。**同一程序內的併發以記憶體內精確鎖處理**：同一把 key 同時只允許一個執行中，併發呼叫回 `CANDIDATE_REQUEST_IN_FLIGHT`（另有 `CANDIDATE_REQUEST_RECOVERING` 表示先前嘗試留下半建立的 candidate：該列由 `CREATING_RECOVERY_GRACE_MS` 的 wall clock **與** 保留的 `owner_pid` liveness 共同決定——擁有者仍存活即持續守護，可證明已死則交由既有 worktree 證據解析，**且不寫入帳本**，因此同一把 key 的重試仍能收斂而非被迫鑄新 key；liveness 判準的不確定性見 [[THREAT_MODEL]] F20）；**跨 OS process** 則由 reservation 的不透明 `owner_token` 擋下——採用既有保留時會重鑄該 token，原建立者中止時的 discard CAS 因此不再匹配，無法刪除他人正在使用的保留。token 刻意不從時鐘推導（時間戳在同一毫秒內不會改變，曾因此讓保護在窄窗內失效），且**每一個對 `candidate_requests` 的寫入都必須帶 token**——這是結構性不變式而非逐呼叫點檢查，因為先前只有 discard 帶 token、settle 沒有，陳舊席位得以覆寫現任持有者的判決並讓一個邏輯請求產出兩份 durable 成果；schema 因此升至 v3，v2→v3 直接重建這張輔助表（僅使升級當下在途的 key 停止重播，不觸碰任何權威資料）；`succeeded` 為終局狀態，輸家無法覆寫贏家的判決（內部不變式，非對外狀態碼）；`start` 的 replay 不會回傳已離開 `active` 的 task，改回 `CANDIDATE_REQUEST_TASK_NO_LONGER_ACTIVE`，避免把已完成甚至已合併的 candidate 當成新 start 交還；已記錄 `failed` 的 key 回 `CANDIDATE_REQUEST_FAILED_RETRY_WITH_NEW_KEY`，並保證換新 key 有前進路徑。**本次呼叫自己建立、且尚未產生任何 durable artifact 就中止的嘗試會刪除該保留**。採用他人保留的嘗試即使沒產生成果也不刪除（保留可能已擁有 candidate row、worktree 或 ref），因此**採用路徑的中止仍會留下 `pending` 列**；ref 建立失敗**不再一律記為 `failed`**：只有 allowlist `DETERMINATE_REQUEST_FAILURES` 內的確定性錯誤碼才終局化，暫時性失敗（權限瞬斷、spawn 失敗、SQLite 錯誤、刻意模糊的 `CANDIDATE_GIT_COMMAND_FAILED`）讓該列維持 `pending` 以便同一把 key 收斂。已用真實失敗驗證（`chmod 500 .git/refs`、`PATH=""`、`chmod 500 .git/worktrees`、以及**時鐘倒退**打在啟用那一刻導致 worktree 已建好卻被判 failed），每一條都先在修復前的基準確認會失敗，且都斷言「環境恢復後同一把 key 仍能成功」。room id 在寫入 request row 前即以 ROOM_PATTERN 驗證，未知或跨房間 taskId 在 reserve 前即被 `#assertScoped` 擋下，寫入嚴格度不低於讀取。**`candidate_requests` 刻意不納入開啟時的 `#verify()`**：它是輔助重試帳本，`candidates`／`candidate_checkpoints` 才是權威記錄，一列不可讀不得讓 durable 資料整體無法開啟；每列改於讀取時以 row-hash 驗證，壞列只毒化自己那把 key。v1 資料庫以純加表方式升級，既有 row 與其 hash 不變。孤兒 recovery ref 可由 `orphanRecoveryRefs()` 唯讀列出且**不自行刪除**（刪 ref 屬破壞性 Git 操作，需 scoped approval），現已有唯讀 CLI 出口 `orchestrator candidates orphan-refs <workspace>`：只列不刪（刪 ref 屬破壞性 Git 操作，需 scoped approval），路徑過 `workspaces.assertAllowed()`，輸出只含 ref 名、commit id、task id 與孤兒理由，掃描達上限會標示。帳本無 TTL 亦無 prune，僅由 `inventory()` 的 `requests`／`requestsPending` 曝露成長。`test/candidate-registry.test.ts`、`test/collab-mcp.test.ts`、`test/collaboration-service.test.ts` |
 | Snapshot-bound approval | 已實作（後端）／synthetic 已驗證；頁內 dialog 與 live 待驗收 | `main_merge_preview` 由 live state 重算整份 snapshot 且**不寫入任何東西**（無 row、無 ref、無 worktree）；`main_merge_request` 以 stable UUID `clientRequestId` 建立 `requested` 記錄，**要求不等於核准**——它不含 token、不授權任何事。核准只能由 owner 介面經 `POST /api/rooms/merge-approvals/approve` 產生，需精確短語 `MERGE INTO MAIN` 與 dialog 實際顯示的 `previewDigest`。approval 至少綁 `taskId`／`completionId`／`roomId`／`mainPath`／`mainBranch`／`candidatePath`／`baseMainHead`／`candidateHead`／`mainHead`／main dirty 與 ignored fingerprint／`recoveryRef`／`previewDigest`；**綁定在建立、核准與消耗三個時點各驗一次**，任一值改變即以 `MAIN_MERGE_APPROVAL_BINDING_CHANGED:<改變的欄位名>` 拒絕並把該 approval 轉為終局 `invalidated`，不靜默重算。single-use 由 `state`＋`row_hash` 的 compare-and-set 保證：兩個並行消耗只有一個成功，輸家得到 `MAIN_MERGE_APPROVAL_ALREADY_CONSUMED`；token 只在 `approved` 期間以 SHA-256 存在，離開該狀態即清除。短效：request 15 分鐘、grant 5 分鐘，逾時記為 `expired` 並拒絕。截斷（`filesTruncated`／`submodulesTruncated`／`mergeConflictsTruncated`）與模擬出的衝突都使 preview 不可核准，**寫入路徑與讀取路徑都擋**。拒絕、失效與逾時皆不執行任何 Git 指令，candidate、checkpoint 與 recovery ref 逐位元不變，owner 可重新 preview 再問一次。approval 只授權 `merge-candidate-into-main`，消耗時帶其他 action 一律 `MAIN_MERGE_APPROVAL_ACTION_NOT_GRANTED`，並在授權物件內明列 `notAuthorized`（push／publish／deploy／delete／cleanup…）。**本階段不寫入 canonical main**：`consumeMainMerge` 只做驗證與狀態轉移，沒有任何 MCP／HTTP 出口，promotion 屬 5-5。schema v4 新增獨立 `candidate_merge_approvals` 表（row-hash 完整性、scalar 與 preview 互為冗餘校驗、`state IN ('requested','approved')` 的 partial unique index 保證每個 task 同時只有一個未決問題），未動 v3 的 `candidate_requests` 帳本。`test/merge-approval.test.ts`、`test/merge-approval-web.test.ts`、`test/collab-mcp.test.ts`、`test/candidate-registry.test.ts` |
 | Merge approval drift invalidation | 已實作（後端）／synthetic 已驗證；GUI/live 待驗收 | 每一條 approval 讀取路徑（`candidate_status`、`GET /api/rooms/merge-approvals`、`GET /api/rooms/merge-approvals/inspect`，以及 `main_merge_request` 重新提出請求時）在回報那一列之前先對 live state 重驗綁定，共用單一 `#observeMergeApproval`；漂移者在被回報前即持久轉為終局 `invalidated`，`refusal` 帶 5-3 同一套欄位名稱與 `drift-detected-on:<介面>`。**已核准後才漂移**的 approval 逐一驗證九個綁定值（`mainHead`／`mainBranch`／`mainDirtyFingerprint`／`mainIgnoredFingerprint`／`candidateHead`／`candidateWorktreeClean`／`recoveryRef`／`previewDigest`／`candidateStatus`）× 三條讀取路徑皆顯示失效並具名，且其餘兩條路徑立即一致；`token_hash` 於失效時清除。失效為 compare-and-set，三條路徑並行觀察同一次漂移只產生一筆事件，輸家改讀 store 現況回報。durable 那一列保留 `decided_by`，audit 鏈另記 `ownerHadGranted`／`observedOn`／`previousState`，因此「Owner 核准過但漂移作廢」與「從未有人核准」可區分；Room ledger（公開面）只列改變的欄位名，不含路徑、approval id 或 token，chain 與 audit chain 皆 verify 通過。失效後 `candidates`／`candidate_checkpoints` 兩張表、`refs/**`、main HEAD／tree／status 與 candidate HEAD／status 逐位元不變，recovery ref 仍指向該 candidate head，且可立即重新 preview 並提出新請求（`main_merge_request` 本身即為觀察路徑，漂移者不會佔住每個 task 唯一的未決名額）。**不誤殺**：ignored 檔案內容變動、無 `.gitattributes` 綁定的 merge driver、無關 branch／tag、mtime-only touch 後的 `update-index --refresh` 四者累加後 approval 仍為 `approved`、`bindingCheck` 仍為 `{checked:true,valid:true,changed:[]}`，且仍可被消耗。**暫時性失敗不燒核准**：綁定檢查逐欄位獨立探測，讀到且值不同才進 `changed`，讀不到一律進 `unverified`，任何例外都不會轉成「已改變」。`changed` 為空而 `unverified` 非空時，approval **不**失效、`token_hash` **不**清除、**不寫任何列**，只回 `{checked:false, valid:false, changed:[], unverified:[…], unavailable:"MAIN_MERGE_APPROVAL_BINDING_CHECK_FAILED"}`；環境恢復後下一次觀察回到 `{checked:true, valid:true, changed:[]}` 且**仍可成功 consume**。`grant`／`consume` 以獨立錯誤型別 `MergeApprovalBindingUnverifiableError`（`MAIN_MERGE_APPROVAL_BINDING_CHECK_FAILED:<欄位名>`）拒絕該次動作，但不轉為任何終局狀態（requested 仍 requested、approved 仍 approved）。已用**真實** Git／檔案系統失敗驗證三種形狀：main `.git` `chmod 000`、candidate worktree 改名離開再放回、PATH 內無 git 造成 spawn 失敗；三者皆斷言恢復後仍可 consume。反向亦驗證：真的刪掉 recovery ref 仍算漂移（`rev-parse --verify --quiet` exit 1 = ref 不存在，其餘 = 讀不到才拋錯）。同時「有欄位變了」又「有欄位讀不到」時仍以漂移處理，但 `changed` 只列實際比對過的那個。**紀錄不寫死事實斷言**：audit detail 的 `candidateRetained`／`checkpointsRetained`／`recoveryRefRetained` 三個常數已移除（先刪 recovery ref 再觀察，舊版仍宣稱「復原點完整保留」），改為只描述本次動作的 `deletedByThisInvalidation: "nothing"`，帳本文案同步改為「這次失效沒有刪除 candidate、checkpoint 或復原點」。逾時與終局列不重驗。**未動 schema**（v4 既有語意已足），v1→v4／v3→v4 升級與 v2 拒絕不變；未動 `candidate_requests`、`#mergePreview` 或 `#diff`；本階段仍不寫入 canonical main。`test/merge-approval-drift.test.ts`、`test/merge-approval.test.ts`、`test/merge-approval-web.test.ts` |
-| Promotion/recovery（Phase 5-5，第一輪：核心路徑，**尚無 HTTP／MCP／GUI 出口**） | 核心已實作／synthetic＋真實 git 已驗證；**GUI 與 live 驗收未做**  | `promoteMainMerge()` 是全產品唯一寫入 canonical main 的路徑，順序固定為「驗證綁定 → 寫入 durable `applying` 意圖紀錄 → 消耗核准 → `git merge --no-ff --no-edit` → 寫入終局結果」。意圖紀錄（schema v5 新表 `candidate_merge_promotions`，純加表升級，v1/v3/v4 皆不動既有列與 row hash）在任何 Git 寫入前就含 pre-HEAD、pre-index 指紋（`ls-files --stage`，非 `write-tree`，因為後者會寫物件並可能取 `index.lock`）、tracked 工作樹指紋、**未追蹤與 ignored 檔案的路徑＋內容指紋**、stash、reflog 與將執行的 hook 清單＋SHA-256，另存 `owner_pid` 以區分「執行中」與「已崩潰」，並在 merge 子程序被 spawn 的當下把它的 **pgid** 寫進同一筆紀錄——`detached` 讓 `git merge` 自成 process group，`kill -9` orchestrator **不會**停下它，它會繼續把 main 寫完（已實測）。**崩潰後的 reconciliation 一律唯讀**：不 `reset`／`checkout`／`merge --abort`／`clean`／`stash`／改 `.git/config`／刪 `*.lock`，只讀取、逐項比對指紋、具名列出每一個不同的面向。**每一次讀取都重新觀察**（不是寫死一次就凍結）：pgid 仍存在時一律回報「仍在寫入」而不下任何結論；孤兒 merge 跑完之後下一次讀取即回報 `AUTHORIZED_MERGE_COMMIT_OBSERVED_WITH_MERGE_STATE_LEFT_BEHIND`（HEAD 已是被授權的 merge commit，但 git 仍留著 `MERGE_HEAD`），Owner 清掉具名的殘留後再讀即為 `applied`；Owner 自己把 main 復原後再讀即為 `rolled-back`。**復原指令是觀察來的，不是寫死的**：一旦觀察到被授權的 merge commit 就改為唯讀的 `git -C <main> show --stat <observed head>`（`recoveryKind: inspect-observed-merge`），只有在沒觀察到它時才提供 `git -C <main> reset --hard <pre-HEAD>`（`recoveryKind: reset-to-pre-promotion`）——否則那行指令會叫 Owner 丟掉一次真的成功了的 merge。`merged` 為終局：成功後 candidate 轉 `merged`，再次 preview／request 一律 `MAIN_MERGE_CANDIDATE_ALREADY_MERGED`。同一 approval 的併發 promotion 由 `approval_id` UNIQUE 索引序列化，輸家在跑任何 Git 指令前就被擋下。**已用真實 git 實測**（`test/merge-promotion.test.ts`，第二輪為 39 條）：hook 真的被執行（hook 寫檔、斷言檔案存在）而 preview 一次都沒執行；`pre-merge-commit` 非零退出後 main 的 HEAD／index／工作樹／未追蹤／ignored／stash／reflog 逐項回到 pre-op 指紋且移除外部條件後可重新成功；`post-merge` 非零退出時 merge 已完成，紀錄照實記為 `applied` 而非失敗；會掛住的 hook 被逾時終止且 **hook 自己的 pid 被斷言已消失**；main 有 ignored 檔案位於 merge 會寫入的路徑時**逐一具名列出並在核准前拒絕**（實測 git 會靜默覆蓋、exit 0、事後仍報工作樹乾淨）；十七種「不乾淨」條件各有一條拒絕測試（tracked 變更、未追蹤檔案、`skip-worktree`、sparse-checkout 的 `true`／`1`／`yes`／`on` **四種寫法**、`MERGE_HEAD`、`index.lock`、`.gitmodules`、**index 內 160000 gitlink 且完全沒有 `.gitmodules`**、LFS/clean-smudge filter、以及 `filter=` 出現在 **root／巢狀／被 ignore 的 `.gitattributes`／`.git/info/attributes`／`core.attributesFile`** 五種位置）；`.git` 唯讀與 merge driver 失敗兩種真實失敗各驗一次回滾與「恢復後重新發起成功」；核准後才出現的 `index.lock`／`MERGE_HEAD` **拒絕但不消耗核准**，清除後同一把 token 仍可成功；**真實 `kill -9` 打在 hook 執行中**，由**另一個新 OS 程序**重開 registry，回報 `needs-manual-review`、具名列出 `index`／`trackedWorkingTree` 等差異、給出可複製的復原指令、不自行重試也不自行回滾，candidate 與 recovery ref 完好。hook 環境與 ignored 內容指紋納入 `previewDigest`（因此納入綁定），消耗前再比對一次；**live 的 `.git` 狀態刻意不納入 digest**——實測發現納入會讓別的程序短暫持有的 `index.lock` 永久燒掉 Owner 的核准（PITFALLS #85 同形）。第一輪三次、第二輪九次突變測試證明測試不是空的（每一次都實際跑過整份檔案並附輸出）：拿掉 ignored 內容雜湊、拿掉 authorize 端 gate、拿掉 hook 綁定；以及在 reconciliation 插入 `merge --abort`、移除 consume 端的未結促進 gate、把「快照早於 gate」折回完整性失敗、不查 merge pgid、把 `needs-manual-review` 改回凍結、把復原指令改回永遠 `reset --hard`、`.gitattributes` 只讀 root、sparse 用字串比對、submodule 只看 `.gitmodules`——**九個突變全部讓對應測試變紅**。 | **未做，需第二輪**：HTTP／MCP／GUI 出口（因此 `promoteMainMerge` 目前只有測試會呼叫）、audit／room ledger 的 promotion 紀錄、v2 標準第 1／2 項要求的四個 kill 窗中另外三個（意圖紀錄寫入中、核准消耗的 SQLite 寫入中、終局結果寫入中）、第 7 項的「promotion 期間外部程序推進 main」測試、第 8 項取消語意的 UI、第 9 項在拋棄式 repo 上的 Owner 瀏覽器驗收（成功一次＋真實失敗回滾一次）與涵蓋伺服器端函式的 gate digest |
+| Promotion/recovery（Phase 5-5，第三輪：核心路徑＋audit／ledger，**仍無 HTTP／MCP／GUI 出口**） | 核心已實作／synthetic＋真實 git 已驗證；**GUI 與 live 驗收未做**  | `promoteMainMerge()` 是全產品唯一寫入 canonical main 的路徑，順序固定為「驗證綁定 → 寫入 durable `applying` 意圖紀錄 → 消耗核准 → `git merge --no-ff --no-edit` → 寫入終局結果」。意圖紀錄（schema v5 新表 `candidate_merge_promotions`，純加表升級，v1/v3/v4 皆不動既有列與 row hash）在任何 Git 寫入前就含 pre-HEAD、pre-index 指紋（`ls-files --stage`，非 `write-tree`，因為後者會寫物件並可能取 `index.lock`）、tracked 工作樹指紋、**未追蹤與 ignored 檔案的路徑＋內容指紋**、stash、reflog 與將執行的 hook 清單＋SHA-256，另存 `owner_pid` 以區分「執行中」與「已崩潰」，並在 merge 子程序被 spawn 的當下把它的 **pgid** 寫進同一筆紀錄——`detached` 讓 `git merge` 自成 process group，`kill -9` orchestrator **不會**停下它，它會繼續把 main 寫完（已實測）。**崩潰後的 reconciliation 一律唯讀**：不 `reset`／`checkout`／`merge --abort`／`clean`／`stash`／改 `.git/config`／刪 `*.lock`，只讀取、逐項比對指紋、具名列出每一個不同的面向。**每一次讀取都重新觀察**（不是寫死一次就凍結）：pgid 仍存在時一律回報「仍在寫入」而不下任何結論；孤兒 merge 跑完之後下一次讀取即回報 `AUTHORIZED_MERGE_COMMIT_OBSERVED_WITH_MERGE_STATE_LEFT_BEHIND`（HEAD 已是被授權的 merge commit，但 git 仍留著 `MERGE_HEAD`），Owner 清掉具名的殘留後再讀即為 `applied`；Owner 自己把 main 復原後再讀即為 `rolled-back`。**復原指令是觀察來的，不是寫死的**：一旦觀察到被授權的 merge commit 就改為唯讀的 `git -C <main> show --stat <observed head>`（`recoveryKind: inspect-observed-merge`），只有在沒觀察到它時才提供 `git -C <main> reset --hard <pre-HEAD>`（`recoveryKind: reset-to-pre-promotion`）——否則那行指令會叫 Owner 丟掉一次真的成功了的 merge。`merged` 為終局：成功後 candidate 轉 `merged`，再次 preview／request 一律 `MAIN_MERGE_CANDIDATE_ALREADY_MERGED`。同一 approval 的併發 promotion 由 `approval_id` UNIQUE 索引序列化，輸家在跑任何 Git 指令前就被擋下。**已用真實 git 實測**（`test/merge-promotion.test.ts`，第二輪為 39 條）：hook 真的被執行（hook 寫檔、斷言檔案存在）而 preview 一次都沒執行；`pre-merge-commit` 非零退出後 main 的 HEAD／index／工作樹／未追蹤／ignored／stash／reflog 逐項回到 pre-op 指紋且移除外部條件後可重新成功；`post-merge` 非零退出時 merge 已完成，紀錄照實記為 `applied` 而非失敗；會掛住的 hook 被逾時終止且 **hook 自己的 pid 被斷言已消失**；main 有 ignored 檔案位於 merge 會寫入的路徑時**逐一具名列出並在核准前拒絕**（實測 git 會靜默覆蓋、exit 0、事後仍報工作樹乾淨）；十七種「不乾淨」條件各有一條拒絕測試（tracked 變更、未追蹤檔案、`skip-worktree`、sparse-checkout 的 `true`／`1`／`yes`／`on` **四種寫法**、`MERGE_HEAD`、`index.lock`、`.gitmodules`、**index 內 160000 gitlink 且完全沒有 `.gitmodules`**、LFS/clean-smudge filter、以及 `filter=` 出現在 **root／巢狀／被 ignore 的 `.gitattributes`／`.git/info/attributes`／`core.attributesFile`** 五種位置）；`.git` 唯讀與 merge driver 失敗兩種真實失敗各驗一次回滾與「恢復後重新發起成功」；核准後才出現的 `index.lock`／`MERGE_HEAD` **拒絕但不消耗核准**，清除後同一把 token 仍可成功；**真實 `kill -9` 打在 hook 執行中**，由**另一個新 OS 程序**重開 registry，回報 `needs-manual-review`、具名列出 `index`／`trackedWorkingTree` 等差異、給出可複製的復原指令、不自行重試也不自行回滾，candidate 與 recovery ref 完好。hook 環境與 ignored 內容指紋納入 `previewDigest`（因此納入綁定），消耗前再比對一次；**live 的 `.git` 狀態刻意不納入 digest**——實測發現納入會讓別的程序短暫持有的 `index.lock` 永久燒掉 Owner 的核准（PITFALLS #85 同形）。**第三輪新增**（`test/merge-promotion.test.ts` 57 條）：process group 的判準改為 group **leader**＋開機時刻身分，背景殘留的孫程序具名回報而不再阻擋收斂，且新增 Owner 側的 `abandonMergeProcessGroup()` 出路；attributes 閘門改為**直接問 `git check-attr`**（列舉保留為第二半）；promotion 的 audit 與 room ledger 兩條路徑都留痕，**hook 檔名與退出碼由 `GIT_TRACE2_EVENT` 觀察而來**；另外三個 kill 窗、外部程序推進 main、preview 節流、五個 leftover 拒絕條件（拒絕表 17 → 22 條）各補測試。第一輪三次、第二輪九次、第三輪九次突變測試證明測試不是空的（每一次都實際跑過整份檔案並附輸出）：拿掉 ignored 內容雜湊、拿掉 authorize 端 gate、拿掉 hook 綁定；以及在 reconciliation 插入 `merge --abort`、移除 consume 端的未結促進 gate、把「快照早於 gate」折回完整性失敗、不查 merge pgid、把 `needs-manual-review` 改回凍結、把復原指令改回永遠 `reset --hard`、`.gitattributes` 只讀 root、sparse 用字串比對、submodule 只看 `.gitmodules`——**九個突變全部讓對應測試變紅**。 | **仍未做**：HTTP／MCP／GUI 出口（因此 `promoteMainMerge` 與 `abandonMergeProcessGroup` 目前只有測試會呼叫）、第 8 項取消語意的 UI、第 9 項在拋棄式 repo 上的 Owner 瀏覽器驗收（成功一次＋真實失敗回滾一次）與涵蓋伺服器端函式的 gate digest。**已補（第三輪）**：audit／room ledger 的 promotion 紀錄（含觀察來的 hook 檔名與退出碼）、另外三個 kill 窗、第 7 項的外部程序推進 main 測試（結論與裁決請求見第三輪修正紀錄）、preview 節流測試 |
 | GUI Managed 隔離 | 待實作／待驗證 | Managed policy 不會改變已加入 Native terminal 的 capability |
 
 本表區分「程式已實作且有本機自動證據」與「需要 owner 額度、外部 runtime 或發布決策」。
@@ -586,6 +708,10 @@ approval 綁定，在 merge 前一刻對 live main **不節流**地重驗。
 
 ## 目前自動證據
 
+- 576/576 deterministic tests＋1/1 fuzz smoke（2026-08-06，Phase 5-5 **第二輪**對抗式審查修正後，
+  在靜止的工作樹上 `npm run check` 一次跑完，**exit 0**；跑了兩次，line 95.42／95.43、
+  branch 87.62／87.61、functions 96.99／97.08，gate 為 90／85／90，**兩次都 exit 0**）。**被主張的只有 exit code**，見下方關於數字抖動的說明。
+  第二輪之後尚未重跑乾淨 clone；下一列的 clone 數字對應的是第一輪修正後的那棵樹。
 - 556/556 deterministic tests＋1/1 fuzz smoke（2026-08-06，Phase 5-5 第一輪對抗式審查修正後，
   `npm run check` 一次跑完，**exit 0**）。
 - 最新最終 gate（**以乾淨 clone 為準**）：line 95.26%、branch 87.71%、functions 97.03%；
