@@ -145,3 +145,48 @@ test("a secret carried in a configuration KEY is never disclosed, and keys that 
   await execFileAsync("git", ["config", "--local", `credential.${url}.helper`, "cache"], { cwd: root });
   assert.notEqual((await new GitBroker().restorePoint(root)).hooks.configDigest, before);
 });
+
+/*
+ * FINDING F-2 (sixth round). The round that added `redactConfigSubsection` wired it to `programs`
+ * and left `drivers` and `filters` alone — two lists built in the same function, three lines apart,
+ * from the same `git config --list` output. Measured with real `git config` writes: the key of
+ * `merge.<url>.driver` and of `filter.<url>.clean` was rendered verbatim on the approval screen AND
+ * written verbatim into `preview_json` in SQLite, while the delivery note for that round claimed the
+ * secret reached neither. [[PITFALLS]] #108, recurring inside the round that wrote it down.
+ *
+ * The keys here are deliberately NOT `credential.*`: the existing test only exercises the first arm
+ * of the redaction, and a mutation that deleted the second arm stayed green because nothing reached
+ * it. These reach it, because the only thing marking them is the URL shape.
+ */
+test("a secret in a merge driver or filter KEY is not disclosed, and the command it runs still is", async (t) => {
+  const root = await repository();
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const driverSecret = ["ghp", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"].join("_");
+  const filterSecret = ["ghp", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"].join("_");
+  const driverUrl = `https://u:${driverSecret}@github.com`;
+  const filterUrl = `https://x-access-token:${filterSecret}@github.com`;
+  await execFileAsync("git", ["config", "--local", `merge.${driverUrl}.driver`, "true %O %A %B"], { cwd: root });
+  await execFileAsync("git", ["config", "--local", `filter.${filterUrl}.clean`, "cat"], { cwd: root });
+  // Subsections that are names the owner chose stay legible in both lists.
+  await execFileAsync("git", ["config", "--local", "merge.mine.driver", "true %O %A %B"], { cwd: root });
+  await execFileAsync("git", ["config", "--local", "filter.lfs.clean", "git-lfs clean -- %f"], { cwd: root });
+
+  const restore = await new GitBroker().restorePoint(root);
+  const serialised = JSON.stringify(restore.hooks);
+  assert.ok(!serialised.includes(driverSecret), `a merge driver key leaked a secret: ${serialised}`);
+  assert.ok(!serialised.includes(filterSecret), `a filter key leaked a secret: ${serialised}`);
+  assert.ok(!serialised.includes("x-access-token"), serialised);
+  assert.ok(restore.hooks.drivers.includes("merge.<redacted>.driver=true %O %A %B"), serialised);
+  assert.ok(restore.hooks.filters.includes("filter.<redacted>.clean=cat"), serialised);
+  // The value is still shown, because the value is the command git would run and hiding it would
+  // empty the disclosure of its point. That asymmetry is a stated residual risk, not an oversight.
+  assert.ok(restore.hooks.drivers.includes("merge.mine.driver=true %O %A %B"), serialised);
+  assert.ok(restore.hooks.filters.includes("filter.lfs.clean=git-lfs clean -- %f"), serialised);
+  // Redaction does not narrow the gate: the digest is over git's raw listing, so a value change on
+  // the redacted key is still a binding change.
+  const before = restore.hooks.configDigest;
+  await execFileAsync("git", ["config", "--local", `merge.${driverUrl}.driver`, "false"], { cwd: root });
+  const after = await new GitBroker().restorePoint(root);
+  assert.notEqual(after.hooks.configDigest, before);
+  assert.notEqual(after.hooks.fingerprint, restore.hooks.fingerprint);
+});

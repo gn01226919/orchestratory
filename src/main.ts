@@ -245,13 +245,21 @@ function optionalPid(args: readonly string[], name: string): number {
 /**
  * Renders what each promotion in this project is waiting on, and what would release it.
  *
- * Pure and read-only, like the orphan-ref report beside it. Everything it prints is re-derived by
- * the registry on the read that produced it — the pids, the phrase and the inspect commands are
- * statements about processes alive at that moment, not stored verdicts — so the report is safe to
- * be wrong about the future and useless as a cached answer.
+ * This function is pure. The CALL that produced its input is not, and saying otherwise was a
+ * measured falsehood: `registry.promotions()` re-observes every unsettled record, which is how a
+ * promotion converges after a crash, and converging one WRITES — the authoritative row moves from
+ * `applying` to a settled state, the audit chain gains an entry and the room ledger gains a line.
+ * The review that found this measured it against `orphan-refs` as a control: that command left the
+ * row, the audit count and all three SQLite digests untouched, and this one changed every one of
+ * them. The half re-measured here is the writing itself, in `test/merge-promotion.test.ts`. The
+ * writing is bar item 13 working as specified; the word "read-only" on top of it was the defect.
+ *
+ * Everything printed is re-derived on that read — the pids, the phrase and the inspect commands are
+ * statements about processes alive at that moment, not stored verdicts — so the report is safe to be
+ * wrong about the future and useless as a cached answer.
  *
  * No repository content is echoed: ids, states, pids and read-only `ps` commands only. Nothing here
- * can write, and the commands it prints cannot either.
+ * writes to main, and the commands it prints cannot either.
  */
 export function describePromotions(input: {
   mainPath: string;
@@ -264,7 +272,8 @@ export function describePromotions(input: {
     return `No promotion records for ${input.mainPath}.\n`;
   }
   const lines = [`Promotion records for ${input.mainPath}: ${input.promotions.length}`];
-  lines.push("Read-only. Releasing a record stops it waiting; it never kills a process or writes to main.");
+  lines.push("Listing re-observes each unsettled record and updates it; nothing here writes to main.");
+  lines.push("Releasing a record stops it waiting; it never kills a process either.");
   for (const promotion of input.promotions) {
     lines.push("");
     lines.push(promotion.id);
@@ -282,6 +291,13 @@ export function describePromotions(input: {
           + ` by ${promotion.releasedFromExclusiveMarker.decidedBy}`);
       }
       if (promotion.release) {
+        // An empty list has two very different meanings, and the owner is the one deciding whether
+        // to release a marker over a merge that may be writing. Printing nothing for the second one
+        // would show them the same screen for "nothing is running" and "nobody could find out".
+        if (promotion.release.probeReadable === false) {
+          lines.push("  alive       UNKNOWN — this record's merge group could not be read at all;"
+            + " that is not the same as nothing running");
+        }
         for (const alive of promotion.release.alive) {
           lines.push(`  alive       ${alive.kind} pid ${alive.pid}`);
           lines.push(`              ${alive.inspect}`);

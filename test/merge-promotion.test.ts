@@ -157,6 +157,18 @@ function groupAlive(pgid: number): boolean {
   }
 }
 
+/**
+ * What `ps -g <pgid>` shows, which is the exact read-only command the record hands the owner.
+ *
+ * `groupAlive()` asks the kernel with `kill(pgid, 0)`; this asks the same question the way a human
+ * would, and the difference matters for a precondition ([[PITFALLS]] #106): a test that claims "the
+ * merge is provably still writing" should be able to show the merge.
+ */
+async function psGroup(pgid: number): Promise<string> {
+  const { stdout } = await execFileAsync("ps", ["-o", "pid,ppid,pgid,stat,command", "-g", String(pgid)]);
+  return stdout;
+}
+
 async function waitForGroupExit(pgid: number, attempts = 600): Promise<void> {
   for (let attempt = 0; attempt < attempts && groupAlive(pgid); attempt += 1) await delay(100);
 }
@@ -1471,20 +1483,74 @@ function rewritePromotionRow(path: string, change: (current: {
   const observation = JSON.parse(String(row.observation_json)) as Record<string, unknown>;
   const result = change({ ownerPid: Number(row.owner_pid), observation });
   const ownerPid = result.ownerPid ?? Number(row.owner_pid);
-  const observationJson = JSON.stringify(result.observation ?? observation);
-  const rowHash = createHash("sha256").update(JSON.stringify([
+  const next = result.observation ?? observation;
+  const observationJson = JSON.stringify(next);
+  // The merge group columns are a projection of the observation, exactly as `#writePromotion`
+  // computes them. A helper that left them stale would produce a row the product would call
+  // tampered, and the tests below would then be measuring the helper rather than the product.
+  const pgid = typeof next.mergePgid === "number" && Number.isSafeInteger(next.mergePgid)
+    && next.mergePgid > 1 ? next.mergePgid : null;
+  const group = next.mergeGroup as { bootAtSec?: unknown } | null | undefined;
+  const boot = pgid !== null && typeof group?.bootAtSec === "number"
+    && Number.isSafeInteger(group.bootAtSec) ? group.bootAtSec : null;
+  const base = [
     row.id, row.approval_id, row.task_id, row.room_id, row.main_path, row.main_branch,
     row.candidate_head, row.recovery_ref, row.main_head_before, row.main_head_after,
     row.restore_json, observationJson, row.state, ownerPid, row.started_at_ms,
     row.updated_at_ms,
-  ]), "utf8").digest("hex");
+  ];
+  const rowHash = createHash("sha256").update(JSON.stringify(
+    pgid === null && boot === null ? base : [...base, pgid, boot],
+  ), "utf8").digest("hex");
   assert.equal(
     Number(db.prepare(
-      "UPDATE candidate_merge_promotions SET owner_pid=?,observation_json=?,row_hash=? WHERE id=?",
-    ).run(ownerPid, observationJson, rowHash, String(row.id)).changes),
+      `UPDATE candidate_merge_promotions
+       SET owner_pid=?,observation_json=?,row_hash=?,merge_pgid=?,merge_boot_at_sec=? WHERE id=?`,
+    ).run(ownerPid, observationJson, rowHash, pgid, boot, String(row.id)).changes),
     1,
   );
   db.close();
+}
+
+/**
+ * Damages a promotion row the way corruption actually does — WITHOUT touching the row hash to match.
+ *
+ * The fifth round's probe zeroed `row_hash` and left the payload intact, so every fix it produced was
+ * only ever exercised against a row whose `observation_json` still parsed. Real damage does not pick
+ * fields. This writes the row as given and leaves the hash stale, which is what makes the row
+ * unreadable in the first place.
+ */
+function damagePromotionRow(path: string, change: {
+  observationJson?: string;
+  mergePgid?: number | null;
+  mergeBootAtSec?: number | null;
+}): string {
+  const db = new DatabaseSync(path);
+  const row = db.prepare(
+    "SELECT * FROM candidate_merge_promotions WHERE state='applying' LIMIT 1",
+  ).get() as unknown as Record<string, string | number | null>;
+  const id = String(row.id);
+  const sets: string[] = [];
+  const values: Array<string | number | null> = [];
+  if (change.observationJson !== undefined) {
+    sets.push("observation_json=?");
+    values.push(change.observationJson);
+  }
+  if (change.mergePgid !== undefined) {
+    sets.push("merge_pgid=?");
+    values.push(change.mergePgid);
+  }
+  if (change.mergeBootAtSec !== undefined) {
+    sets.push("merge_boot_at_sec=?");
+    values.push(change.mergeBootAtSec);
+  }
+  sets.push("row_hash=?");
+  values.push("0".repeat(64));
+  assert.equal(Number(db.prepare(
+    `UPDATE candidate_merge_promotions SET ${sets.join(",")} WHERE id=?`,
+  ).run(...values, id).changes), 1);
+  db.close();
+  return id;
 }
 
 /*
@@ -2212,11 +2278,18 @@ test("a process group id now held by another user is not our merge, and does not
  * nor "it is somebody else's" — is the one that must NOT settle: concluding over a group nobody
  * could decide about is publishing a verdict on a repository that may still be being written.
  *
- * On POSIX, `kill(pid, 0)` with a validated positive integer returns only `ESRCH` or `EPERM`, so
- * this branch is unreachable through the public surface. What this test does, therefore, is replace
- * the global `process.kill` for ONE pid — the same function the module calls — so the branch really
- * executes. It proves the classification and the release path, and it does NOT prove anything about
- * a real operating system producing that error; that limit is the reason it is written down here.
+ * The comment that used to be here said this branch was unreachable through the public surface,
+ * because `kill(pid, 0)` with a validated positive integer returns only `ESRCH` or `EPERM` on POSIX.
+ * That was wrong, and the sixth-round review measured it: nothing validated that the recorded number
+ * was a PID, and any value at or above 2^31 makes `process.kill` throw `ERR_INVALID_ARG_TYPE`, which
+ * is neither. The test for that reachable route is "a recorded process group too large to be a pid"
+ * below; it needs no monkey-patching at all.
+ *
+ * This test stays, because it covers a different input: an errno that is neither `ESRCH` nor `EPERM`
+ * on a number that IS a plausible pid. It replaces the global `process.kill` for ONE pid — the same
+ * function the module calls — so the branch really executes. It proves the classification and the
+ * release path, and it does NOT prove anything about a real operating system producing that error;
+ * that limit is the reason it is written down here.
  */
 test("a process group nobody can decide about blocks the answer, and the owner can release it", async (t) => {
   const f = await fixture(t);
@@ -2682,7 +2755,7 @@ test("one project has one promotion applying at a time, and the second is told s
   const db = new DatabaseSync(f.path);
   t.after(() => db.close());
   const row = db.prepare("SELECT * FROM candidate_merge_promotions LIMIT 1").get() as Record<string, unknown>;
-  assert.throws(() => db.prepare("INSERT INTO candidate_merge_promotions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+  assert.throws(() => db.prepare("INSERT INTO candidate_merge_promotions (id,approval_id,task_id,room_id,main_path,main_branch,candidate_head,recovery_ref,main_head_before,main_head_after,restore_json,observation_json,state,owner_pid,started_at_ms,updated_at_ms,row_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
     .run(randomUUID(), randomUUID(), String(row.task_id), String(row.room_id), String(row.main_path),
       String(row.main_branch), String(row.candidate_head), `${String(row.recovery_ref)}-2`,
       String(row.main_head_before), null, String(row.restore_json), String(row.observation_json),
@@ -2728,7 +2801,7 @@ test("a database written before the exclusive marker existed gets it, or is refu
   broken.exec("DROP INDEX candidate_merge_promotions_applying");
   const row = broken.prepare("SELECT * FROM candidate_merge_promotions LIMIT 1").get() as Record<string, unknown>;
   for (const suffix of ["a", "b"]) {
-    broken.prepare("INSERT INTO candidate_merge_promotions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+    broken.prepare("INSERT INTO candidate_merge_promotions (id,approval_id,task_id,room_id,main_path,main_branch,candidate_head,recovery_ref,main_head_before,main_head_after,restore_json,observation_json,state,owner_pid,started_at_ms,updated_at_ms,row_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
       .run(randomUUID(), randomUUID(), String(row.task_id), String(row.room_id), String(row.main_path),
         String(row.main_branch), String(row.candidate_head), `${String(row.recovery_ref)}-${suffix}`,
         String(row.main_head_before), null, String(row.restore_json), String(row.observation_json),
@@ -3628,7 +3701,9 @@ test("the CLI can see what a promotion is waiting on and release it, without kil
   assert.match(report, new RegExp(`ps -o pid,ppid,pgid,stat,lstart,command -g ${pgid}`, "u"));
   assert.match(report, new RegExp(`--pgid ${pgid}`, "u"));
   assert.match(report, /MAY STILL BE WRITING TO MAIN/u);
-  // The listing is read-only in the strongest sense: the record is exactly where it was.
+  // A record that is blocked on a live process is not re-observed at all, so listing leaves this one
+  // exactly where it was. That is narrower than "the listing is read-only", which is what this
+  // comment used to say and what the CLI header used to print — see the F-3 test below.
   assert.equal(readable((await registry.promotions({ roomId: "demo", mainPath: f.source }))[0]).state, "applying");
 
   // The phrase and the number are both required through the CLI too.
@@ -3652,4 +3727,589 @@ test("the CLI can see what a promotion is waiting on and release it, without kil
   assert.equal(
     readable((await registry.promotions({ roomId: "demo", mainPath: f.source }))[0]).pending, undefined,
   );
+});
+
+/*
+ * FINDING F-1 (sixth round). The previous round's fix was only ever measured against a row whose
+ * `row_hash` had been zeroed and whose payload was left intact. Real corruption does not pick
+ * fields. With `observation_json` destroyed as well, `promotionGroupIdentity()` answered `null`,
+ * `mergeGroupState(null)` answered `"none"`, and "none" was read as "no merge is alive": the SHORT
+ * phrase was accepted, `--pgid 999999` was accepted, and the project's exclusive marker was handed
+ * back while `ps -g` still listed the `git merge`, its hook and its `sleep`. [[PITFALLS]] #85 —
+ * "I cannot read this" quietly became "I know, and the news is good".
+ *
+ * Both shapes are exercised: a payload that is not JSON at all, and a payload that is valid JSON
+ * with the group stripped out of it. Then the columns themselves are destroyed, which is the case
+ * where the answer is genuinely unavailable — and the requirement there is not "assume the best" but
+ * "say so and keep asking for the phrase that admits main may be being written".
+ *
+ * The precondition is asserted FIRST and re-asserted at each step ([[PITFALLS]] #106): a refusal is
+ * only evidence if the merge really is alive while it happens.
+ */
+test("a promotion row whose payload is destroyed with its hash still names the merge writing main", async (t) => {
+  const f = await fixture(t);
+  const started = join(f.root, "hook-entered");
+  await hook(f, "pre-merge-commit", `#!/bin/sh\ntouch ${JSON.stringify(started)}\nsleep 900\n`);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const beforeHead = await head(f.source);
+
+  const child = await promoteInChildAt(f, approval, token);
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  for (let attempt = 0; attempt < 300 && !await exists(started); attempt += 1) await delay(100);
+  child.kill("SIGKILL");
+  await waitForExit(child);
+
+  const withPgid = new CandidateRegistry(f.data);
+  const pgid = readable((await withPgid.promotions({ roomId: "demo", mainPath: f.source }))[0])
+    .observation.mergePgid as number;
+  withPgid.close();
+  f.registry.close();
+  assert.ok(typeof pgid === "number" && pgid > 1);
+  t.after(() => { try { process.kill(-pgid, "SIGKILL"); } catch { /* already gone */ } });
+
+  // The column is the whole point of this round: it holds the number after the payload is gone.
+  const columns = new DatabaseSync(f.path);
+  const stored = columns.prepare(
+    "SELECT merge_pgid, merge_boot_at_sec FROM candidate_merge_promotions WHERE state='applying'",
+  ).get() as { merge_pgid: number | null; merge_boot_at_sec: number | null };
+  columns.close();
+  assert.equal(stored.merge_pgid, pgid, "the merge group was not given a column of its own");
+  assert.ok(typeof stored.merge_boot_at_sec === "number");
+
+  const payloads = [
+    // Not JSON at all.
+    "this used to be JSON",
+    // Valid JSON, group removed. Indistinguishable from a promotion that never spawned git, if the
+    // observation is the only place you look.
+    JSON.stringify({ code: "PROMOTION_STARTED", mainHead: null, observedAt: "1970-01-01T00:00:00.000Z" }),
+  ];
+  let promotionId = "";
+  for (const payload of payloads) {
+    promotionId = damagePromotionRow(f.path, { observationJson: payload });
+    const reader = new CandidateRegistry(f.data);
+    const listed = unreadable((await reader.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+    assert.equal(groupAlive(pgid), true, "this assertion is only evidence while the merge is alive");
+    // Shown, not merely probed: `ps -g` lists the `git merge` itself, so what follows is a refusal
+    // about a write that is demonstrably in flight rather than about an empty process group.
+    const listing = await psGroup(pgid);
+    assert.match(listing, /git[^\n]*merge/u, `ps -g ${pgid} does not show the merge:\n${listing}`);
+    assert.equal(listed.state, "unreadable");
+    assert.equal(listed.holdsProjectExclusiveMarker, true);
+    // Read from the column, not the payload: the payload no longer says anything.
+    assert.deepEqual(listed.release?.alive.map((entry) => [entry.kind, entry.pid]), [["merge", pgid]]);
+    assert.equal(listed.release?.probeReadable, true);
+    assert.equal(listed.release?.confirmation, MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION);
+    for (const alive of listed.release?.alive ?? []) {
+      assert.ok(alive.inspect.startsWith("ps ") && !/reset|kill|clean|checkout/u.test(alive.inspect), alive.inspect);
+    }
+
+    const args = { promotionId, roomId: "demo", mainPath: f.source, pgid, decidedBy: "local-web" };
+    // The short phrase says nothing about main being written, and it is refused here by name.
+    await assert.rejects(
+      reader.abandonMergeProcessGroup({ ...args, confirmation: MERGE_UNREADABLE_ABANDON_CONFIRMATION }),
+      (error: Error & { confirmation?: string; alive?: ReadonlyArray<{ pid: number }> }) =>
+        error.message === "MAIN_MERGE_PROMOTION_ROW_UNREADABLE"
+        && error.confirmation === MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION
+        && (error.alive ?? []).some((entry) => entry.pid === pgid),
+    );
+    // And the number still has to be quoted, which is only possible because it survived.
+    await assert.rejects(
+      reader.abandonMergeProcessGroup({
+        ...args, pgid: 999_999, confirmation: MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION,
+      }),
+      /MERGE_GROUP_ABANDON_PGID_MISMATCH/u,
+    );
+    assert.equal(
+      unreadable((await reader.promotions({ roomId: "demo", mainPath: f.source }))[0]).storedState,
+      "applying", "a refused release must leave the marker exactly where it was",
+    );
+    reader.close();
+  }
+
+  /*
+   * A row that is internally CONSISTENT by hash and inconsistent by content: the payload is rewritten
+   * to say no group is recorded, the columns still hold one, and the hash is recomputed so the row
+   * passes its own integrity check. That is what a targeted edit looks like, and without the
+   * column-versus-payload agreement check the row would read as perfectly fine, report no pending
+   * merge, and be settled by the next observation while `ps -g` still lists the merge.
+   */
+  {
+    const db = new DatabaseSync(f.path);
+    const row = db.prepare("SELECT * FROM candidate_merge_promotions WHERE state='applying'")
+      .get() as unknown as Record<string, string | number | null>;
+    const observationJson = JSON.stringify({
+      code: "PROMOTION_STARTED", mainHead: null, observedAt: "1970-01-01T00:00:00.000Z",
+    });
+    const consistentHash = createHash("sha256").update(JSON.stringify([
+      row.id, row.approval_id, row.task_id, row.room_id, row.main_path, row.main_branch,
+      row.candidate_head, row.recovery_ref, row.main_head_before, row.main_head_after,
+      row.restore_json, observationJson, row.state, row.owner_pid, row.started_at_ms,
+      row.updated_at_ms, row.merge_pgid, row.merge_boot_at_sec,
+    ]), "utf8").digest("hex");
+    assert.equal(Number(db.prepare(
+      "UPDATE candidate_merge_promotions SET observation_json=?,row_hash=? WHERE id=?",
+    ).run(observationJson, consistentHash, String(row.id)).changes), 1);
+    db.close();
+    const strict = new CandidateRegistry(f.data);
+    t.after(() => strict.close());
+    const disagreeing = (await strict.promotions({ roomId: "demo", mainPath: f.source }))[0];
+    assert.equal(groupAlive(pgid), true, "this assertion is only evidence while the merge is alive");
+    assert.equal(disagreeing?.state, "unreadable",
+      "a row whose column and payload disagree about the merge must not read as fine");
+    assert.deepEqual(
+      unreadable(disagreeing).release?.alive.map((entry) => [entry.kind, entry.pid]), [["merge", pgid]],
+    );
+    assert.equal(unreadable(disagreeing).release?.confirmation, MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION);
+    strict.close();
+  }
+
+  /*
+   * Now take the columns away too, which is the case the fix cannot probe: nothing left can name the
+   * merge. The requirement is that this is reported as an UNANSWERED question rather than as good
+   * news — the phrase stays the long one even though `alive` is empty, and `probeReadable` is what
+   * tells the two apart (finding F-5: `aliveAtRelease: []` was written while `ps` proved three
+   * processes alive, and `unverifiedSource` beside it does not cover that).
+   */
+  damagePromotionRow(f.path, {
+    observationJson: "this used to be JSON", mergePgid: null, mergeBootAtSec: null,
+  });
+  const blind = new CandidateRegistry(f.data);
+  t.after(() => blind.close());
+  const unseen = unreadable((await blind.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  assert.equal(groupAlive(pgid), true, "this assertion is only evidence while the merge is alive");
+  assert.deepEqual(unseen.release?.alive, []);
+  assert.equal(unseen.release?.probeReadable, false,
+    "an empty list must not be reported as an answered question");
+  assert.equal(unseen.release?.confirmation, MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION);
+  const blindArgs = { promotionId, roomId: "demo", mainPath: f.source, decidedBy: "local-web" };
+  await assert.rejects(
+    blind.abandonMergeProcessGroup({
+      ...blindArgs, pgid: 0, confirmation: MERGE_UNREADABLE_ABANDON_CONFIRMATION,
+    }),
+    (error: Error & { confirmation?: string; probeReadable?: boolean }) =>
+      error.message === "MAIN_MERGE_PROMOTION_ROW_UNREADABLE"
+      && error.confirmation === MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION
+      && error.probeReadable === false,
+  );
+
+  // The way out still exists — no number can be demanded when no number can be read — and taking it
+  // kills nothing, writes nothing, and is recorded as the unanswered question it was.
+  const before = await treeDigest(f.source);
+  const released = unreadable(await blind.abandonMergeProcessGroup({
+    ...blindArgs, pgid: 0, confirmation: MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION,
+  }));
+  assert.equal(released.storedState, "needs-manual-review");
+  assert.equal(released.holdsProjectExclusiveMarker, false);
+  assert.equal(groupAlive(pgid), true, "releasing the marker must not kill anything");
+  assert.equal(await treeDigest(f.source), before, "releasing the marker wrote to the repository");
+  assert.equal(await head(f.source), beforeHead);
+  const record = new DatabaseSync(f.path);
+  const observation = JSON.parse(String((record.prepare(
+    "SELECT observation_json FROM candidate_merge_promotions WHERE id=?",
+  ).get(promotionId) as { observation_json: string }).observation_json)) as {
+    unreadableRecordReleased?: { aliveAtRelease?: unknown[]; probeReadable?: boolean };
+  };
+  record.close();
+  assert.deepEqual(observation.unreadableRecordReleased?.aliveAtRelease, []);
+  assert.equal(observation.unreadableRecordReleased?.probeReadable, false,
+    "the record must distinguish `probed and found nothing` from `could not probe`");
+});
+
+/*
+ * The other direction ([[PITFALLS]] #107). Above, the payload is destroyed and the merge is alive, so
+ * the short phrase is refused. Here the payload is destroyed in exactly the same way and the merge is
+ * OVER — and the short phrase is the one that works, while the long one is refused. Without this,
+ * "the short phrase is refused" could be true simply because the column now blocks everything
+ * forever, which is the stale-observable defect this project has already had once ([[PITFALLS]] #102).
+ */
+test("a destroyed payload does not make a finished merge block the project forever", async (t) => {
+  const f = await fixture(t);
+  const started = join(f.root, "hook-entered");
+  await hook(f, "pre-merge-commit", `#!/bin/sh\ntouch ${JSON.stringify(started)}\nsleep 600\n`);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+
+  const child = await promoteInChildAt(f, approval, token);
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  for (let attempt = 0; attempt < 300 && !await exists(started); attempt += 1) await delay(100);
+  child.kill("SIGKILL");
+  await waitForExit(child);
+  const withPgid = new CandidateRegistry(f.data);
+  const pgid = readable((await withPgid.promotions({ roomId: "demo", mainPath: f.source }))[0])
+    .observation.mergePgid as number;
+  withPgid.close();
+  f.registry.close();
+  process.kill(-pgid, "SIGKILL");
+  await waitForGroupExit(pgid);
+  assert.equal(groupAlive(pgid), false, "this test is only meaningful once the merge is over");
+
+  const promotionId = damagePromotionRow(f.path, { observationJson: "this used to be JSON" });
+  const reader = new CandidateRegistry(f.data);
+  t.after(() => reader.close());
+  const listed = unreadable((await reader.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  // The column still holds the number; probing it is what turns it back into "nothing is running".
+  assert.deepEqual(listed.release?.alive, []);
+  assert.equal(listed.release?.probeReadable, true);
+  assert.equal(listed.release?.confirmation, MERGE_UNREADABLE_ABANDON_CONFIRMATION);
+  const args = { promotionId, roomId: "demo", mainPath: f.source, pgid, decidedBy: "local-web" };
+  await assert.rejects(
+    reader.abandonMergeProcessGroup({ ...args, confirmation: MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION }),
+    (error: Error & { confirmation?: string }) =>
+      error.message === "MAIN_MERGE_PROMOTION_ROW_UNREADABLE"
+      && error.confirmation === MERGE_UNREADABLE_ABANDON_CONFIRMATION,
+  );
+  reader.close();
+
+  /*
+   * The third shape, and the one a mutation caught as uncovered ([[PITFALLS]] #107, third case:
+   * neither an unmet precondition nor an equivalent mutation, just a branch with no test). Here the
+   * columns hold nothing AND the payload parses and states, affirmatively, that no group is
+   * recorded — which is what a row written before those columns existed looks like once its merge
+   * has been settled, and what any row looks like before git is spawned. That is an ANSWER, so the
+   * short phrase is the one that works. Making it demand the long phrase instead would be safe in
+   * the trivial sense and would take the short phrase out of service permanently, which is the
+   * shape bar item 11 forbids.
+   */
+  damagePromotionRow(f.path, {
+    observationJson: JSON.stringify({
+      code: "PROMOTION_STARTED", mainHead: null, mergePgid: null, mergeGroup: null,
+      observedAt: "1970-01-01T00:00:00.000Z",
+    }),
+    mergePgid: null,
+    mergeBootAtSec: null,
+  });
+  const groupless = new CandidateRegistry(f.data);
+  t.after(() => groupless.close());
+  const answered = unreadable((await groupless.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  assert.equal(answered.holdsProjectExclusiveMarker, true);
+  assert.deepEqual(answered.release?.alive, []);
+  assert.equal(answered.release?.probeReadable, true,
+    "an observation that says `no group` is an answer, not an unanswered question");
+  assert.equal(answered.release?.confirmation, MERGE_UNREADABLE_ABANDON_CONFIRMATION);
+  await assert.rejects(
+    groupless.abandonMergeProcessGroup({ ...args, confirmation: MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION }),
+    (error: Error & { confirmation?: string }) =>
+      error.message === "MAIN_MERGE_PROMOTION_ROW_UNREADABLE"
+      && error.confirmation === MERGE_UNREADABLE_ABANDON_CONFIRMATION,
+  );
+  const released = unreadable(await groupless.abandonMergeProcessGroup({
+    ...args, confirmation: MERGE_UNREADABLE_ABANDON_CONFIRMATION,
+  }));
+  assert.equal(released.holdsProjectExclusiveMarker, false);
+});
+
+/*
+ * Bar item 11, for the columns this round adds. A database written by the previous commit keeps the
+ * merge group ONLY inside `observation_json` and hashes its rows without the two new columns. Both
+ * halves have to keep working: the row must stay readable (a hash that suddenly fails would report
+ * tampering where there was an upgrade — [[PITFALLS]] #100), and the fail-closed answer must still
+ * be reached from the one source such a row has.
+ */
+test("a promotion row written before the merge-group columns existed still opens, and still blocks", async (t) => {
+  const f = await fixture(t);
+  const started = join(f.root, "hook-entered");
+  await hook(f, "pre-merge-commit", `#!/bin/sh\ntouch ${JSON.stringify(started)}\nsleep 900\n`);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+
+  const child = await promoteInChildAt(f, approval, token);
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  for (let attempt = 0; attempt < 300 && !await exists(started); attempt += 1) await delay(100);
+  child.kill("SIGKILL");
+  await waitForExit(child);
+  const withPgid = new CandidateRegistry(f.data);
+  const pgid = readable((await withPgid.promotions({ roomId: "demo", mainPath: f.source }))[0])
+    .observation.mergePgid as number;
+  withPgid.close();
+  f.registry.close();
+  t.after(() => { try { process.kill(-pgid, "SIGKILL"); } catch { /* already gone */ } });
+
+  // Exactly what the previous commit wrote: no columns, and a hash over the sixteen fields it knew.
+  const db = new DatabaseSync(f.path);
+  const row = db.prepare("SELECT * FROM candidate_merge_promotions WHERE state='applying'")
+    .get() as unknown as Record<string, string | number | null>;
+  db.exec(`ALTER TABLE candidate_merge_promotions DROP COLUMN merge_pgid;
+    ALTER TABLE candidate_merge_promotions DROP COLUMN merge_boot_at_sec;`);
+  const legacyHash = createHash("sha256").update(JSON.stringify([
+    row.id, row.approval_id, row.task_id, row.room_id, row.main_path, row.main_branch,
+    row.candidate_head, row.recovery_ref, row.main_head_before, row.main_head_after,
+    row.restore_json, row.observation_json, row.state, row.owner_pid, row.started_at_ms,
+    row.updated_at_ms,
+  ]), "utf8").digest("hex");
+  db.prepare("UPDATE candidate_merge_promotions SET row_hash=? WHERE id=?")
+    .run(legacyHash, String(row.id));
+  assert.equal(Number((db.prepare(
+    "SELECT count(*) AS n FROM pragma_table_info('candidate_merge_promotions') WHERE name='merge_pgid'",
+  ).get() as { n: number }).n), 0, "the columns must really be absent for this to prove anything");
+  db.close();
+
+  const upgraded = new CandidateRegistry(f.data);
+  t.after(() => upgraded.close());
+  // The row is READABLE — the hash it was stored with is still its hash — and it still blocks,
+  // because the observation is the one source such a row has and it is still consulted.
+  const listed = readable((await upgraded.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  assert.equal(groupAlive(pgid), true, "this assertion is only evidence while the merge is alive");
+  assert.equal(listed.state, "applying");
+  assert.equal(listed.pending?.code, "MERGE_SUBPROCESS_STILL_RUNNING");
+  assert.equal(listed.pending?.pid, pgid);
+
+  // The columns were added on open, and now that they exist a write fills them in.
+  const after = new DatabaseSync(f.path);
+  const present = after.prepare(
+    "SELECT name FROM pragma_table_info('candidate_merge_promotions')",
+  ).all() as unknown as Array<{ name: string }>;
+  after.close();
+  assert.ok(present.some((column) => column.name === "merge_pgid"), JSON.stringify(present));
+  assert.ok(present.some((column) => column.name === "merge_boot_at_sec"), JSON.stringify(present));
+
+  // And a legacy row whose hash is ALSO gone still reaches the fail-closed answer through the only
+  // source it has. This is the branch of the reading that exists solely for such rows.
+  const promotionId = damagePromotionRow(f.path, {});
+  const reader = new CandidateRegistry(f.data);
+  t.after(() => reader.close());
+  const damaged = unreadable((await reader.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  assert.equal(damaged.id, promotionId);
+  assert.deepEqual(damaged.release?.alive.map((entry) => [entry.kind, entry.pid]), [["merge", pgid]]);
+  assert.equal(damaged.release?.confirmation, MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION);
+});
+
+/*
+ * FINDING F-6 (sixth round). `probe()`'s fourth answer was documented as unreachable through the
+ * public interface, on the grounds that `kill(pid, 0)` with a valid positive integer returns only
+ * `ESRCH` or `EPERM`. That is true of a valid pid and the record never checked for one: any number
+ * at or above 2^31 makes `process.kill` throw `ERR_INVALID_ARG_TYPE`, which is neither, and
+ * `promotionPgid` accepted anything up to 2^53. So the branch was reachable all along, from a
+ * recorded number alone, with no test on it.
+ *
+ * The precondition is measured here rather than assumed ([[PITFALLS]] #106): `process.kill` really
+ * does refuse this number in a way that is not `ESRCH`.
+ */
+test("a recorded process group too large to be a pid blocks the answer instead of settling it", async (t) => {
+  const f = await fixture(t);
+  const started = join(f.root, "hook-entered");
+  await hook(f, "pre-merge-commit", `#!/bin/sh\ntouch ${JSON.stringify(started)}\nsleep 600\n`);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+
+  const child = await promoteInChildAt(f, approval, token);
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  for (let attempt = 0; attempt < 300 && !await exists(started); attempt += 1) await delay(100);
+  child.kill("SIGKILL");
+  await waitForExit(child);
+  const first = new CandidateRegistry(f.data);
+  const recorded = readable((await first.promotions({ roomId: "demo", mainPath: f.source }))[0])
+    .observation.mergePgid as number;
+  first.close();
+  process.kill(-recorded, "SIGKILL");
+  await waitForGroupExit(recorded);
+  f.registry.close();
+
+  const beyondPid = 2 ** 31;
+  assert.throws(
+    () => process.kill(beyondPid, 0),
+    (error: NodeJS.ErrnoException) => error.code !== "ESRCH" && error.code !== "EPERM",
+    "this test assumes a number this large is refused as neither present nor absent",
+  );
+  rewritePromotionRow(f.path, ({ observation }) => ({
+    observation: {
+      ...observation,
+      mergePgid: beyondPid,
+      mergeGroup: { ...(observation.mergeGroup as Record<string, unknown>), pgid: beyondPid },
+    },
+  }));
+
+  const reopened = new CandidateRegistry(f.data);
+  t.after(() => reopened.close());
+  const blocked = readable((await reopened.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  // Not "gone": a number nobody can ask about is not evidence the merge finished.
+  assert.equal(blocked.state, "applying");
+  assert.equal(blocked.pending?.code, "MERGE_PROCESS_GROUP_UNDECIDABLE");
+  assert.equal(blocked.pending?.pid, beyondPid);
+  // And it is not a dead end: the same release every other blocked wait has still works.
+  const released = readable(await reopened.abandonMergeProcessGroup({
+    promotionId: blocked.id, roomId: "demo", mainPath: f.source, pgid: beyondPid,
+    confirmation: MERGE_GROUP_ABANDON_CONFIRMATION, decidedBy: "local-web",
+  }));
+  assert.equal(released.pending, undefined);
+});
+
+/*
+ * The same fourth answer, one level up: `processAlive()` returns `null` for a number it cannot ask
+ * about, and `owner_pid`'s CHECK constraint has no upper bound at all, so a row can carry one. That
+ * branch decides whether an `applying` row keeps waiting on the process that started it, and it had
+ * no test in either direction.
+ */
+test("an owning process id too large to be a pid keeps the record waiting rather than settling it", async (t) => {
+  const f = await fixture(t);
+  const started = join(f.root, "hook-entered");
+  await hook(f, "pre-merge-commit", `#!/bin/sh\ntouch ${JSON.stringify(started)}\nsleep 600\n`);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+
+  const child = await promoteInChildAt(f, approval, token);
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  for (let attempt = 0; attempt < 300 && !await exists(started); attempt += 1) await delay(100);
+  child.kill("SIGKILL");
+  await waitForExit(child);
+  const first = new CandidateRegistry(f.data);
+  const recorded = readable((await first.promotions({ roomId: "demo", mainPath: f.source }))[0])
+    .observation.mergePgid as number;
+  first.close();
+  process.kill(-recorded, "SIGKILL");
+  await waitForGroupExit(recorded);
+  f.registry.close();
+
+  const beyondPid = 2 ** 31;
+  assert.throws(
+    () => process.kill(beyondPid, 0),
+    (error: NodeJS.ErrnoException) => error.code !== "ESRCH" && error.code !== "EPERM",
+    "this test assumes a number this large is refused as neither present nor absent",
+  );
+  // The merge group is out of the way, so the only thing left to decide is the owner process.
+  rewritePromotionRow(f.path, ({ observation }) => ({
+    ownerPid: beyondPid,
+    observation: { ...observation, mergePgid: null, mergeGroup: null },
+  }));
+
+  const reopened = new CandidateRegistry(f.data);
+  t.after(() => reopened.close());
+  const blocked = readable((await reopened.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  assert.equal(blocked.state, "applying");
+  assert.equal(blocked.ownerAlive, null, "an undecidable pid must not be reported as a decided one");
+  assert.equal(blocked.pending?.code, "OWNER_PROCESS_STILL_RUNNING");
+  assert.equal(blocked.pending?.pid, beyondPid);
+  const released = await reopened.abandonPromotionOwnerProcess({
+    promotionId: blocked.id, roomId: "demo", mainPath: f.source, pid: beyondPid,
+    confirmation: MERGE_OWNER_ABANDON_CONFIRMATION, decidedBy: "local-web",
+  });
+  assert.equal(released.pending, undefined);
+});
+
+/*
+ * FINDING F-4 (sixth round). The previous round left `#liveGates`'s fail-closed `catch` untested and
+ * wrote down a reason that was half wrong: a PERSISTENT restore-point failure really does throw
+ * earlier, inside `#previewSnapshot`, but `previewMainMerge` reads the restore point for one
+ * `mainPath` TWICE, and a failure that arrives only for the second read — a disk blinking out, a
+ * permission bit changed for a moment, a deadline hit on a large repository — lands exactly on that
+ * catch. Both directions are measured here, so the count is a fact rather than an assumption.
+ */
+test("a restore point that fails only on the second read is a closed gate, not an open one", async (t) => {
+  class FlakyRestorePoint extends GitBroker {
+    calls = 0;
+    failOn = 0;
+    override async restorePoint(workspace: string): ReturnType<GitBroker["restorePoint"]> {
+      this.calls += 1;
+      if (this.calls === this.failOn) throw new Error("GIT_COMMAND_FAILED");
+      return await super.restorePoint(workspace);
+    }
+  }
+  const broker = new FlakyRestorePoint();
+  const root = await mkdtemp(join(tmpdir(), "orchestratory-flaky-"));
+  const source = join(root, "source");
+  const data = join(root, "data");
+  await mkdir(source);
+  await mkdir(data, { mode: 0o700 });
+  await execFileAsync("git", ["init", "-b", "main"], { cwd: source });
+  await commit(source, "README.md", "committed main\n", "initial");
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const registry = new CandidateRegistry(data, { gitBroker: broker });
+  t.after(() => registry.close());
+  const task = await registry.start({
+    actor: "codex1", clientRequestId: key(), roomId: "demo", mainPath: source, task: "flaky",
+  });
+  await commit(task.candidatePath, "candidate.txt", "candidate work\n", "candidate work");
+  await registry.complete({
+    actor: "codex1", clientRequestId: key(), taskId: task.taskId, roomId: "demo", mainPath: source,
+    summary: "ready",
+  });
+
+  // How many times one preview reads it, measured rather than assumed.
+  broker.calls = 0;
+  const clean = await registry.previewMainMerge({ taskId: task.taskId, roomId: "demo", mainPath: source });
+  assert.equal(clean.approvable, true, clean.blockers.join(","));
+  assert.equal(broker.calls, 2, "the shape of this finding depends on there being two reads");
+
+  // The first read is the one `#previewSnapshot` makes: failing it throws, which is what the
+  // previous comment described and is still true.
+  broker.calls = 0;
+  broker.failOn = 1;
+  await assert.rejects(
+    registry.previewMainMerge({ taskId: task.taskId, roomId: "demo", mainPath: source }),
+    /GIT_COMMAND_FAILED/u,
+  );
+
+  // The second read is the one that reaches the catch, and the answer there is a closed gate.
+  broker.calls = 0;
+  broker.failOn = 2;
+  const preview = await registry.previewMainMerge({ taskId: task.taskId, roomId: "demo", mainPath: source });
+  broker.failOn = 0;
+  assert.equal(broker.calls, 2);
+  assert.equal(preview.approvable, false);
+  assert.deepEqual(preview.blockers, ["MAIN_WORKING_TREE_UNREADABLE"]);
+  assert.equal(preview.hooks.unreadable, true, "an unread hook inventory must not read as `no hooks`");
+  assert.deepEqual(preview.hooks.hooks, []);
+
+  // Transient means transient: once the read succeeds again the same snapshot is approvable, so the
+  // closed gate has not burned anything ([[PITFALLS]] #85).
+  const recovered = await registry.previewMainMerge({ taskId: task.taskId, roomId: "demo", mainPath: source });
+  assert.equal(recovered.approvable, true, recovered.blockers.join(","));
+  assert.equal(recovered.previewDigest, clean.previewDigest);
+});
+
+/*
+ * FINDING F-3 (sixth round). `orchestrator candidates promotions` printed `Read-only.`, its help line
+ * said `# read-only`, and the residual-risk table called it a read-only listing. It is not: listing
+ * re-observes every unsettled record, and converging one moves the authoritative row, appends to the
+ * audit chain and appends to the room ledger. Measured against `orphan-refs` as a control — that
+ * command changed the row, the audit count and all three SQLite digests not at all.
+ *
+ * The writing is what bar item 13 asks for; the label was the defect. This is the behaviour that
+ * makes the corrected wording true, asserted so a future edit cannot quietly restore the old claim.
+ */
+test("listing promotions re-observes and updates the record, which is why it is not read-only", async (t) => {
+  const f = await fixture(t);
+  const started = join(f.root, "hook-entered");
+  await hook(f, "pre-merge-commit", `#!/bin/sh\ntouch ${JSON.stringify(started)}\nsleep 600\n`);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+
+  const child = await promoteInChildAt(f, approval, token);
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  for (let attempt = 0; attempt < 300 && !await exists(started); attempt += 1) await delay(100);
+  child.kill("SIGKILL");
+  await waitForExit(child);
+  const first = new CandidateRegistry(f.data);
+  const pgid = readable((await first.promotions({ roomId: "demo", mainPath: f.source }))[0])
+    .observation.mergePgid as number;
+  first.close();
+  process.kill(-pgid, "SIGKILL");
+  await waitForGroupExit(pgid);
+  f.registry.close();
+
+  const stored = (): { state: string; row_hash: string } => {
+    const db = new DatabaseSync(f.path);
+    const row = db.prepare("SELECT state,row_hash FROM candidate_merge_promotions LIMIT 1")
+      .get() as { state: string; row_hash: string };
+    db.close();
+    return row;
+  };
+  const before = stored();
+  assert.equal(before.state, "applying");
+
+  const events: string[] = [];
+  const reader = new CandidateRegistry(f.data, {
+    onMergePromotion: (event) => { events.push(event.phase); },
+  });
+  t.after(() => reader.close());
+  await reader.promotions({ roomId: "demo", mainPath: f.source });
+  const after = stored();
+  assert.notEqual(after.state, before.state, "the listing did not converge the record");
+  assert.notEqual(after.row_hash, before.row_hash, "the listing did not write");
+  assert.deepEqual(events, ["re-observed"]);
+
+  // A second listing of a record that has not changed writes no further ledger entry, so "it
+  // updates" does not become "it appends on every read".
+  await reader.promotions({ roomId: "demo", mainPath: f.source });
+  assert.deepEqual(events, ["re-observed"]);
 });

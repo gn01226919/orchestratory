@@ -786,6 +786,12 @@ export interface UnreadableMergePromotion {
   release?: {
     confirmation: string;
     alive: Array<{ kind: "merge" | "owner"; pid: number; inspect: string }>;
+    /**
+     * Whether the merge group could be read at all. When it is false, an empty `alive` means the
+     * question could not be answered — not that nothing is running — and the phrase is the longer
+     * one for that reason alone.
+     */
+    probeReadable: boolean;
   };
   /** The owner's declaration, echoed back. Attributed, never presented as an observation. */
   releasedFromExclusiveMarker?: { at: string; decidedBy: string };
@@ -945,6 +951,20 @@ interface PromotionRow {
   started_at_ms: number;
   updated_at_ms: number;
   row_hash: string;
+  /**
+   * The merge subprocess group, in a column of its own so that it survives whatever happened to
+   * `observation_json`. Null means "no group is recorded", which is the truth before the merge is
+   * spawned and again once an observation has established that it is over.
+   *
+   * Written by `#writePromotion`, and there derived from the observation being written, so a row
+   * that went through that helper cannot hold two different answers. The one write that does NOT
+   * maintain the pair is `#releaseUnreadablePromotion`, which edits an already-unreadable row's
+   * payload with a raw UPDATE on purpose; disagreement there is harmless because the row is
+   * unreadable either way, and `#assertPromotionRow` treats disagreement as damage in any case.
+   */
+  merge_pgid: number | null;
+  /** The boot that `merge_pgid` belongs to. A pid from another boot names somebody else. */
+  merge_boot_at_sec: number | null;
 }
 
 interface MergeApprovalRow {
@@ -1215,6 +1235,17 @@ const MERGE_PROMOTIONS_EXCLUSIVE_SQL = `CREATE UNIQUE INDEX candidate_merge_prom
         ON candidate_merge_promotions(main_path) WHERE state='applying';`;
 
 /**
+ * The merge process group's own columns, in the order `ALTER TABLE ... ADD COLUMN` appends them.
+ *
+ * They are listed LAST in the table definition rather than beside `owner_pid`, where they belong by
+ * meaning, for one reason: a database created by this build and a database upgraded into it must end
+ * up with the same column order, and `ADD COLUMN` can only append. The statements that write them
+ * spell the columns out ([[PITFALLS]] #59), so nothing depends on the position — but two
+ * different orders for one schema version is the kind of difference that only shows up later.
+ */
+const MERGE_PROMOTIONS_GROUP_COLUMNS = ["merge_pgid", "merge_boot_at_sec"] as const;
+
+/**
  * The durable INTENT to write canonical main, and the record of what was observed afterwards.
  *
  * It exists because spending the approval and writing main cannot be one atomic act: one is a SQLite
@@ -1228,6 +1259,16 @@ const MERGE_PROMOTIONS_EXCLUSIVE_SQL = `CREATE UNIQUE INDEX candidate_merge_prom
  * `owner_pid` distinguishes "still running" from "died". Without it a reader could not tell a
  * promotion in flight in another process from a crashed one, and would have to either report every
  * live promotion as needing manual review or settle a running one as finished.
+ *
+ * `merge_pgid` and `merge_boot_at_sec` are columns for exactly the same reason, arrived at the same
+ * way — by measurement. The merge's process group used to live ONLY inside `observation_json`, and
+ * `observation_json` is the first thing that cannot be trusted when a row fails its hash: a
+ * corruption that touched the payload left `promotionGroupIdentity()` answering `null`, which the
+ * release requirement read as "no merge is alive" and handed out the short phrase while `ps -g`
+ * could still list the `git merge`, its hook and its `sleep`. That is [[PITFALLS]] #85 in its
+ * sharpest form — "I cannot read this" turned into "I know, and the news is good" — and the answer
+ * is the one `owner_pid` already had: give the fact its own column, so losing the payload does not
+ * lose the number the owner needs to quote.
  */
 const MERGE_PROMOTIONS_TABLE_SQL = `CREATE TABLE candidate_merge_promotions (
         id TEXT PRIMARY KEY CHECK(length(id)=36),
@@ -1246,7 +1287,8 @@ const MERGE_PROMOTIONS_TABLE_SQL = `CREATE TABLE candidate_merge_promotions (
         owner_pid INTEGER NOT NULL CHECK(owner_pid > 0),
         started_at_ms INTEGER NOT NULL CHECK(started_at_ms >= 0),
         updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= started_at_ms),
-        row_hash TEXT NOT NULL CHECK(length(row_hash)=64)
+        row_hash TEXT NOT NULL CHECK(length(row_hash)=64),
+        ${MERGE_PROMOTIONS_GROUP_COLUMNS.map((column) => `${column} INTEGER`).join(",\n        ")}
       ) STRICT;
       CREATE INDEX candidate_merge_promotions_task
         ON candidate_merge_promotions(task_id, started_at_ms DESC);
@@ -1455,20 +1497,60 @@ function mergeApprovalHash(row: Omit<MergeApprovalRow, "row_hash">): string {
   ]));
 }
 
+/**
+ * The row's integrity digest.
+ *
+ * The two merge-group columns are appended only when at least one of them holds something, so a row
+ * written before those columns existed hashes to exactly the value it was stored with. Bar item 11
+ * is about precisely this: a database written by the previous commit must stay readable, and an
+ * integrity check that suddenly rejects every existing promotion would report tampering where there
+ * was an upgrade ([[PITFALLS]] #100).
+ */
 function mergePromotionHash(row: Omit<PromotionRow, "row_hash">): string {
-  return sha(JSON.stringify([
+  const base = [
     row.id, row.approval_id, row.task_id, row.room_id, row.main_path, row.main_branch,
     row.candidate_head, row.recovery_ref, row.main_head_before, row.main_head_after,
     row.restore_json, row.observation_json, row.state, row.owner_pid, row.started_at_ms,
     row.updated_at_ms,
-  ]));
+  ];
+  return sha(JSON.stringify(
+    row.merge_pgid === null && row.merge_boot_at_sec === null
+      ? base
+      : [...base, row.merge_pgid, row.merge_boot_at_sec],
+  ));
+}
+
+/**
+ * The largest number the process probes will treat as naming a process.
+ *
+ * `pid_t` is a signed 32-bit integer on macOS and Linux, and `process.kill`
+ * throws `ERR_INVALID_ARG_TYPE` above that — not `ESRCH`, not `EPERM`. Nothing is REJECTED for
+ * exceeding it: a recorded number too large to be a pid is a number nobody can decide about, and
+ * turning "undecidable" into "no such process" is the fail-open direction ([[PITFALLS]] #85). The
+ * bound exists so that the undecidable answer comes from a decision written here rather than from
+ * Node's argument validation happening to throw in a convenient direction, and so the branch can be
+ * reached from the public interface without replacing `process.kill`.
+ *
+ * Measured on this build: `2147483648`, `4294967296` and `2**53-1` all reach the probes, because
+ * `promotionPgid` accepts anything up to 2^53 and `owner_pid`'s CHECK has no upper bound at all.
+ */
+const MAX_PID = 2 ** 31 - 1;
+
+/**
+ * A number recorded as a process group id, or `null` when the record does not carry one.
+ *
+ * Deliberately NOT bounded by `MAX_PID`: a value out of range still means "something wrote a group
+ * here", and the probes answer `unknown` for it, which blocks a conclusion. Filtering it out at this
+ * layer would turn a nonsensical record into a clean "no merge is running".
+ */
+function recordedPgid(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 1 ? value : null;
 }
 
 /** The merge subprocess group recorded on a promotion row, or `null` when none is recorded. */
 function promotionPgid(row: PromotionRow): number | null {
   try {
-    const value = (JSON.parse(row.observation_json) as MergePromotionObservation).mergePgid;
-    return typeof value === "number" && Number.isSafeInteger(value) && value > 1 ? value : null;
+    return recordedPgid((JSON.parse(row.observation_json) as MergePromotionObservation).mergePgid);
   } catch { return null; }
 }
 
@@ -1484,6 +1566,73 @@ function promotionGroupIdentity(row: PromotionRow): MergeProcessGroupIdentity | 
     const spawnedAt = typeof value.spawnedAt === "string" ? value.spawnedAt : null;
     return { pgid, bootAtSec, spawnedAt };
   } catch { return { pgid, bootAtSec: null, spawnedAt: null }; }
+}
+
+/**
+ * What a row says about its merge's process group when the row itself cannot be trusted, and whether
+ * that answer was READ or merely absent.
+ *
+ * The distinction is the whole point. "I probed and found no merge" and "I could not find out
+ * whether there is a merge" lead to opposite actions — the first releases a project-wide marker with
+ * a short phrase, the second must not — and folding them into one `null` is exactly the failure that
+ * was measured: corrupt `observation_json`, `promotionGroupIdentity()` answers `null`, and the
+ * release read that as good news while `ps -g` still listed a `git merge` writing to main.
+ */
+interface MergeIdentityReading {
+  /** The group to probe, or `null` when the record does not name one. */
+  identity: MergeProcessGroupIdentity | null;
+  /**
+   * False when no source could answer the question at all. A `false` here NEVER means "no merge";
+   * it means the record's answer is missing, and callers must treat it exactly as they treat a probe
+   * that comes back undecidable.
+   */
+  readable: boolean;
+}
+
+/** The merge process group as the row's OWN COLUMNS hold it, independent of `observation_json`. */
+function columnMergeIdentity(row: PromotionRow): MergeProcessGroupIdentity | null {
+  const pgid = recordedPgid(row.merge_pgid);
+  if (pgid === null) return null;
+  const boot = row.merge_boot_at_sec;
+  return {
+    pgid,
+    bootAtSec: typeof boot === "number" && Number.isSafeInteger(boot) ? boot : null,
+    spawnedAt: null,
+  };
+}
+
+/**
+ * The merge process group of a row whose integrity check failed, read from the two sources that do
+ * not fail together, and honest about not knowing.
+ *
+ * Order matters. The columns come first because they are the source that a damaged payload cannot
+ * take with it. `observation_json` is consulted only afterwards, and only for what the columns
+ * cannot answer: rows written before those columns existed keep the group nowhere else.
+ *
+ * The one thing this must not do is manufacture a "no merge" answer out of a source it could not
+ * read. There are three paths that return `readable: false`: the payload does not parse, the parsed
+ * payload is not an object, and the payload carries a `mergePgid` that is neither absent, nor null,
+ * nor a usable number. Each of those is something present and unintelligible, not an answer.
+ */
+function durableMergeIdentity(row: PromotionRow): MergeIdentityReading {
+  const column = columnMergeIdentity(row);
+  if (column !== null) return { identity: column, readable: true };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.observation_json);
+  } catch {
+    return { identity: null, readable: false };
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { identity: null, readable: false };
+  }
+  const legacy = promotionGroupIdentity(row);
+  if (legacy !== null) return { identity: legacy, readable: true };
+  const recorded = (parsed as MergePromotionObservation).mergePgid;
+  // `undefined` is a promotion that has not spawned git yet; `null` is one whose group an
+  // observation established is over, or that the owner disowned. Both are answers. Anything else
+  // sitting in that field is a group written by something this code does not understand.
+  return { identity: null, readable: recorded === undefined || recorded === null };
 }
 
 /**
@@ -1524,6 +1673,9 @@ const BOOT_IDENTITY_TOLERANCE_SEC = 60;
 type MergeGroupState = "none" | "merge-running" | "merge-done-group-alive" | "gone" | "unknown";
 
 function probe(pid: number): "alive" | "gone" | "foreign" | "unknown" {
+  // Group probes pass `-pgid`, so the range is checked on the magnitude. A number outside it cannot
+  // be asked about, and "cannot be asked about" is `unknown` — never "gone".
+  if (!Number.isSafeInteger(pid) || pid === 0 || Math.abs(pid) > MAX_PID) return "unknown";
   try {
     process.kill(pid, 0);
     return "alive";
@@ -1639,7 +1791,7 @@ function ownerProcessAlive(row: PromotionRow): boolean | null {
  * is what would let a reader settle a promotion that is still running.
  */
 function processAlive(pid: number): boolean | null {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  if (!Number.isSafeInteger(pid) || pid <= 0 || pid > MAX_PID) return null;
   try {
     process.kill(pid, 0);
     return true;
@@ -1656,36 +1808,50 @@ function processAlive(pid: number): boolean | null {
  * and which of the numbers it was waiting on can still be seen.
  *
  * Every input here is read without the row hash, because the row hash is the thing that failed:
- * `owner_pid` is a plain integer column, and the merge group comes out of `observation_json` through
- * parsers that already treat unparseable text as "decides nothing". That makes this a best-effort
- * probe and it is described as one — but best-effort in the safe direction: anything that might
- * still be running demands the phrase that says so, and only a row where nothing can be seen at all
- * gets the short one.
+ * `owner_pid`, `merge_pgid` and `merge_boot_at_sec` are plain integer columns that a damaged payload
+ * does not take with it. That makes this a best-effort probe and it is described as one — but
+ * best-effort in the safe direction: anything that might still be running, AND anything this cannot
+ * find out about, demands the phrase that says so. Only a row where the question was actually asked
+ * and actually answered gets the short one.
  *
- * The alternative measured on this code was worse than imprecise: the pgid argument was ignored
- * outright, `999999` was accepted, and a provably live `git merge` had the project's marker taken
- * out from under it while it wrote.
+ * The previous shape got that last distinction wrong in the direction that matters, and it was
+ * measured: with `observation_json` destroyed as well as the hash — which is what real corruption
+ * looks like, since it does not pick fields — the merge group read back as `null`,
+ * `mergeGroupState(null)` answered `"none"`, and "none" was treated as "no merge is alive". The
+ * short phrase was accepted, `--pgid 999999` was accepted, and the project's exclusive marker was
+ * handed back while `ps -g` still listed the `git merge`, its hook and its `sleep`.
  */
 function unreadableReleaseRequirement(row: PromotionRow): {
   confirmation: string;
   alive: Array<{ kind: "merge" | "owner"; pid: number; inspect: string }>;
+  /**
+   * False when the merge group could not be read at all. `alive: []` then means "nothing could be
+   * seen", not "nothing is there", and the confirmation reflects the stronger of the two.
+   */
+  probeReadable: boolean;
 } {
   const alive: Array<{ kind: "merge" | "owner"; pid: number; inspect: string }> = [];
-  const identity = promotionGroupIdentity(row);
-  const group = mergeGroupState(identity);
+  const reading = durableMergeIdentity(row);
+  const group = mergeGroupState(reading.identity);
   // "unknown" counts as alive on purpose: an undecidable probe is not evidence the merge is over,
   // and this is the one decision where being wrong means publishing over a live write.
-  if (identity !== null && (group === "merge-running" || group === "unknown")) {
-    alive.push({ kind: "merge", pid: identity.pgid, inspect: inspectGroupCommand(identity.pgid) });
+  if (reading.identity !== null && (group === "merge-running" || group === "unknown")) {
+    alive.push({
+      kind: "merge", pid: reading.identity.pgid, inspect: inspectGroupCommand(reading.identity.pgid),
+    });
   }
   if (ownerProcessAlive(row) !== false && Number.isSafeInteger(row.owner_pid) && row.owner_pid > 1) {
     alive.push({ kind: "owner", pid: row.owner_pid, inspect: inspectPidCommand(row.owner_pid) });
   }
   return {
-    confirmation: alive.length > 0
+    // An unreadable group is the same answer as a live one, because it is the same amount of
+    // evidence that main is not being written: none. The difference between them is reported in
+    // `probeReadable` rather than resolved in favour of the convenient reading.
+    confirmation: alive.length > 0 || !reading.readable
       ? MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION
       : MERGE_UNREADABLE_ABANDON_CONFIRMATION,
     alive,
+    probeReadable: reading.readable,
   };
 }
 
@@ -1821,12 +1987,15 @@ export class MergeUnreadablePromotionError extends Error {
    * a read-only command that shows it. Non-empty is why `confirmation` is the longer phrase.
    */
   readonly alive: ReadonlyArray<{ kind: "merge" | "owner"; pid: number; inspect: string }>;
+  /** False when the merge group could not be read; an empty `alive` then asserts nothing. */
+  readonly probeReadable: boolean;
 
   constructor(
     promotionId: string,
     requirement: {
       confirmation: string;
       alive: ReadonlyArray<{ kind: "merge" | "owner"; pid: number; inspect: string }>;
+      probeReadable?: boolean;
     } = { confirmation: MERGE_UNREADABLE_ABANDON_CONFIRMATION, alive: [] },
   ) {
     super("MAIN_MERGE_PROMOTION_ROW_UNREADABLE");
@@ -1834,6 +2003,7 @@ export class MergeUnreadablePromotionError extends Error {
     this.promotionId = promotionId;
     this.confirmation = requirement.confirmation;
     this.alive = [...requirement.alive];
+    this.probeReadable = requirement.probeReadable ?? true;
   }
 }
 
@@ -2136,6 +2306,7 @@ export class CandidateRegistry {
       if (version === 0) this.#migrate();
       else if (version < SCHEMA_VERSION) this.#upgrade(version);
       this.#assertPromotionExclusivity();
+      this.#assertPromotionGroupColumns();
       if (this.#db.prepare("PRAGMA foreign_key_check").all().length > 0) {
         throw new Error("CANDIDATE_REGISTRY_FOREIGN_KEY_VIOLATION");
       }
@@ -3196,6 +3367,10 @@ export class CandidateRegistry {
       owner_pid: process.pid,
       started_at_ms: startedAt,
       updated_at_ms: startedAt,
+      // No group yet, and that is a fact rather than a gap: git has not been spawned. It becomes a
+      // number in `#recordMergePgid`, through the same write that puts it in the observation.
+      merge_pgid: null,
+      merge_boot_at_sec: null,
     };
     let promotion: PromotionRow = { ...bare, row_hash: mergePromotionHash(bare) };
     // Step one: the intent record, on disk, BEFORE the approval is spent and long before any Git
@@ -3937,6 +4112,33 @@ export class CandidateRegistry {
     }
   }
 
+  /**
+   * Gives the merge process group its own columns on a database this build did not create.
+   *
+   * Same shape and same reasoning as `#assertPromotionExclusivity` above: the promotion table
+   * shipped in v5 without them, so a v5 database written by an earlier commit is schema-current and
+   * keeps the group only inside `observation_json` — the one field that is worthless exactly when it
+   * is needed. `ADD COLUMN` is additive, appends NULL to every existing row, and `mergePromotionHash`
+   * ignores the pair while both are null, so no stored hash moves and no existing row is rewritten.
+   * That is why this needs no version bump and no upgrade branch to get wrong.
+   *
+   * If the columns cannot be added, opening fails by name rather than continuing with the defect the
+   * columns exist to close.
+   */
+  #assertPromotionGroupColumns(): void {
+    const present = new Set((this.#db.prepare(
+      "SELECT name FROM pragma_table_info('candidate_merge_promotions')",
+    ).all() as unknown as Array<{ name: string }>).map((column) => column.name));
+    for (const column of MERGE_PROMOTIONS_GROUP_COLUMNS) {
+      if (present.has(column)) continue;
+      try {
+        this.#db.exec(`ALTER TABLE candidate_merge_promotions ADD COLUMN ${column} INTEGER;`);
+      } catch {
+        throw new Error("CANDIDATE_MERGE_PROMOTION_GROUP_COLUMNS_MISSING");
+      }
+    }
+  }
+
   #upgrade(from: number): void {
     if (from === 1 || from === 3) this.#assertCompletionsReadable();
     if (from === 1) {
@@ -4636,10 +4838,18 @@ export class CandidateRegistry {
     } catch {
       // Unread is a closed gate, never an open one.
       //
-      // Deliberately left as it was: a fifth-round attempt to also carry the scan's own answer here
-      // could not be given a test, because every caller reads the restore point earlier through
-      // `#previewSnapshot` and throws before this catch is reached. Adding a second blocker to a
-      // branch nothing can reach would be code with no test behind it ([[PITFALLS]] #97).
+      // The previous comment here said this branch could not be reached, because `#previewSnapshot`
+      // reads the restore point earlier and throws first. That is true of a PERSISTENT failure and
+      // false of the interesting one: `previewMainMerge` reads the restore point for one `mainPath`
+      // TWICE, and a failure that arrives between the two — an external disk blinking out, a
+      // permission bit changed for a moment, a deadline hit on a large repository — reaches exactly
+      // here. Measured with an injected broker that fails only the second read: the call returned
+      // `["MAIN_WORKING_TREE_UNREADABLE"]`, from this line.
+      //
+      // What has NOT changed is the answer: the overwrite scan's own `unavailable` is still not
+      // carried up beside it. One blocker is enough to refuse, a second would say nothing the first
+      // does not, and the decision is recorded here so the next reader does not have to rediscover
+      // that it was a decision.
       return {
         blockers: ["MAIN_WORKING_TREE_UNREADABLE"],
         overwrite,
@@ -4753,6 +4963,9 @@ export class CandidateRegistry {
         throw new MergeUnreadablePromotionError(typeof row.id === "string" ? row.id : "", {
           confirmation: requirement.confirmation,
           alive: options.authenticated ? requirement.alive : [],
+          // Carried even for an unauthenticated caller: it says whether the empty list above means
+          // anything, and withholding it would leave "no pids shown" ambiguous in both directions.
+          probeReadable: requirement.probeReadable,
         });
       }
       if (promotionPending(row) !== undefined) throw new Error("MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY");
@@ -5046,25 +5259,48 @@ export class CandidateRegistry {
   }
 
   #insertPromotion(row: PromotionRow): void {
-    this.#db.prepare("INSERT INTO candidate_merge_promotions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(
+    // Columns named explicitly, not positionally: this table gains columns by `ADD COLUMN` on
+    // databases written by earlier builds, and a positional INSERT is the statement that silently
+    // starts meaning something else when that happens ([[PITFALLS]] #59).
+    this.#db.prepare(`INSERT INTO candidate_merge_promotions (
+        id,approval_id,task_id,room_id,main_path,main_branch,candidate_head,recovery_ref,
+        main_head_before,main_head_after,restore_json,observation_json,state,owner_pid,
+        started_at_ms,updated_at_ms,row_hash,merge_pgid,merge_boot_at_sec
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
       row.id, row.approval_id, row.task_id, row.room_id, row.main_path, row.main_branch,
       row.candidate_head, row.recovery_ref, row.main_head_before, row.main_head_after,
       row.restore_json, row.observation_json, row.state, row.owner_pid, row.started_at_ms,
-      row.updated_at_ms, row.row_hash,
+      row.updated_at_ms, row.row_hash, row.merge_pgid, row.merge_boot_at_sec,
     );
   }
 
-  /** The only way to UPDATE a promotion, compare-and-set on the previous row hash and state. */
+  /**
+   * The only way to UPDATE a promotion, compare-and-set on the previous row hash and state.
+   *
+   * The merge-group columns are not accepted from the caller: they are DERIVED here from the
+   * observation being written. That is deliberately structural rather than a convention every call
+   * site has to remember ([[PITFALLS]] #74). The two must agree — the columns exist so the group
+   * survives a damaged payload, not so it can be recorded twice with two different answers — and a
+   * group written into the columns but not cleared when an observation establishes the merge is over
+   * would be the stale-pid defect this project has already had once ([[PITFALLS]] #102).
+   */
   #writePromotion(previous: PromotionRow, fields: Partial<PromotionRow>): PromotionRow {
     const merged = { ...previous, ...fields };
-    const { row_hash: _old, ...bare } = merged;
+    const identity = promotionGroupIdentity(merged);
+    const { row_hash: _old, ...bare } = {
+      ...merged,
+      merge_pgid: identity?.pgid ?? null,
+      merge_boot_at_sec: identity?.bootAtSec ?? null,
+    };
     const next: PromotionRow = { ...bare, row_hash: mergePromotionHash(bare) };
     this.#db.exec("BEGIN IMMEDIATE");
     try {
       const result = this.#db.prepare(`UPDATE candidate_merge_promotions
-        SET main_head_after=?,observation_json=?,state=?,updated_at_ms=?,row_hash=?
+        SET main_head_after=?,observation_json=?,state=?,updated_at_ms=?,row_hash=?,
+            merge_pgid=?,merge_boot_at_sec=?
         WHERE id=? AND row_hash=? AND state=?`).run(
         next.main_head_after, next.observation_json, next.state, next.updated_at_ms, next.row_hash,
+        next.merge_pgid, next.merge_boot_at_sec,
         next.id, previous.row_hash, previous.state,
       );
       if (Number(result.changes) !== 1) throw new Error("MAIN_MERGE_PROMOTION_CONCURRENT_UPDATE");
@@ -5086,11 +5322,19 @@ export class CandidateRegistry {
       || !CHECKPOINT_REF_PATTERN.test(row.recovery_ref)
       || row.main_branch.length < 1 || row.main_branch.length > 255
       || !Number.isSafeInteger(row.owner_pid) || row.owner_pid <= 0
+      || (row.merge_pgid !== null && !Number.isSafeInteger(row.merge_pgid))
+      || (row.merge_boot_at_sec !== null && !Number.isSafeInteger(row.merge_boot_at_sec))
       || row.updated_at_ms < row.started_at_ms) {
       throw new Error("MAIN_MERGE_PROMOTION_ROW_TAMPERED");
     }
     JSON.parse(row.restore_json);
     JSON.parse(row.observation_json);
+    // The column and the observation are one fact written twice, so disagreement is damage. Checked
+    // in one direction only: a row written before these columns existed carries the group solely in
+    // `observation_json`, and a null column there is an upgrade, not tampering (bar item 11).
+    if (row.merge_pgid !== null && promotionPgid(row) !== row.merge_pgid) {
+      throw new Error("MAIN_MERGE_PROMOTION_ROW_TAMPERED");
+    }
   }
 
   #publicPromotion(row: PromotionRow): MergePromotion {
@@ -5480,6 +5724,11 @@ export class CandidateRegistry {
       at,
       decidedBy,
       aliveAtRelease: requirement.alive.map((entry) => ({ kind: entry.kind, pid: entry.pid })),
+      // Without this, `aliveAtRelease: []` reads as "nothing was running" — and it was measured
+      // being written exactly that way while `ps` proved three processes alive, because the group
+      // could not be read at all. `unverifiedSource` beside it does not cover this: it says the
+      // values came from a row whose hash failed, not that a question went unanswered.
+      probeReadable: requirement.probeReadable,
     };
     // Written with a raw UPDATE rather than `#writePromotion`: that helper recomputes the row hash
     // over every column, which would hand a corrupted record a valid signature and make it look like
@@ -5541,6 +5790,8 @@ export class CandidateRegistry {
             mainHeadBefore: typeof row.main_head_before === "string" ? row.main_head_before : null,
           },
           aliveAtRelease: requirement.alive.map((entry) => ({ kind: entry.kind, pid: entry.pid })),
+          /** False when the merge group could not be read; the empty list above then asserts nothing. */
+          probeReadable: requirement.probeReadable,
         },
       });
     } catch { /* the durable row has already moved; an audit sink must not undo that */ }

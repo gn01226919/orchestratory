@@ -26,9 +26,19 @@ export interface HookEnvironment {
   hooksPath: string;
   /** Executable hooks present there, name and content hash, sorted. */
   hooks: Array<{ name: string; sha256: string; bytes: number }>;
-  /** Configured merge drivers: `merge.<name>.driver` runs a command during a real merge. */
+  /**
+   * Configured merge drivers: `merge.<name>.driver` runs a command during a real merge, reported as
+   * `key=value`.
+   *
+   * The KEY goes through `redactConfigSubsection` before it leaves this function, because
+   * `merge.<url>.driver` is a valid spelling and a URL may carry a token — measured, not reasoned
+   * about: it was rendered verbatim and stored verbatim while the round that fixed `programs`
+   * claimed the hazard was closed. The VALUE is shown as configured, because it is the command git
+   * would execute and that is the entire point of disclosing it; a secret an owner puts inside a
+   * merge driver command is a residual risk this list does not close.
+   */
   drivers: string[];
-  /** Configured clean/smudge filters, including LFS. Their presence is a refusal, not a warning. */
+  /** Configured clean/smudge filters, including LFS, `key=value`, key redacted like `drivers`. */
   filters: string[];
   /**
    * Configuration keys present in this repository that `CONFIG_NAMES_A_PROGRAM` recognises as able
@@ -638,8 +648,18 @@ export class GitBroker {
       const boundary = entry.indexOf("\n");
       return boundary < 0 ? { key: entry, value: "" } : { key: entry.slice(0, boundary), value: entry.slice(boundary + 1) };
     });
+    // The key half goes through the same redaction as `programs`, and for the same measured reason:
+    // `merge.<url>.driver` and `filter.<url>.clean` are valid keys whose subsection is owner-supplied
+    // text, so a token written there was rendered verbatim on the approval screen and stored verbatim
+    // in `preview_json`. The previous round redacted `programs` and left these two lists — the same
+    // hazard in the same function, one branch over ([[PITFALLS]] #108).
+    //
+    // The VALUE is deliberately not redacted: for these two lists the value IS the command git would
+    // run, and hiding it would remove the only thing that makes the disclosure worth reading. That
+    // asymmetry is a residual risk and is written down as one, not as a claim that nothing leaks.
     const configured = (test: RegExp): string[] =>
-      entries.filter((entry) => test.test(entry.key)).map((entry) => `${entry.key}=${entry.value}`).sort();
+      entries.filter((entry) => test.test(entry.key))
+        .map((entry) => `${redactConfigSubsection(entry.key)}=${entry.value}`).sort();
     const hooksPathEntry = entries.find((entry) => entry.key === "core.hookspath");
     const hooksPath = hooksPathEntry?.value ?? "";
     const directory = hooksPath === ""
