@@ -22,12 +22,15 @@ import {
   MERGE_PREVIEW_RECOMPUTE_THROTTLE_MS,
   MERGE_PROMOTION_ABANDON_CONFIRMATION,
   MERGE_UNREADABLE_ABANDON_CONFIRMATION,
+  MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION,
   type CandidateTask,
   type MergeApproval,
   type MergePromotion,
+  type UnreadableMergePromotion,
 } from "../src/core/candidate-registry.ts";
 import { CollaborationService } from "../src/core/collaboration-service.ts";
 import { GitBroker, readExecutedHooks } from "../src/core/git-broker.ts";
+import { runCandidatePromotionsCommand } from "../src/main.ts";
 
 /*
  * Phase 5-5. Everything here drives a REAL git repository and a REAL merge into a real canonical
@@ -210,6 +213,13 @@ async function promoteInChild(
   return spawn(process.execPath, [script, f.data, f.source, approval.id, token, f.task.taskId], {
     stdio: ["ignore", "pipe", "pipe"],
   });
+}
+
+function unreadable(
+  entry: Awaited<ReturnType<CandidateRegistry["promotions"]>>[number] | undefined,
+): UnreadableMergePromotion {
+  assert.ok(entry !== undefined && entry.state === "unreadable", `expected an unreadable row: ${JSON.stringify(entry)}`);
+  return entry;
 }
 
 function readable(entry: Awaited<ReturnType<CandidateRegistry["promotions"]>>[number] | undefined): MergePromotion {
@@ -2966,33 +2976,68 @@ test("one unreadable promotion row is named, and does not retire the whole proje
   t.after(() => reopened.close());
   const listed = (await reopened.promotions({ roomId: "demo", mainPath: f.source }))[0];
   assert.equal(listed?.state, "unreadable");
+  assert.equal(unreadable(listed).holdsProjectExclusiveMarker, true);
+
+  /*
+   * FINDING F1 (fifth round). `ps -g` proves the `git merge`, its hook and its `sleep` are all
+   * alive, and main is already half-applied — and this release accepted the SHORT phrase, ignored
+   * the pgid argument entirely (`999999` was taken), and let the project's exclusive marker go while
+   * that merge went on writing. The phrase it accepted does not mention main at all.
+   *
+   * So the precondition is asserted FIRST ([[PITFALLS]] #106): the merge really is alive here.
+   */
+  assert.equal(groupAlive(pgid), true, "this test is only meaningful while the merge is alive");
+  assert.equal(unreadable(listed).release?.confirmation, MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION);
+  assert.deepEqual(
+    unreadable(listed).release?.alive.map((entry) => [entry.kind, entry.pid]), [["merge", pgid]],
+  );
+  // Read-only, like every other command a live merge is described with ([[PITFALLS]] #94).
+  for (const alive of unreadable(listed).release?.alive ?? []) {
+    assert.ok(alive.inspect.startsWith("ps ") && !/reset|kill|clean|checkout/u.test(alive.inspect), alive.inspect);
+  }
 
   // The other task is refused — an unreadable row is not evidence main is fine — but it is told what
-  // is actually wrong. "Somebody is promoting" would send the owner looking for a promotion.
+  // is actually wrong. "Somebody is promoting" would send the owner looking for a promotion, and the
+  // phrase it hands over is the one that applies right now, not the short one.
   await assert.rejects(
     reopened.promoteMainMerge({
       approvalId: otherApproval.id, token: otherToken, action: MERGE_APPROVAL_GRANT,
       taskId: other.taskId, roomId: "demo", mainPath: f.source,
     }),
-    (error: Error & { confirmation?: string }) =>
+    (error: Error & { confirmation?: string; alive?: ReadonlyArray<{ pid: number }> }) =>
       error.message === "MAIN_MERGE_PROMOTION_ROW_UNREADABLE"
-      && error.confirmation === MERGE_UNREADABLE_ABANDON_CONFIRMATION,
+      && error.confirmation === MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION
+      && (error.alive ?? []).some((entry) => entry.pid === pgid),
   );
 
-  // And the release accepts it. Without the phrase it refuses, and the refusal carries the phrase.
   const args = {
     promotionId, roomId: "demo", mainPath: f.source, pgid, decidedBy: "local-web",
   };
+  // Neither the ordinary abandon phrase nor the SHORT unreadable phrase releases a marker while a
+  // merge that may be writing main is still answering "alive".
+  for (const wrong of [MERGE_LIVE_ABANDON_CONFIRMATION, MERGE_UNREADABLE_ABANDON_CONFIRMATION]) {
+    await assert.rejects(
+      reopened.abandonMergeProcessGroup({ ...args, confirmation: wrong }),
+      (error: Error & { confirmation?: string }) =>
+        error.message === "MAIN_MERGE_PROMOTION_ROW_UNREADABLE"
+        && error.confirmation === MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION,
+    );
+  }
+  // And the pgid argument is not decoration: it used to be ignored outright.
   await assert.rejects(
-    reopened.abandonMergeProcessGroup({ ...args, confirmation: MERGE_LIVE_ABANDON_CONFIRMATION }),
-    (error: Error & { confirmation?: string }) =>
-      error.message === "MAIN_MERGE_PROMOTION_ROW_UNREADABLE"
-      && error.confirmation === MERGE_UNREADABLE_ABANDON_CONFIRMATION,
+    reopened.abandonMergeProcessGroup({
+      ...args, pgid: 999_999, confirmation: MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION,
+    }),
+    /MERGE_GROUP_ABANDON_PGID_MISMATCH/u,
+  );
+  assert.equal(
+    unreadable((await reopened.promotions({ roomId: "demo", mainPath: f.source }))[0]).storedState,
+    "applying", "a refused release must leave the marker exactly where it was",
   );
 
   const before = await treeDigest(f.source);
   const released = await reopened.abandonMergeProcessGroup({
-    ...args, confirmation: MERGE_UNREADABLE_ABANDON_CONFIRMATION,
+    ...args, confirmation: MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION,
   });
   assert.equal(await treeDigest(f.source), before, "releasing the marker wrote to the repository");
   assert.equal(groupAlive(pgid), true, "releasing the marker must not kill anything");
@@ -3000,6 +3045,7 @@ test("one unreadable promotion row is named, and does not retire the whole proje
   assert.ok("unreadable" in released && released.unreadable);
   assert.equal(released.state, "unreadable");
   assert.equal(released.storedState, "needs-manual-review");
+  assert.equal(released.holdsProjectExclusiveMarker, false);
   assert.equal(released.releasedFromExclusiveMarker?.decidedBy, "local-web");
   assert.equal((await reopened.promotions({ roomId: "demo", mainPath: f.source }))[0]?.state, "unreadable");
 
@@ -3127,4 +3173,483 @@ test("the approval surface carries what would run and what would be silently ove
   assert.deepEqual(inspected.overwrites.untracked, []);
   // And the file still holds the owner's bytes: reading the approval decided nothing.
   assert.equal(await readFile(join(f.source, "secrets.env"), "utf8"), "OWNER_LOCAL_SECRET=1\n");
+});
+
+/*
+ * FINDING F1/F4 (fifth round), the other direction ([[PITFALLS]] #107: a branch with no coverage
+ * looks the same from both sides). Above, the merge is alive and the SHORT phrase is refused. Here
+ * nothing is alive, the short phrase is the one that works, and the LONG one is refused — otherwise
+ * "refuses the short phrase" could be true simply because the short phrase never works.
+ *
+ * It also holds the release to bar item 13: `storedState` and `releasedFromExclusiveMarker` used to
+ * exist only inside the value the releasing call returned. Every later read collapsed "released" and
+ * "still claiming the whole project" back into `{state:"unreadable"}`, so the owner could not tell
+ * whether their release had done anything. Every assertion after the release here is made through a
+ * DIFFERENT registry instance.
+ */
+test("an unreadable record whose processes are gone is released with the shorter phrase, and stays released", async (t) => {
+  const f = await fixture(t);
+  const started = join(f.root, "hook-entered");
+  await hook(f, "pre-merge-commit", `#!/bin/sh\ntouch ${JSON.stringify(started)}\nsleep 600\n`);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const beforeHead = await head(f.source);
+
+  const child = await promoteInChildAt(f, approval, token);
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  for (let attempt = 0; attempt < 300 && !await exists(started); attempt += 1) await delay(100);
+  child.kill("SIGKILL");
+  await waitForExit(child);
+  const first = new CandidateRegistry(f.data);
+  const pgid = readable((await first.promotions({ roomId: "demo", mainPath: f.source }))[0])
+    .observation.mergePgid as number;
+  first.close();
+  // Nothing is left alive: the owner process is already dead and the orphaned merge is ended here.
+  process.kill(-pgid, "SIGKILL");
+  await waitForGroupExit(pgid);
+  f.registry.close();
+
+  const db = new DatabaseSync(f.path);
+  const promotionId = String((db.prepare(
+    "SELECT id FROM candidate_merge_promotions WHERE state='applying'").get() as { id: string }).id);
+  db.prepare("UPDATE candidate_merge_promotions SET row_hash=? WHERE id=?").run("0".repeat(64), promotionId);
+  db.close();
+
+  const reader = new CandidateRegistry(f.data);
+  t.after(() => reader.close());
+  const listed = unreadable((await reader.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  assert.equal(listed.holdsProjectExclusiveMarker, true);
+  assert.equal(listed.storedState, "applying");
+  assert.deepEqual(listed.release?.alive, []);
+  assert.equal(listed.release?.confirmation, MERGE_UNREADABLE_ABANDON_CONFIRMATION);
+  assert.equal(listed.releasedFromExclusiveMarker, undefined);
+
+  const args = { promotionId, roomId: "demo", mainPath: f.source, pgid, decidedBy: "local-web" };
+  // The longer phrase is for a state this record is not in, and using it is refused rather than
+  // treated as "at least as strong".
+  await assert.rejects(
+    reader.abandonMergeProcessGroup({ ...args, confirmation: MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION }),
+    (error: Error & { confirmation?: string }) =>
+      error.message === "MAIN_MERGE_PROMOTION_ROW_UNREADABLE"
+      && error.confirmation === MERGE_UNREADABLE_ABANDON_CONFIRMATION,
+  );
+  const before = await treeDigest(f.source);
+  const released = await reader.abandonMergeProcessGroup({
+    ...args, confirmation: MERGE_UNREADABLE_ABANDON_CONFIRMATION,
+  });
+  assert.equal(await treeDigest(f.source), before, "releasing the marker wrote to the repository");
+  assert.equal(unreadable(released).storedState, "needs-manual-review");
+  assert.equal(unreadable(released).holdsProjectExclusiveMarker, false);
+  reader.close();
+
+  // A different instance, a different read, the same two answers — and the release requirement is
+  // gone because there is no longer a marker to release.
+  const later = new CandidateRegistry(f.data);
+  t.after(() => later.close());
+  const after = unreadable((await later.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  assert.equal(after.state, "unreadable", "nothing here repairs the row");
+  assert.equal(after.storedState, "needs-manual-review");
+  assert.equal(after.holdsProjectExclusiveMarker, false);
+  assert.equal(after.releasedFromExclusiveMarker?.decidedBy, "local-web");
+  assert.match(after.releasedFromExclusiveMarker?.at ?? "", /^\d{4}-\d{2}-\d{2}T/u);
+  assert.equal(after.release, undefined);
+  // Releasing it twice is refused: the marker is not there to give up a second time.
+  await assert.rejects(
+    later.abandonMergeProcessGroup({ ...args, confirmation: MERGE_UNREADABLE_ABANDON_CONFIRMATION }),
+    /MAIN_MERGE_PROMOTION_NOT_BLOCKED/u,
+  );
+  assert.equal(await head(f.source), beforeHead, "no path here may move main");
+});
+
+/*
+ * FINDING F5 (fifth round). Removing the "only when BOTH waits are in the way" guard from
+ * `abandonPromotionEntirely` left all 77 tests green: the existing refusals cover a wrong phrase, a
+ * wrong pid and a wrong pgid, and none of them covers a promotion that is in the wrong STATE for
+ * this phrase. That guard is the reason the longest phrase cannot be used to skip the narrower,
+ * safer confirmation the actual state calls for — the [[PITFALLS]] #107 shape, so both directions
+ * are here: merge-only blocked, then owner-only blocked.
+ */
+test("the release that opens both waits is refused when only one of them is in the way", async (t) => {
+  const f = await fixture(t);
+  const started = join(f.root, "hook-entered");
+  await hook(f, "pre-merge-commit", `#!/bin/sh\ntouch ${JSON.stringify(started)}\nsleep 600\n`);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const child = await promoteInChildAt(f, approval, token);
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  for (let attempt = 0; attempt < 300 && !await exists(started); attempt += 1) await delay(100);
+  child.kill("SIGKILL");
+  await waitForExit(child);
+  f.registry.close();
+
+  const reopened = new CandidateRegistry(f.data);
+  t.after(() => reopened.close());
+  const blocked = readable((await reopened.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  const pgid = blocked.observation.mergePgid as number;
+  t.after(() => { try { process.kill(-pgid, "SIGKILL"); } catch { /* already gone */ } });
+  // Only the merge is in the way: the process that started this died with the `kill -9` above.
+  assert.equal(blocked.pending?.code, "MERGE_SUBPROCESS_STILL_RUNNING");
+  await assert.rejects(reopened.abandonPromotionEntirely({
+    promotionId: blocked.id, roomId: "demo", mainPath: f.source,
+    pid: process.pid, pgid, confirmation: MERGE_PROMOTION_ABANDON_CONFIRMATION, decidedBy: "local-web",
+  }), /MAIN_MERGE_PROMOTION_NOT_DOUBLY_BLOCKED/u);
+  // And the narrow release for the state it IS in still works, so the refusal above is not the only
+  // thing standing between this record and an exit.
+  assert.equal(blocked.pending?.release, MERGE_LIVE_ABANDON_CONFIRMATION);
+
+  // Now the other direction: the merge is over and only the owner process answers "alive". This
+  // test process is used as that number, which is exactly what a recycled pid looks like.
+  process.kill(-pgid, "SIGKILL");
+  await waitForGroupExit(pgid);
+  rewritePromotionRow(f.path, () => ({ ownerPid: process.pid }));
+  const owned = new CandidateRegistry(f.data);
+  t.after(() => owned.close());
+  const waiting = readable((await owned.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  assert.equal(waiting.pending?.code, "OWNER_PROCESS_STILL_RUNNING");
+  await assert.rejects(owned.abandonPromotionEntirely({
+    promotionId: waiting.id, roomId: "demo", mainPath: f.source,
+    pid: process.pid, pgid, confirmation: MERGE_PROMOTION_ABANDON_CONFIRMATION, decidedBy: "local-web",
+  }), /MAIN_MERGE_PROMOTION_NOT_DOUBLY_BLOCKED/u);
+  assert.equal(waiting.pending?.release, MERGE_OWNER_ABANDON_CONFIRMATION);
+});
+
+/*
+ * FINDING F2 (fifth round). Turning `#overwriteScan`'s catch into a fail-open
+ * `{checked:true, ignored:[], untracked:[]}` left all 594 tests green: the only test that named
+ * `OVERWRITE_SCAN_*` covered `..._FILE_LIST_TRUNCATED`, and neither the real-failure branch nor the
+ * pathspec bound had one. That is not a display concern — the answer travels through
+ * `promotionBlockers()` into the gate that decides whether an approval may be raised and whether one
+ * may be SPENT, so fail-open there means "the scan broke, therefore no file will be overwritten",
+ * and the file it silently overwrites is an ignored one git will not warn about.
+ *
+ * Both cases here are real failures of the real method: git's own process failing, and a pathspec
+ * this product refuses to hand to git. Neither substitutes a return value for the scan.
+ */
+test("a scan that could not run is a closed gate at preview, named separately from the tree", async (t) => {
+  // A pathspec that cannot be passed to git safely. `-dash.txt` is an ordinary, committable file
+  // name, and the broker refuses to put it in an argument list rather than hoping `--` holds.
+  const dashed = await fixture(t, {
+    beforeComplete: async ({ candidatePath }) => {
+      await writeFile(join(candidatePath, "-dash.txt"), "candidate\n", "utf8");
+      await execFileAsync("git", ["add", "--", "./-dash.txt"], { cwd: candidatePath });
+      await execFileAsync("git", [...author, "commit", "-m", "dashed"], { cwd: candidatePath });
+    },
+  });
+  const preview = await dashed.registry.previewMainMerge({
+    taskId: dashed.task.taskId, roomId: "demo", mainPath: dashed.source,
+  });
+  // The working tree itself is perfectly readable, so this blocker is the ONLY reason — which is
+  // what makes it a test of this branch rather than of the one beside it.
+  assert.deepEqual(preview.blockers, ["OVERWRITE_SCAN_UNAVAILABLE"]);
+  assert.equal(preview.overwrites.checked, false);
+  assert.equal(preview.approvable, false);
+  // And the owner cannot be ASKED, so there is never an approval to spend.
+  await assert.rejects(dashed.registry.requestMainMerge({
+    actor: "codex1", clientRequestId: key(), taskId: dashed.task.taskId, roomId: "demo",
+    mainPath: dashed.source, completionId: preview.completionId, previewDigest: preview.previewDigest,
+  }), (error: Error & { blockers?: string[] }) =>
+    error.message.startsWith("MAIN_MERGE_PROMOTION_REFUSED")
+    && (error.blockers ?? []).includes("OVERWRITE_SCAN_UNAVAILABLE"));
+
+  // The refusal is about this change set, not about the project: a sibling task over the same main
+  // is still approvable, so nothing here is a permanent verdict on the repository.
+  const sibling = await dashed.registry.start({
+    actor: "codex1", clientRequestId: key(), roomId: "demo", mainPath: dashed.source, task: "sibling",
+  });
+  await commit(sibling.candidatePath, "plain.txt", "plain\n", "plain work");
+  await dashed.registry.complete({
+    actor: "codex1", clientRequestId: key(), taskId: sibling.taskId, roomId: "demo",
+    mainPath: dashed.source, summary: "ready",
+  });
+  const recovered = await dashed.registry.previewMainMerge({
+    taskId: sibling.taskId, roomId: "demo", mainPath: dashed.source,
+  });
+  assert.equal(recovered.approvable, true, recovered.blockers.join(","));
+});
+
+/*
+ * The same gate at the other end: the scan is re-run against LIVE main immediately before the
+ * approval is spent, and a failure there must refuse rather than proceed. Reaching that window
+ * needs the failure to appear AFTER the approval was granted, so the repository's permissions are
+ * removed for the duration of that one scan — the same shape as an external drive dropping out
+ * mid-promotion. `untrackedAtPaths` is NOT replaced: the real method runs, spawns a real
+ * `git ls-files`, and that process really fails. Only the surrounding environment is arranged.
+ */
+test("a scan that could not run refuses the promotion at the moment the approval is spent", async (t) => {
+  class BreakDuringScan extends GitBroker {
+    gitDirectory = "";
+    armed = false;
+    override async untrackedAtPaths(
+      workspace: string, paths: readonly string[],
+    ): ReturnType<GitBroker["untrackedAtPaths"]> {
+      if (!this.armed) return await super.untrackedAtPaths(workspace, paths);
+      await chmod(this.gitDirectory, 0o000);
+      try {
+        return await super.untrackedAtPaths(workspace, paths);
+      } finally {
+        await chmod(this.gitDirectory, 0o700);
+      }
+    }
+  }
+  const broker = new BreakDuringScan();
+  const root = await mkdtemp(join(tmpdir(), "orchestratory-scan-"));
+  const source = join(root, "source");
+  const data = join(root, "data");
+  await mkdir(source);
+  await mkdir(data, { mode: 0o700 });
+  await execFileAsync("git", ["init", "-b", "main"], { cwd: source });
+  await commit(source, "README.md", "committed main\n", "initial");
+  broker.gitDirectory = join(source, ".git");
+  t.after(async () => {
+    await chmod(broker.gitDirectory, 0o700).catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  });
+  const registry = new CandidateRegistry(data, { gitBroker: broker });
+  t.after(() => registry.close());
+  const task = await registry.start({
+    actor: "codex1", clientRequestId: key(), roomId: "demo", mainPath: source, task: "scan",
+  });
+  await commit(task.candidatePath, "candidate.txt", "candidate work\n", "candidate work");
+  await registry.complete({
+    actor: "codex1", clientRequestId: key(), taskId: task.taskId, roomId: "demo", mainPath: source,
+    summary: "ready",
+  });
+  const f = { root, source, data, path: registry.path, registry, task };
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const beforeHead = await head(source);
+
+  broker.armed = true;
+  await assert.rejects(promote(f, approval, token), (error: Error & { blockers?: string[] }) =>
+    error.message.startsWith("MAIN_MERGE_PROMOTION_REFUSED")
+    && (error.blockers ?? []).includes("OVERWRITE_SCAN_UNAVAILABLE"));
+  broker.armed = false;
+  await chmod(broker.gitDirectory, 0o700);
+  // Nothing was written and nothing was spent: main is where it was, and the same grant still works
+  // once the repository can be read again.
+  assert.equal(await head(source), beforeHead);
+  assert.equal(await status(source), "");
+  assert.equal((await promote(f, approval, token)).promotion.state, "applied");
+});
+
+/*
+ * The scan's other closed gate: a change set with more paths than one bounded pathspec may carry.
+ * `OVERWRITE_SCAN_PATHSPEC_TOO_LARGE` had no test either, and it is the branch that decides what
+ * happens when a legitimate but very large candidate arrives.
+ */
+test("a change set with more paths than one bounded pathspec is a closed gate, named", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "orchestratory-pathspec-"));
+  const source = join(root, "source");
+  const data = join(root, "data");
+  await mkdir(source);
+  await mkdir(data, { mode: 0o700 });
+  await execFileAsync("git", ["init", "-b", "main"], { cwd: source });
+  await commit(source, "README.md", "committed main\n", "initial");
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  // Above the file cap the preview would truncate first, and a truncated preview is a different
+  // refusal; this has to be a change set the preview can carry WHOLE.
+  const registry = new CandidateRegistry(data, { maxFiles: 2_500 });
+  t.after(() => registry.close());
+  const task = await registry.start({
+    actor: "codex1", clientRequestId: key(), roomId: "demo", mainPath: source, task: "wide",
+  });
+  // Gitlinks written straight into the index: 2001 real files would spend one `git cat-file` each on
+  // sizes this test never looks at, and the scan counts paths, not bytes.
+  const entries = Array.from(
+    { length: 2_001 },
+    (_, index) => `160000 ${"0".repeat(39)}1 0\tsub/${index}`,
+  ).join("\n");
+  execFileSync("git", ["update-index", "--index-info"], { cwd: task.candidatePath, input: `${entries}\n` });
+  execFileSync("git", [...author, "commit", "-m", "wide"], { cwd: task.candidatePath });
+  // A gitlink whose path is missing reads as a deletion, and completion refuses a dirty worktree.
+  // An empty directory at each path is what git considers an unmodified, uninitialised submodule.
+  for (let index = 0; index < 2_001; index += 1) {
+    await mkdir(join(task.candidatePath, "sub", String(index)), { recursive: true });
+  }
+  await registry.complete({
+    actor: "codex1", clientRequestId: key(), taskId: task.taskId, roomId: "demo", mainPath: source,
+    summary: "ready",
+  });
+  const preview = await registry.previewMainMerge({
+    taskId: task.taskId, roomId: "demo", mainPath: source,
+  });
+  assert.equal(preview.preview.filesTruncated, false, "the preview must carry the whole change set here");
+  assert.equal(preview.overwrites.checked, false);
+  assert.ok(preview.blockers.includes("OVERWRITE_SCAN_PATHSPEC_TOO_LARGE"), preview.blockers.join(","));
+  await assert.rejects(registry.requestMainMerge({
+    actor: "codex1", clientRequestId: key(), taskId: task.taskId, roomId: "demo",
+    mainPath: source, completionId: preview.completionId, previewDigest: preview.previewDigest,
+  }), /OVERWRITE_SCAN_PATHSPEC_TOO_LARGE|PREVIEW_/u);
+});
+
+/*
+ * FINDING F3 (fifth round). Two owner declarations were added to the promotion event with no test
+ * looking at what they write, and one of them carried four values — `mainBranch`, `candidateHead`,
+ * `recoveryRef`, `mainHeadBefore` — copied straight out of a row whose integrity check had just
+ * failed, into the audit chain, under a comment claiming every such field was null.
+ *
+ * Both are driven through the PRODUCT wiring (`CollaborationService` supplies the chain and the
+ * ledger), and both assert the count and the content: an empty chain verifies too.
+ */
+test("the owner's two release declarations are recorded, attributed, and assert nothing they did not read", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "orchestratory-release-audit-"));
+  const source = join(root, "source");
+  const data = join(root, "data");
+  await mkdir(source);
+  await mkdir(data, { mode: 0o700 });
+  await execFileAsync("git", ["init", "-b", "main"], { cwd: source });
+  await commit(source, "README.md", "committed main\n", "initial");
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const service = new CollaborationService(data);
+  t.after(() => service.close());
+  service.ledger.createRoom("demo", source);
+  const started = join(root, "hook-entered");
+  await writeFile(join(source, ".git", "hooks", "pre-merge-commit"),
+    `#!/bin/sh\ntouch ${JSON.stringify(started)}\nsleep 600\n`, { encoding: "utf8", mode: 0o700 });
+
+  const task = await service.candidates.start({
+    actor: "codex1", clientRequestId: key(), roomId: "demo", mainPath: source, task: "released",
+  });
+  await commit(task.candidatePath, "candidate.txt", "candidate work\n", "candidate work");
+  await service.candidates.complete({
+    actor: "codex1", clientRequestId: key(), taskId: task.taskId, roomId: "demo", mainPath: source,
+    summary: "ready",
+  });
+  const f = { root, source, data, path: service.candidates.path, registry: service.candidates, task };
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const child = await promoteInChildAt(f, approval, token);
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  for (let attempt = 0; attempt < 300 && !await exists(started); attempt += 1) await delay(100);
+  child.kill("SIGKILL");
+  await waitForExit(child);
+
+  const blocked = readable((await service.candidates.promotions({ roomId: "demo", mainPath: source }))[0]);
+  const pgid = blocked.observation.mergePgid as number;
+  t.after(() => { try { process.kill(-pgid, "SIGKILL"); } catch { /* already gone */ } });
+  // Both numbers alive: the merge really is, and the owner slot is pointed at this live test process.
+  rewritePromotionRow(f.path, () => ({ ownerPid: process.pid }));
+  const doubly = readable((await service.candidates.promotions({ roomId: "demo", mainPath: source }))[0]);
+  assert.equal(doubly.pending?.code, "PROMOTION_OWNER_AND_MERGE_STILL_RUNNING");
+  await service.candidates.abandonPromotionEntirely({
+    promotionId: doubly.id, roomId: "demo", mainPath: source, pid: process.pid, pgid,
+    confirmation: MERGE_PROMOTION_ABANDON_CONFIRMATION, decidedBy: "local-web",
+  });
+
+  const abandoned = service.audit.list({ roomId: "demo" })
+    .filter((event) => event.type === "candidate.main-merge-promotion-abandoned");
+  assert.equal(service.audit.verify(), true);
+  assert.equal(abandoned.length, 1, `expected exactly one record, got ${abandoned.length}`);
+  const detail = abandoned[0]?.detail as Record<string, unknown>;
+  assert.equal(abandoned[0]?.outcome, "denied");
+  assert.equal(detail.decidedBy, "local-web");
+  assert.equal(detail.pid, process.pid);
+  assert.equal(detail.pgid, pgid);
+  assert.equal(detail.whileRunning, true, "the merge really was alive when this was declared");
+  assert.equal(detail.mainMutation, false);
+  const abandonedLines = service.ledger.listAfter("demo", 0)
+    .map((entry) => entry.text).filter((text: string) => text.includes("兩個程序"));
+  assert.equal(abandonedLines.length, 1, abandonedLines.join(" | "));
+  assert.match(String(abandonedLines[0]), /沒有修改 main，也沒有結束任何程序/u);
+  assert.equal(String(abandonedLines[0]).includes(source), false, "the public ledger leaked the project path");
+
+  // --- and the unreadable-row release, whose record must assert nothing it did not read
+  const db = new DatabaseSync(f.path);
+  const promotionId = String((db.prepare("SELECT id FROM candidate_merge_promotions").get() as { id: string }).id);
+  db.prepare("UPDATE candidate_merge_promotions SET state='applying', row_hash=? WHERE id=?")
+    .run("0".repeat(64), promotionId);
+  db.close();
+  const listed = unreadable((await service.candidates.promotions({ roomId: "demo", mainPath: source }))[0]);
+  await service.candidates.abandonMergeProcessGroup({
+    promotionId, roomId: "demo", mainPath: source,
+    pgid: listed.release?.alive.find((entry) => entry.kind === "merge")?.pid ?? Number.NaN,
+    confirmation: listed.release?.confirmation ?? "", decidedBy: "local-web",
+  });
+  const releasedEvents = service.audit.list({ roomId: "demo" })
+    .filter((event) => event.type === "candidate.main-merge-unreadable-record-released");
+  assert.equal(service.audit.verify(), true);
+  assert.equal(releasedEvents.length, 1, `expected exactly one record, got ${releasedEvents.length}`);
+  const released = releasedEvents[0]?.detail as Record<string, unknown>;
+  // Nothing about the repository is asserted, because nothing about it was read.
+  for (const field of ["mainHeadBefore", "mainHeadAfter", "candidateHead", "recoveryRef", "decidedBy"]) {
+    if (field === "decidedBy") continue;
+    assert.equal(released[field], null, `${field} was asserted from a row whose hash does not verify`);
+  }
+  assert.equal(released.mainMutation, false);
+  assert.equal(released.recordRepaired, false);
+  // The row's own copies are still available to look things up with — behind a flag that says where
+  // they came from, which is the whole difference between carrying a value and vouching for it.
+  assert.equal(released.unverifiedSource, true);
+  const unverified = released.unverifiedRowValues as Record<string, unknown>;
+  assert.match(String(unverified.candidateHead), /^[0-9a-f]{40}$/u);
+  assert.match(String(unverified.mainHeadBefore), /^[0-9a-f]{40}$/u);
+  assert.equal(unverified.mainBranch, "main");
+  const releasedLines = service.ledger.listAfter("demo", 0)
+    .map((entry) => entry.text).filter((text: string) => text.includes("讀不了"));
+  assert.equal(releasedLines.length, 1, releasedLines.join(" | "));
+  assert.match(String(releasedLines[0]), /仍然讀不了、仍未結案/u);
+  assert.equal(service.ledger.verifyChain("demo"), true);
+});
+
+/*
+ * Bar item 11, the product-side path. `promotions()` and the three releases had no caller anywhere
+ * outside this test suite: `grep -rn "promoteMainMerge\|abandonPromotion\|abandonMergeProcessGroup\|
+ * promotions(" src/main.ts src/ui src/mcp bin` returned nothing, so the only way an owner could
+ * clear a wedged record was to write a Node script against a private SQLite file.
+ *
+ * This drives the CLI command against a REAL registry and a REAL blocked promotion. Only the
+ * allowlist check and the room lookup are left to `main()`.
+ */
+test("the CLI can see what a promotion is waiting on and release it, without killing anything", async (t) => {
+  const f = await fixture(t);
+  const started = join(f.root, "hook-entered");
+  await hook(f, "pre-merge-commit", `#!/bin/sh\ntouch ${JSON.stringify(started)}\nsleep 600\n`);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const beforeHead = await head(f.source);
+  const child = await promoteInChildAt(f, approval, token);
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  for (let attempt = 0; attempt < 300 && !await exists(started); attempt += 1) await delay(100);
+  child.kill("SIGKILL");
+  await waitForExit(child);
+  f.registry.close();
+
+  const registry = new CandidateRegistry(f.data);
+  t.after(() => registry.close());
+  const run = async (args: string[]): Promise<string> => await runCandidatePromotionsCommand({
+    args, roomId: "demo", mainPath: f.source, registry, decidedBy: "local-cli",
+  });
+  const listed = readable((await registry.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  const pgid = listed.observation.mergePgid as number;
+  t.after(() => { try { process.kill(-pgid, "SIGKILL"); } catch { /* already gone */ } });
+
+  const report = await run([]);
+  assert.match(report, new RegExp(`MERGE_SUBPROCESS_STILL_RUNNING \\(pid ${pgid}\\)`, "u"));
+  assert.match(report, new RegExp(`ps -o pid,ppid,pgid,stat,lstart,command -g ${pgid}`, "u"));
+  assert.match(report, new RegExp(`--pgid ${pgid}`, "u"));
+  assert.match(report, /MAY STILL BE WRITING TO MAIN/u);
+  // The listing is read-only in the strongest sense: the record is exactly where it was.
+  assert.equal(readable((await registry.promotions({ roomId: "demo", mainPath: f.source }))[0]).state, "applying");
+
+  // The phrase and the number are both required through the CLI too.
+  await assert.rejects(
+    run(["release", listed.id, "--confirm", "STOP WAITING FOR THIS PROCESS GROUP", "--pgid", String(pgid)]),
+    /MERGE_ABANDON_REFUSED_MERGE_STILL_RUNNING/u,
+  );
+  await assert.rejects(
+    run(["release", listed.id, "--confirm", MERGE_LIVE_ABANDON_CONFIRMATION, "--pgid", String(pgid + 1)]),
+    /MERGE_GROUP_ABANDON_PGID_MISMATCH/u,
+  );
+
+  const before = await treeDigest(f.source);
+  const after = await run([
+    "release", listed.id, "--confirm", MERGE_LIVE_ABANDON_CONFIRMATION, "--pgid", String(pgid),
+  ]);
+  assert.match(after, /Released as local-cli\. Nothing was killed and main was not written\./u);
+  assert.equal(groupAlive(pgid), true, "the CLI must not kill anything");
+  assert.equal(await treeDigest(f.source), before, "the CLI wrote to the repository");
+  assert.equal(await head(f.source), beforeHead);
+  assert.equal(
+    readable((await registry.promotions({ roomId: "demo", mainPath: f.source }))[0]).pending, undefined,
+  );
 });

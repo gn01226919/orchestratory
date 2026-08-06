@@ -292,6 +292,26 @@ export const MERGE_UNREADABLE_ABANDON_CONFIRMATION =
   "STOP LETTING AN UNREADABLE PROMOTION RECORD BLOCK THIS PROJECT";
 
 /**
+ * The second phrase for an unreadable row, required when one of the numbers that row was waiting on
+ * is still answering "alive".
+ *
+ * The phrase above says nothing about main being written, and that was measured rather than
+ * theorised: with `ps -g` listing a live `git merge`, its hook and its `sleep`, and main already
+ * half-applied (`A  a.txt`), the release above was ACCEPTED, the merge went on writing, and the
+ * project's exclusive marker was gone. The next task was refused only because main happened to be
+ * dirty by then — stopped by coincidence rather than by design, which is exactly what
+ * [[PITFALLS]] #109 says is not a guard.
+ *
+ * A row whose hash does not verify cannot be trusted to say which pid is which, so the probe here is
+ * best-effort and its answer only ever raises the bar: anything that might still be running turns
+ * the ordinary phrase into a refusal that names this one, and this one says what the owner is
+ * actually doing. Nothing is killed here either, and main is not touched.
+ */
+export const MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION =
+  "STOP LETTING AN UNREADABLE RECORD BLOCK THIS PROJECT WHILE ONE OF ITS PROCESSES IS STILL ALIVE"
+  + " AND MAY BE WRITING TO MAIN";
+
+/**
  * Written into every consumed authorization so no downstream caller has to infer the limits of what
  * the owner agreed to. A merge approval authorizes one merge of one snapshot into main; it is not a
  * push, publish, deploy, delete or cleanup approval, and it never becomes one.
@@ -620,6 +640,22 @@ export interface MergePromotionObservation {
    */
   ownerProcessDisowned?: { pid: number; at: string; decidedBy: string };
   /**
+   * Recorded when the owner declared that a promotion row NOBODY CAN READ should stop claiming the
+   * project's exclusive marker.
+   *
+   * It is written into the row this same declaration is about, which is only sound because that row
+   * is already unreadable: nothing here recomputes its hash, so the record does not acquire a valid
+   * signature it never had. It is stored rather than returned once because a declaration that exists
+   * only in one call's return value cannot be read back — and then "released" and "still claiming the
+   * project" look identical on the next read, which is the state bar item 13 forbids.
+   */
+  unreadableRecordReleased?: {
+    at: string;
+    decidedBy: string;
+    /** What the best-effort probe could still see at that moment. Attributed to that instant only. */
+    aliveAtRelease?: Array<{ kind: string; pid: number }>;
+  };
+  /**
    * The boot the process that started this promotion belonged to.
    *
    * `owner_pid` on its own is the same defect as a bare pgid, one level up: after a reboot the
@@ -689,11 +725,17 @@ export interface MergePromotionEvent {
   taskId: string;
   roomId: string;
   mainPath: string;
-  mainBranch: string;
-  candidateHead: string;
-  recoveryRef: string;
+  /**
+   * The three values below and `mainHeadBefore` are null on exactly one phase:
+   * `unreadable-record-released`, where the only place they could have come from is a row whose
+   * integrity check failed. Null there means "this trail does not assert them", and the row's own
+   * copies travel in `detail.unverifiedRowValues` behind `detail.unverifiedSource`.
+   */
+  mainBranch: string | null;
+  candidateHead: string | null;
+  recoveryRef: string | null;
   /** main's HEAD as observed BEFORE anything was written. */
-  mainHeadBefore: string;
+  mainHeadBefore: string | null;
   /** main's HEAD as observed after. Null means it was not read on the pass that produced this. */
   mainHeadAfter: string | null;
   /**
@@ -729,6 +771,22 @@ export interface UnreadableMergePromotion {
    * and collapsing them would leave the owner unable to tell whether their release did anything.
    */
   storedState?: string;
+  /**
+   * Whether this row still claims the project's exclusive marker, re-derived from the `state` column
+   * on every read. This is the fact a release changes, and it is the one the owner needs in order to
+   * tell whether theirs took effect.
+   */
+  holdsProjectExclusiveMarker?: boolean;
+  /**
+   * What releasing this row would require right now: the exact phrase, and every number the record
+   * was waiting on that a best-effort probe can still see, each with a read-only command that shows
+   * it. Present only while the row still holds the marker, and re-derived on every read — these are
+   * statements about processes that are alive at the moment of the call.
+   */
+  release?: {
+    confirmation: string;
+    alive: Array<{ kind: "merge" | "owner"; pid: number; inspect: string }>;
+  };
   /** The owner's declaration, echoed back. Attributed, never presented as an observation. */
   releasedFromExclusiveMarker?: { at: string; decidedBy: string };
 }
@@ -1593,6 +1651,76 @@ function processAlive(pid: number): boolean | null {
   }
 }
 
+/**
+ * What releasing an UNREADABLE promotion row from the project's exclusive marker requires right now,
+ * and which of the numbers it was waiting on can still be seen.
+ *
+ * Every input here is read without the row hash, because the row hash is the thing that failed:
+ * `owner_pid` is a plain integer column, and the merge group comes out of `observation_json` through
+ * parsers that already treat unparseable text as "decides nothing". That makes this a best-effort
+ * probe and it is described as one — but best-effort in the safe direction: anything that might
+ * still be running demands the phrase that says so, and only a row where nothing can be seen at all
+ * gets the short one.
+ *
+ * The alternative measured on this code was worse than imprecise: the pgid argument was ignored
+ * outright, `999999` was accepted, and a provably live `git merge` had the project's marker taken
+ * out from under it while it wrote.
+ */
+function unreadableReleaseRequirement(row: PromotionRow): {
+  confirmation: string;
+  alive: Array<{ kind: "merge" | "owner"; pid: number; inspect: string }>;
+} {
+  const alive: Array<{ kind: "merge" | "owner"; pid: number; inspect: string }> = [];
+  const identity = promotionGroupIdentity(row);
+  const group = mergeGroupState(identity);
+  // "unknown" counts as alive on purpose: an undecidable probe is not evidence the merge is over,
+  // and this is the one decision where being wrong means publishing over a live write.
+  if (identity !== null && (group === "merge-running" || group === "unknown")) {
+    alive.push({ kind: "merge", pid: identity.pgid, inspect: inspectGroupCommand(identity.pgid) });
+  }
+  if (ownerProcessAlive(row) !== false && Number.isSafeInteger(row.owner_pid) && row.owner_pid > 1) {
+    alive.push({ kind: "owner", pid: row.owner_pid, inspect: inspectPidCommand(row.owner_pid) });
+  }
+  return {
+    confirmation: alive.length > 0
+      ? MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION
+      : MERGE_UNREADABLE_ABANDON_CONFIRMATION,
+    alive,
+  };
+}
+
+/**
+ * What an unreadable promotion row looks like to a reader, derived from the row every single time.
+ *
+ * `storedState` and `releasedFromExclusiveMarker` used to exist only in the value returned by the ONE
+ * call that performed a release: every later read collapsed "released" and "still claiming the whole
+ * project" back into the same `{state:"unreadable"}`, so an owner could not tell whether their
+ * release had done anything. Bar item 13 is about exactly that. Both come from the durable row here,
+ * and `holdsProjectExclusiveMarker` is re-derived from the `state` column on each read rather than
+ * cached, because it is the fact the release is about.
+ */
+function unreadablePromotionView(row: PromotionRow): UnreadableMergePromotion {
+  let released: { at: string; decidedBy: string } | undefined;
+  try {
+    const value = (JSON.parse(String(row.observation_json)) as MergePromotionObservation)
+      .unreadableRecordReleased;
+    if (value && typeof value.at === "string" && typeof value.decidedBy === "string") {
+      released = { at: value.at, decidedBy: value.decidedBy };
+    }
+  } catch { /* an observation that cannot be read asserts nothing, exactly like the row it is in */ }
+  const holds = row.state === "applying";
+  return {
+    id: typeof row.id === "string" ? row.id : "",
+    taskId: typeof row.task_id === "string" ? row.task_id : "",
+    state: "unreadable",
+    unreadable: true,
+    storedState: typeof row.state === "string" ? row.state : "",
+    holdsProjectExclusiveMarker: holds,
+    ...(holds ? { release: unreadableReleaseRequirement(row) } : {}),
+    ...(released === undefined ? {} : { releasedFromExclusiveMarker: released }),
+  };
+}
+
 function mergeRequestKey(value: unknown): string {
   if (typeof value !== "string" || !UUID_PATTERN.test(value)) throw new Error("MAIN_MERGE_CLIENT_REQUEST_ID_INVALID");
   return value;
@@ -1688,12 +1816,24 @@ export class MergePromotionDoublyBlockedError extends Error {
 export class MergeUnreadablePromotionError extends Error {
   readonly promotionId: string;
   readonly confirmation: string;
+  /**
+   * The numbers this unreadable row was waiting on that a best-effort probe can still see, each with
+   * a read-only command that shows it. Non-empty is why `confirmation` is the longer phrase.
+   */
+  readonly alive: ReadonlyArray<{ kind: "merge" | "owner"; pid: number; inspect: string }>;
 
-  constructor(promotionId: string) {
+  constructor(
+    promotionId: string,
+    requirement: {
+      confirmation: string;
+      alive: ReadonlyArray<{ kind: "merge" | "owner"; pid: number; inspect: string }>;
+    } = { confirmation: MERGE_UNREADABLE_ABANDON_CONFIRMATION, alive: [] },
+  ) {
     super("MAIN_MERGE_PROMOTION_ROW_UNREADABLE");
     this.name = "MergeUnreadablePromotionError";
     this.promotionId = promotionId;
-    this.confirmation = MERGE_UNREADABLE_ABANDON_CONFIRMATION;
+    this.confirmation = requirement.confirmation;
+    this.alive = [...requirement.alive];
   }
 }
 
@@ -3190,12 +3330,8 @@ export class CandidateRegistry {
       try {
         this.#assertPromotionRow(row);
       } catch {
-        promotions.push({
-          id: typeof row.id === "string" ? row.id : "",
-          taskId: typeof row.task_id === "string" ? row.task_id : "",
-          state: "unreadable",
-          unreadable: true,
-        });
+        // Derived from the row every time, never from what some earlier call happened to return.
+        promotions.push(unreadablePromotionView(row));
         continue;
       }
       promotions.push(this.#publicPromotion(await this.#resolvePromotion(row)));
@@ -4499,6 +4635,11 @@ export class CandidateRegistry {
       return { blockers: promotionBlockers(restore, overwrite), overwrite, hooks: restore.hooks };
     } catch {
       // Unread is a closed gate, never an open one.
+      //
+      // Deliberately left as it was: a fifth-round attempt to also carry the scan's own answer here
+      // could not be given a test, because every caller reads the restore point earlier through
+      // `#previewSnapshot` and throws before this catch is reached. Adding a second blocker to a
+      // branch nothing can reach would be code with no test behind it ([[PITFALLS]] #97).
       return {
         blockers: ["MAIN_WORKING_TREE_UNREADABLE"],
         overwrite,
@@ -4604,7 +4745,15 @@ export class CandidateRegistry {
         // truth was "one row here cannot be read and nothing you do to promotions will help".
         // Measured: one corrupted `row_hash` refused every other task in the project forever, and
         // the release that could have cleared it answered `MAIN_MERGE_PROMOTION_NOT_FOUND`.
-        throw new MergeUnreadablePromotionError(typeof row.id === "string" ? row.id : "");
+        //
+        // The phrase is a constant and goes to everyone, because it is the way out. The pids do not:
+        // they are facts about the owner's machine, and a caller that has not proved it holds a
+        // token has no claim on them. An owner reading the listing gets them either way.
+        const requirement = unreadableReleaseRequirement(row);
+        throw new MergeUnreadablePromotionError(typeof row.id === "string" ? row.id : "", {
+          confirmation: requirement.confirmation,
+          alive: options.authenticated ? requirement.alive : [],
+        });
       }
       if (promotionPending(row) !== undefined) throw new Error("MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY");
       const last = this.#promotionResolvedAt.get(row.id) ?? 0;
@@ -5025,7 +5174,7 @@ export class CandidateRegistry {
       throw new Error("MAIN_MERGE_PROMOTION_NOT_FOUND");
     }
     if (!this.#promotionRowReadable(raw)) {
-      return this.#releaseUnreadablePromotion(raw, input.confirmation, decidedBy);
+      return this.#releaseUnreadablePromotion(raw, input.confirmation, decidedBy, input.pgid);
     }
     const row = raw;
     if (row.state === "applied" || row.state === "rolled-back") {
@@ -5281,27 +5430,74 @@ export class CandidateRegistry {
    * The scope check that got us here compared the row's plain `room_id` and `main_path` columns,
    * which an integrity failure does not make trustworthy. It is the strongest check available for a
    * row whose hash is wrong, and the action it authorises writes only to that same row.
+   *
+   * What it refuses to do with the short phrase is release a marker while anything this record was
+   * waiting on can still be seen. That is not a hypothetical ordering: measured on this code, a
+   * `git merge` whose hook `ps -g` still listed, with main already half-applied, had the project's
+   * marker released out from under it and the pgid argument ignored entirely.
    */
   #releaseUnreadablePromotion(
-    row: PromotionRow, confirmation: unknown, decidedBy: string,
+    row: PromotionRow, confirmation: unknown, decidedBy: string, pgid: unknown,
   ): UnreadableMergePromotion {
     const id = typeof row.id === "string" ? row.id : "";
     const taskId = typeof row.task_id === "string" ? row.task_id : "";
     if (row.state !== "applying") throw new Error("MAIN_MERGE_PROMOTION_NOT_BLOCKED");
-    if (confirmation !== MERGE_UNREADABLE_ABANDON_CONFIRMATION) {
-      throw new MergeUnreadablePromotionError(id);
+    // Asked HERE rather than trusted from a caller, and asked again on every attempt: it is a
+    // statement about processes that are alive right now.
+    const requirement = unreadableReleaseRequirement(row);
+    if (confirmation !== requirement.confirmation) {
+      throw new MergeUnreadablePromotionError(id, requirement);
+    }
+    // When a merge group can still be seen, the owner has to quote its number, exactly as every
+    // other release requires. This path used to ignore the argument completely — `999999` was
+    // accepted against a `git merge` that `ps` was still listing. Nothing is required when nothing
+    // can be seen, because there is then no number on the record to quote.
+    //
+    // A live OWNER process raises the phrase but adds no number requirement, and that is a decision
+    // rather than an oversight: this call carries one number, the merge group is the thing that
+    // writes main, and asking the owner to quote a pid into a parameter named for a process group
+    // would be a worse instruction than asking for nothing.
+    const merge = requirement.alive.find((entry) => entry.kind === "merge");
+    if (merge !== undefined && (!Number.isSafeInteger(pgid) || pgid !== merge.pid)) {
+      throw new Error("MERGE_GROUP_ABANDON_PGID_MISMATCH");
     }
     const at = new Date(this.#now()).toISOString();
+    // The declaration is written into the row's own observation column so it can be READ BACK. The
+    // previous shape returned it once and stored nothing, which left every later read unable to say
+    // whether the release had happened. Preserved as text rather than merged into a parsed object:
+    // this row's JSON is exactly as untrustworthy as the rest of it, and overwriting it would
+    // destroy the only evidence of what the record used to claim.
+    let observation: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(String(row.observation_json));
+      observation = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+        ? { ...parsed as Record<string, unknown> }
+        : { unparsedObservation: String(row.observation_json).slice(0, 4_096) };
+    } catch {
+      observation = { unparsedObservation: String(row.observation_json).slice(0, 4_096) };
+    }
+    observation.unreadableRecordReleased = {
+      at,
+      decidedBy,
+      aliveAtRelease: requirement.alive.map((entry) => ({ kind: entry.kind, pid: entry.pid })),
+    };
     // Written with a raw UPDATE rather than `#writePromotion`: that helper recomputes the row hash
     // over every column, which would hand a corrupted record a valid signature and make it look like
     // something this product wrote. The row stays unreadable, deliberately.
     const result = this.#db.prepare(
-      "UPDATE candidate_merge_promotions SET state='needs-manual-review' WHERE id=? AND state='applying'",
-    ).run(id);
+      "UPDATE candidate_merge_promotions SET state='needs-manual-review', observation_json=? WHERE id=? AND state='applying'",
+    ).run(JSON.stringify(observation), id);
     if (Number(result.changes) !== 1) throw new Error("MAIN_MERGE_PROMOTION_CONCURRENT_UPDATE");
     try {
-      // Every field that would be a fact about the repository is null, because none of them was
-      // read: an unreadable row is exactly the case where a record must not assert anything.
+      // Every field that would be a fact about the REPOSITORY is null, because none of them was
+      // observed: an unreadable row is exactly the case where a record must not assert anything.
+      //
+      // That sentence used to sit directly above four fields — `mainBranch`, `candidateHead`,
+      // `recoveryRef`, `mainHeadBefore` — being copied straight out of a row whose integrity check
+      // had just failed, into the audit chain, with no mark on them. They are still carried, because
+      // a trail that names nothing an owner can look up is not much of a trail, but they are carried
+      // in `detail.unverifiedRowValues` under a flag that says where they came from, and the
+      // top-level fields the chain treats as observations stay null.
       this.#onPromotion?.({
         phase: "unreadable-record-released",
         promotionId: id,
@@ -5309,10 +5505,10 @@ export class CandidateRegistry {
         taskId,
         roomId: row.room_id,
         mainPath: row.main_path,
-        mainBranch: typeof row.main_branch === "string" ? row.main_branch : "",
-        candidateHead: typeof row.candidate_head === "string" ? row.candidate_head : "",
-        recoveryRef: typeof row.recovery_ref === "string" ? row.recovery_ref : "",
-        mainHeadBefore: typeof row.main_head_before === "string" ? row.main_head_before : "",
+        mainBranch: null,
+        candidateHead: null,
+        recoveryRef: null,
+        mainHeadBefore: null,
         mainHeadAfter: null,
         mainHeadUnchanged: null,
         state: "needs-manual-review",
@@ -5332,17 +5528,32 @@ export class CandidateRegistry {
         previewDigest: null,
         approvalState: null,
         at,
-        detail: { decidedBy, mainMutation: false, recordRepaired: false },
+        detail: {
+          decidedBy,
+          mainMutation: false,
+          recordRepaired: false,
+          /** True for every value below: read from a row whose hash did not verify. */
+          unverifiedSource: true,
+          unverifiedRowValues: {
+            mainBranch: typeof row.main_branch === "string" ? row.main_branch : null,
+            candidateHead: typeof row.candidate_head === "string" ? row.candidate_head : null,
+            recoveryRef: typeof row.recovery_ref === "string" ? row.recovery_ref : null,
+            mainHeadBefore: typeof row.main_head_before === "string" ? row.main_head_before : null,
+          },
+          aliveAtRelease: requirement.alive.map((entry) => ({ kind: entry.kind, pid: entry.pid })),
+        },
       });
     } catch { /* the durable row has already moved; an audit sink must not undo that */ }
-    return {
-      id,
-      taskId,
-      state: "unreadable",
-      unreadable: true,
-      storedState: "needs-manual-review",
-      releasedFromExclusiveMarker: { at, decidedBy },
-    };
+    // Re-read, and rendered by the same function every listing uses. A hand-built answer here is how
+    // this call came to report two fields no later read could produce.
+    const stored = this.#promotionRowRaw(id);
+    return stored === undefined
+      ? {
+        id, taskId, state: "unreadable", unreadable: true,
+        storedState: "needs-manual-review", holdsProjectExclusiveMarker: false,
+        releasedFromExclusiveMarker: { at, decidedBy },
+      }
+      : unreadablePromotionView(stored);
   }
 
   /**

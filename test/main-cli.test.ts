@@ -2,7 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { runCli } from "../src/cli-entry.ts";
 import { helpText } from "../src/help.ts";
-import { describeOrphanRecoveryRefs } from "../src/main.ts";
+import {
+  describeOrphanRecoveryRefs, describePromotions, runCandidatePromotionsCommand,
+  type PromotionReleasePort,
+} from "../src/main.ts";
 import { defaultNaturalLanguageTeam } from "../src/ui/tui.ts";
 
 test("global CLI help and safe entrypoint remain bounded", async () => {
@@ -170,4 +173,111 @@ test("/local applies for the loopback endpoint and never registers it itself", a
     /已在這次啟動中加入/u,
   );
   assert.match(runConversationCommand("/help", session, opts).lines.join("\n"), /\/local/u);
+});
+
+/*
+ * Bar item 11 requires that any state which occupies a task's one open question have a PRODUCT-SIDE
+ * path to release it. Until this command existed, `promotions()` and the three release actions had
+ * no CLI, HTTP, MCP or GUI caller anywhere — the only way to reach them was for the owner to write a
+ * Node script against a private SQLite file, which is not a product-side path.
+ *
+ * These cover the report and the argument handling. The command driving a REAL registry against a
+ * REAL blocked promotion is in test/merge-promotion.test.ts, where the git fixtures live.
+ */
+test("promotion records are listable and releasable from the CLI, and the two are separate verbs", async () => {
+  assert.match(helpText(), /candidates promotions <workspace>/u);
+  assert.match(helpText(), /read-only; what each promotion is waiting on/u);
+  assert.match(helpText(), /kills nothing, never writes main/u);
+  // Writing to main deliberately has no product-side exit, and help must not imply otherwise.
+  assert.doesNotMatch(helpText(), /promote|merge-candidate-into-main/u);
+
+  const id = "11111111-1111-4111-8111-111111111111";
+  const taskId = "22222222-2222-4222-8222-222222222222";
+  assert.match(
+    describePromotions({ mainPath: "/workspace/project", promotions: [] }),
+    /^No promotion records for \/workspace\/project\.\n$/u,
+  );
+
+  const blocked = describePromotions({
+    mainPath: "/workspace/project",
+    promotions: [{
+      id, taskId, state: "applying",
+      mainHeadBefore: "a".repeat(40), mainHeadAfter: null, ownerAlive: true,
+      startedAt: "2026-08-07T00:00:00.000Z", updatedAt: "2026-08-07T00:00:01.000Z",
+      observation: { code: "PROMOTION_STILL_APPLYING", observedAt: "2026-08-07T00:00:01.000Z" },
+      pending: {
+        code: "PROMOTION_OWNER_AND_MERGE_STILL_RUNNING", pid: 4242,
+        inspect: "ps -o pid,ppid,pgid,stat,lstart,command -p 4242",
+        release: "STOP WAITING FOR BOTH PROCESSES OF A PROMOTION THAT MAY STILL BE WRITING TO MAIN",
+        alsoBlockedBy: { pid: 4343, inspect: "ps -o pid,ppid,pgid,stat,lstart,command -g 4343" },
+      },
+    } as unknown as Parameters<typeof describePromotions>[0]["promotions"][number]],
+  });
+  // Which record, what it waits on, and the exact invocation that would release it.
+  assert.match(blocked, /PROMOTION_OWNER_AND_MERGE_STILL_RUNNING \(pid 4242\)/u);
+  assert.match(blocked, /and on {6}pid 4343/u);
+  assert.match(blocked, /--pid 4242 --pgid 4343/u);
+  assert.match(blocked, /Releasing a record stops it waiting; it never kills a process or writes to main\./u);
+  // Nothing it prints may be a command that writes.
+  assert.doesNotMatch(blocked, /reset --hard|git clean|kill /u);
+
+  const unreadable = describePromotions({
+    mainPath: "/workspace/project",
+    promotions: [{
+      id, taskId, state: "unreadable", unreadable: true,
+      storedState: "applying", holdsProjectExclusiveMarker: true,
+      release: {
+        confirmation: "STOP LETTING AN UNREADABLE RECORD BLOCK THIS PROJECT WHILE ONE OF ITS"
+          + " PROCESSES IS STILL ALIVE AND MAY BE WRITING TO MAIN",
+        alive: [{ kind: "merge", pid: 5151, inspect: "ps -o pid,ppid,pgid,stat,lstart,command -g 5151" }],
+      },
+    } as unknown as Parameters<typeof describePromotions>[0]["promotions"][number]],
+  });
+  assert.match(unreadable, /state {7}unreadable/u);
+  assert.match(unreadable, /stored {6}applying/u);
+  assert.match(unreadable, /exclusive {3}held — every other task in this project is refused while it is/u);
+  assert.match(unreadable, /alive {7}merge pid 5151/u);
+  assert.match(unreadable, /--pgid 5151/u);
+  assert.match(unreadable, /MAY BE WRITING TO MAIN/u);
+
+  // Argument handling, both directions: which release is called is decided by which numbers the
+  // owner quoted, and a request with no phrase never reaches any of them.
+  const calls: string[] = [];
+  const port = {
+    promotions: async () => [],
+    abandonMergeProcessGroup: async (input: { pgid: number }) => {
+      calls.push(`group:${input.pgid}`); return undefined;
+    },
+    abandonPromotionOwnerProcess: async (input: { pid: number }) => {
+      calls.push(`owner:${input.pid}`); return undefined;
+    },
+    abandonPromotionEntirely: async (input: { pid: number; pgid: number }) => {
+      calls.push(`both:${input.pid}:${input.pgid}`); return undefined;
+    },
+  } as unknown as PromotionReleasePort;
+  const run = async (args: string[]): Promise<string> => await runCandidatePromotionsCommand({
+    args, roomId: "demo", mainPath: "/workspace/project", registry: port, decidedBy: "local-cli",
+  });
+
+  assert.match(await run([]), /^No promotion records/u);
+  assert.equal(calls.length, 0, "the read-only listing must not release anything");
+  await assert.rejects(run(["unknown"]), /CANDIDATE_PROMOTIONS_UNKNOWN_SUBCOMMAND/u);
+  await assert.rejects(run(["release"]), /CANDIDATE_PROMOTION_ID_REQUIRED/u);
+  await assert.rejects(run(["release", id]), /CANDIDATE_PROMOTION_RELEASE_CONFIRMATION_REQUIRED/u);
+  await assert.rejects(run(["release", id, "--confirm"]), /CONFIRM_VALUE_REQUIRED/u);
+  await assert.rejects(
+    run(["release", id, "--confirm", "P", "--pid", "0"]), /CANDIDATE_PROMOTION_PID_INVALID/u,
+  );
+  await assert.rejects(
+    run(["release", id, "--confirm", "P", "--pgid", "notanumber"]), /CANDIDATE_PROMOTION_PID_INVALID/u,
+  );
+  assert.equal(calls.length, 0, "a refused invocation must not reach a release");
+
+  await run(["release", id, "--confirm", "P", "--pgid", "77"]);
+  await run(["release", id, "--confirm", "P", "--pid", "88"]);
+  await run(["release", id, "--confirm", "P", "--pid", "88", "--pgid", "77"]);
+  // The fourth form carries no number at all: it is the unreadable-row release, the one state with
+  // nothing on the record to quote. It must reach the same action, with a pgid that is not a number.
+  await run(["release", id, "--confirm", "P"]);
+  assert.deepEqual(calls, ["group:77", "owner:88", "both:88:77", "group:NaN"]);
 });

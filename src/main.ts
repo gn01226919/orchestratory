@@ -191,6 +191,188 @@ export function describeOrphanRecoveryRefs(input: {
   return lines.join("\n");
 }
 
+/**
+ * The three release actions and the read-only listing, as the CLI sees them.
+ *
+ * Narrower than `CandidateRegistry` on purpose: this command may observe promotions and stop a
+ * record from waiting, and it must not be able to reach `promoteMainMerge` — writing to main stays
+ * deliberately unexposed on the product side, and a port that cannot name it cannot be talked into
+ * calling it.
+ */
+export interface PromotionReleasePort {
+  promotions(input: { roomId: string; mainPath: string }): Promise<ReadonlyArray<
+    import("./core/candidate-registry.ts").MergePromotion
+    | import("./core/candidate-registry.ts").UnreadableMergePromotion
+  >>;
+  abandonMergeProcessGroup(input: {
+    promotionId: string; roomId: string; mainPath: string; pgid: number;
+    confirmation: string; decidedBy: string;
+  }): Promise<unknown>;
+  abandonPromotionOwnerProcess(input: {
+    promotionId: string; roomId: string; mainPath: string; pid: number;
+    confirmation: string; decidedBy: string;
+  }): Promise<unknown>;
+  abandonPromotionEntirely(input: {
+    promotionId: string; roomId: string; mainPath: string; pid: number; pgid: number;
+    confirmation: string; decidedBy: string;
+  }): Promise<unknown>;
+}
+
+function flagValue(args: readonly string[], name: string): string | undefined {
+  const index = args.indexOf(name);
+  if (index < 0) return undefined;
+  const value = args[index + 1];
+  if (value === undefined || value.startsWith("--")) throw new Error(`${name.slice(2).toUpperCase()}_VALUE_REQUIRED`);
+  return value;
+}
+
+/**
+ * A pid supplied on the command line, or `NaN` when the flag was not given at all.
+ *
+ * `NaN` rather than a placeholder integer because "not supplied" has to be distinguishable from
+ * every real number: the registry refuses any release whose pid does not match the one on the
+ * record, and a missing flag must land on that refusal rather than on a number that could
+ * accidentally be right.
+ */
+function optionalPid(args: readonly string[], name: string): number {
+  const raw = flagValue(args, name);
+  if (raw === undefined) return Number.NaN;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error("CANDIDATE_PROMOTION_PID_INVALID");
+  return value;
+}
+
+/**
+ * Renders what each promotion in this project is waiting on, and what would release it.
+ *
+ * Pure and read-only, like the orphan-ref report beside it. Everything it prints is re-derived by
+ * the registry on the read that produced it — the pids, the phrase and the inspect commands are
+ * statements about processes alive at that moment, not stored verdicts — so the report is safe to
+ * be wrong about the future and useless as a cached answer.
+ *
+ * No repository content is echoed: ids, states, pids and read-only `ps` commands only. Nothing here
+ * can write, and the commands it prints cannot either.
+ */
+export function describePromotions(input: {
+  mainPath: string;
+  promotions: ReadonlyArray<
+    import("./core/candidate-registry.ts").MergePromotion
+    | import("./core/candidate-registry.ts").UnreadableMergePromotion
+  >;
+}): string {
+  if (input.promotions.length === 0) {
+    return `No promotion records for ${input.mainPath}.\n`;
+  }
+  const lines = [`Promotion records for ${input.mainPath}: ${input.promotions.length}`];
+  lines.push("Read-only. Releasing a record stops it waiting; it never kills a process or writes to main.");
+  for (const promotion of input.promotions) {
+    lines.push("");
+    lines.push(promotion.id);
+    lines.push(`  task        ${promotion.taskId}`);
+    if (promotion.state === "unreadable") {
+      // An unreadable row is reported as unreadable and never repaired, but the two facts an owner
+      // needs are still derivable from columns a failed hash does not make unreadable.
+      lines.push("  state       unreadable (this row's integrity check fails; nothing here repairs it)");
+      lines.push(`  stored      ${promotion.storedState ?? "unknown"}`);
+      lines.push(`  exclusive   ${promotion.holdsProjectExclusiveMarker
+        ? "held — every other task in this project is refused while it is"
+        : "not held"}`);
+      if (promotion.releasedFromExclusiveMarker) {
+        lines.push(`  released    ${promotion.releasedFromExclusiveMarker.at}`
+          + ` by ${promotion.releasedFromExclusiveMarker.decidedBy}`);
+      }
+      if (promotion.release) {
+        for (const alive of promotion.release.alive) {
+          lines.push(`  alive       ${alive.kind} pid ${alive.pid}`);
+          lines.push(`              ${alive.inspect}`);
+        }
+        lines.push(`  release     --confirm ${JSON.stringify(promotion.release.confirmation)}`
+          + (promotion.release.alive.some((entry) => entry.kind === "merge")
+            ? ` --pgid ${promotion.release.alive.find((entry) => entry.kind === "merge")?.pid}`
+            : ""));
+      }
+      continue;
+    }
+    lines.push(`  state       ${promotion.state}`);
+    lines.push(`  main HEAD   ${promotion.mainHeadBefore.slice(0, 12)} before`
+      + `, ${promotion.mainHeadAfter ? `${promotion.mainHeadAfter.slice(0, 12)} now` : "not read"}`);
+    const pending = promotion.pending;
+    if (pending === undefined) {
+      lines.push("  waiting     nothing — this record is not blocked on any process");
+    } else {
+      lines.push(`  waiting     ${pending.code} (pid ${pending.pid})`);
+      lines.push(`              ${pending.inspect}`);
+      for (const also of pending.alsoBlockedBy === undefined ? [] : [pending.alsoBlockedBy]) {
+        lines.push(`  and on      pid ${also.pid}`);
+        lines.push(`              ${also.inspect}`);
+      }
+      lines.push(`  release     --confirm ${JSON.stringify(pending.release)}`
+        + (pending.code === "OWNER_PROCESS_STILL_RUNNING" ? ` --pid ${pending.pid}`
+          : pending.alsoBlockedBy === undefined ? ` --pgid ${pending.pid}`
+            : ` --pid ${pending.pid} --pgid ${pending.alsoBlockedBy.pid}`));
+    }
+    for (const difference of promotion.observation.differences ?? []) {
+      lines.push(`  differs     ${difference}`);
+    }
+    if (promotion.observation.recovery !== undefined) {
+      lines.push(`  recovery    (${promotion.observation.recoveryKind ?? "unnamed"}) ${promotion.observation.recovery}`);
+    }
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
+/**
+ * `orchestrator candidates promotions <workspace> [release …]`.
+ *
+ * Bar item 11 requires that any state occupying a task's one open question have a product-side path
+ * to release it, and until now the three releases and the listing had no CLI, HTTP, MCP or GUI
+ * caller at all: the only way to reach them was for the owner to write a Node script against a
+ * private SQLite file. A script the owner has to write is not a product-side path.
+ *
+ * Listing and releasing are separate verbs, and the release verb needs both the exact numbers the
+ * record reports and the exact phrase, which is the same evidence-of-reading the registry demands
+ * of every other caller. The workspace goes through the allowlist before this is reached, exactly as
+ * `orphan-refs` does.
+ */
+export async function runCandidatePromotionsCommand(input: {
+  args: readonly string[];
+  roomId: string;
+  mainPath: string;
+  registry: PromotionReleasePort;
+  decidedBy: string;
+}): Promise<string> {
+  const { args, roomId, mainPath, registry } = input;
+  if (args.length === 0) {
+    return describePromotions({
+      mainPath, promotions: await registry.promotions({ roomId, mainPath }),
+    });
+  }
+  if (args[0] !== "release") throw new Error("CANDIDATE_PROMOTIONS_UNKNOWN_SUBCOMMAND");
+  const promotionId = args[1];
+  if (!promotionId || promotionId.startsWith("--")) throw new Error("CANDIDATE_PROMOTION_ID_REQUIRED");
+  const confirmation = flagValue(args, "--confirm");
+  if (confirmation === undefined) throw new Error("CANDIDATE_PROMOTION_RELEASE_CONFIRMATION_REQUIRED");
+  const pid = optionalPid(args, "--pid");
+  const pgid = optionalPid(args, "--pgid");
+  const common = { promotionId, roomId, mainPath, confirmation, decidedBy: input.decidedBy };
+  // Which release is meant is decided by which numbers the owner quoted, and those are exactly what
+  // the listing prints for that record. A number the record does not report is refused by the
+  // registry rather than corrected here.
+  if (Number.isSafeInteger(pid) && Number.isSafeInteger(pgid)) {
+    await registry.abandonPromotionEntirely({ ...common, pid, pgid });
+  } else if (Number.isSafeInteger(pid)) {
+    await registry.abandonPromotionOwnerProcess({ ...common, pid });
+  } else {
+    // Including the case where neither was given: that reaches the unreadable-row release, which is
+    // the one state with no number on the record to quote. A readable row refuses it by name.
+    await registry.abandonMergeProcessGroup({ ...common, pgid });
+  }
+  return `${describePromotions({
+    mainPath, promotions: await registry.promotions({ roomId, mainPath }),
+  })}Released as ${input.decidedBy}. Nothing was killed and main was not written.\n`;
+}
+
 export async function main(args = process.argv.slice(2)): Promise<void> {
   const command = args[0] ?? "hybrid";
   if (command === "--help" || command === "-h" || command === "help") {
@@ -409,6 +591,30 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
           taskStatus: (taskId) => {
             try { return collaboration.candidates.get(taskId)?.status; } catch { return undefined; }
           },
+        }));
+      } finally {
+        collaboration.close();
+      }
+      return;
+    }
+    if (command === "candidates" && args[1] === "promotions") {
+      const requested = args[2];
+      if (!requested) throw new Error("CANDIDATE_PROMOTIONS_PATH_REQUIRED");
+      // Same protection as `orphan-refs`: the allowlist decides which repository may be named, an
+      // empty allowlist fails closed, and nothing here can be pointed at an arbitrary directory.
+      const mainPath = await app.workspaces.assertAllowed(requested);
+      const { CollaborationService } = await import("./core/collaboration-service.ts");
+      const collaboration = new CollaborationService(app.store.dataDirectory);
+      try {
+        const room = collaboration.ledger.roomForWorkspace(mainPath);
+        if (room === undefined) throw new Error("ROOM_NOT_FOUND_FOR_WORKSPACE");
+        stdout.write(await runCandidatePromotionsCommand({
+          args: args.slice(3),
+          roomId: room.id,
+          mainPath,
+          registry: collaboration.candidates,
+          // Attributed to the terminal the owner typed it in, never to the product.
+          decidedBy: "local-cli",
         }));
       } finally {
         collaboration.close();

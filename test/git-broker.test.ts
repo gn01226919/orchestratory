@@ -106,3 +106,42 @@ test("Git inspection fully fingerprints content beyond the changed-byte safety c
   assert.equal(second.changedBytes, first.changedBytes);
   assert.notEqual(second.fingerprint, first.fingerprint);
 });
+
+/*
+ * FINDING F6 (fifth round). The itemised configuration disclosure carries KEYS only, and the comment
+ * beside it explained that values are withheld because `credential.helper` can carry a secret. But a
+ * git key is `section.subsection.name`, and git's own documented spelling for a per-URL helper puts a
+ * URL in the subsection — so a token in that URL's userinfo was rendered verbatim on the approval
+ * screen and written into the stored preview. Measured in a real browser: SECRET_IN_PROGRAM_KEY_RENDERED.
+ *
+ * The assertion below is not "the key is shortened"; it is that the secret appears NOWHERE in the
+ * value this function returns, which is what makes it a leak test rather than a formatting test.
+ */
+test("a secret carried in a configuration KEY is never disclosed, and keys that name nothing secret are", async (t) => {
+  const root = await repository();
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  // Assembled at runtime so the repository never stores anything shaped like a credential.
+  const secret = ["ghp", "0123456789abcdef0123456789abcdef0123"].join("_");
+  const url = `https://x-access-token:${secret}@github.com`;
+  await execFileAsync("git", ["config", "--local", `credential.${url}.helper`, "store"], { cwd: root });
+  await execFileAsync("git", ["config", "--local", "credential.helper", "cache"], { cwd: root });
+  // A subsection that is a NAME the owner chose stays legible: hiding it would remove the disclosure
+  // this list exists to provide, and there is nothing secret in it.
+  await execFileAsync("git", ["config", "--local", "difftool.mine.cmd", "true"], { cwd: root });
+  await execFileAsync("git", ["config", "--local", "gpg.ssh.defaultKeyCommand", "true"], { cwd: root });
+
+  const restore = await new GitBroker().restorePoint(root);
+  const serialised = JSON.stringify(restore.hooks);
+  assert.ok(!serialised.includes(secret), `the configuration key leaked a secret: ${serialised}`);
+  assert.ok(!serialised.includes("x-access-token"), serialised);
+  assert.ok(restore.hooks.programs.includes("credential.<redacted>.helper"), serialised);
+  // The bare key has no subsection at all, so there is nothing to redact and it is reported as-is.
+  assert.ok(restore.hooks.programs.includes("credential.helper"), serialised);
+  assert.ok(restore.hooks.programs.includes("difftool.mine.cmd"), serialised);
+  assert.ok(restore.hooks.programs.includes("gpg.ssh.defaultkeycommand"), serialised);
+  // Completeness of the gate is unaffected: the digest is taken over git's raw listing, so the
+  // redacted key is still bound and setting it after an approval is still a binding change.
+  const before = restore.hooks.configDigest;
+  await execFileAsync("git", ["config", "--local", `credential.${url}.helper`, "cache"], { cwd: root });
+  assert.notEqual((await new GitBroker().restorePoint(root)).hooks.configDigest, before);
+});
