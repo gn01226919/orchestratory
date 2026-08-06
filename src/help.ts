@@ -19,7 +19,7 @@ export function helpText(): string {
     "  orchestrator workspaces list|allow <path> [--label <name>]",
     "  orchestrator worktrees list|cleanup <run-id> [--execute]",
     "  orchestrator candidates orphan-refs <workspace>   # read-only; lists, never deletes",
-    "  orchestrator candidates promotions <workspace>    # read-only; what each promotion is waiting on",
+    "  orchestrator candidates promotions <workspace>    # re-observes and updates unsettled records",
     "  orchestrator candidates promotions <workspace> release <promotion-id> --confirm <phrase> [--pid N] [--pgid N]",
     "                                                    # stops this record waiting; kills nothing, never writes main",
     "  orchestrator data inventory|integrity|purge [--execute]",

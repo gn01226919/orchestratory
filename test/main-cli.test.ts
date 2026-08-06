@@ -186,7 +186,12 @@ test("/local applies for the loopback endpoint and never registers it itself", a
  */
 test("promotion records are listable and releasable from the CLI, and the two are separate verbs", async () => {
   assert.match(helpText(), /candidates promotions <workspace>/u);
-  assert.match(helpText(), /read-only; what each promotion is waiting on/u);
+  // FINDING F-3 (sixth round). Both of these used to say "read-only", and the listing is not:
+  // `promotions()` re-observes every unsettled record, which moves the authoritative row, appends to
+  // the audit chain and appends to the room ledger. Measured against `orphan-refs` as a control,
+  // which changed none of the three. The writing is bar item 13 working; the label was the defect.
+  assert.match(helpText(), /re-observes and updates unsettled records/u);
+  assert.doesNotMatch(helpText(), /promotions <workspace> {4}# read-only/u);
   assert.match(helpText(), /kills nothing, never writes main/u);
   // Writing to main deliberately has no product-side exit, and help must not imply otherwise.
   assert.doesNotMatch(helpText(), /promote|merge-candidate-into-main/u);
@@ -217,7 +222,10 @@ test("promotion records are listable and releasable from the CLI, and the two ar
   assert.match(blocked, /PROMOTION_OWNER_AND_MERGE_STILL_RUNNING \(pid 4242\)/u);
   assert.match(blocked, /and on {6}pid 4343/u);
   assert.match(blocked, /--pid 4242 --pgid 4343/u);
-  assert.match(blocked, /Releasing a record stops it waiting; it never kills a process or writes to main\./u);
+  assert.match(blocked, /Listing re-observes each unsettled record and updates it; nothing here writes to main\./u);
+  assert.match(blocked, /Releasing a record stops it waiting; it never kills a process either\./u);
+  // The header must not claim to be read-only while the call that produced it writes.
+  assert.doesNotMatch(blocked, /Read-only\./u);
   // Nothing it prints may be a command that writes.
   assert.doesNotMatch(blocked, /reset --hard|git clean|kill /u);
 
@@ -239,6 +247,25 @@ test("promotion records are listable and releasable from the CLI, and the two ar
   assert.match(unreadable, /alive {7}merge pid 5151/u);
   assert.match(unreadable, /--pgid 5151/u);
   assert.match(unreadable, /MAY BE WRITING TO MAIN/u);
+
+  // FINDING F-5/F-1 (sixth round). An empty `alive` list means one of two opposite things, and the
+  // owner is the one deciding whether to hand back a marker over a merge that may be writing. The
+  // listing must not render "probed and found nothing" and "could not probe" as the same screen.
+  const unprobed = describePromotions({
+    mainPath: "/workspace/project",
+    promotions: [{
+      id, taskId, state: "unreadable", unreadable: true,
+      storedState: "applying", holdsProjectExclusiveMarker: true,
+      release: {
+        confirmation: "STOP LETTING AN UNREADABLE RECORD BLOCK THIS PROJECT WHILE ONE OF ITS"
+          + " PROCESSES IS STILL ALIVE AND MAY BE WRITING TO MAIN",
+        alive: [], probeReadable: false,
+      },
+    } as unknown as Parameters<typeof describePromotions>[0]["promotions"][number]],
+  });
+  assert.match(unprobed, /alive {7}UNKNOWN — this record's merge group could not be read at all/u);
+  assert.match(unprobed, /MAY BE WRITING TO MAIN/u);
+  assert.doesNotMatch(unprobed, /--pgid/u);
 
   // Argument handling, both directions: which release is called is decided by which numbers the
   // owner quoted, and a request with no phrase never reaches any of them.
