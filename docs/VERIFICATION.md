@@ -343,7 +343,15 @@ Owner 自己的工作，`git clean` 更會刪掉未追蹤與 ignored 檔案—�
    **理由**：`git merge` 是外部程序，控制面在它執行期間**沒有中止點**，單機 git 上做不到「期間中止」。
    成立的是**事後偵測**：`authorizedMergeCommit` 的雙親判準使「外部推進被誤記為 applied」
    在結構上不可能——已實測，外部程序推進 main 時 git 自己就會 exit 128
-   （`cannot lock ref 'HEAD'`）。開始前的 `index.lock` 檢查與排他標記**仍為必要，未放寬**。
+   （`cannot lock ref 'HEAD'`）。開始前的 `index.lock` 檢查仍為必要，未放寬。
+
+   **2026-08-06 更正（第三輪審查指出，主代理接受）**：上一版裁決寫「排他標記仍為必要、未放寬」——
+   **那句話與實作不符，是我自己犯的一次未驗證宣稱**（[[PITFALLS]] #77 同形）。
+   實際的排他標記是 `candidate_merge_promotions.approval_id` 的 UNIQUE 索引，**只序列化同一把核准**；
+   `#assertNoUnresolvedPromotion` 以 `task_id` scope，**對 `mainPath` 沒有任何鎖**。
+   審查員實測（`p6-exclusive.mjs`）：task A 被 kill 後 task B 的 preview 被拒，
+   **原因是 main 剛好變髒而非有人持有排他權**——「靠巧合擋住」不是「靠設計擋住」。
+   **因此排他粒度必須明寫**：見下方第 7 項的補正要求。
 
    **何時失效**：若未來 promotion 改為由控制面自行實作 merge（而非呼叫 `git merge` 外部程序），
    或開放多 candidate 併發 promotion，此項立即回復為必須。
@@ -547,6 +555,42 @@ merge 以 Owner 身分執行，一個屬於別人的 pid 不可能是它），�
 owner-pid 測試）；I/J/K 在同一棵樹上跑（各 `fail=1`），基準線 `pass=59 fail=0`。
 L/M/N 是在**加入那兩條新測試之後**的樹上跑的，各 `pass=60 fail=1`，基準線 `pass=61 fail=0`。
 A–K 與 L/M/N 之間唯一的差異是那兩條新測試，它們只增加覆蓋、不改任何產品程式碼。
+
+### v2 的第三處補正（2026-08-06，第三輪審查後）
+
+第三輪不通過，根因打穿第 3 與第 10 項，且審查員指出**標準本身的四個漏洞**：
+
+**(A) 第 3 項只點名四個 config 鍵，那是一份名詞清單不是判準。**
+實測：candidate worktree 在**核准之後**寫入 `commit.gpgsign=true` ＋ `gpg.program=<evil>`，
+`git merge --no-ff` 建立 merge commit 時**以 Owner 身分執行了它**，
+而綁定、揭露、消耗前重驗三道防線全部看不到（`gpg.*` 不在 `hookEnvironment()` 指紋內）。
+對照組證明缺口是特定的：`core.hooksPath` 與 `merge.*.driver` 都被正確拒絕。
+
+**判準改為**：**promotion 環境下 git 可能 spawn 的每一個「由設定指定的可執行檔」都必須納入
+綁定與揭露**；不得以列舉四個鍵了事。已知同類至少還有 `gpg.program`＋`commit.gpgsign`、
+`core.fsmonitor`（已被釘死）、`core.sshCommand`、`credential.helper`。
+**該清單本身必須有一條測試證明它跟得上 git**，或改為在 `promotionGitEnvironment()` 用
+`GIT_CONFIG_KEY_n` 把它們全部釘死並在文件寫明。
+（這是 [[PITFALLS]] #101／#103 在同一輪的原地復發：attributes 那半已改成「直接問 git」，
+這半仍是手寫列舉——而且專案自己知道這個類別，`process-runner.ts` 特地釘死了 `core.fsmonitor`。）
+
+**(B) 第 5 項要求「觀察來的」但沒要求「觀察不到時必須可區分」。**
+本輪程式做對了（讀不到＝欄位缺席、讀到但無 hook＝`[]`，兩者不折疊），但**沒有測試**——
+把兩個 `return null` 改成 `return []` 時 61/61 全綠。
+**補**：凡宣稱「未讀到」與「讀到而為空」不折疊者，**必須有一條讓讀取真的失敗的測試**。
+
+**(C) 第 7 項「可觀察的排他標記」沒寫粒度。**
+per-approval 的 UNIQUE 索引照字面就滿足，但那對 main 沒有任何保護。
+**補**：排他標記**必須對 `mainPath` 排他**（例如以 `main_path` 為鍵、`state='applying'` 的 partial
+unique index）。若做不到，必須由 Owner 明確把「對 main 排他」一併移入殘餘風險並寫下失效條件——
+**不得停留在「裁決說沒放寬、實作其實沒有」的狀態**。
+
+**(D) 沒有任何一項管「Owner 側的釋放／放棄動作」。**
+第 11 項只說「必須有產品側路徑可以釋放」，於是本輪新增的 `abandonMergeProcessGroup()`
+一出生就沒有標準約束它——實測它會接受一個 `ps` 證明**還在寫 main** 的 merge，
+並**當場遞出可複製貼上的 `git reset --hard`**（[[PITFALLS]] #94 的災難形狀）。
+**補**：任何釋放／放棄型動作**必須有自己的拒絕條件測試**，
+且**不得在破壞性操作進行中遞出破壞性復原指令**；確認短語必須說出正在放棄的是什麼。
 
 ### 可接受的殘餘風險（連同「何時失效」一起列，未列出的不得事後補認）
 
