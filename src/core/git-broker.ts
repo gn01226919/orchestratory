@@ -98,6 +98,18 @@ const MAX_REPORTED_IGNORED_PATHS = 500;
 const MAX_INVENTORY_PATHS = 200_000;
 const MAX_HOOK_BYTES = 1_048_576;
 /**
+ * Bounded attributes scan. git consults a `.gitattributes` in EVERY directory it descends into, plus
+ * `$GIT_DIR/info/attributes` and `core.attributesFile`, so reading only the root file reports a
+ * repository whose `sub/.gitattributes` declares `filter=lfs` as having no filters at all. Exceeding
+ * either bound is reported as unreadable, never as "no filters".
+ */
+const MAX_ATTRIBUTES_FILES = 256;
+const MAX_ATTRIBUTES_BYTES = 1_048_576;
+/** A `filter=` on any path is a clean/smudge round trip this product cannot promise to roll back. */
+const ATTRIBUTES_DECLARE_FILTER = /(?:^|\s)filter=/mu;
+/** The index mode git gives a submodule (gitlink). `.gitmodules` is documentation; this is the fact. */
+const GITLINK_MODE = "160000";
+/**
  * Files whose presence in the git directory means a working tree is in the middle of an operation.
  * `AUTO_MERGE` and `MERGE_MSG` are included because they outlive some interruptions that leave no
  * `MERGE_HEAD` at all, and `index.lock` because a promotion must refuse rather than wait for it.
@@ -464,6 +476,86 @@ export class GitBroker {
   }
 
   /**
+   * Every attributes file this repository would actually consult, as absolute paths.
+   *
+   * Measured, not assumed: `git ls-files -- '*.gitattributes'` really does match nested files (the
+   * default pathspec glob crosses `/`), and a root-only read reports `sub/deep/.gitattributes
+   * filter=lfs` as no filter at all. Ignored copies are included because an ignored file is invisible
+   * to `git status` and therefore invisible to the emptiness gate; untracked non-ignored ones are
+   * already refused by `MAIN_STATUS_NOT_EMPTY` before this matters.
+   *
+   * `core.attributesFile` is read from the repository's own config, which is writable by any linked
+   * worktree sharing this common `.git` — the same surface the hook binding exists for.
+   */
+  async #attributesFiles(workspace: string, ignoredPaths: readonly string[]): Promise<string[]> {
+    const found = new Set<string>();
+    for (const path of await this.#paths(workspace, ["ls-files", "-z", "--", "*.gitattributes"])) {
+      found.add(join(workspace, path));
+    }
+    for (const path of ignoredPaths) {
+      if (path === ".gitattributes" || path.endsWith("/.gitattributes")) found.add(join(workspace, path));
+    }
+    // `--git-path info` answers the git directory's `info/`, honouring linked worktrees.
+    found.add(join(await this.#gitPath(workspace, "info"), "attributes"));
+    const configured = (await this.#git(workspace, ["config", "--get", "core.attributesFile"], 8_192)
+      .catch(() => "")).trim();
+    if (configured) found.add(isAbsolute(configured) ? configured : join(workspace, configured));
+    return [...found].sort();
+  }
+
+  /**
+   * Whether any attributes file declares a `filter=`, or an explicit refusal when that cannot be
+   * decided. Unread is never "no filter": this gate is the only thing standing between a promotion
+   * and a clean/smudge round trip whose rollback this product cannot promise.
+   */
+  async #attributesBlockers(workspace: string, ignoredPaths: readonly string[]): Promise<string[]> {
+    let files: string[];
+    try {
+      files = await this.#attributesFiles(workspace, ignoredPaths);
+    } catch {
+      return ["MAIN_ATTRIBUTES_UNREADABLE"];
+    }
+    if (files.length > MAX_ATTRIBUTES_FILES) return ["MAIN_ATTRIBUTES_UNREADABLE"];
+    for (const path of files) {
+      let contents: string;
+      try {
+        const info = await stat(path);
+        if (!info.isFile()) continue;
+        if (info.size > MAX_ATTRIBUTES_BYTES) return ["MAIN_ATTRIBUTES_UNREADABLE"];
+        contents = await readFile(path, "utf8");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        return ["MAIN_ATTRIBUTES_UNREADABLE"];
+      }
+      if (ATTRIBUTES_DECLARE_FILTER.test(contents)) return ["MAIN_ATTRIBUTES_DECLARE_FILTER"];
+    }
+    return [];
+  }
+
+  /**
+   * Whether sparse checkout is on, asked in the one way that cannot be fooled by spelling.
+   *
+   * `core.sparseCheckout=1`, `=yes` and `=on` all mean true to git and all fail a `=== "true"`
+   * comparison — measured. `--type=bool` normalises them; a value git itself rejects exits non-zero
+   * and is treated as a closed gate rather than as "not enabled".
+   */
+  async #sparseCheckoutBlockers(workspace: string): Promise<string[]> {
+    const result = await runProcess({
+      executable: await resolveExecutable("git"),
+      args: ["config", "--type=bool", "--get", "core.sparseCheckout"],
+      cwd: workspace,
+      timeoutMs: 30_000,
+      outputLimitBytes: 4_096,
+      env: minimalGitEnvironment(),
+    });
+    if (result.terminationReason) return ["MAIN_SPARSE_CHECKOUT_UNREADABLE"];
+    // Exit 1 is git answering, successfully, that the key is not set at all.
+    if (result.exitCode === 1) return [];
+    if (result.exitCode !== 0) return ["MAIN_SPARSE_CHECKOUT_UNREADABLE"];
+    return result.stdout.trim() === "true" ? ["MAIN_SPARSE_CHECKOUT_ENABLED"] : [];
+  }
+
+  /**
    * Everything about a working tree that a promotion must be able to put back exactly as it found it,
    * plus every reason it may not receive a merge at all.
    *
@@ -477,11 +569,12 @@ export class GitBroker {
     const workspace = await canonicalWorkspace(workspaceInput);
     const inspection = await this.inspect(workspace);
     const deadline = Date.now() + CONTENT_FINGERPRINT_TIMEOUT_MS;
-    const [head, stash, reflog, indexFlags] = await Promise.all([
+    const [head, stash, reflog, indexFlags, indexStage] = await Promise.all([
       this.headSha(workspace),
       this.#git(workspace, ["stash", "list", "--format=%H"], 262_144),
       this.#git(workspace, ["reflog", "show", "--format=%H %gs", "HEAD"], 1_048_576),
       this.#git(workspace, ["ls-files", "-v"], 8_388_608),
+      this.#git(workspace, ["ls-files", "--stage", "-z"], 4_194_304),
     ]);
     const untracked = await this.#pathContentFingerprint(
       workspace, ["ls-files", "--others", "--exclude-standard", "-z"], deadline, "untracked",
@@ -503,13 +596,16 @@ export class GitBroker {
     for (const [name, code] of PROMOTION_STATE_FILES) {
       if (await this.#present(await this.#gitPath(workspace, name))) blockers.push(code);
     }
-    const sparse = (await this.#git(workspace, ["config", "--get", "core.sparseCheckout"], 4_096).catch(() => "")).trim();
-    if (sparse === "true") blockers.push("MAIN_SPARSE_CHECKOUT_ENABLED");
-    if (await this.#present(join(workspace, ".gitmodules"))) blockers.push("MAIN_HAS_SUBMODULES");
+    blockers.push(...await this.#sparseCheckoutBlockers(workspace));
+    // A submodule is a `160000` entry in the INDEX. `.gitmodules` is a tracked description of one and
+    // can be absent while the gitlink is present — measured with `update-index --cacheinfo 160000`,
+    // which produces exactly that shape and passed a `.gitmodules`-only gate. Both are refused.
+    if (indexStage.split("\0").some((entry) => entry.startsWith(`${GITLINK_MODE} `))) {
+      blockers.push("MAIN_HAS_SUBMODULES");
+    } else if (await this.#present(join(workspace, ".gitmodules"))) blockers.push("MAIN_HAS_SUBMODULES");
     if (hooks.filters.length > 0) blockers.push("MAIN_HAS_CONTENT_FILTERS");
     if (hooks.unreadable) blockers.push("MAIN_HOOK_DIRECTORY_UNREADABLE");
-    const attributes = await readFile(join(workspace, ".gitattributes"), "utf8").catch(() => "");
-    if (/(?:^|\s)filter=/mu.test(attributes)) blockers.push("MAIN_ATTRIBUTES_DECLARE_FILTER");
+    blockers.push(...await this.#attributesBlockers(workspace, ignored.paths));
     const reflogEntries = reflog.split("\n").filter(Boolean);
     return {
       head,
@@ -522,10 +618,9 @@ export class GitBroker {
       worktreeFingerprint: inspection.fingerprint,
       // The index itself — mode, object id, stage and path for every entry. Deliberately NOT
       // `git write-tree`, which would be a write: it can create objects and take `index.lock`, and
-      // this fingerprint has to be readable during a strictly read-only crash reconciliation.
-      indexFingerprint: createHash("sha256")
-        .update(await this.#git(workspace, ["ls-files", "--stage", "-z"], 4_194_304), "utf8")
-        .digest("hex"),
+      // this fingerprint has to be readable during a strictly read-only crash reconciliation. The
+      // same listing is what the gitlink gate above reads, so both see one index, read once.
+      indexFingerprint: createHash("sha256").update(indexStage, "utf8").digest("hex"),
       untrackedFingerprint: untracked.fingerprint,
       ignoredFingerprint: ignored.fingerprint,
       stashDigest: createHash("sha256").update(stash, "utf8").digest("hex"),
@@ -655,7 +750,10 @@ export class GitBroker {
    * rather than returned: it is untrusted repository text, and the caller decides what happened by
    * observing the repository afterwards, never by reading git's prose.
    */
-  async mergeIntoHead(workspaceInput: string, commit: string, timeoutMs = MERGE_TIMEOUT_MS): Promise<{
+  async mergeIntoHead(
+    workspaceInput: string, commit: string, timeoutMs = MERGE_TIMEOUT_MS,
+    onSpawn?: (processGroupId: number) => void,
+  ): Promise<{
     exitCode: number;
     timedOut: boolean;
   }> {
@@ -668,6 +766,7 @@ export class GitBroker {
       timeoutMs,
       outputLimitBytes: 262_144,
       env: promotionGitEnvironment(),
+      ...(onSpawn === undefined ? {} : { onSpawn }),
     });
     return { exitCode: result.exitCode, timedOut: result.terminationReason === "timeout" };
   }

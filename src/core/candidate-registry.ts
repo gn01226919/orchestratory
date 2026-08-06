@@ -429,6 +429,22 @@ export interface MergePromotionObservation {
   recoveryRefIntact: boolean | null;
   /** Present when the attempt itself reported something; absent when this is a later observation. */
   attempt?: { exitCode: number; timedOut: boolean };
+  /**
+   * The process group the merge subprocess was spawned into, recorded the instant it was spawned and
+   * cleared once it has been seen to finish.
+   *
+   * It exists because the merge is `detached`: killing the orchestrator does NOT kill the `git merge`
+   * it started, and that merge goes on to write main to completion. Without this, a reader arriving
+   * during that window sees an owner process that is gone and a repository mid-write, calls it
+   * undetermined, and freezes that answer while the merge quietly succeeds behind it. A group that
+   * still exists means the write is still in flight and there is nothing to conclude yet.
+   */
+  mergePgid?: number | null;
+  /**
+   * What the recovery command in `recovery` would do, named rather than left for the owner to infer
+   * from the command text. `inspect` never writes.
+   */
+  recoveryKind?: "reset-to-pre-promotion" | "inspect-observed-merge";
   observedAt: string;
 }
 
@@ -1119,6 +1135,36 @@ function mergePromotionHash(row: Omit<PromotionRow, "row_hash">): string {
   ]));
 }
 
+/** The merge subprocess group recorded on a promotion row, or `null` when none is recorded. */
+function promotionPgid(row: PromotionRow): number | null {
+  try {
+    const value = (JSON.parse(row.observation_json) as MergePromotionObservation).mergePgid;
+    return typeof value === "number" && Number.isSafeInteger(value) && value > 1 ? value : null;
+  } catch { return null; }
+}
+
+/**
+ * Whether the merge this promotion started is STILL WRITING, right now.
+ *
+ * A negative pid signals the whole process group, which is the only way to ask about a detached
+ * subprocess and everything it started — a `git merge` plus whatever hooks it is running. Two
+ * asymmetries are deliberate. No recorded group means "not running": either the attempt was awaited
+ * to completion, which clears it, or none was ever recorded, and in both cases the answer must come
+ * from observing the repository. Anything OTHER than a definitive "no such group" counts as still
+ * running, because assuming dead is what would let a reader publish a conclusion about a repository
+ * that is still being changed underneath it.
+ */
+function mergeGroupStillRunning(row: PromotionRow): boolean {
+  const pgid = promotionPgid(row);
+  if (pgid === null) return false;
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
 /**
  * Whether a pid is a process that still exists. Signal 0 checks for existence without delivering
  * anything; `EPERM` means it exists and is not ours, which is still "alive". A pid that cannot be
@@ -1248,6 +1294,28 @@ export class MergePromotionRefusedError extends Error {
  */
 function promotionFacts(preview: CandidateCompletionPreview): PromotionFacts | undefined {
   return preview.promotion;
+}
+
+/**
+ * The one code for "this approval's snapshot was taken before the promotion gates existed".
+ *
+ * It is deliberately NOT an integrity failure. An approval written by the previous release verifies
+ * its own hash perfectly — nothing was tampered with, the snapshot simply predates a check that did
+ * not exist when it was taken. Folding the two together was PITFALLS #85 in its textbook form: the
+ * row could then never be read, never be rejected and never expire, so it held the task's single
+ * open-question slot forever and the task could never be asked about again. "Older than this feature"
+ * is its own terminal state, and a terminal state releases the slot.
+ */
+const PREVIEW_PREDATES_PROMOTION_GATES = "PREVIEW_PREDATES_PROMOTION_GATES";
+
+/**
+ * Whether a row that PASSED its integrity check carries a snapshot from before Phase 5-5.
+ *
+ * Callers must have run `#assertMergeApprovalRow` first: this answers a question about a readable
+ * row, and a row that cannot be verified is not readable enough to be asked.
+ */
+function previewPredatesPromotionGates(row: MergeApprovalRow): boolean {
+  return promotionFacts(assertPreviewShape(JSON.parse(row.preview_json) as unknown)) === undefined;
 }
 
 function boundedRefusal(refusal: MergeApprovalRefusal): MergeApprovalRefusal {
@@ -2153,7 +2221,7 @@ export class CandidateRegistry {
     await this.#observeOpenMergeApproval(scope.task.taskId, "merge-request");
     if (this.#openMergeApproval(scope.task.taskId)) throw new Error("MAIN_MERGE_APPROVAL_ALREADY_PENDING");
     // Nobody may be asked to approve a merge into a main whose last promotion is unaccounted for.
-    this.#assertNoUnresolvedPromotion(scope.task.taskId);
+    await this.#assertNoUnresolvedPromotion(scope.task.taskId);
     if (this.#countMergeApprovals(scope.task.taskId) >= MAX_MERGE_APPROVALS_PER_TASK) {
       throw new Error("MAIN_MERGE_APPROVAL_TASK_LIMIT_REACHED");
     }
@@ -2245,6 +2313,10 @@ export class CandidateRegistry {
     const row = await this.#scopedMergeApprovalRow(input.approvalId, input.roomId, input.mainPath);
     if (row.state !== "requested") throw new Error("MAIN_MERGE_APPROVAL_NOT_PENDING");
     this.#assertMergeApprovalLive(row);
+    // A request raised under the previous release was never checked against the promotion gates, so
+    // there is no answer the owner could give it that would be safe to act on. It is retired by name
+    // rather than granted and refused later, and the slot it held is released.
+    if (this.#retirePredatingApproval(row)) throw new Error(PREVIEW_PREDATES_PROMOTION_GATES);
     if (input.confirmation !== MERGE_APPROVAL_CONFIRMATION) throw new Error("MAIN_MERGE_CONFIRMATION_MISMATCH");
     // The surface has to name the digest it displayed. Approving a row whose preview the caller never
     // saw is exactly the failure the whole binding exists to prevent.
@@ -2314,8 +2386,9 @@ export class CandidateRegistry {
    * It re-verifies the entire binding against live state a SECOND time — creation-time verification
    * alone would let anything that moved in between slip through — and it runs the gates that only
    * matter when main is actually about to be written. Every refusal here happens with the approval
-   * still `approved`, so an owner whose working tree was dirty can clean it and try again; the only
-   * thing that ends an approval on this path is drift, which ends it wherever it is noticed.
+   * still `approved`, so an owner whose working tree was dirty can clean it and try again. Only two
+   * things end an approval on this path, and both of them are conditions no retry could fix: drift,
+   * which ends it wherever it is noticed, and a snapshot older than the promotion gates themselves.
    */
   async #authorizeMainMerge(input: {
     approvalId: string;
@@ -2337,6 +2410,14 @@ export class CandidateRegistry {
     const row = this.#mergeApprovalRow(input.approvalId);
     if (!row) throw new Error("MAIN_MERGE_APPROVAL_NOT_FOUND");
     this.#assertMergeApprovalRow(row);
+    // Before anything about the approval is judged: an unresolved promotion means nobody knows what
+    // state main is in, and spending anything against it would write on top of an unknown state with
+    // no later record able to untangle the two. It is FIRST because every other refusal here is a
+    // consequence — the approval that started the unresolved promotion is also, necessarily, already
+    // spent — and "your token was used" sends the owner to the wrong problem. The one they have to
+    // act on is their repository. (The state of an approval is already visible before the token is
+    // checked, so this changes nothing about what an unauthenticated caller can learn.)
+    await this.#assertNoUnresolvedPromotion(row.task_id);
     if (row.state === "consumed") throw new Error("MAIN_MERGE_APPROVAL_ALREADY_CONSUMED");
     if (row.state !== "approved") throw new Error("MAIN_MERGE_APPROVAL_NOT_APPROVED");
     this.#assertMergeApprovalLive(row);
@@ -2352,9 +2433,6 @@ export class CandidateRegistry {
     try { mainPath = await canonicalWorkspace(input.mainPath); } catch { /* unresolvable is "changed" */ }
     if (mainPath !== row.main_path) intent.push("mainPath");
     if (intent.length > 0) throw new MergeApprovalBindingError(intent);
-    // An unresolved promotion means nobody knows what state main is in. Spending another approval
-    // against it would write on top of an unknown state, and no later record could untangle the two.
-    this.#assertNoUnresolvedPromotion(row.task_id);
     const { changed, unverified } = await this.#verifyMergeBinding(row, { throttle: false });
     if (changed.length > 0) {
       this.#settleMergeApproval(row, "invalidated", driftRefusal(changed, "consume", unverified));
@@ -2379,7 +2457,13 @@ export class CandidateRegistry {
     const approved = promotionFacts(preview);
     // A snapshot recorded before Phase 5-5 carries none of these, which is not "nothing changed":
     // it was never checked against any of them, and it is refused by name rather than defaulted.
-    if (!approved) throw new MergePromotionRefusedError(["PREVIEW_PREDATES_PROMOTION_GATES"], overwrite);
+    // Reachable: the integrity check no longer collapses "older than this feature" into "tampered",
+    // so a promotion attempted directly against a previous-release approval arrives here and gets
+    // this answer instead of a corruption error it can do nothing with.
+    if (!approved) {
+      this.#retirePredatingApproval(row);
+      throw new MergePromotionRefusedError([PREVIEW_PREDATES_PROMOTION_GATES], overwrite);
+    }
     if (approved.hooks.fingerprint !== restore.hooks.fingerprint) {
       this.#settleMergeApproval(row, "invalidated", driftRefusal(["hookEnvironment"], "consume"));
       throw new MergeApprovalBindingError(["hookEnvironment"]);
@@ -2510,7 +2594,15 @@ export class CandidateRegistry {
     };
     let attempt: { exitCode: number; timedOut: boolean };
     try {
-      attempt = await this.#git.mergeIntoHead(row.main_path, row.candidate_head, mergeTimeoutMs);
+      // Step three, and the first thing that writes: the merge. Its process group is persisted the
+      // instant it is spawned, because the subprocess is detached and outlives this process — a
+      // `kill -9` here does not stop the merge, and without the group id a later reader cannot tell
+      // "still being written" from "finished, unrecorded" and freezes the wrong answer over a
+      // repository that is still changing.
+      attempt = await this.#git.mergeIntoHead(
+        row.main_path, row.candidate_head, mergeTimeoutMs,
+        (pgid) => { promotion = this.#recordMergePgid(promotion, pgid); },
+      );
     } catch {
       // git could not even be run. Main may still be untouched, but that is a claim, not a reading,
       // so it goes through exactly the same observation as every other outcome.
@@ -3719,11 +3811,16 @@ export class CandidateRegistry {
     // Only now is recomputing the whole snapshot meaningful — and it is still done, because the
     // scalar checks above are a summary and the digest is the thing the owner actually approved.
     //
-    // On an observation path the last recomputation is reused for a few seconds. Reusing it is safe
-    // in the exact sense that matters: every input the digest is computed FROM — both heads, both
-    // working-tree fingerprints, the ignored inventory, the branch, the recovery ref — has already
-    // been compared against live state on this very pass, unthrottled, immediately above. The cache
-    // is keyed on the approval's own row hash, so any change to the approval discards it.
+    // On an observation path the last recomputation is reused for a few seconds. What that reuse is
+    // and is not covered by, precisely: both heads, both working-tree fingerprints, the ignored
+    // inventory, the branch and the recovery ref have already been compared against live state on
+    // this very pass, unthrottled, immediately above — so a throttled digest cannot hide a change in
+    // any of them. It CAN hide, for up to the throttle window, a change to the two values that live
+    // only inside `preview.promotion`: the hook environment and the ignored-content fingerprint.
+    // Those are not left to this path. `#authorizeMainMerge` re-reads both from live main and
+    // compares them by name immediately before the approval is spent, unthrottled, which is the
+    // comparison that actually gates the write; this one only decides what a read surface displays.
+    // The cache is keyed on the approval's own row hash, so any change to the approval discards it.
     const memo = options.throttle ? this.#previewMemo.get(row.id) : undefined;
     if (memo && memo.rowHash === row.row_hash && this.#now() - memo.at < MERGE_PREVIEW_RECOMPUTE_THROTTLE_MS) {
       if (memo.digest !== undefined) {
@@ -3829,12 +3926,32 @@ export class CandidateRegistry {
     }
   }
 
-  /** Refuses anything that would act on a task whose last promotion left main in an unknown state. */
-  #assertNoUnresolvedPromotion(taskId: string): void {
+  /**
+   * Refuses anything that would act on a task whose last promotion left main in an unknown state —
+   * after looking again, rather than after reading a conclusion somebody wrote once.
+   *
+   * Re-observing here is what makes the gate an account of the repository instead of a permanent
+   * verdict. Two real situations resolve themselves and neither involves this product writing
+   * anything: an orphaned merge that outlived the crash and finished, and an owner who read the
+   * named differences and put their own repository back. Freezing the first answer turned both into
+   * a task that could never be promoted again.
+   */
+  async #assertNoUnresolvedPromotion(taskId: string): Promise<void> {
     const rows = this.#db.prepare(
       "SELECT * FROM candidate_merge_promotions WHERE task_id=? AND state IN ('applying','needs-manual-review')",
     ).all(taskId) as unknown as PromotionRow[];
-    if (rows.length > 0) throw new Error("MAIN_MERGE_PROMOTION_UNRESOLVED");
+    for (const row of rows) {
+      try {
+        this.#assertPromotionRow(row);
+      } catch {
+        // A promotion row that fails its own hash is not evidence that main is fine.
+        throw new Error("MAIN_MERGE_PROMOTION_UNRESOLVED");
+      }
+      const resolved = await this.#resolvePromotion(row);
+      if (resolved.state === "applying" || resolved.state === "needs-manual-review") {
+        throw new Error("MAIN_MERGE_PROMOTION_UNRESOLVED");
+      }
+    }
   }
 
   /**
@@ -3857,6 +3974,9 @@ export class CandidateRegistry {
       reflogPreserved: null,
       recoveryRefIntact: null,
       ...(attempt === undefined ? {} : { attempt }),
+      // Carried forward, never re-derived: the group id was observed at spawn time and this pass
+      // cannot re-observe it. An attempt that has just been awaited is over, so its group is cleared.
+      mergePgid: attempt === undefined ? promotionPgid(row) : null,
       observedAt: new Date(this.#now()).toISOString(),
     };
     try {
@@ -3897,29 +4017,61 @@ export class CandidateRegistry {
       observation.code = "AUTHORIZED_MERGE_COMMIT_OBSERVED_IN_MAIN";
       return { observation, state: "applied", headAfter: observation.mainHead };
     }
+    // "Back where it was" is about the repository's CONTENT and git state: HEAD, the index, tracked,
+    // untracked and ignored files, the stash, the reflog and the absence of leftover merge state.
+    // `hookEnvironment` is reported alongside them but does not disqualify, and that distinction is
+    // load-bearing rather than a convenience. A promotion never writes `.git/hooks`; what a failure
+    // leaves is an owner who has to CHANGE the hook — remove the one that hung, fix the one that
+    // exited non-zero — before anything can succeed again. Counting that as "main did not come back"
+    // meant the only action that makes a retry possible was also the action that permanently sealed
+    // the previous attempt as unresolved, which sealed the task with it. What the hook inventory
+    // gates is the approval binding, checked live immediately before the merge, not this.
+    const blocking = (observation.differences ?? []).filter((name) => name !== "hookEnvironment");
     if (observation.mergeInProgress === false && observation.mainHead === row.main_head_before
-      && observation.differences !== undefined && observation.differences.length === 0) {
+      && observation.differences !== undefined && blocking.length === 0) {
       observation.code = "MAIN_OBSERVED_IDENTICAL_TO_PRE_PROMOTION_FINGERPRINTS";
       return { observation, state: "rolled-back", headAfter: null };
+    }
+    // A fourth shape, measured rather than imagined: a merge orphaned by a crash commits the merge
+    // the owner authorized and is then killed before git clears `MERGE_HEAD`/`AUTO_MERGE`. Main
+    // carries the authorized commit — `git status --porcelain` is completely empty — while git still
+    // considers a merge to be in progress. That is not finished, and it is emphatically not
+    // undetermined: saying "undetermined" here is what made the record freeze on an answer that had
+    // stopped being true. It is named, it stays gated until the leftovers are gone, and the command
+    // offered is a read-only look at the merge rather than anything that would undo it. Clearing the
+    // named leftovers is the owner's move; the next observation then reports `applied`.
+    if (observation.authorizedMergeCommit === true) {
+      observation.code = "AUTHORIZED_MERGE_COMMIT_OBSERVED_WITH_MERGE_STATE_LEFT_BEHIND";
+      return { observation, state: "needs-manual-review", headAfter: observation.mainHead };
     }
     observation.code = "PROMOTION_OUTCOME_UNDETERMINED";
     return { observation, state: "needs-manual-review", headAfter: observation.mainHead };
   }
 
   /**
-   * The copy-and-paste command an owner needs in order to put their own repository back, produced
-   * only from values this promotion recorded before it started. It is never executed here.
+   * The copy-and-paste command an owner needs, chosen from what was just OBSERVED rather than fixed
+   * at the moment the promotion started. It is never executed here.
+   *
+   * `reset --hard <pre-promotion head>` is correct only while main does not carry the merge. Once an
+   * authorized merge commit has been seen at HEAD — which happens when a merge orphaned by a crash
+   * runs to completion after this process is gone — that same command silently throws away a merge
+   * that really did succeed. So the moment the merge is observed, the offer becomes a read-only look
+   * at it, and the record says which of the two it is instead of leaving the owner to read the verb.
    */
-  #recoveryHint(row: PromotionRow): string {
-    return `git -C ${row.main_path} reset --hard ${row.main_head_before}`;
+  #recoveryHint(row: PromotionRow, observation: MergePromotionObservation): void {
+    if (observation.authorizedMergeCommit === true && observation.mainHead !== null) {
+      observation.recovery = `git -C ${row.main_path} show --stat ${observation.mainHead}`;
+      observation.recoveryKind = "inspect-observed-merge";
+      return;
+    }
+    observation.recovery = `git -C ${row.main_path} reset --hard ${row.main_head_before}`;
+    observation.recoveryKind = "reset-to-pre-promotion";
   }
 
   /** Records the outcome of the attempt this process just made. */
   async #settlePromotion(row: PromotionRow, attempt: { exitCode: number; timedOut: boolean }): Promise<PromotionRow> {
     const observed = await this.#observeMain(row, attempt);
-    if (observed.state !== "applied") {
-      observed.observation.recovery = this.#recoveryHint(row);
-    }
+    if (observed.state !== "applied") this.#recoveryHint(row, observed.observation);
     const next = this.#writePromotion(row, {
       state: observed.state,
       main_head_after: observed.headAfter,
@@ -3931,16 +4083,26 @@ export class CandidateRegistry {
   }
 
   /**
-   * Resolves a promotion left behind by a process that is gone, using nothing but observation.
+   * Re-observes a promotion nobody is driving, and reports what the repository says NOW.
    *
-   * A row whose owner is still running is a promotion in progress and is returned untouched: settling
-   * it would be reporting on a merge that has not finished. A row whose owner is provably dead is
-   * observed once, and only a conclusive reading moves it — an inconclusive one leaves it exactly
-   * where it is, which is what "needs a human" looks like on disk.
+   * It runs on every read of a non-terminal row, not once. "Needs manual review" used to be written
+   * once and never looked at again, which made it a permanent verdict rather than an account: an
+   * orphaned merge that finished after the crash, and an owner who put their own repository back
+   * after reading the named differences, both left the record frozen on an answer that had stopped
+   * being true, with a `reset --hard` still on offer that would have destroyed a merge that
+   * succeeded. Re-observing costs only reads, and it is the only thing that can make either of those
+   * situations resolve without this product writing to main.
+   *
+   * Two things stop it. A row whose owner process is still alive is a promotion in flight. And a row
+   * whose merge subprocess group still exists is a promotion whose write is still in flight even
+   * though the orchestrator that started it is gone — `detached` means killing this process does not
+   * kill git, and settling mid-write would record a conclusion about a repository that is still
+   * being changed.
    */
   async #resolvePromotion(row: PromotionRow): Promise<PromotionRow> {
-    if (row.state !== "applying") return row;
-    if (processAlive(row.owner_pid) !== false) return row;
+    if (row.state === "applied" || row.state === "rolled-back") return row;
+    if (row.state === "applying" && processAlive(row.owner_pid) !== false) return row;
+    if (mergeGroupStillRunning(row)) return row;
     // Strictly read-only. No reset, no checkout, no `merge --abort`, no `clean`, no touching
     // `.git/config` and no removing a lock file: after a kill during a hook the rewritten index is
     // bit-for-bit indistinguishable from work the owner staged themselves, so an automatic rollback
@@ -3956,15 +4118,50 @@ export class CandidateRegistry {
       observed.state = "rolled-back";
       observed.headAfter = null;
     }
-    if (observed.state !== "applied") observed.observation.recovery = this.#recoveryHint(row);
-    const next = this.#writePromotion(row, {
-      state: observed.state,
-      main_head_after: observed.headAfter,
-      observation_json: JSON.stringify(observed.observation),
-      updated_at_ms: Math.max(row.started_at_ms, this.#now()),
-    });
-    if (observed.state === "applied") this.#markCandidateMerged(row.task_id);
-    return next;
+    if (observed.state !== "applied") this.#recoveryHint(row, observed.observation);
+    try {
+      const next = this.#writePromotion(row, {
+        state: observed.state,
+        main_head_after: observed.headAfter,
+        observation_json: JSON.stringify(observed.observation),
+        updated_at_ms: Math.max(row.started_at_ms, this.#now()),
+      });
+      if (observed.state === "applied") this.#markCandidateMerged(row.task_id);
+      return next;
+    } catch {
+      // Another reader observed the same repository at the same instant and wrote first. Its record
+      // stands; this reader reports what the store now holds rather than an answer it failed to save.
+      const current = this.#promotionRow(row.id);
+      return current ?? row;
+    }
+  }
+
+  /**
+   * Writes the merge subprocess group into the intent record, synchronously, at spawn time.
+   *
+   * A failure here is swallowed rather than aborting the merge: the merge is already running, and
+   * refusing to proceed at this point would leave a repository being written by a process nobody is
+   * waiting on. Losing the group id degrades this promotion to the previous behaviour — the crash
+   * reader falls back to re-observation, which is what actually converges the answer.
+   */
+  #recordMergePgid(row: PromotionRow, pgid: number): PromotionRow {
+    try {
+      const observation = JSON.parse(row.observation_json) as MergePromotionObservation;
+      return this.#writePromotion(row, {
+        observation_json: JSON.stringify({ ...observation, mergePgid: pgid }),
+        updated_at_ms: Math.max(row.started_at_ms, this.#now()),
+      });
+    } catch { return row; }
+  }
+
+  #promotionRow(id: string): PromotionRow | undefined {
+    const row = this.#db.prepare("SELECT * FROM candidate_merge_promotions WHERE id=?")
+      .get(id) as unknown as PromotionRow | undefined;
+    if (!row) return undefined;
+    try {
+      this.#assertPromotionRow(row);
+    } catch { return undefined; }
+    return row;
   }
 
   /**
@@ -4171,6 +4368,11 @@ export class CandidateRegistry {
     if (MERGE_APPROVAL_TERMINAL.has(row.state) || this.#now() > row.expires_at_ms) {
       return { row, check: { checked: false, valid: false, changed: [] } };
     }
+    // Before anything is compared: an approval taken before the promotion gates existed can never
+    // become usable, whatever live state says. Recording that as its own terminal state is what frees
+    // the task's single open-question slot, so the owner can be asked again against a fresh snapshot.
+    const retired = this.#retirePredatingApproval(row);
+    if (retired) return { row: retired, check: { checked: false, valid: false, changed: [] } };
     let verification: MergeBindingVerification;
     try {
       verification = await this.#verifyMergeBinding(row, { throttle: true });
@@ -4259,6 +4461,29 @@ export class CandidateRegistry {
       });
     } catch { /* the durable invalidation has already committed and is the primary record */ }
     return next;
+  }
+
+  /**
+   * Retires an approval whose snapshot predates the promotion gates, by name, and returns the row the
+   * store now holds — or `undefined` when there was nothing to retire.
+   *
+   * This is the whole of the upgrade path for an owner decision made under the previous release. It
+   * spends nothing, runs no Git command and touches no candidate: the approval was already unusable,
+   * and the only thing that changes is that the store now SAYS so, which is what lets `reject`,
+   * `request` and expiry all work again instead of every surface throwing "tampered".
+   */
+  #retirePredatingApproval(row: MergeApprovalRow): MergeApprovalRow | undefined {
+    if (MERGE_APPROVAL_TERMINAL.has(row.state) || !previewPredatesPromotionGates(row)) return undefined;
+    this.#settleMergeApproval(row, "invalidated", {
+      code: PREVIEW_PREDATES_PROMOTION_GATES,
+      changed: ["promotionGates"],
+    });
+    const current = this.#mergeApprovalRow(row.id);
+    if (!current) return undefined;
+    try {
+      this.#assertMergeApprovalRow(current);
+    } catch { return undefined; }
+    return current;
   }
 
   /** Best-effort terminal transition used on refusal paths; it must never replace the real refusal. */
@@ -4426,11 +4651,7 @@ export class CandidateRegistry {
       || preview.mainDirty.ignoredFingerprint !== row.main_ignored_fingerprint
       // Bar item 5 on the read path as well: a truncated or conflicted preview is not approvable, so
       // a stored approval carrying one is not an approval anything may act on.
-      || mergeBlockers(preview).length > 0
-      // And an approval whose snapshot never recorded the promotion gates is not an approval to
-      // write main with. Absent is refused rather than defaulted, because defaulting it to "no
-      // blockers" is precisely the shape that lets an unchecked condition pass as a checked one.
-      || preview.promotion === undefined) {
+      || mergeBlockers(preview).length > 0) {
       throw new Error("MAIN_MERGE_APPROVAL_ROW_TAMPERED");
     }
     if (row.refusal_json !== null) assertRefusal(JSON.parse(row.refusal_json) as unknown);

@@ -645,3 +645,41 @@ candidate 動了，approval 依然在每一條讀取路徑上顯示成 `approved
 `.git/config` 可被有終端的 Native agent 直接寫入，保護來自「綁定＋揭露＋消耗前重驗」而非阻止寫入。
 promotion 期間若外部程序推進 main，目前是**事後偵測**（觀察到的 HEAD 不是被授權的 merge commit →
 `needs-manual-review` 並具名），不是期間中止；這一項尚未有測試，見 [[VERIFICATION]] 的待辦。
+
+### 第一輪對抗式審查後的修正（2026-08-06）
+
+第一輪判定**不通過**。三處決定被實測推翻，全部是「把不確定折疊成一個確定答案」的同一種病：
+
+- **「快照早於 promotion gates」曾被讀成「這列被竄改」。** 用前一個 commit（`df075b7`）建立、含一筆
+  Owner **已核准** approval 的 v4 資料庫，用本 commit 開啟：`row_hash` 完全正確、儲存層的升級也確實
+  是純加表，但讀取層的 assert 把 `preview.promotion === undefined` 和完整性失敗放進**同一個 `throw`**，
+  於是 list／inspect／reject／promote 全部丟 `MAIN_MERGE_APPROVAL_ROW_TAMPERED`，
+  同一份程式碼裡正確的具名答案 `PREVIEW_PREDATES_PROMOTION_GATES` 永遠到不了。
+  更糟的是 expiry sweep 走同一個 assert，於是那一列**永久佔著「每 task 一個未決問題」的結構性槽位**：
+  request 永遠 `ALREADY_PENDING`、reject 永遠拋錯，24 小時後仍然如此，該 task 永久報廢且產品側零路徑可清。
+  **現在兩者是兩個答案**：完整性失敗仍是 `MAIN_MERGE_APPROVAL_ROW_TAMPERED`；
+  「這份快照早於這個功能」是具名終局狀態 `PREVIEW_PREDATES_PROMOTION_GATES`，
+  槽位因此被釋放，Owner 可以立刻被重新詢問。這是 [[PITFALLS]] #85 的教科書版本。
+- **`kill -9` 殺不掉它自己啟動的 merge。** `runProcess` 用 `detached`，`git merge` 自成 process group；
+  殺掉 orchestrator 之後它 PPID 變 1，**繼續把 main 寫完**（實測 HEAD 移動到真正被授權的 merge commit、
+  `git status --porcelain` 完全空白）。而 `#resolvePromotion` 第一行是
+  `if (row.state !== "applying") return row;`——一旦寫成 `needs-manual-review` 就**永不再觀察**。
+  結果是不變式被繞成「完整套用，而產品的紀錄說不確定」，`mainHeadAfter` 是過期的事實斷言，
+  而給 Owner 的 `git reset --hard <pre-HEAD>` **會靜默丟掉一次真的成功了的 merge**。
+  三項修正：**(a)** merge 子程序的 pgid 在 spawn 當下寫進意圖紀錄，該 group 仍存在時不得下任何結論；
+  **(b)** 取消凍結——非終局的紀錄每次讀取重新觀察，孤兒 merge 跑完、或 Owner 自己把 main 復原，
+  都會在下一次讀取自行收斂，這也是 `needs-manual-review` 唯一的出路（產品仍然一個位元都不寫）；
+  **(c)** 復原指令改為**觀察來的**——看到被授權的 merge commit 就只提供唯讀的 `git show --stat`，
+  永不提供會毀掉它的 `reset --hard`。
+- **三個「乾淨」判準用了最省事的讀法**（[[PITFALLS]] #93 應驗在自己身上）：`.gitattributes` 只讀 root、
+  boolean 用 `=== "true"` 比字串、submodule 只看 `.gitmodules` 是否存在。實測 `sub/deep/.gitattributes`、
+  `.git/info/attributes`、被 ignore 的 `.gitattributes`、`core.attributesFile`、
+  `core.sparseCheckout` 的 `1`／`yes`／`on`、以及 index 內的 `160000` gitlink（無 `.gitmodules`、
+  `status` 完全空白）全部通過為 `approvable: true`。判準改為：attributes **掃全部來源**；
+  boolean 一律 `git config --type=bool`（git 拒絕的值視為讀不到 → 關閉的閘門）；
+  submodule 看 **index 的 `160000` 條目**。
+
+**一處判準放寬，明說理由。** 「main 回到操作前」的判定**不再把 `hookEnvironment` 算進去**（仍照實回報）。
+理由是它會製造死路：讓 promotion 失敗的往往就是那個 hook，而移除／修好它是重試唯一可能成功的前提，
+把它算成「main 沒回來」等於讓唯一的出路同時永久封死上一次嘗試，連帶封死整個 task。
+hook 清單真正把關的地方是 approval 綁定，在 merge 前一刻對 live main 不節流地重驗，不是這裡。

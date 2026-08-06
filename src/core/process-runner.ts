@@ -16,6 +16,19 @@ export interface ProcessRequest {
   signal?: AbortSignal;
   /** Trusted in-process streaming parser. Streamed stdout is not retained or subject to the capture byte ceiling. */
   stdoutConsumer?: (chunk: Buffer) => void;
+  /**
+   * Called once, synchronously, immediately after the child is spawned, with its process-group id.
+   *
+   * Children are spawned `detached`, which means they survive this process: a `kill -9` of the
+   * orchestrator does NOT stop a `git merge` that is already running, and that merge goes on to
+   * finish writing the owner's main branch. Handing the group id to the caller before the child can
+   * do anything is what lets a later reader tell "the write is still in flight" from "the write is
+   * over and nobody recorded the outcome" — the two states that otherwise look identical from disk.
+   *
+   * On platforms where the child is not detached there is no separate group and nothing is reported.
+   * A thrown callback is not allowed to leak into the child's lifecycle.
+   */
+  onSpawn?: (processGroupId: number) => void;
   /** Test/embedded-code extension only; never populated from user or model input. */
   trustedExecutableRoots?: readonly string[];
 }
@@ -268,6 +281,13 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
+
+    // Before any output is wired up, so the caller has the group id at the earliest instant it
+    // exists. A listener that throws must not take the child down with it: the child is already
+    // running, and the only thing worse than not recording it is losing track of it.
+    if (request.onSpawn && child.pid && process.platform !== "win32") {
+      try { request.onSpawn(child.pid); } catch { /* recorded or not, the child is already alive */ }
+    }
 
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
