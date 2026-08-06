@@ -254,6 +254,44 @@ export const MERGE_LIVE_ABANDON_CONFIRMATION =
 export const MERGE_OWNER_ABANDON_CONFIRMATION = "STOP WAITING FOR THIS PROMOTION'S OWNER PROCESS";
 
 /**
+ * The owner's phrase for the one state neither of the phrases above can leave: BOTH numbers this
+ * record waits on are answering "alive".
+ *
+ * The two releases refuse each other by design, and each refusal is right on its own: disowning the
+ * merge while the owner process runs would let two readers describe one repository, and disowning
+ * the owner while the merge runs would publish a verdict over a live write. Together they were a
+ * cycle. Measured on a real promotion whose merge had been killed outright and whose two recorded
+ * numbers had been recycled to live processes of the same user within one boot — PITFALLS #105's
+ * shape exactly — `abandonMergeProcessGroup` answered `MAIN_MERGE_PROMOTION_STILL_OWNED`,
+ * `abandonPromotionOwnerProcess` answered `MERGE_ABANDON_REFUSED_MERGE_STILL_RUNNING`, and the task
+ * could never be promoted again. That is the state bar item 11 forbids.
+ *
+ * So there is a third way out, and its phrase says what the other two cannot: that this abandons TWO
+ * processes, and that one of them may still be writing to main. Nothing is killed here either, and
+ * main is not touched — what changes is only whether this record keeps waiting, and the record
+ * attributes that to the owner rather than dressing it up as an observation.
+ */
+export const MERGE_PROMOTION_ABANDON_CONFIRMATION =
+  "STOP WAITING FOR BOTH PROCESSES OF A PROMOTION THAT MAY STILL BE WRITING TO MAIN";
+
+/**
+ * The owner's phrase for a promotion record this release cannot read at all.
+ *
+ * A row whose integrity check fails is not evidence that main is fine, so it holds the project's
+ * exclusive marker — and every OTHER task in the project was then refused for as long as the
+ * corruption lasted, while the one release that could have freed them refused to look at the row at
+ * all (`#promotionRow` returns nothing for a row that fails its check, so every abandon answered
+ * `MAIN_MERGE_PROMOTION_NOT_FOUND`). One unreadable row therefore retired an entire project rather
+ * than the one task it belongs to.
+ *
+ * This phrase does not repair the row and does not decide what happened to main: it moves that row
+ * out of `applying` so it stops claiming the project, and leaves it unresolved for its own task,
+ * which is exactly what an unreadable record deserves.
+ */
+export const MERGE_UNREADABLE_ABANDON_CONFIRMATION =
+  "STOP LETTING AN UNREADABLE PROMOTION RECORD BLOCK THIS PROJECT";
+
+/**
  * Written into every consumed authorization so no downstream caller has to infer the limits of what
  * the owner agreed to. A merge approval authorizes one merge of one snapshot into main; it is not a
  * push, publish, deploy, delete or cleanup approval, and it never becomes one.
@@ -433,9 +471,13 @@ export interface MergeApprovalPreview {
    * first operation in this product that runs code out of `.git`, as the owner and unsandboxed, so
    * the owner is shown WHAT will run rather than told that hooks exist.
    *
-   * `programs` is the same disclosure for configuration: every key in main's config that can name a
-   * program git runs, by key. Its values are not here on purpose — this is rendered to the owner and
-   * one of those keys can carry a secret — and are covered by `configDigest` instead.
+   * `programs` is the same disclosure for configuration: the keys in main's config that this
+   * release RECOGNISES as able to name a program git runs, by key. It is not every such key and
+   * never claims to be — the previous wording said "every", and `gpg.ssh.defaultKeyCommand` was in
+   * main's config, executable by git, and absent from the list at the same time. Completeness is
+   * `configDigest`'s job: it binds every key including the ones no expression here matches. Values
+   * are not here on purpose — this is rendered to the owner and one of those keys can carry a
+   * secret — and are covered by `configDigest` instead.
    */
   hooks: PromotionFacts["hooks"];
   confirmationPhrase: string;
@@ -471,13 +513,21 @@ export interface MergePromotionPending {
   code:
     | "OWNER_PROCESS_STILL_RUNNING"
     | "MERGE_SUBPROCESS_STILL_RUNNING"
-    | "MERGE_PROCESS_GROUP_UNDECIDABLE";
+    | "MERGE_PROCESS_GROUP_UNDECIDABLE"
+    | "PROMOTION_OWNER_AND_MERGE_STILL_RUNNING";
   /** The process the owner can look at. Named, because "still running" with no pid is unactionable. */
   pid: number;
   /** A read-only command that shows what that process is. Nothing here ever executes it. */
   inspect: string;
   /** Present only when the owner has a way to release this state without waiting. */
   release?: string;
+  /**
+   * The SECOND process in the way, present only for the combined state.
+   *
+   * Both numbers have to be named there, because the release that works requires both of them and a
+   * state that names one while refusing on the other is the dead end this field exists to end.
+   */
+  alsoBlockedBy?: { pid: number; inspect: string };
 }
 
 /**
@@ -631,7 +681,9 @@ export interface MergePromotion {
  * durable record does not also say.
  */
 export interface MergePromotionEvent {
-  phase: "started" | "settled" | "re-observed" | "merge-group-abandoned" | "owner-process-abandoned";
+  phase:
+    | "started" | "settled" | "re-observed" | "merge-group-abandoned" | "owner-process-abandoned"
+    | "promotion-abandoned" | "unreadable-record-released";
   promotionId: string;
   approvalId: string;
   taskId: string;
@@ -668,6 +720,17 @@ export interface UnreadableMergePromotion {
   taskId: string;
   state: "unreadable";
   unreadable: true;
+  /**
+   * The value of the row's own `state` column, present only where it matters: after the owner has
+   * released such a row from the project's exclusive marker.
+   *
+   * The row stays unreadable — nothing here repairs it — but "unreadable and still claiming the
+   * project" and "unreadable and no longer claiming it" are different facts about the repository,
+   * and collapsing them would leave the owner unable to tell whether their release did anything.
+   */
+  storedState?: string;
+  /** The owner's declaration, echoed back. Attributed, never presented as an observation. */
+  releasedFromExclusiveMarker?: { at: string; decidedBy: string };
 }
 
 export interface MergePromotionResult {
@@ -1449,19 +1512,31 @@ function inspectPidCommand(pid: number): string {
  */
 function promotionPending(row: PromotionRow): MergePromotionPending | undefined {
   if (row.state === "applied" || row.state === "rolled-back") return undefined;
-  if (row.state === "applying" && ownerProcessAlive(row) !== false) {
-    return {
-      code: "OWNER_PROCESS_STILL_RUNNING",
-      pid: row.owner_pid,
-      inspect: inspectPidCommand(row.owner_pid),
-      release: MERGE_OWNER_ABANDON_CONFIRMATION,
-    };
-  }
   const identity = promotionGroupIdentity(row);
   const group = mergeGroupState(identity);
-  if (identity === null || group === "gone" || group === "none" || group === "merge-done-group-alive") {
-    return undefined;
+  const mergeBlocking = identity !== null && group !== "gone" && group !== "none"
+    && group !== "merge-done-group-alive";
+  if (row.state === "applying" && ownerProcessAlive(row) !== false) {
+    // Both numbers alive is its own state, not the owner state with a footnote. Reporting it as
+    // `OWNER_PROCESS_STILL_RUNNING` handed out a release phrase that the merge check then refused,
+    // and the merge release refused on the owner — a cycle with no exit and a permanently retired
+    // task. Naming it is what lets `pending.release` be a phrase that actually works.
+    return mergeBlocking && identity !== null
+      ? {
+        code: "PROMOTION_OWNER_AND_MERGE_STILL_RUNNING",
+        pid: row.owner_pid,
+        inspect: inspectPidCommand(row.owner_pid),
+        release: MERGE_PROMOTION_ABANDON_CONFIRMATION,
+        alsoBlockedBy: { pid: identity.pgid, inspect: inspectGroupCommand(identity.pgid) },
+      }
+      : {
+        code: "OWNER_PROCESS_STILL_RUNNING",
+        pid: row.owner_pid,
+        inspect: inspectPidCommand(row.owner_pid),
+        release: MERGE_OWNER_ABANDON_CONFIRMATION,
+      };
   }
+  if (!mergeBlocking || identity === null) return undefined;
   const running = group === "merge-running";
   return {
     code: running ? "MERGE_SUBPROCESS_STILL_RUNNING" : "MERGE_PROCESS_GROUP_UNDECIDABLE",
@@ -1576,6 +1651,49 @@ export class MergeAbandonStillRunningError extends Error {
     this.pid = pid;
     this.inspect = inspect;
     this.confirmation = confirmation;
+  }
+}
+
+/**
+ * A narrow release asked for while BOTH of this record's processes are answering "alive".
+ *
+ * Each narrow release refuses on the other one, which was a cycle: the owner release refused because
+ * the merge was running, the merge release refused because the owner was running, and nothing else
+ * could ever move that row. The refusal now carries both pids, both read-only inspect commands and
+ * the phrase that does work, so the state that used to have no exit hands out the exit.
+ */
+export class MergePromotionDoublyBlockedError extends Error {
+  readonly ownerPid: number;
+  readonly mergePgid: number;
+  readonly inspect: readonly string[];
+  readonly confirmation: string;
+
+  constructor(ownerPid: number, mergePgid: number, inspect: readonly string[]) {
+    super("MERGE_ABANDON_REFUSED_BOTH_PROCESSES_RUNNING");
+    this.name = "MergePromotionDoublyBlockedError";
+    this.ownerPid = ownerPid;
+    this.mergePgid = mergePgid;
+    this.inspect = [...inspect];
+    this.confirmation = MERGE_PROMOTION_ABANDON_CONFIRMATION;
+  }
+}
+
+/**
+ * A release asked for on a promotion row this release cannot read.
+ *
+ * It is a refusal only because the phrase was missing or wrong; it carries the one that works, so
+ * the state that used to answer `MAIN_MERGE_PROMOTION_NOT_FOUND` — and leave the entire project
+ * blocked with no action able to touch the row — now answers with the way through.
+ */
+export class MergeUnreadablePromotionError extends Error {
+  readonly promotionId: string;
+  readonly confirmation: string;
+
+  constructor(promotionId: string) {
+    super("MAIN_MERGE_PROMOTION_ROW_UNREADABLE");
+    this.name = "MergeUnreadablePromotionError";
+    this.promotionId = promotionId;
+    this.confirmation = MERGE_UNREADABLE_ABANDON_CONFIRMATION;
   }
 }
 
@@ -3131,10 +3249,22 @@ export class CandidateRegistry {
   async inspectMergeApproval(input: { approvalId: string; roomId: string; mainPath: string }): Promise<{
     approval: MergeApproval;
     binding: MergeApprovalBindingCheck;
+    overwrites: { checked: boolean; ignored: string[]; untracked: string[]; unavailable?: string };
   }> {
     this.#assertOpen();
     const row = await this.#scopedMergeApprovalRow(input.approvalId, input.roomId, input.mainPath);
     const observed = await this.#observeMergeApproval(row, "merge-approval-inspect");
+    // Live, and carried on the surface the owner actually looks at.
+    //
+    // The hook inventory and the configuration keys are inside the bound preview, so the dialog
+    // already had them. This list is not: it is a fact about live main — which files sitting there
+    // right now would be silently replaced — and it is the one the owner cannot discover any other
+    // way, because git overwrites those files, exits zero and reports a clean tree afterwards. The
+    // agent-facing preview surface has shown it since Phase 5-5 began; the approval screen showed a
+    // count and a fingerprint, which is [[PITFALLS]] #86's shape: a number instead of the facts.
+    const overwrite = await this.#overwriteScan(
+      row.main_path, assertPreviewShape(JSON.parse(row.preview_json) as unknown),
+    );
     return {
       approval: {
         ...this.#publicMergeApproval(observed.row),
@@ -3143,6 +3273,12 @@ export class CandidateRegistry {
           : {}),
       },
       binding: observed.check,
+      overwrites: {
+        checked: overwrite.checked,
+        ignored: overwrite.ignored,
+        untracked: overwrite.untracked,
+        ...(overwrite.unavailable === undefined ? {} : { unavailable: overwrite.unavailable }),
+      },
     };
   }
 
@@ -4462,7 +4598,13 @@ export class CandidateRegistry {
       try {
         this.#assertPromotionRow(row);
       } catch {
-        throw new Error("MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY");
+        // Its own answer, not the busy one. Both refuse, and that is right — an unreadable row is
+        // not evidence that main is fine — but they are different problems with different exits, and
+        // collapsing them told every other task in the project "somebody is promoting" while the
+        // truth was "one row here cannot be read and nothing you do to promotions will help".
+        // Measured: one corrupted `row_hash` refused every other task in the project forever, and
+        // the release that could have cleared it answered `MAIN_MERGE_PROMOTION_NOT_FOUND`.
+        throw new MergeUnreadablePromotionError(typeof row.id === "string" ? row.id : "");
       }
       if (promotionPending(row) !== undefined) throw new Error("MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY");
       const last = this.#promotionResolvedAt.get(row.id) ?? 0;
@@ -4847,6 +4989,11 @@ export class CandidateRegistry {
    * A leader that is still answering "alive" is refused on the first attempt and requires
    * `MERGE_LIVE_ABANDON_CONFIRMATION` on the second, and for as long as that process lives the
    * record offers only a read-only look at it — never `reset --hard` over a tree git may be writing.
+   *
+   * Two states are handled here rather than elsewhere because they arrive at this same door: a row
+   * this release cannot READ (which used to answer `MAIN_MERGE_PROMOTION_NOT_FOUND` and leave the
+   * whole project blocked), and a row whose owner process is alive TOO (which used to answer
+   * `MAIN_MERGE_PROMOTION_STILL_OWNED` and point at a release that refused right back).
    */
   async abandonMergeProcessGroup(input: {
     promotionId: string;
@@ -4861,7 +5008,7 @@ export class CandidateRegistry {
      */
     confirmation: string;
     decidedBy: string;
-  }): Promise<MergePromotion> {
+  }): Promise<MergePromotion | UnreadableMergePromotion> {
     this.#assertOpen();
     if (typeof input.promotionId !== "string" || !UUID_PATTERN.test(input.promotionId)) {
       throw new Error("MAIN_MERGE_PROMOTION_ID_INVALID");
@@ -4870,10 +5017,17 @@ export class CandidateRegistry {
     if (!ROOM_PATTERN.test(roomId)) throw new Error("CANDIDATE_ROOM_INVALID");
     const mainPath = await canonicalWorkspace(input.mainPath);
     const decidedBy = text(input.decidedBy, "MERGE_GROUP_ABANDON_DECIDED_BY_INVALID", 64);
-    const row = this.#promotionRow(input.promotionId);
-    if (!row || row.room_id !== roomId || row.main_path !== mainPath) {
+    // Read WITHOUT the integrity check first. `#promotionRow` drops an unreadable row, and dropping
+    // it here is what made one corrupted row retire a whole project: the row still held the
+    // exclusive marker, and the only action that could have freed it answered "not found".
+    const raw = this.#promotionRowRaw(input.promotionId);
+    if (!raw || raw.room_id !== roomId || raw.main_path !== mainPath) {
       throw new Error("MAIN_MERGE_PROMOTION_NOT_FOUND");
     }
+    if (!this.#promotionRowReadable(raw)) {
+      return this.#releaseUnreadablePromotion(raw, input.confirmation, decidedBy);
+    }
+    const row = raw;
     if (row.state === "applied" || row.state === "rolled-back") {
       throw new Error("MAIN_MERGE_PROMOTION_ALREADY_SETTLED");
     }
@@ -4882,6 +5036,12 @@ export class CandidateRegistry {
     // readers describe one repository.
     const pending = promotionPending(row);
     if (pending === undefined) throw new Error("MAIN_MERGE_PROMOTION_NOT_BLOCKED");
+    if (pending.code === "PROMOTION_OWNER_AND_MERGE_STILL_RUNNING") {
+      throw new MergePromotionDoublyBlockedError(
+        pending.pid, pending.alsoBlockedBy?.pid ?? 0,
+        [pending.inspect, ...(pending.alsoBlockedBy === undefined ? [] : [pending.alsoBlockedBy.inspect])],
+      );
+    }
     if (pending.code === "OWNER_PROCESS_STILL_RUNNING") throw new Error("MAIN_MERGE_PROMOTION_STILL_OWNED");
     // Two stages, because the two states are not the same risk. A group nobody can decide about is
     // released with the ordinary phrase; a group whose LEADER answers "alive" is a `git merge` that
@@ -4937,8 +5097,10 @@ export class CandidateRegistry {
    * with nothing on the product side able to clear it.
    *
    * It kills nothing and it does not touch main. What it refuses to do is release the wait while the
-   * merge subprocess is provably alive: that would be disowning the caller and the writer at once,
-   * and the record would then describe a repository something is still writing.
+   * merge subprocess is also in the way: that would be disowning the caller and the writer at once,
+   * and the record would then describe a repository something is still writing. That refusal used to
+   * be a wall — the merge release refused on the owner and this one refused on the merge — so it now
+   * hands back `abandonPromotionEntirely`'s phrase and both pids instead.
    */
   async abandonPromotionOwnerProcess(input: {
     promotionId: string;
@@ -4968,24 +5130,25 @@ export class CandidateRegistry {
       throw new Error("MAIN_MERGE_PROMOTION_ALREADY_SETTLED");
     }
     const pending = promotionPending(row);
+    // The combined state is refused HERE too, and with the route rather than a wall. Falling through
+    // to the merge-still-running refusal below would be the same answer the cycle used to give.
+    if (pending?.code === "PROMOTION_OWNER_AND_MERGE_STILL_RUNNING") {
+      throw new MergePromotionDoublyBlockedError(
+        pending.pid, pending.alsoBlockedBy?.pid ?? 0,
+        [pending.inspect, ...(pending.alsoBlockedBy === undefined ? [] : [pending.alsoBlockedBy.inspect])],
+      );
+    }
     if (pending === undefined || pending.code !== "OWNER_PROCESS_STILL_RUNNING") {
       throw new Error("MAIN_MERGE_PROMOTION_NOT_OWNER_BLOCKED");
     }
     if (!Number.isSafeInteger(input.pid) || input.pid !== pending.pid) {
       throw new Error("MERGE_OWNER_ABANDON_PID_MISMATCH");
     }
+    // No separate "is the merge alive?" check here: reaching `OWNER_PROCESS_STILL_RUNNING` at all
+    // now MEANS the merge group is not in the way, because `promotionPending` reports the two-alive
+    // case as its own state and it is refused above with the phrase that releases both. A second
+    // check for it here would be unreachable, and unreachable guards cannot be tested.
     const observation = JSON.parse(row.observation_json) as MergePromotionObservation;
-    // Asked directly rather than through `promotionPending`, which answers about the owner process
-    // first and so would never mention the merge. A live leader means main may be being written now.
-    const group = mergeGroupState(promotionGroupIdentity(row));
-    if (group === "merge-running") {
-      const identity = promotionGroupIdentity(row);
-      throw new MergeAbandonStillRunningError(
-        identity?.pgid ?? 0,
-        inspectGroupCommand(identity?.pgid ?? 0),
-        MERGE_LIVE_ABANDON_CONFIRMATION,
-      );
-    }
     const disowned = {
       ...observation,
       ownerProcessDisowned: {
@@ -5004,6 +5167,182 @@ export class CandidateRegistry {
       mainMutation: false,
     });
     return this.#publicPromotion(await this.#resolvePromotion(updated));
+  }
+
+  /**
+   * The way out of the state where the two releases above refuse each other.
+   *
+   * Both are correct in isolation and together they were a cycle with no product-side exit, which is
+   * the state bar item 11 forbids. This one requires BOTH numbers exactly as the record reports them
+   * and a phrase that says both that two processes are being abandoned and that one of them may
+   * still be writing to main. It kills nothing, it does not touch main, and it does not decide what
+   * happened: the next read re-observes the repository and reaches whichever of the three answers
+   * the fingerprints support.
+   *
+   * It is refused whenever the narrower releases would work, so the longer phrase can never be used
+   * to skip the safer confirmation the actual state calls for.
+   */
+  async abandonPromotionEntirely(input: {
+    promotionId: string;
+    roomId: string;
+    mainPath: string;
+    /** The owner pid exactly as the record reports it. */
+    pid: number;
+    /** The merge pgid exactly as the record reports it, in `pending.alsoBlockedBy`. */
+    pgid: number;
+    confirmation: string;
+    decidedBy: string;
+  }): Promise<MergePromotion> {
+    this.#assertOpen();
+    if (typeof input.promotionId !== "string" || !UUID_PATTERN.test(input.promotionId)) {
+      throw new Error("MAIN_MERGE_PROMOTION_ID_INVALID");
+    }
+    const roomId = text(input.roomId, "CANDIDATE_ROOM_INVALID", 48);
+    if (!ROOM_PATTERN.test(roomId)) throw new Error("CANDIDATE_ROOM_INVALID");
+    const mainPath = await canonicalWorkspace(input.mainPath);
+    if (input.confirmation !== MERGE_PROMOTION_ABANDON_CONFIRMATION) {
+      throw new Error("MERGE_PROMOTION_ABANDON_CONFIRMATION_MISMATCH");
+    }
+    const decidedBy = text(input.decidedBy, "MERGE_GROUP_ABANDON_DECIDED_BY_INVALID", 64);
+    const row = this.#promotionRow(input.promotionId);
+    if (!row || row.room_id !== roomId || row.main_path !== mainPath) {
+      throw new Error("MAIN_MERGE_PROMOTION_NOT_FOUND");
+    }
+    if (row.state === "applied" || row.state === "rolled-back") {
+      throw new Error("MAIN_MERGE_PROMOTION_ALREADY_SETTLED");
+    }
+    const pending = promotionPending(row);
+    if (pending === undefined || pending.code !== "PROMOTION_OWNER_AND_MERGE_STILL_RUNNING"
+      || pending.alsoBlockedBy === undefined) {
+      throw new Error("MAIN_MERGE_PROMOTION_NOT_DOUBLY_BLOCKED");
+    }
+    if (!Number.isSafeInteger(input.pid) || input.pid !== pending.pid) {
+      throw new Error("MERGE_OWNER_ABANDON_PID_MISMATCH");
+    }
+    if (!Number.isSafeInteger(input.pgid) || input.pgid !== pending.alsoBlockedBy.pid) {
+      throw new Error("MERGE_GROUP_ABANDON_PGID_MISMATCH");
+    }
+    const observation = JSON.parse(row.observation_json) as MergePromotionObservation;
+    // `whileRunning` is what stops `#recoveryHint` offering `reset --hard` over a tree a live merge
+    // may be writing, and it is asked again on every read rather than frozen here.
+    const running = mergeGroupState(promotionGroupIdentity(row)) === "merge-running";
+    const at = new Date(this.#now()).toISOString();
+    const disowned = {
+      ...observation,
+      mergePgid: null,
+      mergeGroup: null,
+      mergeGroupDisowned: {
+        pgid: input.pgid,
+        at,
+        decidedBy,
+        bootAtSec: bootAtSec(),
+        whileRunning: running,
+      },
+      ownerProcessDisowned: { pid: input.pid, at, decidedBy },
+    } satisfies MergePromotionObservation;
+    const updated = this.#writePromotion(row, {
+      observation_json: JSON.stringify(disowned),
+      updated_at_ms: Math.max(row.started_at_ms, this.#now()),
+    });
+    this.#emitPromotion(updated, "promotion-abandoned", {
+      pid: input.pid,
+      pgid: input.pgid,
+      decidedBy,
+      whileRunning: running,
+      mainMutation: false,
+    });
+    return this.#publicPromotion(await this.#resolvePromotion(updated));
+  }
+
+  /** The stored row exactly as SQLite holds it, integrity UNVERIFIED. Callers must decide. */
+  #promotionRowRaw(id: string): PromotionRow | undefined {
+    const row = this.#db.prepare("SELECT * FROM candidate_merge_promotions WHERE id=?")
+      .get(id) as unknown as PromotionRow | undefined;
+    if (!row || typeof row.room_id !== "string" || typeof row.main_path !== "string") return undefined;
+    return row;
+  }
+
+  #promotionRowReadable(row: PromotionRow): boolean {
+    try {
+      this.#assertPromotionRow(row);
+      return true;
+    } catch { return false; }
+  }
+
+  /**
+   * Moves an unreadable promotion row out of `applying` so it stops claiming the whole project.
+   *
+   * Nothing here repairs the row, decides what happened to main, or promises the owner anything
+   * about their repository. It writes one column's worth of meaning — this record no longer holds
+   * the exclusive marker — and records that the owner said so. The row remains unresolved for its
+   * OWN task, which is the honest consequence of a record nobody can read: `#assertNoUnresolvedPromotion`
+   * still refuses every approval for it, and that is a one-task cost rather than a whole project's.
+   *
+   * The scope check that got us here compared the row's plain `room_id` and `main_path` columns,
+   * which an integrity failure does not make trustworthy. It is the strongest check available for a
+   * row whose hash is wrong, and the action it authorises writes only to that same row.
+   */
+  #releaseUnreadablePromotion(
+    row: PromotionRow, confirmation: unknown, decidedBy: string,
+  ): UnreadableMergePromotion {
+    const id = typeof row.id === "string" ? row.id : "";
+    const taskId = typeof row.task_id === "string" ? row.task_id : "";
+    if (row.state !== "applying") throw new Error("MAIN_MERGE_PROMOTION_NOT_BLOCKED");
+    if (confirmation !== MERGE_UNREADABLE_ABANDON_CONFIRMATION) {
+      throw new MergeUnreadablePromotionError(id);
+    }
+    const at = new Date(this.#now()).toISOString();
+    // Written with a raw UPDATE rather than `#writePromotion`: that helper recomputes the row hash
+    // over every column, which would hand a corrupted record a valid signature and make it look like
+    // something this product wrote. The row stays unreadable, deliberately.
+    const result = this.#db.prepare(
+      "UPDATE candidate_merge_promotions SET state='needs-manual-review' WHERE id=? AND state='applying'",
+    ).run(id);
+    if (Number(result.changes) !== 1) throw new Error("MAIN_MERGE_PROMOTION_CONCURRENT_UPDATE");
+    try {
+      // Every field that would be a fact about the repository is null, because none of them was
+      // read: an unreadable row is exactly the case where a record must not assert anything.
+      this.#onPromotion?.({
+        phase: "unreadable-record-released",
+        promotionId: id,
+        approvalId: typeof row.approval_id === "string" ? row.approval_id : "",
+        taskId,
+        roomId: row.room_id,
+        mainPath: row.main_path,
+        mainBranch: typeof row.main_branch === "string" ? row.main_branch : "",
+        candidateHead: typeof row.candidate_head === "string" ? row.candidate_head : "",
+        recoveryRef: typeof row.recovery_ref === "string" ? row.recovery_ref : "",
+        mainHeadBefore: typeof row.main_head_before === "string" ? row.main_head_before : "",
+        mainHeadAfter: null,
+        mainHeadUnchanged: null,
+        state: "needs-manual-review",
+        observation: {
+          code: "PROMOTION_RECORD_UNREADABLE",
+          mainHead: null,
+          authorizedMergeCommit: null,
+          mergeInProgress: null,
+          worktreeRestored: null,
+          stashRestored: null,
+          reflogPreserved: null,
+          recoveryRefIntact: null,
+          observedAt: at,
+        },
+        mainMutated: false,
+        decidedBy: null,
+        previewDigest: null,
+        approvalState: null,
+        at,
+        detail: { decidedBy, mainMutation: false, recordRepaired: false },
+      });
+    } catch { /* the durable row has already moved; an audit sink must not undo that */ }
+    return {
+      id,
+      taskId,
+      state: "unreadable",
+      unreadable: true,
+      storedState: "needs-manual-review",
+      releasedFromExclusiveMarker: { at, decidedBy },
+    };
   }
 
   /**

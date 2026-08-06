@@ -645,6 +645,13 @@ candidate 動了，approval 依然在每一條讀取路徑上顯示成 `approved
   揭露側的 `programs`（可指名程式的設定鍵，**只列鍵名不列值**，因為 `credential.helper` 之類的值可能夾帶秘密）
   是一份**明確不宣稱完整**的清單，只決定哪些鍵會被逐項顯示；完整性由 digest 那一半承擔。
   merge 子程序有固定逾時、輸出上限與整個 PGID 的終止。
+  **2026-08-06 第二次更正（第四輪審查）**：上面兩處「在核准畫面逐項揭露」與（`mainIgnoredFingerprint`
+  那一條的）「在核准畫面上**逐一列出**這次合併會覆蓋的 ignored 檔案」，**在寫下的當下都不成立**——
+  實測 `public/room.js` 對 `promotion`／`hooks`／`programs`／`configDigest`／`overwrites` 的引用次數
+  全部為 0，資料在 payload 裡但一個字都沒有被渲染。已補上：揭露渲染在 scroll-gate 量測的區域**之內**
+  且在檔案清單之前，覆蓋清單由 `inspectMergeApproval` 每次回傳 live 掃描結果，
+  「沒讀到」「掃描沒跑」「hook 目錄讀不到」「快照早於閘門」各自是具名阻擋條件（缺席≠空）。
+  已用真實瀏覽器 DOM 驗收，見 [[VERIFICATION]]。
 - **live 的 `.git` 狀態刻意不納入 digest。** 第一版把它放進去，實測立刻顯示：別的程序短暫持有一秒的
   `index.lock` 會讓綁定「改變」，永久燒掉 Owner 的核准——PITFALLS #85 的同形違反。
   綁定值只描述**快照**，`.git` 的當下狀態每次決策點重新計算，而且是「拒絕但不消耗」。

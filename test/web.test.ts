@@ -1497,7 +1497,10 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
     /下列項目存在期間，確認輸入與「合併進 main」保持停用。 · While any of these is present the confirmation input and the primary button stay disabled\./u,
   );
   assert.match(roomHtml, /id="merge-approval-repreview" type="button">↻ 重新產生預覽 · Re-preview/u);
-  assert.match(roomHtml, /變更檔案（預設收合，請捲到底） · Changed files \(collapsed by default, scroll to the bottom\)/u);
+  // The scroll-gated region holds the promotion disclosure BEFORE the file list, so its label has
+  // to say so: the owner is being asked to scroll past what would run, not only past the diff.
+  assert.match(roomHtml, /這次促進會執行什麼、覆蓋什麼，以及變更檔案（預設收合，請捲到底）/u);
+  assert.match(roomHtml, /What this promotion would execute and overwrite, then the changed files \(collapsed by default, scroll to the bottom\)/u);
   assert.match(roomHtml, /id="merge-approval-diff"/u);
   assert.match(roomHtml, /復原點 · Recovery point/u);
   assert.match(roomHtml, /id="merge-approval-restore"/u);
@@ -1573,7 +1576,7 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(mergeDialogScript, /function mergeApprovalSignature\(/u);
   assert.match(
     mergeDialogScript,
-    /=== mergeApprovalSignature\(approval, state\.mergeApprovalBinding\)\) return;/u,
+    /=== mergeApprovalSignature\(approval, state\.mergeApprovalBinding, state\.mergeApprovalOverwrites\)\) return;/u,
   );
   assert.match(mergeDialogScript, /mainMutation: false/u);
   // Rejection describes what this ACTION did and never declares the current state of anything: the

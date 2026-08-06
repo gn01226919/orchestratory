@@ -665,7 +665,7 @@ export class CollaborationService {
     roomId: string;
     workspace: string;
     approvalId: string;
-  }): Promise<{ approval: MergeApproval; binding: MergeApprovalBindingCheck }> {
+  }): Promise<ReturnType<CandidateRegistry["inspectMergeApproval"]>> {
     this.#assertRoomWorkspace(input.roomId, input.workspace);
     return await this.candidates.inspectMergeApproval({
       approvalId: input.approvalId, roomId: input.roomId, mainPath: input.workspace,
@@ -1382,6 +1382,12 @@ export class CollaborationService {
         ? "Owner 宣告不再等待 promotion 的程序群；本次沒有修改 main，下次讀取會重新觀察"
       : event.phase === "owner-process-abandoned"
         ? "Owner 宣告不再等待發起這次 promotion 的程序；本次沒有修改 main，下次讀取會重新觀察"
+      : event.phase === "promotion-abandoned"
+        ? "Owner 宣告不再等待這次 promotion 的兩個程序（發起者與 merge）；"
+          + "本次沒有修改 main，也沒有結束任何程序，下次讀取會重新觀察"
+      : event.phase === "unreadable-record-released"
+        ? "Owner 宣告一筆讀不了的 promotion 紀錄不再佔用本專案的排他標記；"
+          + "該紀錄仍然讀不了、仍未結案，本次沒有修改 main，也沒有修復那筆紀錄"
         : event.state === "applied"
           ? `promotion 已套用；main HEAD ${head(event.mainHeadBefore)} → ${head(event.mainHeadAfter)}`
           : event.state === "rolled-back"
