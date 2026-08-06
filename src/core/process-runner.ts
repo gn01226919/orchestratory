@@ -178,8 +178,9 @@ export function minimalGitEnvironment(
 }
 
 /**
- * The ONE environment in which repository hooks are allowed to run, and the only difference from
- * `minimalGitEnvironment` is that the `core.hooksPath=/dev/null` pin is dropped.
+ * The ONE environment in which repository hooks are allowed to run: the `core.hooksPath=/dev/null`
+ * pin is dropped, and every other program git can be configured to spawn is pinned off instead
+ * (`PROMOTION_CONFIG_PINS`).
  *
  * Every read-only Git command in this product runs with hooks disabled, because inspecting a
  * repository must never execute code that repository carries. A promotion is not an inspection: the
@@ -201,15 +202,51 @@ export function promotionGitEnvironment(
   const { GIT_CONFIG_KEY_1: _key, GIT_CONFIG_VALUE_1: _value, ...base } = minimalGitEnvironment(source);
   return {
     ...base,
-    GIT_CONFIG_COUNT: "1",
-    GIT_CONFIG_KEY_0: "core.fsmonitor",
-    GIT_CONFIG_VALUE_0: "false",
+    GIT_CONFIG_COUNT: String(PROMOTION_CONFIG_PINS.length),
+    ...Object.fromEntries(PROMOTION_CONFIG_PINS.flatMap(([key, value], index) => [
+      [`GIT_CONFIG_KEY_${index}`, key],
+      [`GIT_CONFIG_VALUE_${index}`, value],
+    ])),
     GIT_AUTHOR_NAME: PROMOTION_IDENTITY_NAME,
     GIT_AUTHOR_EMAIL: PROMOTION_IDENTITY_EMAIL,
     GIT_COMMITTER_NAME: PROMOTION_IDENTITY_NAME,
     GIT_COMMITTER_EMAIL: PROMOTION_IDENTITY_EMAIL,
   };
 }
+
+/**
+ * Configuration a promotion refuses to take from the repository, and the value it uses instead.
+ *
+ * Each entry is here because git SPAWNS A PROGRAM when it is set. `core.fsmonitor` is a program git
+ * starts to answer status queries; `commit.gpgsign` and `tag.gpgsign` make git run `gpg.program` to
+ * sign; `merge.verifySignatures` makes it run `gpg.program` to verify. Pinning the BEHAVIOUR rather
+ * than the program name is deliberate: there is no value of `gpg.program` that means "run nothing",
+ * while `commit.gpgsign=false` means git never asks for it.
+ *
+ * `GIT_CONFIG_KEY_n` has command-line precedence, so these beat `.git/config` — which a linked
+ * candidate worktree shares and can rewrite at any moment, including after the owner approved.
+ * Measured on a real repository: with `commit.gpgsign=true` and `gpg.program` naming a script,
+ * `git merge --no-ff` executed that script as the owner; with these pins the same repository merged
+ * without running it at all.
+ *
+ * The consequence is stated rather than hidden: A PROMOTION MERGE COMMIT IS NOT SIGNED, and a
+ * repository configured to verify the signatures of what it merges does not get them verified here.
+ * The authorization for a promotion is the approval record, not a signature; making the merge depend
+ * on a program named by the same config file an untrusted worktree can rewrite would trade a
+ * documented gap for arbitrary code execution as the owner.
+ *
+ * This is a list, and a list of another system's behaviours is always behind that system (PITFALLS
+ * #103), so it is NOT the primary defence. `GitBroker.hookEnvironment()` fingerprints the WHOLE
+ * effective configuration into the approval binding, which refuses a key nobody here has heard of.
+ * These pins are what makes the known ones unreachable even when they were already set before the
+ * owner looked.
+ */
+export const PROMOTION_CONFIG_PINS: ReadonlyArray<readonly [string, string]> = [
+  ["core.fsmonitor", "false"],
+  ["commit.gpgsign", "false"],
+  ["tag.gpgsign", "false"],
+  ["merge.verifySignatures", "false"],
+];
 
 export const PROMOTION_IDENTITY_NAME = "Orchestratory promotion";
 /**

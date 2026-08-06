@@ -1379,7 +1379,9 @@ export class CollaborationService {
     const summary = event.phase === "started"
       ? `已記錄 promotion 意圖（尚未寫入 main）；main HEAD 寫入前為 ${head(event.mainHeadBefore)}`
       : event.phase === "merge-group-abandoned"
-        ? `Owner 宣告不再等待 promotion 的程序群；本次沒有修改 main，下次讀取會重新觀察`
+        ? "Owner 宣告不再等待 promotion 的程序群；本次沒有修改 main，下次讀取會重新觀察"
+      : event.phase === "owner-process-abandoned"
+        ? "Owner 宣告不再等待發起這次 promotion 的程序；本次沒有修改 main，下次讀取會重新觀察"
         : event.state === "applied"
           ? `promotion 已套用；main HEAD ${head(event.mainHeadBefore)} → ${head(event.mainHeadAfter)}`
           : event.state === "rolled-back"

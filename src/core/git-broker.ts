@@ -30,6 +30,28 @@ export interface HookEnvironment {
   drivers: string[];
   /** Configured clean/smudge filters, including LFS. Their presence is a refusal, not a warning. */
   filters: string[];
+  /**
+   * Every configuration key present in this repository whose value can name a program git runs, by
+   * KEY only. Disclosure, itemised, so the owner is shown what the merge could execute rather than a
+   * fingerprint that changed.
+   *
+   * Values are deliberately absent: `credential.helper` and friends can carry a shell snippet with a
+   * secret in it, and this list is rendered on an approval screen. The values are covered by
+   * `configDigest`, which binds them without ever displaying them.
+   */
+  programs: string[];
+  /**
+   * SHA-256 over the repository's ENTIRE effective configuration under the promotion environment,
+   * keys and values.
+   *
+   * This is the half of the gate that is not a list. `programs` and `PROMOTION_CONFIG_PINS` both
+   * enumerate keys that are known today, and an enumeration of another system's behaviour is always
+   * behind that system (PITFALLS #103) — measured here as the exact repeat of that pitfall: a
+   * promotion bound `core.hooksPath`, `merge.*.driver` and `filter.*` and executed `gpg.program`,
+   * because nothing bound it. Hashing the whole listing means a key nobody here has heard of, set
+   * after the owner approved, is a binding change and a refusal.
+   */
+  configDigest: string;
   /** True when the hook directory could not be listed; never reported as "no hooks". */
   unreadable: boolean;
   fingerprint: string;
@@ -138,6 +160,20 @@ const ATTRIBUTES_PROBE_PATHS: readonly string[] = [
 const MAX_ATTRIBUTES_PROBE_PATHS = 200_000;
 /** Values `git check-attr` prints when no filter would run. Anything else is a filter. */
 const ATTRIBUTES_NO_FILTER = new Set(["unspecified", "unset"]);
+/**
+ * Configuration keys whose value names — or switches on — a program git runs. Used for DISCLOSURE
+ * only, and explicitly NOT claimed to be all of them.
+ *
+ * It cannot be all of them: the set is defined by another program's source and grows with its
+ * releases, and this project has already been caught twice writing "exhaustive" beside such a list
+ * (PITFALLS #103, #104). What stands behind it is `configDigest`, which hashes the whole listing and
+ * therefore covers every key this expression does not match, and `PROMOTION_CONFIG_PINS`, which
+ * makes the reachable ones unreachable. This expression only decides what gets ITEMISED to the owner.
+ */
+const CONFIG_NAMES_A_PROGRAM =
+  /^(?:core\.(?:fsmonitor|sshcommand|askpass|editor|pager|alternaterefscommand|gitproxy)|sequence\.editor|gpg\.program|gpg\..+\.program|commit\.gpgsign|tag\.gpgsign|merge\.verifysignatures|credential\.(?:.+\.)?helper|diff\.external|diff\..+\.(?:command|textconv)|merge\..+\.driver|mergetool\..+\.cmd|difftool\..+\.cmd|filter\..+\.(?:clean|smudge|process)|pager\..+|trailer\..+\.command|uploadpack\.packobjectshook|guitool\..+\.cmd|browser\..+\.cmd|web\.browser)$/u;
+/** Bounded itemised config disclosure. The digest always covers every key; this list is the display. */
+const MAX_REPORTED_CONFIG_PROGRAMS = 64;
 /** Bounded read of one promotion's trace file; exceeding it reports "not read", never "no hooks". */
 const MAX_HOOK_TRACE_BYTES = 16 * 1024 * 1024;
 /** The index mode git gives a submodule (gitlink). `.gitmodules` is documentation; this is the fact. */
@@ -228,6 +264,21 @@ export async function readExecutedHooks(traceFile: string): Promise<ObservedHook
     }
   }
   return order.map((id) => started.get(id)).filter((run): run is ObservedHookRun => run !== undefined);
+}
+
+/**
+ * The promotion environment with its command-line config entries removed, so that `git config
+ * --list` answers what the REPOSITORY declares rather than echoing this product's own pins back.
+ *
+ * `GIT_CONFIG_COUNT=0` is what turns them off; the individual keys are deleted as well so nothing
+ * downstream can read a leftover pair and believe it is in effect.
+ */
+function repositoryConfigEnvironment(promotionEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = { ...promotionEnv, GIT_CONFIG_COUNT: "0" };
+  for (const key of Object.keys(environment)) {
+    if (/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/u.test(key)) delete environment[key];
+  }
+  return environment;
 }
 
 export class GitBroker {
@@ -530,7 +581,15 @@ export class GitBroker {
     // instead of the owner's configuration, and conclude there are no hooks. What has to be reported
     // here is what will actually execute.
     const promotionEnv = promotionGitEnvironment();
-    const config = await this.#git(workspace, ["config", "--list", "-z"], 1_048_576, promotionEnv);
+    // …but with the product's own pins removed for the LISTING. `GIT_CONFIG_KEY_n` entries show up
+    // in `git config --list` like any other, so reading it under the promotion environment reports
+    // this product's constants back to itself: `commit.gpgsign` would be disclosed on every approval
+    // screen as if the repository had set it, and a repository that really does set it would be
+    // indistinguishable from one that does not. What is bound and disclosed here is what the
+    // REPOSITORY declares; what the pins do about it is a fixed, documented product behaviour.
+    const config = await this.#git(
+      workspace, ["config", "--list", "-z"], 1_048_576, repositoryConfigEnvironment(promotionEnv),
+    );
     const entries = config.split("\0").filter(Boolean).map((entry) => {
       const boundary = entry.indexOf("\n");
       return boundary < 0 ? { key: entry, value: "" } : { key: entry.slice(0, boundary), value: entry.slice(boundary + 1) };
@@ -568,14 +627,30 @@ export class GitBroker {
     }
     const drivers = configured(/^merge\..+\.driver$/u);
     const filters = [...configured(/^filter\..+\.(?:clean|smudge|process)$/u)];
+    const matched = entries
+      .filter((entry) => CONFIG_NAMES_A_PROGRAM.test(entry.key))
+      .map((entry) => entry.key)
+      .sort()
+      .filter((key, index, all) => all.indexOf(key) === index);
+    // Bounded, because this goes into a stored record with a length limit and `pager.*` alone can be
+    // written thousands of times. Truncating the DISPLAY is safe in a way truncating a fingerprint
+    // would not be: `configDigest` is computed over the whole listing either way.
+    const programs = matched.length > MAX_REPORTED_CONFIG_PROGRAMS
+      ? [...matched.slice(0, MAX_REPORTED_CONFIG_PROGRAMS), `…${matched.length - MAX_REPORTED_CONFIG_PROGRAMS} more`]
+      : matched;
+    // Over the raw listing, not over the parsed entries: it includes every key this file does not
+    // know about, in git's own order, values and all.
+    const configDigest = createHash("sha256").update(config, "utf8").digest("hex");
     return {
       hooksPath,
       hooks,
       drivers,
       filters,
+      programs,
+      configDigest,
       unreadable,
       fingerprint: createHash("sha256")
-        .update(JSON.stringify([hooksPath, hooks, drivers, filters, unreadable]), "utf8")
+        .update(JSON.stringify([hooksPath, hooks, drivers, filters, programs, configDigest, unreadable]), "utf8")
         .digest("hex"),
     };
   }

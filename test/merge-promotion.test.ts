@@ -17,13 +17,15 @@ import {
   MERGE_APPROVAL_CONFIRMATION,
   MERGE_APPROVAL_GRANT,
   MERGE_GROUP_ABANDON_CONFIRMATION,
+  MERGE_LIVE_ABANDON_CONFIRMATION,
+  MERGE_OWNER_ABANDON_CONFIRMATION,
   MERGE_PREVIEW_RECOMPUTE_THROTTLE_MS,
   type CandidateTask,
   type MergeApproval,
   type MergePromotion,
 } from "../src/core/candidate-registry.ts";
 import { CollaborationService } from "../src/core/collaboration-service.ts";
-import { GitBroker } from "../src/core/git-broker.ts";
+import { GitBroker, readExecutedHooks } from "../src/core/git-broker.ts";
 
 /*
  * Phase 5-5. Everything here drives a REAL git repository and a REAL merge into a real canonical
@@ -1046,13 +1048,24 @@ test("an approval cannot be spent while the task's last promotion is unresolved"
  * hashes, because a real v4 row is not tampered with and must not read as if it were.
  */
 function rewindToV4(path: string, taskId: string): { approvalHash: string; approvalState: string } {
+  return rewindPreview(path, taskId, (preview) => { delete preview.promotion; }, { toV4: true });
+}
+
+/**
+ * Rewrites the stored preview of one task's candidate and approval, leaving both rows' hashes and
+ * their `preview_digest` internally consistent — a legitimately stored older row, not a tampered one.
+ */
+function rewindPreview(
+  path: string, taskId: string, edit: (preview: Record<string, unknown>) => void,
+  options: { toV4?: boolean } = {},
+): { approvalHash: string; approvalState: string } {
   const db = new DatabaseSync(path);
   const candidate = db.prepare("SELECT * FROM candidates WHERE task_id=?")
     .get(taskId) as unknown as Record<string, unknown>;
   const completion = JSON.parse(String(candidate.completion_json)) as {
     preview: Record<string, unknown>; previewDigest: string;
   };
-  delete completion.preview.promotion;
+  edit(completion.preview);
   completion.previewDigest = createHash("sha256")
     .update(JSON.stringify(completion.preview), "utf8").digest("hex");
   const completionJson = JSON.stringify(completion);
@@ -1069,7 +1082,7 @@ function rewindToV4(path: string, taskId: string): { approvalHash: string; appro
   const approval = db.prepare("SELECT * FROM candidate_merge_approvals WHERE task_id=?")
     .get(taskId) as unknown as Record<string, unknown>;
   const preview = JSON.parse(String(approval.preview_json)) as Record<string, unknown>;
-  delete preview.promotion;
+  edit(preview);
   const previewJson = JSON.stringify(preview);
   const previewDigest = createHash("sha256").update(previewJson, "utf8").digest("hex");
   const approvalHash = createHash("sha256").update(JSON.stringify([
@@ -1085,7 +1098,7 @@ function rewindToV4(path: string, taskId: string): { approvalHash: string; appro
     "UPDATE candidate_merge_approvals SET preview_json=?,preview_digest=?,row_hash=? WHERE id=?",
   ).run(previewJson, previewDigest, approvalHash, String(approval.id)).changes), 1);
 
-  db.exec("DROP TABLE candidate_merge_promotions; PRAGMA user_version=4;");
+  if (options.toV4 === true) db.exec("DROP TABLE candidate_merge_promotions; PRAGMA user_version=4;");
   db.close();
   return { approvalHash, approvalState: String(approval.state) };
 }
@@ -1364,7 +1377,9 @@ test("a promotion that has been observed to be over stops carrying its process g
   assert.equal(inFlight.pending?.code, "MERGE_SUBPROCESS_STILL_RUNNING");
   assert.equal(inFlight.pending?.pid, pgid);
   assert.match(inFlight.pending?.inspect ?? "", new RegExp(`ps .*-g ${pgid}$`, "u"));
-  assert.equal(inFlight.pending?.release, MERGE_GROUP_ABANDON_CONFIRMATION);
+  // A live leader is offered the longer phrase; the short one belongs to a group nobody can decide
+  // about, and handing it out here is what let a provably live merge be disowned.
+  assert.equal(inFlight.pending?.release, MERGE_LIVE_ABANDON_CONFIRMATION);
 
   process.kill(-pgid, "SIGKILL");
   await waitForGroupExit(pgid);
@@ -1490,8 +1505,20 @@ test("the owner can stop a promotion waiting on a process group, without anythin
 
   const args = {
     promotionId: blocked.id, roomId: "demo", mainPath: f.source, pgid,
-    confirmation: MERGE_GROUP_ABANDON_CONFIRMATION, decidedBy: "local-web",
+    confirmation: MERGE_LIVE_ABANDON_CONFIRMATION, decidedBy: "local-web",
   };
+  // This merge is not merely unwitnessed: `ps` can show it writing. The record says so by handing
+  // out the LONGER phrase, and the short one — the one an owner would use for a group nobody can
+  // decide about — is refused here by name, with the pid and a read-only command to look at it.
+  assert.equal(blocked.pending?.release, MERGE_LIVE_ABANDON_CONFIRMATION);
+  await assert.rejects(
+    reopened.abandonMergeProcessGroup({ ...args, confirmation: MERGE_GROUP_ABANDON_CONFIRMATION }),
+    (error: Error & { pid?: number; confirmation?: string; inspect?: string }) =>
+      error.message === "MERGE_ABANDON_REFUSED_MERGE_STILL_RUNNING"
+      && error.pid === pgid
+      && error.confirmation === MERGE_LIVE_ABANDON_CONFIRMATION
+      && (error.inspect ?? "").includes(String(pgid)),
+  );
   // The phrase and the pid are both required: an owner who did not look at the record has neither.
   await assert.rejects(
     reopened.abandonMergeProcessGroup({ ...args, confirmation: "yes" }),
@@ -1504,6 +1531,12 @@ test("the owner can stop a promotion waiting on a process group, without anythin
 
   const before = await treeDigest(f.source);
   const released = await reopened.abandonMergeProcessGroup(args);
+  // And for as long as that process is alive, the command on offer only LOOKS. Handing over
+  // `git reset --hard` here is PITFALLS #94: it does not undo the write, it races it.
+  assert.equal(released.observation.recoveryKind, "inspect-live-merge");
+  assert.ok(!(released.observation.recovery ?? "").includes("reset"),
+    `a destructive recovery was offered mid-merge: ${released.observation.recovery ?? ""}`);
+  assert.equal(released.observation.mergeGroupDisowned?.whileRunning, true);
   // Nothing was killed and nothing in the repository moved: this releases a record, not a process.
   assert.equal(groupAlive(pgid), true, "abandoning the wait must not kill anything");
   assert.equal(await treeDigest(f.source), before, "abandoning the wait wrote to the repository");
@@ -2153,7 +2186,10 @@ test("a process group id now held by another user is not our merge, and does not
     "a pid belonging to another user was treated as proof our merge was still writing");
   assert.equal(settled.state, "needs-manual-review");
   assert.equal(settled.pending, undefined);
+  // Both directions of the record, not just the decision: the number AND its identity are written
+  // out as null, so nothing carries it into the next observation.
   assert.equal(settled.observation.mergePgid, null);
+  assert.equal(settled.observation.mergeGroup, null);
   assert.ok((settled.observation.differences ?? []).length > 0, "no differences were named");
   // And the foreign process is still exactly where it was: nothing here signals anything.
   assert.throws(() => process.kill(other, 0), (error: NodeJS.ErrnoException) => error.code === "EPERM");
@@ -2230,4 +2266,505 @@ test("a process group nobody can decide about blocks the answer, and the owner c
   assert.equal(released.state, "needs-manual-review");
   assert.equal(released.pending, undefined);
   assert.equal(released.observation.mergeGroupDisowned?.pgid, undecidable);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Round 4. Bar item 3 named four configuration keys; a name list is not a criterion.
+// ---------------------------------------------------------------------------------------------
+
+/*
+ * FINDING P0. `hookEnvironment()` bound `core.hooksPath`, the hook files, `merge.*.driver` and
+ * `filter.*`. It did not bind `commit.gpgsign` or `gpg.program` — so a candidate worktree, which
+ * shares main's common `.git`, could write both AFTER the owner approved, and `git merge --no-ff`
+ * executed that program as the owner while all three defences (the binding, the disclosure and the
+ * re-verification before the token is spent) saw nothing at all. Measured on a real repository.
+ *
+ * The fix is not a longer list. What is bound now is main's WHOLE effective configuration under the
+ * promotion environment, so a key this code has never heard of is caught by the same mechanism —
+ * which is what the last two cases below assert, one of them with a key that exists nowhere in git.
+ */
+for (const attack of [
+  {
+    label: "a signing program (gpg.program) installed after the owner approved",
+    keys: [["commit.gpgsign", "true"], ["gpg.program", "@SCRIPT@"]],
+    executes: true,
+  },
+  {
+    label: "core.sshCommand, which no list in this file mentioned before",
+    keys: [["core.sshCommand", "@SCRIPT@"]],
+    executes: false,
+  },
+  {
+    label: "credential.helper, which can name a shell snippet",
+    keys: [["credential.helper", "!@SCRIPT@"]],
+    executes: false,
+  },
+  {
+    label: "a key that does not exist in any version of git, so no enumeration could contain it",
+    keys: [["future.someTool.program", "@SCRIPT@"]],
+    executes: false,
+  },
+]) {
+  // `executes: false` means git does not invoke that program during a local merge in the first
+  // place, so "the marker is absent" is trivially true for those three; what they assert is the
+  // REFUSAL, and that it comes from the binding rather than from any list of key names. Only the
+  // first case asserts its own premise, because only it can.
+  test(`main's config is bound: ${attack.label} is refused and does not run`, async (t) => {
+    const f = await fixture(t);
+    const approval = await raise(f);
+    const token = await grant(f, approval);
+    const beforeHead = await head(f.source);
+
+    // Written from inside the CANDIDATE worktree with no access to main's directory: a linked
+    // worktree shares the common git dir, so `git config --local` here writes MAIN's config.
+    const marker = join(f.root, "program-ran");
+    const script = join(f.root, "program.sh");
+    await writeFile(script, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\nexit 1\n`, { mode: 0o755 });
+    for (const [key, value] of attack.keys) {
+      await execFileAsync("git", ["config", "--local", key as string, (value as string).replace("@SCRIPT@", script)],
+        { cwd: f.task.candidatePath });
+    }
+    // The premise for the first case, asserted rather than assumed: without the product involved at
+    // all, a plain `git merge` in this repository really does execute that program.
+    if (attack.executes) {
+      const proof = join(f.root, "proof");
+      await execFileAsync("git", ["clone", "--quiet", f.source, proof]);
+      await execFileAsync("git", ["config", "user.email", "t@localhost"], { cwd: proof });
+      await execFileAsync("git", ["config", "user.name", "t"], { cwd: proof });
+      await execFileAsync("git", ["checkout", "--quiet", "-b", "side"], { cwd: proof });
+      await execFileAsync("git", ["commit", "--allow-empty", "--no-gpg-sign", "-m", "side"], { cwd: proof });
+      await execFileAsync("git", ["checkout", "--quiet", "-"], { cwd: proof });
+      await execFileAsync("git", ["config", "commit.gpgsign", "true"], { cwd: proof });
+      await execFileAsync("git", ["config", "gpg.program", script], { cwd: proof });
+      await execFileAsync("git", ["merge", "--no-ff", "--no-edit", "side"], { cwd: proof })
+        .catch(() => undefined);
+      assert.equal(await exists(marker), true, "git does not run this program at all in this setup");
+      await rm(marker, { force: true });
+    }
+
+    await assert.rejects(
+      promote(f, approval, token),
+      (error: Error) => /MAIN_MERGE_APPROVAL_BINDING_CHANGED/u.test(error.message),
+      "a program installed after approval was not refused",
+    );
+    assert.equal(await exists(marker), false, "the program ran");
+    assert.equal(await head(f.source), beforeHead, "main moved");
+    assert.equal((await f.registry.status({ roomId: "demo", mainPath: f.source }))
+      .find((entry) => entry.taskId === f.task.taskId)?.status, "completed");
+  });
+}
+
+/*
+ * The other half, and the one that holds even when the program was configured BEFORE the owner
+ * looked — where there is no drift to notice. `promotionGitEnvironment` pins the behaviours that
+ * reach a configured program, with command-line precedence, so `.git/config` cannot switch them on.
+ * A promotion merge commit is therefore not signed, which is written down rather than discovered.
+ */
+test("a signing program already configured before the owner looked is disclosed and never runs", async (t) => {
+  const marker = join(await mkdtemp(join(tmpdir(), "orchestratory-gpgpin-")), "signer-ran");
+  const f = await fixture(t, {
+    beforeComplete: async ({ source }) => {
+      const script = join(source, "..", "signer.sh");
+      await writeFile(script, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\nexit 1\n`, { mode: 0o755 });
+      await execFileAsync("git", ["config", "commit.gpgsign", "true"], { cwd: source });
+      await execFileAsync("git", ["config", "gpg.program", script], { cwd: source });
+      await execFileAsync("git", ["config", "merge.verifySignatures", "true"], { cwd: source });
+    },
+  });
+
+  // Itemised on the approval screen, by key. The values are deliberately not there: this list is
+  // rendered to the owner and `credential.helper` can carry a secret. They are covered by the digest.
+  const preview = await f.registry.previewMainMerge({
+    taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+  });
+  const programs = preview.hooks.programs ?? [];
+  assert.deepEqual([...programs].sort(),
+    ["commit.gpgsign", "gpg.program", "merge.verifysignatures"]);
+  assert.equal(typeof preview.hooks.configDigest, "string");
+  assert.ok(!JSON.stringify(programs).includes("signer.sh"), "a config VALUE reached the approval screen");
+
+  const approval = await raise(f);
+  const result = await promote(f, approval, await grant(f, approval));
+  assert.equal(result.promotion.state, "applied");
+  assert.equal(await exists(marker), false, "the configured signing program was executed");
+  // And the consequence, stated: the merge commit this product made carries no signature.
+  const signature = await execFileAsync("git", ["log", "-1", "--format=%G?"], { cwd: f.source });
+  assert.equal(signature.stdout.trim(), "N");
+});
+
+/*
+ * FINDING P2 (mutation D). "Not read" and "read, and no hook ran" are different facts, and the code
+ * kept them apart — with nothing testing it. Turning both `return null`s into `return []` left all
+ * 61 tests green, which means the distinction was documented and unguarded.
+ */
+test("a hook trace that could not be read is absent, not an empty list of hooks", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "orchestratory-trace-"));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+
+  assert.equal(await readExecutedHooks(join(root, "does-not-exist.jsonl")), null,
+    "a trace that does not exist must not read as 'no hooks ran'");
+  await mkdir(join(root, "a-directory.jsonl"));
+  assert.equal(await readExecutedHooks(join(root, "a-directory.jsonl")), null);
+
+  // Read, and genuinely empty of hooks: git wrote a trace, no `child_class:"hook"` event is in it.
+  const empty = join(root, "empty.jsonl");
+  await writeFile(empty, `${JSON.stringify({ event: "version", sid: "s" })}\n`, "utf8");
+  assert.deepEqual(await readExecutedHooks(empty), []);
+
+  // And one that did record a hook, so the empty answer above is not simply what this always says.
+  const one = join(root, "one.jsonl");
+  await writeFile(one, [
+    JSON.stringify({ event: "child_start", sid: "s", child_id: 0, child_class: "hook", hook_name: "pre-merge-commit", argv: ["/x/pre-merge-commit"] }),
+    JSON.stringify({ event: "child_exit", sid: "s", child_id: 0, code: 3 }),
+    "",
+  ].join("\n"), "utf8");
+  assert.deepEqual(await readExecutedHooks(one),
+    [{ name: "pre-merge-commit", path: "/x/pre-merge-commit", exitCode: 3 }]);
+});
+
+/*
+ * FINDING F4 (mutation J). The guard that refuses to disown the merge of a promotion whose OWNER
+ * process is still alive had no test at all: deleting the line left all 61 green. Its own comment
+ * says why it exists — "disowning its merge would let two readers describe one repository" — and it
+ * is the newest write-adjacent owner action in the product.
+ */
+test("a promotion whose owner process is still running cannot have its merge disowned", async (t) => {
+  const f = await fixture(t);
+  const started = join(f.root, "hook-entered");
+  await hook(f, "pre-merge-commit", `#!/bin/sh\ntouch ${JSON.stringify(started)}\nsleep 600\n`);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+
+  const child = await promoteInChildAt(f, approval, token);
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  for (let attempt = 0; attempt < 300 && !await exists(started); attempt += 1) await delay(100);
+  child.kill("SIGKILL");
+  await waitForExit(child);
+
+  const first = new CandidateRegistry(f.data);
+  const pgid = readable((await first.promotions({ roomId: "demo", mainPath: f.source }))[0])
+    .observation.mergePgid as number;
+  assert.ok(typeof pgid === "number" && pgid > 1);
+  t.after(() => { try { process.kill(-pgid, "SIGKILL"); } catch { /* already gone */ } });
+  first.close();
+
+  // A LIVE owner pid — this very test process — so the row looks exactly like a promotion running in
+  // another window. Its merge is a merge somebody else is waiting on.
+  rewritePromotionRow(f.path, () => ({ ownerPid: process.pid }));
+  const reopened = new CandidateRegistry(f.data);
+  t.after(() => reopened.close());
+  const blocked = readable((await reopened.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  assert.equal(blocked.pending?.code, "OWNER_PROCESS_STILL_RUNNING");
+
+  await assert.rejects(
+    reopened.abandonMergeProcessGroup({
+      promotionId: blocked.id, roomId: "demo", mainPath: f.source, pgid,
+      confirmation: MERGE_LIVE_ABANDON_CONFIRMATION, decidedBy: "local-web",
+    }),
+    /MAIN_MERGE_PROMOTION_STILL_OWNED/u,
+  );
+  // And nothing was written on the way to that refusal.
+  const after = readable((await reopened.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  assert.equal(after.observation.mergeGroupDisowned, undefined);
+  assert.equal(after.observation.mergePgid, pgid);
+});
+
+/*
+ * FINDING F5. `processAlive` read `EPERM` as "alive" while `probe` read it as "belongs to somebody
+ * else, so it is not ours" — two fields of one record, fixed in one round, pointing in opposite
+ * directions. The consequence was not cosmetic: an `owner_pid` recycled WITHIN one boot pinned the
+ * row on `OWNER_PROCESS_STILL_RUNNING`, `abandonMergeProcessGroup` refused it by name, and
+ * `#assertNoUnresolvedPromotion` refused every later approval for that task. No product path out.
+ */
+test("an owner pid now held by another user is not our process, and does not keep a promotion waiting", async (t) => {
+  const other = foreignPid();
+  assert.ok(other !== undefined,
+    "this machine could not produce a foreign pid, so the EPERM branch was not exercised");
+  if (other === undefined) return;
+  assert.throws(() => process.kill(other, 0), (error: NodeJS.ErrnoException) => error.code === "EPERM");
+
+  const f = await fixture(t);
+  const started = join(f.root, "hook-entered");
+  await hook(f, "pre-merge-commit", `#!/bin/sh\ntouch ${JSON.stringify(started)}\nsleep 600\n`);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+
+  const child = await promoteInChildAt(f, approval, token);
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  for (let attempt = 0; attempt < 300 && !await exists(started); attempt += 1) await delay(100);
+  child.kill("SIGKILL");
+  await waitForExit(child);
+
+  const first = new CandidateRegistry(f.data);
+  const pgid = readable((await first.promotions({ roomId: "demo", mainPath: f.source }))[0])
+    .observation.mergePgid as number;
+  process.kill(-pgid, "SIGKILL");
+  await waitForGroupExit(pgid);
+  first.close();
+
+  rewritePromotionRow(f.path, () => ({ ownerPid: other }));
+  const reopened = new CandidateRegistry(f.data);
+  t.after(() => reopened.close());
+  const settled = await settledPromotion(reopened, f.source, 50);
+  assert.notEqual(settled.state, "applying",
+    "a pid belonging to another user was treated as the orchestrator that started this promotion");
+  assert.equal(settled.pending, undefined);
+  assert.equal(settled.ownerAlive, null);
+  assert.throws(() => process.kill(other, 0), (error: NodeJS.ErrnoException) => error.code === "EPERM");
+});
+
+/*
+ * FINDING F5, the other half: the exit. Removing the cross-boot and other-user cases still leaves
+ * one the operating system can produce — the same user's next process holding that number — and no
+ * probe can tell it apart. So there is an owner-side release, shaped exactly like the process-group
+ * one, and refusing exactly what that one refuses: a merge that is provably still writing.
+ */
+test("the owner can stop a promotion waiting on its own owner process, but not while the merge runs", async (t) => {
+  const f = await fixture(t);
+  const started = join(f.root, "hook-entered");
+  await hook(f, "pre-merge-commit", `#!/bin/sh\ntouch ${JSON.stringify(started)}\nsleep 600\n`);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const beforeHead = await head(f.source);
+
+  const child = await promoteInChildAt(f, approval, token);
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  for (let attempt = 0; attempt < 300 && !await exists(started); attempt += 1) await delay(100);
+  child.kill("SIGKILL");
+  await waitForExit(child);
+
+  const first = new CandidateRegistry(f.data);
+  const pgid = readable((await first.promotions({ roomId: "demo", mainPath: f.source }))[0])
+    .observation.mergePgid as number;
+  first.close();
+  t.after(() => { try { process.kill(-pgid, "SIGKILL"); } catch { /* already gone */ } });
+
+  rewritePromotionRow(f.path, () => ({ ownerPid: process.pid }));
+  const reopened = new CandidateRegistry(f.data);
+  t.after(() => reopened.close());
+  const blocked = readable((await reopened.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  assert.equal(blocked.pending?.code, "OWNER_PROCESS_STILL_RUNNING");
+  assert.equal(blocked.pending?.pid, process.pid);
+  assert.equal(blocked.pending?.release, MERGE_OWNER_ABANDON_CONFIRMATION);
+
+  const args = {
+    promotionId: blocked.id, roomId: "demo", mainPath: f.source, pid: process.pid,
+    confirmation: MERGE_OWNER_ABANDON_CONFIRMATION, decidedBy: "local-web",
+  };
+  // While that merge is alive, releasing the owner wait would disown the caller AND the writer at
+  // once, and the next read would describe a repository something is still writing.
+  await assert.rejects(
+    reopened.abandonPromotionOwnerProcess(args),
+    (error: Error & { pid?: number }) =>
+      error.message === "MERGE_ABANDON_REFUSED_MERGE_STILL_RUNNING" && error.pid === pgid,
+  );
+
+  process.kill(-pgid, "SIGKILL");
+  await waitForGroupExit(pgid);
+  // The phrase and the pid are both required, exactly as for a process group.
+  await assert.rejects(
+    reopened.abandonPromotionOwnerProcess({ ...args, confirmation: "yes" }),
+    /MERGE_OWNER_ABANDON_CONFIRMATION_MISMATCH/u,
+  );
+  await assert.rejects(
+    reopened.abandonPromotionOwnerProcess({ ...args, pid: process.pid + 1 }),
+    /MERGE_OWNER_ABANDON_PID_MISMATCH/u,
+  );
+
+  const before = await treeDigest(f.source);
+  const released = await reopened.abandonPromotionOwnerProcess(args);
+  assert.equal(await treeDigest(f.source), before, "releasing the wait wrote to the repository");
+  assert.equal(released.observation.ownerProcessDisowned?.pid, process.pid);
+  assert.equal(released.observation.ownerProcessDisowned?.decidedBy, "local-web");
+  assert.equal(released.pending, undefined);
+  assert.notEqual(released.state, "applying");
+  // The declaration survives re-reading: it is a decision, not a probe result.
+  const again = readable((await reopened.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  assert.equal(again.observation.ownerProcessDisowned?.pid, process.pid);
+  assert.equal(again.pending, undefined);
+  // And the task is usable again once the owner restores main themselves.
+  await execFileAsync("git", ["reset", "--hard", beforeHead], { cwd: f.source });
+  await rm(join(f.source, ".git", "hooks", "pre-merge-commit"), { force: true });
+  assert.equal((await settledPromotion(reopened, f.source, 50)).state, "rolled-back");
+  const second = await raise(f);
+  assert.equal((await promote(f, second, await grant(f, second))).promotion.state, "applied");
+});
+
+/*
+ * FINDING P2 (exclusivity). The exclusive marker was `approval_id UNIQUE`, which two DIFFERENT
+ * approvals over one project satisfy completely. When that was measured the second promotion was
+ * refused — by the dirty-working-tree gate, because the first merge had already written something.
+ * A gate that holds by coincidence is not a gate, so the marker is now the repository: a partial
+ * unique index on `main_path` where `state='applying'`, read before any live gate.
+ */
+test("one project has one promotion applying at a time, and the second is told so by name", async (t) => {
+  const f = await fixture(t);
+  const started = join(f.root, "hook-entered");
+  await hook(f, "pre-merge-commit", `#!/bin/sh\ntouch ${JSON.stringify(started)}\nsleep 600\n`);
+
+  // A SECOND task over the same main, completed and approved BEFORE anything starts writing — so
+  // its refusal cannot come from the first merge having dirtied the tree.
+  const second = await f.registry.start({
+    actor: "codex1", clientRequestId: key(), roomId: "demo", mainPath: f.source, task: "second",
+  });
+  await commit(second.candidatePath, "second.txt", "second work\n", "second work");
+  await f.registry.complete({
+    actor: "codex1", clientRequestId: key(), taskId: second.taskId, roomId: "demo",
+    mainPath: f.source, summary: "also ready",
+  });
+  const secondPreview = await f.registry.previewMainMerge({
+    taskId: second.taskId, roomId: "demo", mainPath: f.source,
+  });
+  assert.equal(secondPreview.approvable, true, secondPreview.blockers.join(","));
+  const secondApproval = await f.registry.requestMainMerge({
+    actor: "codex1", clientRequestId: key(), taskId: second.taskId, roomId: "demo",
+    mainPath: f.source, completionId: secondPreview.completionId,
+    previewDigest: secondPreview.previewDigest,
+  });
+  const secondToken = (await f.registry.grantMainMerge({
+    approvalId: secondApproval.id, roomId: "demo", mainPath: f.source,
+    previewDigest: secondApproval.binding.previewDigest,
+    confirmation: MERGE_APPROVAL_CONFIRMATION, decidedBy: "local-web",
+  })).approvalToken;
+
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const child = await promoteInChildAt(f, approval, token);
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  for (let attempt = 0; attempt < 300 && !await exists(started); attempt += 1) await delay(100);
+
+  const other = new CandidateRegistry(f.data);
+  t.after(() => other.close());
+  await assert.rejects(
+    other.promoteMainMerge({
+      approvalId: secondApproval.id, token: secondToken, action: MERGE_APPROVAL_GRANT,
+      taskId: second.taskId, roomId: "demo", mainPath: f.source,
+    }),
+    /MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY/u,
+    "a second promotion into a project already being promoted was not refused by the marker",
+  );
+  // The second approval was not SPENT on the way to that refusal, and no second intent record was
+  // written. (Reading it afterwards does end it — main really is dirty now, because the first merge
+  // is writing it, and the drift rule invalidates an approval whose snapshot has stopped describing
+  // the repository. That is a different mechanism from this gate, and it is not "consumed".)
+  const stored = (await other.mergeApprovals({ roomId: "demo", mainPath: f.source, taskId: second.taskId }))
+    .find((entry) => entry.id === secondApproval.id);
+  assert.notEqual(stored?.state, "consumed");
+  assert.equal((await other.promotions({ roomId: "demo", mainPath: f.source }))
+    .filter((entry) => !("unreadable" in entry)).length, 1, "a second promotion record was written");
+
+  // And the marker is the database's, not this function's: a second `applying` row over one main
+  // cannot be stored even by something that skips every check above.
+  const db = new DatabaseSync(f.path);
+  t.after(() => db.close());
+  const row = db.prepare("SELECT * FROM candidate_merge_promotions LIMIT 1").get() as Record<string, unknown>;
+  assert.throws(() => db.prepare("INSERT INTO candidate_merge_promotions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+    .run(randomUUID(), randomUUID(), String(row.task_id), String(row.room_id), String(row.main_path),
+      String(row.main_branch), String(row.candidate_head), `${String(row.recovery_ref)}-2`,
+      String(row.main_head_before), null, String(row.restore_json), String(row.observation_json),
+      "applying", 1, Number(row.started_at_ms), Number(row.updated_at_ms), String(row.row_hash)),
+    /UNIQUE|constraint/iu);
+
+  child.kill("SIGKILL");
+  await waitForExit(child);
+  const pgid = readable((await other.promotions({ roomId: "demo", mainPath: f.source }))[0])
+    .observation.mergePgid as number;
+  if (typeof pgid === "number" && pgid > 1) {
+    process.kill(-pgid, "SIGKILL");
+    await waitForGroupExit(pgid);
+  }
+});
+
+/*
+ * The exclusive marker on an existing database. A v5 database written by an earlier commit of this
+ * branch is schema-current and has no such index, so it would be exclusive on paper and not in the
+ * store — the shape [[PITFALLS]] #100 is about: the storage upgrade is fine and the READING layer is
+ * where the hole is. Creating it at open is idempotent; failing to create it means the invariant is
+ * already broken, and that is a named refusal to open rather than a silent downgrade.
+ */
+test("a database written before the exclusive marker existed gets it, or is refused by name", async (t) => {
+  const f = await fixture(t);
+  const approval = await raise(f);
+  assert.equal((await promote(f, approval, await grant(f, approval))).promotion.state, "applied");
+  f.registry.close();
+
+  const dropped = new DatabaseSync(f.path);
+  dropped.exec("DROP INDEX candidate_merge_promotions_applying");
+  dropped.close();
+
+  const upgraded = new CandidateRegistry(f.data);
+  const check = new DatabaseSync(f.path);
+  assert.ok(check.prepare("SELECT sql FROM sqlite_schema WHERE name='candidate_merge_promotions_applying'").get(),
+    "the exclusive marker was not created on an existing database");
+  check.close();
+  upgraded.close();
+
+  // Now the same database with the invariant ALREADY broken: two `applying` rows over one main.
+  const broken = new DatabaseSync(f.path);
+  broken.exec("DROP INDEX candidate_merge_promotions_applying");
+  const row = broken.prepare("SELECT * FROM candidate_merge_promotions LIMIT 1").get() as Record<string, unknown>;
+  for (const suffix of ["a", "b"]) {
+    broken.prepare("INSERT INTO candidate_merge_promotions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+      .run(randomUUID(), randomUUID(), String(row.task_id), String(row.room_id), String(row.main_path),
+        String(row.main_branch), String(row.candidate_head), `${String(row.recovery_ref)}-${suffix}`,
+        String(row.main_head_before), null, String(row.restore_json), String(row.observation_json),
+        "applying", 1, Number(row.started_at_ms), Number(row.updated_at_ms), String(row.row_hash));
+  }
+  broken.close();
+
+  assert.throws(() => new CandidateRegistry(f.data),
+    /CANDIDATE_MERGE_PROMOTION_MAIN_PATH_NOT_EXCLUSIVE/u);
+  // And the refusal is stable: nothing was deleted or rewritten to make the database fit.
+  const after = new DatabaseSync(f.path);
+  assert.equal(Number((after.prepare(
+    "SELECT COUNT(*) c FROM candidate_merge_promotions WHERE state='applying'").get() as { c: number }).c), 2);
+  after.close();
+  assert.throws(() => new CandidateRegistry(f.data),
+    /CANDIDATE_MERGE_PROMOTION_MAIN_PATH_NOT_EXCLUSIVE/u);
+});
+
+/*
+ * The upgrade path for this round's binding change, asked the way [[PITFALLS]] #100 says to ask it:
+ * open a row the PREVIOUS commit would have written and check that every read/write surface still
+ * works. An approval stored before main's configuration was bound carries a `previewDigest` computed
+ * without it, so the recomputation no longer matches — and the answer has to be a named refusal that
+ * frees the task, not a wedge and not a silent acceptance of a snapshot that was never checked.
+ */
+test("an approval whose snapshot predates the configuration binding cannot write main, and frees the task", async (t) => {
+  const f = await fixture(t);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  f.registry.close();
+
+  // Promotion facts, hook inventory and ignored fingerprint all present — and no record of main's
+  // configuration, because on that commit nothing bound it.
+  rewindPreview(f.path, f.task.taskId, (preview) => {
+    const hooks = (preview.promotion as { hooks: Record<string, unknown> }).hooks;
+    delete hooks.programs;
+    delete hooks.configDigest;
+  });
+
+  const reopened = new CandidateRegistry(f.data);
+  t.after(() => reopened.close());
+  await assert.rejects(
+    reopened.promoteMainMerge({
+      approvalId: approval.id, token, action: MERGE_APPROVAL_GRANT,
+      taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+    }),
+    /MAIN_MERGE_APPROVAL_BINDING_CHANGED|PREVIEW_PREDATES_PROMOTION_GATES/u,
+    "an approval that was never checked against main's configuration was allowed to write main",
+  );
+  assert.equal(await head(f.source), approval.binding.mainHead, "main moved");
+  // Terminal, so the one open question per task is released rather than held by a row nobody can use.
+  const stored = storedApproval(f.path, approval.id);
+  assert.ok(stored.state === "invalidated" || stored.state === "rejected", stored.state);
+  const listed = await reopened.mergeApprovals({ roomId: "demo", mainPath: f.source });
+  assert.equal(listed.length, 1);
+  assert.notEqual(listed[0]?.state, "approved");
+
+  // And the owner can be asked again against a snapshot that HAS been checked against it.
+  const second = await raise({ ...f, registry: reopened });
+  const result = await promote({ ...f, registry: reopened }, second,
+    await grant({ ...f, registry: reopened }, second));
+  assert.equal(result.promotion.state, "applied");
 });

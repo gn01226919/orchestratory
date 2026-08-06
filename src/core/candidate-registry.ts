@@ -122,6 +122,14 @@ export interface PromotionFacts {
     hooks: Array<{ name: string; sha256: string; bytes: number }>;
     drivers: string[];
     filters: string[];
+    /**
+     * Configuration keys present in main that can name a program git runs, by key only, so the
+     * owner sees them itemised on the approval screen. Absent on a snapshot taken before this gate
+     * existed, which `promotionFacts` refuses by name rather than reading as "there were none".
+     */
+    programs?: string[];
+    /** Digest of main's whole effective configuration; see `HookEnvironment.configDigest`. */
+    configDigest?: string;
     unreadable: boolean;
     fingerprint: string;
   };
@@ -215,6 +223,35 @@ export const MERGE_APPROVAL_CONFIRMATION = "MERGE INTO MAIN";
  * decision to them rather than dressing it up as an observation (PITFALLS #86).
  */
 export const MERGE_GROUP_ABANDON_CONFIRMATION = "STOP WAITING FOR THIS PROCESS GROUP";
+
+/**
+ * The second phrase, required when the group's LEADER is answering "alive" — that is, when `ps` can
+ * still show a `git merge` writing to the owner's project.
+ *
+ * The first phrase does not cover this case, and one measurement is the whole reason: a promotion
+ * whose merge was demonstrably mid-flight (the hook had been entered, `ps -g` listed the running
+ * `git merge`) accepted `STOP WAITING FOR THIS PROCESS GROUP` and handed back a copy-and-paste
+ * `git reset --hard <pre-promotion head>` — an instruction to reset a working tree WHILE git is
+ * writing its index. PITFALLS #94 is about exactly that command being more destructive than the
+ * failure it claims to repair.
+ *
+ * So this state is refused on the first attempt, by name, and the way through says what is being
+ * abandoned rather than which record is being edited. Nothing is killed here either: what changes is
+ * only whether this record keeps waiting.
+ */
+export const MERGE_LIVE_ABANDON_CONFIRMATION =
+  "STOP WAITING FOR A MERGE THAT MAY STILL BE WRITING TO MAIN";
+
+/**
+ * The owner's phrase for releasing a promotion that is waiting on the process which STARTED it.
+ *
+ * Within one boot the operating system can hand `owner_pid` to an unrelated process of the same
+ * user, and no probe can tell that apart from the original still running. Without this, such a row
+ * waits forever, `#assertNoUnresolvedPromotion` refuses every later approval for that task, and the
+ * task is permanently retired with no product-side path — the same dead end the process-group
+ * release exists to prevent, one level up.
+ */
+export const MERGE_OWNER_ABANDON_CONFIRMATION = "STOP WAITING FOR THIS PROMOTION'S OWNER PROCESS";
 
 /**
  * Written into every consumed authorization so no downstream caller has to infer the limits of what
@@ -395,6 +432,10 @@ export interface MergeApprovalPreview {
    * The exact hook files this promotion would execute, by name and content hash. Promotion is the
    * first operation in this product that runs code out of `.git`, as the owner and unsandboxed, so
    * the owner is shown WHAT will run rather than told that hooks exist.
+   *
+   * `programs` is the same disclosure for configuration: every key in main's config that can name a
+   * program git runs, by key. Its values are not here on purpose — this is rendered to the owner and
+   * one of those keys can carry a secret — and are covered by `configDigest` instead.
    */
   hooks: PromotionFacts["hooks"];
   confirmationPhrase: string;
@@ -505,7 +546,29 @@ export interface MergePromotionObservation {
    * waiting on is no longer theirs to wait for. Attributed rather than stated as an observation: it
    * is the owner's assertion, and the record says so.
    */
-  mergeGroupDisowned?: { pgid: number; at: string; decidedBy: string };
+  mergeGroupDisowned?: {
+    pgid: number;
+    at: string;
+    decidedBy: string;
+    /** The boot that pgid belonged to, so a disowned number is still identifiable afterwards. */
+    bootAtSec?: number | null;
+    /**
+     * True when the owner disowned a group whose LEADER was answering "alive" at that moment — the
+     * one case where the merge may genuinely still be writing main. Recorded because it changes what
+     * the record may offer afterwards: no destructive recovery command while that is possible.
+     */
+    whileRunning?: boolean;
+  };
+  /**
+   * Recorded when the owner declared, explicitly and by pid, that the process which STARTED this
+   * promotion is not one this record should keep waiting for.
+   *
+   * The way in is the same shape as `mergeGroupDisowned` and exists for the same reason: within one
+   * boot the operating system can hand `owner_pid` to an unrelated process of the same user, and
+   * `kill(pid, 0)` cannot tell that apart from the original. Without an owner-side release, such a
+   * row waits on it forever and the task can never be promoted again — a product with no path.
+   */
+  ownerProcessDisowned?: { pid: number; at: string; decidedBy: string };
   /**
    * The boot the process that started this promotion belonged to.
    *
@@ -525,7 +588,7 @@ export interface MergePromotionObservation {
    * What the recovery command in `recovery` would do, named rather than left for the owner to infer
    * from the command text. `inspect` never writes.
    */
-  recoveryKind?: "reset-to-pre-promotion" | "inspect-observed-merge";
+  recoveryKind?: "reset-to-pre-promotion" | "inspect-observed-merge" | "inspect-live-merge";
   observedAt: string;
 }
 
@@ -568,7 +631,7 @@ export interface MergePromotion {
  * durable record does not also say.
  */
 export interface MergePromotionEvent {
-  phase: "started" | "settled" | "re-observed" | "merge-group-abandoned";
+  phase: "started" | "settled" | "re-observed" | "merge-group-abandoned" | "owner-process-abandoned";
   promotionId: string;
   approvalId: string;
   taskId: string;
@@ -1014,6 +1077,23 @@ const MERGE_APPROVALS_TABLE_SQL = `CREATE TABLE candidate_merge_approvals (
         WHERE state IN ('requested','approved');`;
 
 /**
+ * The exclusive marker, and what it is exclusive ON.
+ *
+ * `approval_id UNIQUE` serialises two callers holding the same token. It says nothing about the
+ * repository: two DIFFERENT approvals, for two different tasks over one main, satisfy it completely
+ * and could be `applying` at the same instant. When that was measured the second promotion was
+ * indeed refused — but by the dirty-working-tree gate, because the first merge had already made main
+ * dirty. A gate that holds by coincidence is not a gate, and the coincidence is gone in the window
+ * before the first merge has written anything.
+ *
+ * A partial unique index on `main_path` where `state='applying'` is a marker SQLite itself enforces:
+ * held for exactly as long as a promotion is under way, visible to every reader in every process,
+ * and impossible for a future call site to forget the way an explicit check can (PITFALLS #74).
+ */
+const MERGE_PROMOTIONS_EXCLUSIVE_SQL = `CREATE UNIQUE INDEX candidate_merge_promotions_applying
+        ON candidate_merge_promotions(main_path) WHERE state='applying';`;
+
+/**
  * The durable INTENT to write canonical main, and the record of what was observed afterwards.
  *
  * It exists because spending the approval and writing main cannot be one atomic act: one is a SQLite
@@ -1048,7 +1128,8 @@ const MERGE_PROMOTIONS_TABLE_SQL = `CREATE TABLE candidate_merge_promotions (
         row_hash TEXT NOT NULL CHECK(length(row_hash)=64)
       ) STRICT;
       CREATE INDEX candidate_merge_promotions_task
-        ON candidate_merge_promotions(task_id, started_at_ms DESC);`;
+        ON candidate_merge_promotions(task_id, started_at_ms DESC);
+      ${MERGE_PROMOTIONS_EXCLUSIVE_SQL}`;
 
 function sha(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
@@ -1373,6 +1454,7 @@ function promotionPending(row: PromotionRow): MergePromotionPending | undefined 
       code: "OWNER_PROCESS_STILL_RUNNING",
       pid: row.owner_pid,
       inspect: inspectPidCommand(row.owner_pid),
+      release: MERGE_OWNER_ABANDON_CONFIRMATION,
     };
   }
   const identity = promotionGroupIdentity(row);
@@ -1380,11 +1462,16 @@ function promotionPending(row: PromotionRow): MergePromotionPending | undefined 
   if (identity === null || group === "gone" || group === "none" || group === "merge-done-group-alive") {
     return undefined;
   }
+  const running = group === "merge-running";
   return {
-    code: group === "merge-running" ? "MERGE_SUBPROCESS_STILL_RUNNING" : "MERGE_PROCESS_GROUP_UNDECIDABLE",
+    code: running ? "MERGE_SUBPROCESS_STILL_RUNNING" : "MERGE_PROCESS_GROUP_UNDECIDABLE",
     pid: identity.pgid,
     inspect: inspectGroupCommand(identity.pgid),
-    release: MERGE_GROUP_ABANDON_CONFIRMATION,
+    // A leader that is answering "alive" is a merge that may be writing main right now, and the
+    // phrase offered says so. The record must not hand out the shorter one here: it is the same
+    // sentence an owner would use for a group nobody can decide about, and the two states are not
+    // the same risk.
+    release: running ? MERGE_LIVE_ABANDON_CONFIRMATION : MERGE_GROUP_ABANDON_CONFIRMATION,
   };
 }
 
@@ -1395,7 +1482,11 @@ function promotionPending(row: PromotionRow): MergePromotionPending | undefined 
 function ownerProcessAlive(row: PromotionRow): boolean | null {
   let recorded: number | null = null;
   try {
-    const value = (JSON.parse(row.observation_json) as MergePromotionObservation).ownerBootAtSec;
+    const observation = JSON.parse(row.observation_json) as MergePromotionObservation;
+    // The owner's own declaration ends the wait, exactly as disowning a process group does. It is
+    // checked first because it is a decision, and a decision is not overruled by a probe.
+    if (observation.ownerProcessDisowned !== undefined) return false;
+    const value = observation.ownerBootAtSec;
     if (typeof value === "number" && Number.isSafeInteger(value)) recorded = value;
   } catch { /* an observation that cannot be read decides nothing */ }
   if (recorded !== null && Math.abs(recorded - bootAtSec()) > BOOT_IDENTITY_TOLERANCE_SEC) return false;
@@ -1403,10 +1494,16 @@ function ownerProcessAlive(row: PromotionRow): boolean | null {
 }
 
 /**
- * Whether a pid is a process that still exists. Signal 0 checks for existence without delivering
- * anything; `EPERM` means it exists and is not ours, which is still "alive". A pid that cannot be
- * decided about is reported as unknown rather than assumed dead, because assuming dead is what would
- * let a reader settle a promotion that is still running.
+ * Whether a pid is the process this product started and is therefore worth waiting for.
+ *
+ * Signal 0 checks for existence without delivering anything. `EPERM` means the pid exists and
+ * belongs to SOMEBODY ELSE — and this promotion's orchestrator ran as the owner, so it is not that
+ * process: the number has been recycled. Answering "alive" there is the same mistake the merge
+ * process group made until this round, in the same file, one level up; the two must not point in
+ * opposite directions, because between them they decide whether a promotion can ever be resolved.
+ *
+ * A pid that cannot be decided about is reported as unknown rather than assumed dead: assuming dead
+ * is what would let a reader settle a promotion that is still running.
  */
 function processAlive(pid: number): boolean | null {
   if (!Number.isSafeInteger(pid) || pid <= 0) return null;
@@ -1416,7 +1513,7 @@ function processAlive(pid: number): boolean | null {
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ESRCH") return false;
-    if (code === "EPERM") return true;
+    if (code === "EPERM") return false;
     return null;
   }
 }
@@ -1459,6 +1556,27 @@ function mergeBlockers(preview: CandidateCompletionPreview): string[] {
   if (preview.mergeConflictsTruncated) blockers.push("PREVIEW_MERGE_CONFLICTS_TRUNCATED");
   if (!preview.mergeable) blockers.push("MERGE_CONFLICTS_PRESENT");
   return blockers;
+}
+
+/**
+ * A release the owner asked for while a `git merge` was still answering "alive".
+ *
+ * It carries the pid, a read-only command that shows what that process is, and the phrase the second
+ * attempt needs — so the refusal is a route rather than a wall. It is a refusal at all because the
+ * measured alternative was handing over `git reset --hard` against a working tree git was writing.
+ */
+export class MergeAbandonStillRunningError extends Error {
+  readonly pid: number;
+  readonly inspect: string;
+  readonly confirmation: string;
+
+  constructor(pid: number, inspect: string, confirmation: string) {
+    super("MERGE_ABANDON_REFUSED_MERGE_STILL_RUNNING");
+    this.name = "MergeAbandonStillRunningError";
+    this.pid = pid;
+    this.inspect = inspect;
+    this.confirmation = confirmation;
+  }
 }
 
 /**
@@ -1528,9 +1646,18 @@ export class MergePromotionRefusedError extends Error {
  *
  * A preview recorded before Phase 5-5 has none. That is not "no blockers": it is a snapshot that was
  * never checked against any of the conditions promotion depends on, so it is refused by name.
+ *
+ * The same applies one gate finer. A snapshot taken before main's whole configuration was bound
+ * carries `hooks` without a `configDigest`, and comparing only the fields it does have would spend
+ * an approval that was never checked against the configuration the merge is about to run under. It
+ * is the same answer, for the same reason, at the same name.
  */
 function promotionFacts(preview: CandidateCompletionPreview): PromotionFacts | undefined {
-  return preview.promotion;
+  const facts = preview.promotion;
+  if (facts === undefined) return undefined;
+  return typeof facts.hooks?.configDigest === "string" && Array.isArray(facts.hooks.programs)
+    ? facts
+    : undefined;
 }
 
 /**
@@ -1750,6 +1877,7 @@ export class CandidateRegistry {
       }
       if (version === 0) this.#migrate();
       else if (version < SCHEMA_VERSION) this.#upgrade(version);
+      this.#assertPromotionExclusivity();
       if (this.#db.prepare("PRAGMA foreign_key_check").all().length > 0) {
         throw new Error("CANDIDATE_REGISTRY_FOREIGN_KEY_VIOLATION");
       }
@@ -2684,9 +2812,13 @@ export class CandidateRegistry {
     // The full re-observation behind it is expensive, so it is offered on proof rather than on
     // request: a caller that can show the token gets it unconditionally, and one that cannot is
     // throttled and refused. That changes nothing about which answer a legitimate owner receives.
-    await this.#assertNoUnresolvedPromotion(row.task_id, {
-      authenticated: row.token_hash !== null && equalDigest(sha(input.token), row.token_hash),
-    });
+    const authenticated = row.token_hash !== null && equalDigest(sha(input.token), row.token_hash);
+    await this.#assertNoUnresolvedPromotion(row.task_id, { authenticated });
+    // And the same question about the REPOSITORY rather than about this task: one main, one
+    // promotion applying. Asked here, before any live gate, so that "somebody else is writing this
+    // project right now" is the answer the owner gets instead of "your working tree is dirty" —
+    // which is what the first merge's own output made true a moment later.
+    await this.#assertMainNotBusy(row.main_path, row.task_id, { authenticated });
     if (row.state === "consumed") throw new Error("MAIN_MERGE_APPROVAL_ALREADY_CONSUMED");
     if (row.state !== "approved") throw new Error("MAIN_MERGE_APPROVAL_NOT_APPROVED");
     this.#assertMergeApprovalLive(row);
@@ -2819,12 +2951,19 @@ export class CandidateRegistry {
       this.#db.exec("COMMIT");
     } catch (error) {
       this.#db.exec("ROLLBACK");
-      // The UNIQUE index on approval_id is the exclusive marker: two callers holding the same token
-      // race here, before either has run a Git command, and exactly one wins. The loser is told what
-      // actually happened rather than shown a storage error, and it has written nothing.
+      // The UNIQUE index on approval_id is one of the two exclusive markers: two callers holding the
+      // same token race here, before either has run a Git command, and exactly one wins. The loser is
+      // told what actually happened rather than shown a storage error, and it has written nothing.
       if (this.#db.prepare("SELECT id FROM candidate_merge_promotions WHERE approval_id=?").get(row.id)) {
         throw new Error("MAIN_MERGE_PROMOTION_ALREADY_STARTED");
       }
+      // The other marker is exclusivity over the REPOSITORY: one main, one promotion applying. Two
+      // different tasks with two different approvals over one project satisfy the first index and are
+      // stopped only by this one, which is held for exactly as long as the promotion is under way.
+      const busy = this.#db.prepare(
+        "SELECT id FROM candidate_merge_promotions WHERE main_path=? AND state='applying'",
+      ).get(row.main_path) as { id?: string } | undefined;
+      if (busy?.id !== undefined) throw new Error("MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY");
       throw error;
     }
     // The first of the two HEAD observations bar item 5 requires, recorded before anything is spent
@@ -3499,6 +3638,30 @@ export class CandidateRegistry {
       } catch {
         throw new Error("CANDIDATE_REGISTRY_PRE_V4_COMPLETION_UNSUPPORTED");
       }
+    }
+  }
+
+  /**
+   * Makes sure the exclusive marker exists on a database this build did not create.
+   *
+   * The promotion table shipped in v5 without it, so a v5 database written by an earlier commit is
+   * schema-current and unprotected — and bumping the version to add one index would rewrite nothing
+   * while adding an upgrade branch to get wrong. Creating it here is idempotent and needs no version
+   * change.
+   *
+   * If two `applying` rows over one main already exist, the index cannot be created, and that is the
+   * invariant already broken: the answer is a named refusal to open rather than a silent downgrade
+   * to no exclusivity at all. Nothing is deleted and nothing is rewritten to make it fit.
+   */
+  #assertPromotionExclusivity(): void {
+    const present = this.#db.prepare(
+      "SELECT name FROM sqlite_schema WHERE type='index' AND name='candidate_merge_promotions_applying'",
+    ).get();
+    if (present) return;
+    try {
+      this.#db.exec(MERGE_PROMOTIONS_EXCLUSIVE_SQL);
+    } catch {
+      throw new Error("CANDIDATE_MERGE_PROMOTION_MAIN_PATH_NOT_EXCLUSIVE");
     }
   }
 
@@ -4203,7 +4366,10 @@ export class CandidateRegistry {
       return {
         blockers: ["MAIN_WORKING_TREE_UNREADABLE"],
         overwrite,
-        hooks: { hooksPath: "", hooks: [], drivers: [], filters: [], unreadable: true, fingerprint: "" },
+        hooks: {
+          hooksPath: "", hooks: [], drivers: [], filters: [], programs: [], configDigest: "",
+          unreadable: true, fingerprint: "",
+        },
       };
     }
   }
@@ -4274,6 +4440,46 @@ export class CandidateRegistry {
   }
 
   /**
+   * Refuses a promotion into a repository another promotion is already applying to.
+   *
+   * The per-task gate above cannot answer this: two tasks in one project have two approvals and two
+   * task ids, and each is perfectly unresolved-free with respect to the other. The exclusive marker
+   * is the partial unique index on `main_path`, and this is where that marker is READ, so the owner
+   * is told which condition actually stopped them. Without it the second promotion was refused by
+   * the dirty-working-tree gate — true only because the first merge had already written something,
+   * and therefore not true in the window before it did.
+   *
+   * Cheap first for the same reason as the per-task gate: a live process is two `kill(pid, 0)`
+   * probes, and only a row nobody is driving is worth re-observing.
+   */
+  async #assertMainNotBusy(
+    mainPath: string, taskId: string, options: { authenticated: boolean },
+  ): Promise<void> {
+    const rows = this.#db.prepare(
+      "SELECT * FROM candidate_merge_promotions WHERE main_path=? AND task_id<>? AND state='applying'",
+    ).all(mainPath, taskId) as unknown as PromotionRow[];
+    for (const row of rows) {
+      try {
+        this.#assertPromotionRow(row);
+      } catch {
+        throw new Error("MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY");
+      }
+      if (promotionPending(row) !== undefined) throw new Error("MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY");
+      const last = this.#promotionResolvedAt.get(row.id) ?? 0;
+      if (!options.authenticated && this.#now() - last < MERGE_PREVIEW_RECOMPUTE_THROTTLE_MS) {
+        throw new Error("MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY");
+      }
+      if (this.#promotionResolvedAt.size >= MAX_LIST) this.#promotionResolvedAt.clear();
+      this.#promotionResolvedAt.set(row.id, this.#now());
+      // A crashed promotion converges here exactly as it does for its own task: re-observed, never
+      // retried. Only a row that is STILL applying afterwards holds the marker.
+      if ((await this.#resolvePromotion(row)).state === "applying") {
+        throw new Error("MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY");
+      }
+    }
+  }
+
+  /**
    * Reads the repository and reports what it finds. It runs no Git command that writes, and it never
    * infers: a value it could not read stays `null`.
    */
@@ -4307,6 +4513,10 @@ export class CandidateRegistry {
         : {}),
       ...(previous.mergeGroupDisowned === undefined
         ? {} : { mergeGroupDisowned: previous.mergeGroupDisowned }),
+      // An owner decision is carried into every later record for the same reason the group one is:
+      // it is what keeps the row from waiting again on a number the owner already ruled on.
+      ...(previous.ownerProcessDisowned === undefined
+        ? {} : { ownerProcessDisowned: previous.ownerProcessDisowned }),
       ...(previous.ownerBootAtSec === undefined ? {} : { ownerBootAtSec: previous.ownerBootAtSec }),
       observedAt: new Date(this.#now()).toISOString(),
     };
@@ -4395,6 +4605,21 @@ export class CandidateRegistry {
     if (observation.authorizedMergeCommit === true && observation.mainHead !== null) {
       observation.recovery = `git -C ${row.main_path} show --stat ${observation.mainHead}`;
       observation.recoveryKind = "inspect-observed-merge";
+      return;
+    }
+    // A promotion the owner disowned while its merge leader was alive is the one shape where this
+    // record exists at all and a `git merge` may still be writing the index it describes. Handing
+    // over `reset --hard` there is handing over PITFALLS #94: the reset does not undo the write, it
+    // races it, and it deletes ignored files the merge overwrote rather than restoring them. Asked
+    // again on every read, so once that process really is gone the normal offer comes back.
+    const disowned = observation.mergeGroupDisowned;
+    if (disowned !== undefined && mergeGroupState({
+      pgid: disowned.pgid,
+      bootAtSec: disowned.bootAtSec ?? null,
+      spawnedAt: disowned.at,
+    }) === "merge-running") {
+      observation.recovery = inspectGroupCommand(disowned.pgid);
+      observation.recoveryKind = "inspect-live-merge";
       return;
     }
     observation.recovery = `git -C ${row.main_path} reset --hard ${row.main_head_before}`;
@@ -4618,6 +4843,10 @@ export class CandidateRegistry {
    * read the record rather than clicked past it. The next read then re-observes the repository and
    * reaches whichever of the three answers the fingerprints support, which for a merge that really
    * was interrupted will be `needs-manual-review` with every difference listed by name.
+   *
+   * A leader that is still answering "alive" is refused on the first attempt and requires
+   * `MERGE_LIVE_ABANDON_CONFIRMATION` on the second, and for as long as that process lives the
+   * record offers only a read-only look at it — never `reset --hard` over a tree git may be writing.
    */
   async abandonMergeProcessGroup(input: {
     promotionId: string;
@@ -4625,6 +4854,11 @@ export class CandidateRegistry {
     mainPath: string;
     /** The pgid exactly as the record reports it. A mismatch refuses rather than guessing. */
     pgid: number;
+    /**
+     * `MERGE_GROUP_ABANDON_CONFIRMATION`, or `MERGE_LIVE_ABANDON_CONFIRMATION` when the record
+     * reports `MERGE_SUBPROCESS_STILL_RUNNING`. The record names which one applies in
+     * `pending.release`.
+     */
     confirmation: string;
     decidedBy: string;
   }): Promise<MergePromotion> {
@@ -4635,9 +4869,6 @@ export class CandidateRegistry {
     const roomId = text(input.roomId, "CANDIDATE_ROOM_INVALID", 48);
     if (!ROOM_PATTERN.test(roomId)) throw new Error("CANDIDATE_ROOM_INVALID");
     const mainPath = await canonicalWorkspace(input.mainPath);
-    if (input.confirmation !== MERGE_GROUP_ABANDON_CONFIRMATION) {
-      throw new Error("MERGE_GROUP_ABANDON_CONFIRMATION_MISMATCH");
-    }
     const decidedBy = text(input.decidedBy, "MERGE_GROUP_ABANDON_DECIDED_BY_INVALID", 64);
     const row = this.#promotionRow(input.promotionId);
     if (!row || row.room_id !== roomId || row.main_path !== mainPath) {
@@ -4652,6 +4883,18 @@ export class CandidateRegistry {
     const pending = promotionPending(row);
     if (pending === undefined) throw new Error("MAIN_MERGE_PROMOTION_NOT_BLOCKED");
     if (pending.code === "OWNER_PROCESS_STILL_RUNNING") throw new Error("MAIN_MERGE_PROMOTION_STILL_OWNED");
+    // Two stages, because the two states are not the same risk. A group nobody can decide about is
+    // released with the ordinary phrase; a group whose LEADER answers "alive" is a `git merge` that
+    // `ps` can still show writing to the owner's project, and the first attempt at it is refused by
+    // name so that the owner has to say what they are actually abandoning. Measured before this
+    // existed: the ordinary phrase disowned a provably live merge and the record immediately offered
+    // `git reset --hard` over the tree that merge was writing.
+    const running = pending.code === "MERGE_SUBPROCESS_STILL_RUNNING";
+    const required = running ? MERGE_LIVE_ABANDON_CONFIRMATION : MERGE_GROUP_ABANDON_CONFIRMATION;
+    if (running && input.confirmation === MERGE_GROUP_ABANDON_CONFIRMATION) {
+      throw new MergeAbandonStillRunningError(pending.pid, pending.inspect, required);
+    }
+    if (input.confirmation !== required) throw new Error("MERGE_GROUP_ABANDON_CONFIRMATION_MISMATCH");
     if (!Number.isSafeInteger(input.pgid) || input.pgid !== pending.pid) {
       throw new Error("MERGE_GROUP_ABANDON_PGID_MISMATCH");
     }
@@ -4664,6 +4907,10 @@ export class CandidateRegistry {
         pgid: input.pgid,
         at: new Date(this.#now()).toISOString(),
         decidedBy,
+        // Kept so the number stays identifiable after it stops being waited on: the recovery hint
+        // asks this same question again on every read, and a bare pid could not be asked safely.
+        bootAtSec: bootAtSec(),
+        whileRunning: running,
       },
     } satisfies MergePromotionObservation;
     const updated = this.#writePromotion(row, {
@@ -4672,6 +4919,87 @@ export class CandidateRegistry {
     });
     this.#emitPromotion(updated, "merge-group-abandoned", {
       pgid: input.pgid,
+      decidedBy,
+      whileRunning: running,
+      mainMutation: false,
+    });
+    return this.#publicPromotion(await this.#resolvePromotion(updated));
+  }
+
+  /**
+   * The owner's way out of a promotion that is waiting on the process which STARTED it.
+   *
+   * Symmetric with `abandonMergeProcessGroup`, and it exists for the symmetric reason: `owner_pid`
+   * is a number the operating system reuses. Scoping it to a boot removes the cross-reboot case, and
+   * classifying `EPERM` as "somebody else's" removes the other-user case, but WITHIN one boot the
+   * same user's next process can hold that number and no probe can tell. Without this the row waits
+   * forever, every later approval for that task is refused as unresolved, and the task is retired
+   * with nothing on the product side able to clear it.
+   *
+   * It kills nothing and it does not touch main. What it refuses to do is release the wait while the
+   * merge subprocess is provably alive: that would be disowning the caller and the writer at once,
+   * and the record would then describe a repository something is still writing.
+   */
+  async abandonPromotionOwnerProcess(input: {
+    promotionId: string;
+    roomId: string;
+    mainPath: string;
+    /** The owner pid exactly as the record reports it. A mismatch refuses rather than guessing. */
+    pid: number;
+    confirmation: string;
+    decidedBy: string;
+  }): Promise<MergePromotion> {
+    this.#assertOpen();
+    if (typeof input.promotionId !== "string" || !UUID_PATTERN.test(input.promotionId)) {
+      throw new Error("MAIN_MERGE_PROMOTION_ID_INVALID");
+    }
+    const roomId = text(input.roomId, "CANDIDATE_ROOM_INVALID", 48);
+    if (!ROOM_PATTERN.test(roomId)) throw new Error("CANDIDATE_ROOM_INVALID");
+    const mainPath = await canonicalWorkspace(input.mainPath);
+    if (input.confirmation !== MERGE_OWNER_ABANDON_CONFIRMATION) {
+      throw new Error("MERGE_OWNER_ABANDON_CONFIRMATION_MISMATCH");
+    }
+    const decidedBy = text(input.decidedBy, "MERGE_GROUP_ABANDON_DECIDED_BY_INVALID", 64);
+    const row = this.#promotionRow(input.promotionId);
+    if (!row || row.room_id !== roomId || row.main_path !== mainPath) {
+      throw new Error("MAIN_MERGE_PROMOTION_NOT_FOUND");
+    }
+    if (row.state === "applied" || row.state === "rolled-back") {
+      throw new Error("MAIN_MERGE_PROMOTION_ALREADY_SETTLED");
+    }
+    const pending = promotionPending(row);
+    if (pending === undefined || pending.code !== "OWNER_PROCESS_STILL_RUNNING") {
+      throw new Error("MAIN_MERGE_PROMOTION_NOT_OWNER_BLOCKED");
+    }
+    if (!Number.isSafeInteger(input.pid) || input.pid !== pending.pid) {
+      throw new Error("MERGE_OWNER_ABANDON_PID_MISMATCH");
+    }
+    const observation = JSON.parse(row.observation_json) as MergePromotionObservation;
+    // Asked directly rather than through `promotionPending`, which answers about the owner process
+    // first and so would never mention the merge. A live leader means main may be being written now.
+    const group = mergeGroupState(promotionGroupIdentity(row));
+    if (group === "merge-running") {
+      const identity = promotionGroupIdentity(row);
+      throw new MergeAbandonStillRunningError(
+        identity?.pgid ?? 0,
+        inspectGroupCommand(identity?.pgid ?? 0),
+        MERGE_LIVE_ABANDON_CONFIRMATION,
+      );
+    }
+    const disowned = {
+      ...observation,
+      ownerProcessDisowned: {
+        pid: input.pid,
+        at: new Date(this.#now()).toISOString(),
+        decidedBy,
+      },
+    } satisfies MergePromotionObservation;
+    const updated = this.#writePromotion(row, {
+      observation_json: JSON.stringify(disowned),
+      updated_at_ms: Math.max(row.started_at_ms, this.#now()),
+    });
+    this.#emitPromotion(updated, "owner-process-abandoned", {
+      pid: input.pid,
       decidedBy,
       mainMutation: false,
     });
