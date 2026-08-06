@@ -3119,6 +3119,14 @@ function renderMergeDiff(approval) {
   end.className = "merge-diff-end";
   end.textContent = "── 變更清單結束 · end of change list ──";
   region.append(end);
+  /*
+   * 重繪＝這是另一份內容，捲動必須從頭開始。設在最後（內容已重建完）才有意義。
+   * 實測（真實瀏覽器，第五輪）：清空再重建之後 `scrollTop` 停在 22.5，不是 0——
+   * 於是「使用者捲完的是上一份」被 `mergeDiffScrolledToBottom()` 算成捲完了這一份，
+   * scroll-gate 在內容換掉的當下無聲放行。呼叫端本來就寫著「重繪會把捲動位置歸零」，
+   * 在這一行存在之前那是一句假註解。
+   */
+  region.scrollTop = 0;
 }
 
 function renderMergeRecovery(approval) {
@@ -3305,6 +3313,14 @@ function mergeApprovalSignature(approval, binding, overwrites) {
 async function repollMergeApproval() {
   const approval = state.mergeApproval;
   if (!approval || byId("merge-approval").hidden || state.mergeApprovalDecided) return;
+  /*
+   * 一次只准有一個在途請求。這個端點每 5 秒觸發一次，而本輪讓它多背了兩條 git 子程序
+   * （`untrackedAtPaths` 的 ignored／untracked 各一條，各 30 秒逾時）——大 repo 或慢碟上
+   * 單次回應可能遠超過 5 秒，沒有守衛就會愈堆愈多，每一個都在 Owner 自己的機器上跑 git。
+   * 慢的時候少問幾次是對的：這是唯讀輪詢，不是狀態機。
+   */
+  if (state.mergeApprovalPollInFlight) return;
+  state.mergeApprovalPollInFlight = true;
   try {
     const value = await api(
       `/api/rooms/merge-approvals/inspect?room=${encodeURIComponent(state.room)}&approvalId=${encodeURIComponent(approval.id)}`,
@@ -3321,7 +3337,10 @@ async function repollMergeApproval() {
         `綁定值在你檢視期間改變了（${(state.mergeApprovalBinding.changed || []).map(bindingFieldLabel).join("、")}）；`
         + "確認輸入已停用並清空，請重新產生預覽再決定。main 沒有被修改。 · Bound values moved while the dialog was open; the confirmation input is disabled again.";
     }
-  } catch { /* 輪詢失敗不改變畫面上的決定狀態 */ }
+  } catch { /* 輪詢失敗不改變畫面上的決定狀態 */ } finally {
+    /* `finally`，因為簽章相同時上面會直接 return——在 catch 裡清旗標會讓它永遠卡住。 */
+    state.mergeApprovalPollInFlight = false;
+  }
 }
 
 function openMergeApprovalDialog(approvalId) {
@@ -3333,6 +3352,7 @@ function openMergeApprovalDialog(approvalId) {
   state.mergeApprovalReturnFocus = document.activeElement;
   state.mergeApprovalDecided = false;
   state.mergeApprovalScrolled = false;
+  state.mergeApprovalPollInFlight = false;
   /* 上一筆核准的掃描結果不得沿用到這一筆：那會讓「我沒看過」長得像「我看過，沒事」。 */
   state.mergeApprovalOverwrites = null;
   dialog.hidden = false;

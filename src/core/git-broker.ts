@@ -44,6 +44,13 @@ export interface HookEnvironment {
    * Values are deliberately absent: `credential.helper` and friends can carry a shell snippet with a
    * secret in it, and this list is rendered on an approval screen. The values are covered by
    * `configDigest`, which binds them without ever displaying them.
+   *
+   * The KEY can carry one too, and that was measured rather than reasoned about: git's own
+   * documented spelling for a per-URL helper is `credential.<url>.helper`, so
+   * `credential.https://x-token:ghp_…@github.com.helper` is a valid key whose middle section is a
+   * token — rendered verbatim on the approval screen and written into the stored preview, while the
+   * comment above congratulated itself for hiding values. `redactConfigSubsection` replaces such a
+   * subsection before the key leaves this function, so neither the screen nor SQLite ever holds it.
    */
   programs: string[];
   /**
@@ -185,6 +192,32 @@ const CONFIG_NAMES_A_PROGRAM =
   /^(?:core\.(?:fsmonitor|sshcommand|askpass|editor|pager|alternaterefscommand|gitproxy)|sequence\.editor|gpg\.program|gpg\..+\.(?:program|defaultkeycommand)|commit\.gpgsign|tag\.gpgsign|merge\.verifysignatures|credential\.(?:.+\.)?helper|diff\.external|diff\..+\.(?:command|textconv)|merge\..+\.driver|mergetool\..+\.cmd|difftool\..+\.cmd|filter\..+\.(?:clean|smudge|process)|pager\..+|trailer\..+\.command|uploadpack\.packobjectshook|guitool\..+\.cmd|browser\..+\.cmd|web\.browser)$/u;
 /** Bounded itemised config disclosure. The digest always covers every key; this list is the display. */
 const MAX_REPORTED_CONFIG_PROGRAMS = 64;
+
+/**
+ * Hides the part of a configuration key that is arbitrary owner-supplied text rather than a name git
+ * defines, wherever that text is documented to be — or simply looks like — a URL.
+ *
+ * A git key is `section.subsection.name`, and the subsection is whatever the repository wrote there.
+ * For `credential.<url>.*` that is a URL by specification, and a URL may carry userinfo — which is
+ * where a token ends up. Measured in a browser against the real approval dialog:
+ * `SECRET_IN_PROGRAM_KEY_RENDERED: true`.
+ *
+ * Only the middle is replaced, so the disclosure still says WHICH mechanism is configured — the
+ * owner needs to know a credential helper would run — and the rest of the list is untouched, because
+ * `merge.<name>.driver` and `difftool.<name>.cmd` name things the owner chose and wants to read.
+ * The second arm catches the same hazard in any other subsection that looks like a URL, so a key
+ * this file has not thought of does not become a new way to print a token. Completeness of the gate
+ * itself is not affected either way: `configDigest` covers the raw listing, redaction and all.
+ */
+function redactConfigSubsection(key: string): string {
+  const parts = key.split(".");
+  if (parts.length < 3) return key;
+  const subsection = parts.slice(1, -1).join(".");
+  const urlLike = subsection.includes("://") || subsection.includes("@");
+  if (parts[0] !== "credential" && !urlLike) return key;
+  return `${parts[0]}.<redacted>.${parts[parts.length - 1]}`;
+}
+
 /** Bounded read of one promotion's trace file; exceeding it reports "not read", never "no hooks". */
 const MAX_HOOK_TRACE_BYTES = 16 * 1024 * 1024;
 /** The index mode git gives a submodule (gitlink). `.gitmodules` is documentation; this is the fact. */
@@ -640,7 +673,8 @@ export class GitBroker {
     const filters = [...configured(/^filter\..+\.(?:clean|smudge|process)$/u)];
     const matched = entries
       .filter((entry) => CONFIG_NAMES_A_PROGRAM.test(entry.key))
-      .map((entry) => entry.key)
+      // Redacted before anything else touches it, so no later step can be the one that leaks it.
+      .map((entry) => redactConfigSubsection(entry.key))
       .sort()
       .filter((key, index, all) => all.indexOf(key) === index);
     // Bounded, because this goes into a stored record with a length limit and `pager.*` alone can be
