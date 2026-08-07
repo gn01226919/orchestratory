@@ -21,6 +21,7 @@ import {
   MERGE_OWNER_ABANDON_CONFIRMATION,
   MERGE_PREVIEW_RECOMPUTE_THROTTLE_MS,
   MERGE_PROMOTION_ABANDON_CONFIRMATION,
+  MERGE_UNACCOUNTED_ABANDON_CONFIRMATION,
   MERGE_UNREADABLE_ABANDON_CONFIRMATION,
   MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION,
   type CandidateTask,
@@ -146,6 +147,21 @@ async function status(workspace: string): Promise<string> {
 
 async function exists(path: string): Promise<boolean> {
   return await stat(path).then(() => true).catch(() => false);
+}
+
+/**
+ * Whether ONE process still exists, asked the same way `probe()` asks about a group leader.
+ *
+ * Separate from `groupAlive` because `kill(-pid, 0)` answers `ESRCH` for a pid that is not a group
+ * leader, and a hook that backgrounds a child hands this product exactly such a number.
+ */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
 }
 
 /** Whether a whole process group still exists, asked the same way the product asks. */
@@ -3811,9 +3827,15 @@ test("a promotion row whose payload is destroyed with its hash still names the m
   assert.equal(stored.merge_pgid, pgid, "the merge group was not given a column of its own");
   assert.ok(typeof stored.merge_boot_at_sec === "number");
 
+  // `probeReadable` is `false` in both shapes here and that is not a lost distinction: amendment
+  // (O) redefined the field to answer the question it is actually read for — "does an empty `alive`
+  // mean nothing is there, or that nothing could be seen" — and while a merge this record names is
+  // answering "alive" the honest answer is that nothing has been concluded either way. The
+  // distinction between the two payload shapes is still measured, in `recordedGroups` below: the
+  // first leaves the column as the only source, the second adds a payload that contradicts it.
   const payloads = [
-    // Not JSON at all: the payload answers nothing, so the column is the only source and it answers.
-    { payload: "this used to be JSON", probeReadable: true },
+    // Not JSON at all: the payload answers nothing, so the column is the only source.
+    { payload: "this used to be JSON", sources: ["column", "trace"] },
     // Valid JSON, group removed. The column names a group and the payload states there is none:
     // two in-row sources, two answers, and no way to tell which. Amendment (F) — the answer is
     // "unreadable", not "whichever one this code happened to prefer".
@@ -3821,11 +3843,11 @@ test("a promotion row whose payload is destroyed with its hash still names the m
       payload: JSON.stringify({
         code: "PROMOTION_STARTED", mainHead: null, observedAt: "1970-01-01T00:00:00.000Z",
       }),
-      probeReadable: false,
+      sources: ["column", "trace"],
     },
   ];
   let promotionId = "";
-  for (const { payload, probeReadable } of payloads) {
+  for (const { payload, sources } of payloads) {
     promotionId = damagePromotionRow(f.path, { observationJson: payload });
     const reader = new CandidateRegistry(f.data);
     const listed = unreadable((await reader.promotions({ roomId: "demo", mainPath: f.source }))[0]);
@@ -3838,7 +3860,11 @@ test("a promotion row whose payload is destroyed with its hash still names the m
     assert.equal(listed.holdsProjectExclusiveMarker, true);
     // Read from the column, not the payload: the payload no longer says anything.
     assert.deepEqual(listed.release?.alive.map((entry) => [entry.kind, entry.pid]), [["merge", pgid]]);
-    assert.equal(listed.release?.probeReadable, probeReadable);
+    assert.equal(listed.release?.probeReadable, false,
+      "nothing may be concluded while a number this record names is answering `alive`");
+    assert.deepEqual(
+      [...new Set((listed.release?.recordedGroups ?? []).map((entry) => entry.source))], sources,
+    );
     assert.equal(listed.release?.confirmation, MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION);
     // Every source that named a number is reported, so a disagreement is shown rather than settled.
     assert.ok((listed.release?.recordedGroups ?? []).some(
@@ -4037,14 +4063,20 @@ test("a destroyed payload does not make a finished merge block the project forev
   reader.close();
 
   /*
-   * The third shape, and the one a mutation caught as uncovered ([[PITFALLS]] #107, third case:
-   * neither an unmet precondition nor an equivalent mutation, just a branch with no test). Here the
-   * columns hold nothing AND the payload parses and states, affirmatively, that no group is
-   * recorded — which is what a row written before those columns existed looks like once its merge
-   * has been settled, and what any row looks like before git is spawned. That is an ANSWER, so the
-   * short phrase is the one that works. Making it demand the long phrase instead would be safe in
-   * the trivial sense and would take the short phrase out of service permanently, which is the
-   * shape bar item 11 forbids.
+   * The third shape, REVERSED by amendment (O) — and the reversal is the ninth round's BLOCKER-2.
+   *
+   * Until this round this block asserted the opposite: columns holding nothing AND a payload that
+   * states, affirmatively, that no group is recorded were treated as an ANSWER, so the short phrase
+   * worked. That is class 1 ("the two in-row sources say there is no group") intersected with class
+   * 3 ("the two outside sources say nothing"), and the ninth round's three classes were written as
+   * mutually exclusive alternatives, each relying on the other to hold — so nothing ever tested the
+   * one cell where a single hook can produce both at once, and that cell was fail-open.
+   *
+   * The reversal is not "demand the long phrase always", which would take the short one out of
+   * service and be the shape bar item 11 forbids. The short phrase is still what works in the FIRST
+   * half of this same test, where the column names a number and probing it answers "gone". What is
+   * no longer evidence is a record saying there is nothing to probe: that is the absence of an
+   * answer, and the two are indistinguishable exactly when it matters.
    */
   damagePromotionRow(f.path, {
     observationJson: JSON.stringify({
@@ -4059,17 +4091,19 @@ test("a destroyed payload does not make a finished merge block the project forev
   const answered = unreadable((await groupless.promotions({ roomId: "demo", mainPath: f.source }))[0]);
   assert.equal(answered.holdsProjectExclusiveMarker, true);
   assert.deepEqual(answered.release?.alive, []);
-  assert.equal(answered.release?.probeReadable, true,
-    "an observation that says `no group` is an answer, not an unanswered question");
-  assert.equal(answered.release?.confirmation, MERGE_UNREADABLE_ABANDON_CONFIRMATION);
+  assert.equal(answered.release?.probeReadable, false,
+    "a record that says there is nothing to probe has not answered; it has stopped answering");
+  assert.equal(answered.release?.confirmation, MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION);
   await assert.rejects(
-    groupless.abandonMergeProcessGroup({ ...args, confirmation: MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION }),
+    groupless.abandonMergeProcessGroup({ ...args, confirmation: MERGE_UNREADABLE_ABANDON_CONFIRMATION }),
     (error: Error & { confirmation?: string }) =>
       error.message === "MAIN_MERGE_PROMOTION_ROW_UNREADABLE"
-      && error.confirmation === MERGE_UNREADABLE_ABANDON_CONFIRMATION,
+      && error.confirmation === MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION,
   );
+  // …and the way out is still there, with the phrase that says what is being accepted. Bar item 11
+  // is about there BEING an exit, not about which sentence it costs.
   const released = unreadable(await groupless.abandonMergeProcessGroup({
-    ...args, confirmation: MERGE_UNREADABLE_ABANDON_CONFIRMATION,
+    ...args, confirmation: MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION,
   }));
   assert.equal(released.holdsProjectExclusiveMarker, false);
 });
@@ -4648,10 +4682,14 @@ test("an owning process id too large to be a pid keeps the record waiting rather
     (error: NodeJS.ErrnoException) => error.code !== "ESRCH" && error.code !== "EPERM",
     "this test assumes a number this large is refused as neither present nor absent",
   );
-  // The merge group is out of the way, so the only thing left to decide is the owner process.
+  // The merge group is out of the way, so the only thing left to decide is the owner process. The
+  // record KEEPS the number rather than being rewritten to say it has none: amendment (O) makes
+  // those two different states — a probed number that answers "gone" is evidence, and a record with
+  // nothing to probe is the absence of it — and this test is about the owner pid, so it must not
+  // silently become a test about the other one.
   rewritePromotionRow(f.path, ({ observation }) => ({
     ownerPid: beyondPid,
-    observation: { ...observation, mergePgid: null, mergeGroup: null },
+    observation,
   }));
 
   const reopened = new CandidateRegistry(f.data);
@@ -4858,53 +4896,83 @@ test("`orphan-refs` says read-only, and the bytes of every database are the same
 });
 
 // =============================================================================================
-// Round-9 findings. The eighth round's blocker was not a missing comparison — the three-source
-// comparison was there and correct — it was that the comparison had been wired into ONE of the two
-// decisions that need it. Amendment (I): after fixing a judgement, enumerate every path that makes
-// the same judgement and drive each of them.
+// Round-10 findings. Amendment (O) REPLACES the three-class corruption matrix that stood here.
 //
-// THE PATHS THAT DECIDE WHETHER A CONCLUSION MAY BE DRAWN ABOUT THIS PROMOTION, in full. Every one
-// of them reaches `promotionPending(row, trace)`, which now requires the outside sources as a
-// parameter so a future path cannot be added that forgets them ([[PITFALLS]] #74):
+// Four rounds in a row fixed the dimension that had just been broken — field names, then sources,
+// then the intersection of sources, then whether a source exists at all — and each fix was correct
+// and each was followed by the same defect through the next dimension ([[PITFALLS]] #117, #121).
+// The invariant behind all four was never about the shape of the damage:
 //
-//   1. `promotions()` -> `#resolvePromotion()` -> `#observeMain()`   the record and its recovery hint
-//   2. `#publicPromotion()`                                          the `pending` the listing prints
-//   3. `#assertNoUnresolvedPromotion()`                              this task's next preview/approval
-//   4. `#assertMainNotBusy()`                                        every OTHER task in the project
-//   5. `abandonMergeProcessGroup()`                                  the merge-group release
-//   6. `abandonPromotionOwnerProcess()`                              the owner-process release
-//   7. `abandonPromotionEntirely()`                                  the combined release
+//   A DESTRUCTIVE CONCLUSION MAY NOT BE REACHED FROM THE ABSENCE OF EVIDENCE.
 //
-// and the CLI rendering of 1+2, which is where the owner actually reads the answer.
+// So the model below is not a list of damage shapes. It is every SUBSET of the four sources, each
+// one DELETED rather than corrupted, with the assertion that no subset makes any of the four
+// measurable loosenings true. Deleting cannot supply an answer, so if the product only ever moves
+// on positive evidence, the whole power set is safe by construction — and if it does not, one of
+// these sixteen finds it. Amendment (P): the subsets include the ones the ninth round's mutually
+// exclusive classes could not express, in particular "everything at once", which is what a single
+// repository hook can do in a single promotion.
+//
+// THE PATHS THAT DECIDE WHETHER A CONCLUSION MAY BE DRAWN ABOUT THIS PROMOTION, in full — eleven,
+// not seven. Amendment (S): the ninth round's own list was written by the person who had just
+// edited it, so it contained what he had edited.
+//
+//    1. `promotionPending()`                                          the gate every other path asks
+//    2. `#recoveryHint()`                                             hands out `reset --hard`
+//    3. `#observeMain()`                                              what the record says it saw
+//    4. `#settlePromotion()`                                          the in-process conclusion
+//    5. `#resolvePromotion()`                                         the crash-reader's conclusion
+//    6. `#publicPromotion()`                                          the `pending` the listing prints
+//    7. `#assertNoUnresolvedPromotion()`                              this task's next approval
+//    8. `#assertMainNotBusy()` (pending branch)                       every OTHER task in the project
+//    9. `#assertMainNotBusy()` (unreadable branch)                    the same, for a damaged row
+//   10. `abandonMergeProcessGroup()` / `abandonPromotionOwnerProcess()` / `abandonPromotionEntirely()`
+//   11. `#releaseUnreadablePromotion()` and `unreadablePromotionView()`
+//
+// and the CLI rendering of 1, 2 and 6, which is where the owner actually reads the answer.
 // =============================================================================================
 
 /**
- * The corruption model, defined by SOURCE rather than by column name (amendments (E) and (I)).
+ * One source of a merge's identity, and how to DELETE it.
  *
- * The seventh round's three classes were read as "three SQLite columns", so when an eighth source
- * arrived that does not live in SQLite at all the matrix did not grow with it — the set of landing
- * spots shrank while the set of outcomes did not ([[PITFALLS]] #121). There are four sources now:
- * `column` and `payload` inside the promotion row, `trace` (git's own event stream) and
- * `spawn-record` (this product's marker for a failed pgid write) outside it. Adding a fifth means
- * adding a row here.
- *
- * NONE of these damages the row hash. That is deliberate and it is the whole finding: every shape
- * below leaves a row that passes its own integrity check, so it travels the READABLE path — the one
- * that was reading `observation_json` alone while `ps -g` listed the merge.
+ * Deleting rather than corrupting is the point. A corrupted source can be argued about — is the
+ * value wrong, is the field missing, does the hash still cover it — and four rounds of arguing
+ * about that produced four fixes and four bypasses. A deleted source makes exactly one claim: it
+ * says nothing. If saying nothing can move the product towards a conclusion, the product is wrong,
+ * and no amount of comparing what the survivors say can repair it.
  */
-interface SourceSilence {
-  label: string;
-  /** Applied while the merge is alive. Must leave the row passing `#assertPromotionRow`. */
-  apply(context: { path: string; data: string; promotionId: string }): Promise<void>;
+interface MergeIdentitySourceCase {
+  name: "column" | "payload" | "trace" | "spawn-record";
+  /**
+   * True when removing this source leaves a row whose integrity check FAILS.
+   *
+   * The two in-row sources are a projection pair — `#assertPromotionRow` refuses a row whose column
+   * and payload disagree, in both directions — so a column that goes away on its own is damage, not
+   * silence, and the record travels the unreadable path. That is not a gap in the model: it is the
+   * product refusing to let one half of the pair vanish quietly, and the assertions below hold on
+   * both paths.
+   */
+  damagesRow: boolean;
+  remove(context: { path: string; data: string; promotionId: string }): Promise<void>;
 }
 
-const SOURCE_SILENCE: readonly SourceSilence[] = [
+const IDENTITY_SOURCES: readonly MergeIdentitySourceCase[] = [
+  {
+    name: "column",
+    damagesRow: true,
+    remove: async ({ path }) => {
+      damagePromotionRow(path, { mergePgid: null, mergeBootAtSec: null });
+    },
+  },
   {
     // The p8-race shape, reachable with nothing forged: another process holds the database across
     // the one write that records the group ([[PITFALLS]] #65 calls that an ordinary condition on
     // this machine), `#recordMergePgid` swallows the failure, and git is already running detached.
-    label: "the two sources inside the row never got the group at all",
-    apply: async ({ path }) => {
+    // The columns are a projection of this field, so they go with it and the row stays READABLE —
+    // which is the path that concluded.
+    name: "payload",
+    damagesRow: false,
+    remove: async ({ path }) => {
       rewritePromotionRow(path, ({ observation }) => {
         const next = { ...observation };
         delete next.mergePgid;
@@ -4914,37 +4982,99 @@ const SOURCE_SILENCE: readonly SourceSilence[] = [
     },
   },
   {
-    // The p8-readable shape: the row STATES there is no group. That is what a settled promotion
-    // looks like, and it is a lie here, and only a source outside the row can tell the difference.
-    label: "the two sources inside the row state, affirmatively, that there is no group",
-    apply: async ({ path }) => {
-      rewritePromotionRow(path, ({ observation }) => ({
-        observation: { ...observation, mergePgid: null, mergeGroup: null },
-      }));
+    // BLOCKER-1's own move, and it needs no database access at all: `$GIT_TRACE2_EVENT` is handed
+    // to every hook this merge runs, and this phase trusts those hooks and runs them as the owner
+    // with no sandbox. Two lines in a hook empty the file.
+    name: "trace",
+    damagesRow: false,
+    remove: async ({ data, promotionId }) => {
+      await rm(join(data, "promotion-traces", `${promotionId}.jsonl`), { force: true });
     },
   },
   {
-    // The mirror: the sources OUTSIDE the row stop answering. The in-row pair is intact and must
-    // carry it alone — otherwise "the trace fixed it" would be indistinguishable from "the trace is
-    // now the only thing that works".
-    label: "both sources outside the row stop answering",
-    apply: async ({ data, promotionId }) => {
-      await rm(join(data, "promotion-traces", `${promotionId}.jsonl`), { force: true });
+    // The marker lives in `dirname($GIT_TRACE2_EVENT)`, which the same hook derives from the same
+    // environment variable. The claim that it is "never named to anything the merge runs" was
+    // measured false; what makes it safe is not where it is but that its absence cannot loosen.
+    name: "spawn-record",
+    damagesRow: false,
+    remove: async ({ data, promotionId }) => {
       await rm(join(data, "promotion-traces", `${promotionId}.spawn-record.json`), { force: true });
     },
   },
 ];
 
-for (const silence of SOURCE_SILENCE) {
-  test(`no path concludes about a live merge when ${silence.label}`, async (t) => {
+/** Every subset of a list, smallest first. Sixteen for four sources, including none and all. */
+function subsetsOf<T>(items: readonly T[]): T[][] {
+  const out: T[][] = [];
+  for (let mask = 0; mask < 1 << items.length; mask += 1) {
+    out.push(items.filter((_, index) => (mask & (1 << index)) !== 0));
+  }
+  return out.sort((a, b) => a.length - b.length);
+}
+
+/**
+ * The four loosenings, measured on whichever path this row now travels.
+ *
+ * They are the four the standard names, and each is a boolean that starts FALSE while a merge is
+ * writing. "No subset of deletions turns any of them true" is the whole of amendment (O), and it is
+ * checkable without enumerating a single damage shape.
+ */
+async function looseness(f: Fixture, promotionId: string): Promise<{
+  destructiveOffer: boolean;
+  notWaiting: boolean;
+  shortPhraseAccepted: boolean;
+  markerReleased: boolean;
+  report: string;
+}> {
+  const registry = new CandidateRegistry(f.data);
+  try {
+    const entry = (await registry.promotions({ roomId: "demo", mainPath: f.source }))[0];
+    assert.ok(entry !== undefined, "the promotion row disappeared");
+    const report = await runCandidatePromotionsCommand({
+      args: [], roomId: "demo", mainPath: f.source, registry, decidedBy: "local-cli",
+    });
+    const short = async (confirmation: string): Promise<boolean> => {
+      try {
+        await registry.abandonMergeProcessGroup({
+          promotionId, roomId: "demo", mainPath: f.source, pgid: 0, confirmation,
+          decidedBy: "local-web",
+        });
+        return true;
+      } catch { return false; }
+    };
+    const shortPhraseAccepted = await short(MERGE_GROUP_ABANDON_CONFIRMATION)
+      || await short(MERGE_UNREADABLE_ABANDON_CONFIRMATION);
+    if ("unreadable" in entry) {
+      return {
+        destructiveOffer: false,
+        notWaiting: entry.release?.probeReadable === true,
+        shortPhraseAccepted,
+        markerReleased: entry.holdsProjectExclusiveMarker === false,
+        report,
+      };
+    }
+    return {
+      destructiveOffer: entry.observation.recoveryKind === "reset-to-pre-promotion"
+        || entry.observation.recovery !== undefined,
+      notWaiting: entry.pending === undefined,
+      shortPhraseAccepted,
+      markerReleased: entry.state !== "applying",
+      report,
+    };
+  } finally { registry.close(); }
+}
+
+for (const removed of subsetsOf(IDENTITY_SOURCES)) {
+  const label = removed.length === 0
+    ? "nothing is deleted"
+    : `${removed.map((source) => source.name).join(" + ")} ${removed.length === 1 ? "is" : "are"} deleted`;
+  test(`no source subset lets a live merge be concluded about: ${label}`, async (t) => {
     const f = await fixture(t);
     const started = join(f.root, "hook-entered");
     await hook(f, "pre-merge-commit", `#!/bin/sh\ntouch ${JSON.stringify(started)}\nsleep 900\n`);
 
     // A SECOND task over the same main, approved BEFORE anything writes, so its refusal cannot come
-    // from the first merge having dirtied the tree. The eighth-round reviewer's own scope note was
-    // that it could only show "the named marker did not fire, and the coincidence stopped it"; this
-    // is what turns that into a refusal by name.
+    // from the first merge having dirtied the tree.
     const second = await f.registry.start({
       actor: "codex1", clientRequestId: key(), roomId: "demo", mainPath: f.source, task: "second",
     });
@@ -4986,7 +5116,20 @@ for (const silence of SOURCE_SILENCE) {
     assert.ok(typeof pgid === "number" && pgid > 1);
     t.after(() => { try { process.kill(-pgid, "SIGKILL"); } catch { /* already gone */ } });
 
-    await silence.apply({ path: f.path, data: f.data, promotionId });
+    // All FOUR sources start out naming this merge, so every removal below takes away something
+    // that was really there. The marker is written by hand because the product only writes it when
+    // the pgid write fails, and this promotion's did not — the baseline has to be the state in
+    // which every source answers, or a "subset" would be measuring absences that predate it.
+    const marker = join(f.data, "promotion-traces", `${promotionId}.spawn-record.json`);
+    await writeFile(marker, JSON.stringify({
+      pgid, bootAtSec: Math.round(Date.now() / 1_000 - uptime()), at: new Date().toISOString(),
+    }), { encoding: "utf8", mode: 0o600 });
+    assert.equal(await exists(join(f.data, "promotion-traces", `${promotionId}.jsonl`)), true,
+      "git's trace was never written, so deleting it would prove nothing");
+
+    for (const source of removed) {
+      await source.remove({ path: f.path, data: f.data, promotionId });
+    }
 
     // [[PITFALLS]] #106: none of what follows is evidence unless the merge really is writing.
     assert.equal(groupAlive(pgid), true, "this test is only evidence while the merge is alive");
@@ -4994,34 +5137,28 @@ for (const silence of SOURCE_SILENCE) {
     assert.match(listing, /git[^\n]*merge/u, `ps -g ${pgid} does not show the merge:\n${listing}`);
     const beforeTree = await treeDigest(f.source);
 
+    const measured = await looseness(f, promotionId);
+    assert.equal(measured.destructiveOffer, false,
+      `a destructive recovery command was offered while the merge was writing:\n${measured.report}`);
+    assert.equal(measured.notWaiting, false,
+      `the record stopped waiting for a merge that is still writing:\n${measured.report}`);
+    assert.equal(measured.shortPhraseAccepted, false,
+      "a phrase that says nothing about main being written released a live merge");
+    assert.equal(measured.markerReleased, false,
+      "the project's exclusive marker was handed back over a live merge");
+
+    // The CLI rendering of the same answer. The sentence this replaced asserted a fact about the
+    // owner's machine while `ps -g` listed three live processes (amendment (L)).
+    assert.ok(!/is still being waited on/u.test(measured.report), measured.report);
+    assert.ok(!/reset --hard/u.test(measured.report),
+      `the CLI offered a destructive command:\n${measured.report}`);
+    assert.ok(!/pid undefined|pid NaN/u.test(measured.report), measured.report);
+
     const registry = new CandidateRegistry(f.data);
     t.after(() => registry.close());
 
-    // PATH 1 + 2. The record does not settle, and it names the number `ps -g` is showing.
-    const listed = readable((await registry.promotions({ roomId: "demo", mainPath: f.source }))[0]);
-    assert.equal(listed.state, "applying", "a conclusion was drawn over a live merge");
-    assert.equal(listed.pending?.code, "MERGE_SUBPROCESS_STILL_RUNNING");
-    assert.equal(listed.pending?.pid, pgid);
-    assert.equal(listed.pending?.release, MERGE_LIVE_ABANDON_CONFIRMATION);
-    // And nothing destructive is on offer. This is the sentence the eighth round handed the owner:
-    // `git reset --hard <pre-op head>` against a working tree git was in the middle of writing.
-    assert.notEqual(listed.observation.recoveryKind, "reset-to-pre-promotion");
-    assert.equal(listed.observation.recovery, undefined);
-
-    // The CLI rendering of the same two paths (amendment (L)). The old line asserted a fact about
-    // the owner's machine — "this record is not blocked on any process" — while three processes
-    // were alive; the assertion below is what stops that sentence coming back.
-    const report = await runCandidatePromotionsCommand({
-      args: [], roomId: "demo", mainPath: f.source, registry, decidedBy: "local-cli",
-    });
-    assert.ok(!report.includes("is still being waited on"),
-      `the CLI claimed nothing was being waited on:\n${report}`);
-    assert.match(report, new RegExp(`MERGE_SUBPROCESS_STILL_RUNNING \\(pid ${pgid}\\)`, "u"));
-    assert.ok(!/reset --hard/u.test(report), `the CLI offered a destructive command:\n${report}`);
-
-    // PATH 3. This task's own next approval. Asked through `requestMainMerge`, because
-    // `previewMainMerge` deliberately does NOT pass this gate — reading the wrong one of the two is
-    // the mistake the fifth-round reviewer made and reported ([[PITFALLS]] #114).
+    // This task's own next approval. Asked through `requestMainMerge`, because `previewMainMerge`
+    // deliberately does NOT pass this gate ([[PITFALLS]] #114).
     const again = await registry.previewMainMerge({
       taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
     });
@@ -5033,84 +5170,97 @@ for (const silence of SOURCE_SILENCE) {
       /MAIN_MERGE_PROMOTION_UNRESOLVED/u,
     );
 
-    // PATH 4. Every OTHER task in the project, refused BY NAME rather than by a dirty tree.
+    // Every OTHER task in the project, refused BY NAME rather than by a dirty tree. This is the one
+    // the ninth round's reviewer could not reach through the per-task gate, and it is the one that
+    // would let a second `git merge` start into a repository the first one is still writing.
     await assert.rejects(
       registry.promoteMainMerge({
         approvalId: secondApproval.id, token: secondToken, action: MERGE_APPROVAL_GRANT,
         taskId: second.taskId, roomId: "demo", mainPath: f.source,
       }),
-      (error: Error) => error.message === "MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY",
-    );
-
-    // PATH 5. The merge-group release refuses the phrase that says nothing about main being written.
-    await assert.rejects(
-      registry.abandonMergeProcessGroup({
-        promotionId, roomId: "demo", mainPath: f.source, pgid,
-        confirmation: MERGE_GROUP_ABANDON_CONFIRMATION, decidedBy: "local-web",
-      }),
-      (error: Error & { confirmation?: string }) =>
-        error.message === "MERGE_ABANDON_REFUSED_MERGE_STILL_RUNNING"
-        && error.confirmation === MERGE_LIVE_ABANDON_CONFIRMATION,
-    );
-    // …and an invented number, even with the phrase that admits main may be being written.
-    await assert.rejects(
-      registry.abandonMergeProcessGroup({
-        promotionId, roomId: "demo", mainPath: f.source, pgid: 999_999,
-        confirmation: MERGE_LIVE_ABANDON_CONFIRMATION, decidedBy: "local-web",
-      }),
-      /MERGE_GROUP_ABANDON_PGID_MISMATCH/u,
-    );
-
-    // PATH 6 and 7. Both are answering about the same record and must not be the way past it.
-    await assert.rejects(
-      registry.abandonPromotionOwnerProcess({
-        promotionId, roomId: "demo", mainPath: f.source, pid: process.pid,
-        confirmation: MERGE_OWNER_ABANDON_CONFIRMATION, decidedBy: "local-web",
-      }),
-      /MAIN_MERGE_PROMOTION_NOT_OWNER_BLOCKED/u,
-    );
-    await assert.rejects(
-      registry.abandonPromotionEntirely({
-        promotionId, roomId: "demo", mainPath: f.source, pid: process.pid, pgid,
-        confirmation: MERGE_PROMOTION_ABANDON_CONFIRMATION, decidedBy: "local-web",
-      }),
-      /MAIN_MERGE_PROMOTION_NOT_DOUBLY_BLOCKED/u,
+      (error: Error) => error.message === "MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY"
+        || error.message === "MAIN_MERGE_PROMOTION_ROW_UNREADABLE",
     );
 
     assert.equal(groupAlive(pgid), true, "nothing here may kill the merge");
     assert.equal(await treeDigest(f.source), beforeTree, "reading the record wrote to the repository");
     assert.equal(await head(f.source), beforeHead);
+  });
+}
 
-    /*
-     * The other direction ([[PITFALLS]] #107). Everything above would also be true of a record that
-     * simply refuses forever, which is the stale-observable defect this project has already had once
-     * ([[PITFALLS]] #102) and the shape bar item 11 forbids. So: end the merge, change nothing else,
-     * and every one of the same paths must move.
-     */
+/*
+ * The other direction, once ([[PITFALLS]] #107). Everything above would also be true of a record
+ * that refuses forever, which is the stale-observable defect this project has already had
+ * ([[PITFALLS]] #102) and the shape bar item 11 forbids.
+ *
+ * Two exits, and which one applies is decided by evidence rather than by patience. With the row's
+ * OWN sources still naming the group, ending the merge is enough and the record converges by
+ * itself. With every source deleted — the maximum a single hook can do in one promotion, which is
+ * amendment (P)'s requirement — nothing can ever say the merge ended, so the exit is the owner's,
+ * in one named phrase, and it is REACHABLE.
+ */
+for (const wipe of [false, true]) {
+  test(`a record that cannot be concluded about still has a way out: ${
+    wipe ? "every source deleted" : "the row's own sources intact"}`, async (t) => {
+    const f = await fixture(t);
+    const started = join(f.root, "hook-entered");
+    await hook(f, "pre-merge-commit", `#!/bin/sh\ntouch ${JSON.stringify(started)}\nsleep 900\n`);
+    const approval = await raise(f);
+    const token = await grant(f, approval);
+    const child = await promoteInChildAt(f, approval, token);
+    t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+    for (let attempt = 0; attempt < 300 && !await exists(started); attempt += 1) await delay(100);
+    child.kill("SIGKILL");
+    await waitForExit(child);
+    const before = new CandidateRegistry(f.data);
+    const inFlight = readable((await before.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+    const promotionId = inFlight.id;
+    const pgid = inFlight.observation.mergePgid as number;
+    before.close();
+    f.registry.close();
+    assert.ok(typeof pgid === "number" && pgid > 1);
+
+    if (wipe) {
+      for (const source of IDENTITY_SOURCES) {
+        if (source.name === "column") continue; // taken with the payload, which is its projection
+        await source.remove({ path: f.path, data: f.data, promotionId });
+      }
+    }
     process.kill(-pgid, "SIGKILL");
     await waitForGroupExit(pgid);
-    assert.equal(groupAlive(pgid), false, "the second half of this test needs the merge to be over");
+    assert.equal(groupAlive(pgid), false, "this half needs the merge to be over");
 
-    const settled = await settledPromotion(registry, f.source, 100);
-    assert.equal(settled.state, "needs-manual-review", "the record never converged");
-    assert.equal(settled.pending, undefined);
-    const after = await runCandidatePromotionsCommand({
-      args: [], roomId: "demo", mainPath: f.source, registry, decidedBy: "local-cli",
+    const registry = new CandidateRegistry(f.data);
+    t.after(() => registry.close());
+    if (!wipe) {
+      const settled = await settledPromotion(registry, f.source, 100);
+      assert.equal(settled.state, "needs-manual-review", "the record never converged");
+      assert.equal(settled.pending, undefined);
+      assert.equal(settled.observation.mergeConclusion, "MERGE_GROUP_PROBED_GONE",
+        "the record settled without naming the evidence that let it");
+      // And it stays converged. The evidence that allowed it is erased by the very act of recording
+      // it — `mergePgid` becomes null — so a second read has to find the conclusion itself.
+      const again = readable((await registry.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+      assert.equal(again.pending, undefined, "the record re-opened a conclusion it had already made");
+      return;
+    }
+    const waiting = readable((await registry.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+    assert.equal(waiting.state, "applying");
+    assert.equal(waiting.pending?.code, "MERGE_IDENTITY_UNACCOUNTED");
+    assert.equal(waiting.pending?.pid, undefined, "a state with no number must not invent one");
+    assert.equal(waiting.pending?.release, MERGE_UNACCOUNTED_ABANDON_CONFIRMATION);
+    const beforeTree = await treeDigest(f.source);
+    const released = await registry.abandonMergeProcessGroup({
+      promotionId, roomId: "demo", mainPath: f.source, pgid: 0,
+      confirmation: MERGE_UNACCOUNTED_ABANDON_CONFIRMATION, decidedBy: "local-web",
     });
-    assert.match(after, /no process this record names is still being waited on/u);
-    // …and the sentence it replaced does not come back. That one asserted a fact about the owner's
-    // machine — "this record is not blocked on any process" — and it was printed while `ps -g`
-    // listed three live processes. Nothing here can promise what is running (amendment (L)).
-    assert.ok(!/not blocked on any process/u.test(after), after);
-    // The per-task gate still refuses — `needs-manual-review` is unresolved for its own task — but
-    // the PROJECT-wide marker is gone, which is the thing that was being held over a live merge.
-    await assert.rejects(
-      registry.promoteMainMerge({
-        approvalId: secondApproval.id, token: secondToken, action: MERGE_APPROVAL_GRANT,
-        taskId: second.taskId, roomId: "demo", mainPath: f.source,
-      }),
-      (error: Error) => error.message !== "MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY",
-    );
+    assert.ok(!("unreadable" in released));
+    assert.equal(await treeDigest(f.source), beforeTree, "a release wrote to the repository");
+    const settled = await settledPromotion(registry, f.source, 100);
+    assert.notEqual(settled.state, "applying");
+    assert.equal(settled.pending, undefined);
+    assert.equal(settled.observation.mergeAccountAbandoned?.decidedBy, "local-web",
+      "the record must attribute this to the owner rather than report it as an observation");
   });
 }
 
@@ -5242,17 +5392,41 @@ test("a trace that proves a merge started without naming it is an unanswered que
   reader.close();
 
   /*
-   * The other direction ([[PITFALLS]] #107). Take the trace away and change nothing else: the record
-   * still says, affirmatively, that it holds no group, and now nothing contradicts it — so the SHORT
-   * phrase is the one that works. Without this, "always demand the long phrase" would pass the test
-   * above while taking the short phrase permanently out of service, which is what bar item 11
-   * forbids.
+   * The other direction ([[PITFALLS]] #107), rewritten by amendment (O).
+   *
+   * It used to take the trace away and expect the SHORT phrase, on the reasoning that a record
+   * saying "no group", with nothing left to contradict it, has answered. That reasoning is the
+   * ninth round's BLOCKER: the thing that would contradict it is a file whose path this product
+   * hands to every hook the merge runs, so "nothing contradicts it" is a state the observed merge
+   * can produce for itself — and it did, in a probe that changed two lines of a hook.
+   *
+   * The short phrase still has to work, or it is out of service and bar item 11 is broken. What it
+   * takes now is evidence rather than quiet: the merge ends and the COLUMN — inside the row, under
+   * its hash, out of the hook's reach — names the number that is now gone.
    */
   await rm(tracePath, { force: true });
+  const silenced = await releaseRequirement(f);
+  assert.equal(silenced.probeReadable, false,
+    "removing the only source that could contradict the record is not an answer from it");
+  assert.equal(silenced.confirmation, MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION);
+
+  process.kill(-pgid, "SIGKILL");
+  await waitForGroupExit(pgid);
+  const boot = Math.round(Date.now() / 1_000 - uptime());
+  damagePromotionRow(f.path, {
+    mergePgid: pgid,
+    mergeBootAtSec: boot,
+    observationJson: JSON.stringify({
+      code: "PROMOTION_STARTED", mainHead: null, mergePgid: pgid,
+      mergeGroup: { pgid, bootAtSec: boot, spawnedAt: null },
+      observedAt: "1970-01-01T00:00:00.000Z",
+    }),
+  });
   const answered = await releaseRequirement(f);
   assert.deepEqual(answered.alive, []);
+  assert.deepEqual(answered.recordedGroups.map((entry) => entry.source), ["column", "payload"]);
   assert.equal(answered.probeReadable, true,
-    "with nothing left to contradict it, a record that says `no group` has answered");
+    "a number the row itself names, probed and gone, is what an answer looks like");
   assert.equal(answered.confirmation, MERGE_UNREADABLE_ABANDON_CONFIRMATION);
   const releasing = new CandidateRegistry(f.data);
   t.after(() => releasing.close());
@@ -5262,7 +5436,6 @@ test("a trace that proves a merge started without naming it is an unanswered que
     confirmation: MERGE_UNREADABLE_ABANDON_CONFIRMATION, decidedBy: "local-web",
   }));
   assert.equal(released.holdsProjectExclusiveMarker, false);
-  assert.equal(groupAlive(pgid), true, "releasing the marker must not kill anything");
   assert.equal(await treeDigest(f.source), beforeTree);
 });
 
@@ -5470,10 +5643,21 @@ test("a merge whose process-group write failed is recorded as such, and still bl
   assert.equal(fromMarker.pending?.pid, pgid);
   alone.close();
 
-  // Once the merge is over the record converges — the marker names an incomplete account, not a
-  // permanent block ([[PITFALLS]] #102) — and the incompleteness is stated where the owner reads it.
+  // Once the merge is over the record must be able to move — the marker names an incomplete
+  // account, not a permanent block ([[PITFALLS]] #102). Amendment (O) changed HOW it moves: nothing
+  // inside this row ever held the number, so the only sources that could now say the merge is over
+  // are the two the merge's own hooks can write, and a record they can settle is not settled. The
+  // wait ends with the owner, in one named phrase, told exactly what to look for.
   process.kill(-pgid, "SIGKILL");
   await waitForGroupExit(pgid);
+  const waiting = readable((await registry.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  assert.equal(waiting.state, "applying");
+  assert.equal(waiting.pending?.code, "MERGE_IDENTITY_UNACCOUNTED");
+  assert.equal(waiting.pending?.release, MERGE_UNACCOUNTED_ABANDON_CONFIRMATION);
+  await registry.abandonMergeProcessGroup({
+    promotionId, roomId: "demo", mainPath: f.source, pgid,
+    confirmation: MERGE_UNACCOUNTED_ABANDON_CONFIRMATION, decidedBy: "local-web",
+  });
   const settled = await settledPromotion(registry, f.source, 100);
   assert.equal(settled.state, "needs-manual-review");
   assert.equal(settled.observation.mergeIdentityUnrecorded, true,
@@ -5481,7 +5665,12 @@ test("a merge whose process-group write failed is recorded as such, and still bl
   const report = await runCandidatePromotionsCommand({
     args: [], roomId: "demo", mainPath: f.source, registry, decidedBy: "local-cli",
   });
-  assert.match(report, /the write that was carrying this merge's process group FAILED/u);
+  // Attributed rather than asserted (amendment (Q)). The old sentence — "the write that was
+  // carrying this merge's process group FAILED" — was a claim about what happened inside this
+  // product, derived from a file existing in a directory the merge's own hooks can name. A hook
+  // that writes that file made the product print it, and it was not true.
+  assert.match(report, /a marker beside this promotion's trace says the write that would have/u);
+  assert.ok(!/process group FAILED/u.test(report), report);
 });
 
 /*
@@ -5539,10 +5728,39 @@ test("a promotion killed between spawning git and recording its group does not s
   assert.equal(listed.observation.recovery, undefined, "a recovery command was offered mid-write");
   assert.equal(await head(f.source), beforeHead);
 
-  // The other direction: once that merge is gone the record moves. A window that blocks forever is
-  // the defect, not the fix.
+  // The other direction: once that merge is gone the record must be able to move. A window that
+  // blocks forever is the defect, not the fix.
+  //
+  // How it moves changed with amendment (O), and this is the honest consequence rather than a
+  // weakening. Nothing INSIDE this row ever held the group — that is the whole premise of the test —
+  // so once the merge is over the only thing that could say so is git's trace, whose path this
+  // product hands to every hook the merge runs. A record that would settle on that is a record a
+  // hook can settle. So the wait ends where it should: with the owner, told exactly what to look
+  // for, in one named phrase.
   process.kill(-pgid, "SIGKILL");
   await waitForGroupExit(pgid);
+  const stillWaiting = readable((await registry.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  assert.equal(stillWaiting.state, "applying");
+  assert.equal(stillWaiting.pending?.code, "MERGE_IDENTITY_UNACCOUNTED");
+  assert.equal(stillWaiting.pending?.pid, undefined, "a state with no number must not invent one");
+  assert.equal(stillWaiting.pending?.release, MERGE_UNACCOUNTED_ABANDON_CONFIRMATION);
+  // The search it hands over is read-only and names the commit this promotion was authorized for.
+  assert.match(stillWaiting.pending?.inspect ?? "", /^ps -eo /u);
+  assert.ok(!/reset|kill|clean|checkout/u.test(stillWaiting.pending?.inspect ?? ""));
+  // Every other phrase is refused, so the exit cannot be reached by guessing.
+  for (const wrong of [MERGE_GROUP_ABANDON_CONFIRMATION, MERGE_LIVE_ABANDON_CONFIRMATION]) {
+    await assert.rejects(
+      registry.abandonMergeProcessGroup({
+        promotionId, roomId: "demo", mainPath: f.source, pgid,
+        confirmation: wrong, decidedBy: "local-web",
+      }),
+      /MERGE_GROUP_ABANDON_CONFIRMATION_MISMATCH/u,
+    );
+  }
+  await registry.abandonMergeProcessGroup({
+    promotionId, roomId: "demo", mainPath: f.source, pgid,
+    confirmation: MERGE_UNACCOUNTED_ABANDON_CONFIRMATION, decidedBy: "local-web",
+  });
   const settled = await settledPromotion(registry, f.source, 100);
   assert.notEqual(settled.state, "applying");
   assert.equal(settled.pending, undefined);
@@ -5752,23 +5970,31 @@ test("a record whose group was never written asks for the longer phrase even wit
   assert.equal(incomplete.confirmation, MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION);
 
   /*
-   * The other direction. Put a payload back that STATES, affirmatively, that there is no group —
-   * with the marker gone, that is an answer and the short phrase is the one that works. Then put the
-   * marker back and watch exactly that answer switch off again. Without both halves, "always ask for
-   * the long phrase" would satisfy the assertions above while retiring the short one, which is the
-   * shape bar item 11 forbids.
+   * The other direction. Put the group back into the row's OWN columns, where it would have gone if
+   * the write had not failed, and take the marker away: the record now names a number, the number
+   * probes dead, and the short phrase is the one that works. Then put the marker back and watch
+   * exactly that answer switch off again. Without both halves, "always ask for the long phrase"
+   * would satisfy the assertions above while retiring the short one, which bar item 11 forbids.
+   *
+   * Amendment (O) changed what the first half has to look like. It used to write a payload STATING
+   * that there is no group, which is the ninth round's blocker in miniature: a record asserting that
+   * there is nothing to probe is the absence of an answer, not an answer, and it is exactly what a
+   * merge that has silenced its own sources leaves behind.
    */
+  const boot = Math.round(Date.now() / 1_000 - uptime());
   damagePromotionRow(f.path, {
-    mergePgid: null,
-    mergeBootAtSec: null,
+    mergePgid: pgid,
+    mergeBootAtSec: boot,
     observationJson: JSON.stringify({
-      code: "PROMOTION_STARTED", mainHead: null, mergePgid: null, mergeGroup: null,
+      code: "PROMOTION_STARTED", mainHead: null, mergePgid: pgid,
+      mergeGroup: { pgid, bootAtSec: boot, spawnedAt: null },
       observedAt: "1970-01-01T00:00:00.000Z",
     }),
   });
   await rm(marker, { force: true });
   const answered = await releaseRequirement(f);
-  assert.deepEqual(answered.recordedGroups, []);
+  assert.deepEqual(answered.recordedGroups.map((entry) => entry.source), ["column", "payload"]);
+  assert.deepEqual(answered.alive, [], "this half is only about the phrase, not a live process");
   assert.equal(answered.probeReadable, true);
   assert.equal(answered.confirmation, MERGE_UNREADABLE_ABANDON_CONFIRMATION);
 
@@ -5777,4 +6003,310 @@ test("a record whose group was never written asks for the longer phrase even wit
   assert.equal(contradicted.probeReadable, false,
     "the marker says this record never got the group; that is not `there was no group`");
   assert.equal(contradicted.confirmation, MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION);
+});
+
+// =============================================================================================
+// Amendment (R). "Seven paths are each driven by their own test" was a claim about call sites, and
+// the ninth round's reviewer falsified it by reverting six of the seven wirings one line at a time
+// and watching 123/123 stay green. A path is only wired if a mutation that unwires it turns
+// something red. Each test below exists to be that red, and names the mutation it answers.
+// =============================================================================================
+
+/**
+ * Mutations OBS and SETTLE. `#observeMain` reads the merge's identity from EVERY source, and
+ * `#settlePromotion` hands it the real one rather than a trace-less reading.
+ *
+ * Reverting either was measured green: in every state the delivered tests reached, the payload
+ * happened to hold the same number, so "reads four sources" and "reads one" were indistinguishable.
+ * This is the state where they are not — the ONE write that records the group failed, so the two
+ * in-row sources hold nothing at all, and the only thing that knows what git was is the marker
+ * beside the trace. The merge itself then runs to completion with a background process still in its
+ * group, which is the shape that makes the identity observable rather than merely stored.
+ */
+test("what an observation records about the merge comes from every source, not from the payload", async (t) => {
+  const f = await fixture(t);
+  const started = join(f.root, "hook-entered");
+  const lingering = join(f.root, "lingering.pid");
+  await hook(f, "pre-merge-commit", `#!/bin/sh
+touch ${JSON.stringify(started)}
+sleep 900 </dev/null >/dev/null 2>&1 &
+echo $! > ${JSON.stringify(lingering)}
+exit 0
+`);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const child = await promoteWithFailingPgidWrite(f, approval, token);
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  await waitForExit(child);
+  f.registry.close();
+
+  const db = new DatabaseSync(f.path);
+  const row = db.prepare("SELECT * FROM candidate_merge_promotions LIMIT 1")
+    .get() as unknown as Record<string, string | number | null>;
+  db.close();
+  const promotionId = String(row.id);
+  const observation = JSON.parse(String(row.observation_json)) as {
+    mergePgid?: number | null;
+    mergeGroupSurvivors?: { pgid: number };
+    mergeIdentityUnrecorded?: boolean;
+  };
+  // The precondition ([[PITFALLS]] #106): the ONE write that puts the group into the row failed, so
+  // at the moment the observation was made neither in-row source held the number, and an
+  // observation that names it can only have got it from outside the row. (The column below holds it
+  // now BECAUSE the observation recovered it — which is the thing under test.)
+  const marker = join(f.data, "promotion-traces", `${promotionId}.spawn-record.json`);
+  assert.equal(await exists(marker), true, "the pgid write did not fail, so this test proves nothing");
+  assert.equal(observation.mergeIdentityUnrecorded, true,
+    "the record does not know its own account was incomplete, so nothing below is about recovery");
+  const pgid = (JSON.parse(await readFile(marker, "utf8")) as { pgid: number }).pgid;
+  const survivor = Number((await readFile(lingering, "utf8")).trim());
+  t.after(() => { try { process.kill(survivor, "SIGKILL"); } catch { /* already gone */ } });
+  assert.equal(groupAlive(pgid), true, "the background process this test needs is already gone");
+
+  assert.equal(observation.mergePgid, pgid,
+    "the record settled without naming the group its own write had lost");
+  assert.equal(observation.mergeGroupSurvivors?.pgid, pgid,
+    "the leader was gone and the group was not, and the record did not say so");
+  assert.equal(String(row.state), "applied", "the merge itself succeeded and must be recorded as such");
+});
+
+/**
+ * Mutations OGATE and HINT, and the second half of finding P1-1 that the ninth round measured only
+ * half of.
+ *
+ * A repository hook — trusted by this phase, run as the owner, unsandboxed — derives the marker's
+ * path from `$GIT_TRACE2_EVENT`, which this product hands it, and writes a number of its own
+ * choosing into it. The ninth round measured the false SENTENCE that produced; this measures the
+ * other half, which is what the record then DOES.
+ *
+ * The direction is fail-closed and that is the point: a hook can make this product refuse to
+ * conclude, and it cannot make it conclude. What it costs the owner is one named phrase; what it
+ * would have cost them is `git reset --hard` over a tree they were told was quiet.
+ */
+test("a hook that forges the spawn-record marker cannot make this record conclude, or lie about it", async (t) => {
+  const f = await fixture(t);
+  const started = join(f.root, "hook-entered");
+  const chosen = join(f.root, "chosen.pid");
+  // Nothing here is privileged: `${GIT_TRACE2_EVENT%.jsonl}.spawn-record.json` is ordinary shell
+  // against a variable the product itself exported into this hook's environment.
+  await hook(f, "pre-merge-commit", `#!/bin/sh
+touch ${JSON.stringify(started)}
+sleep 900 </dev/null >/dev/null 2>&1 &
+echo $! > ${JSON.stringify(chosen)}
+printf '{"pgid":%s,"at":"2026-08-07T00:00:00.000Z"}' "$!" \
+  > "\${GIT_TRACE2_EVENT%.jsonl}.spawn-record.json"
+exit 1
+`);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const beforeHead = await head(f.source);
+  const result = await promote(f, approval, token);
+  const forged = Number((await readFile(chosen, "utf8")).trim());
+  t.after(() => { try { process.kill(forged, "SIGKILL"); } catch { /* already gone */ } });
+  assert.equal(await exists(started), true, "the hook never ran");
+  assert.ok(Number.isSafeInteger(forged) && forged > 1);
+  assert.equal(pidAlive(forged), true, "the number the hook chose is not alive, so nothing is proved");
+  assert.equal(result.mainMutated, false);
+
+  // It did NOT settle, and it named what it could not account for rather than concluding.
+  const listed = readable((await f.registry.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  assert.equal(listed.state, "applying");
+  // This process is still the owner, so the record is blocked on both numbers — and the second of
+  // them is the one the hook picked. Without amendment (O) the row would have settled `rolled-back`
+  // here, which is the state that hands the project's exclusive marker back.
+  assert.equal(listed.pending?.code, "PROMOTION_OWNER_AND_MERGE_STILL_RUNNING");
+  assert.equal(listed.pending?.alsoBlockedBy?.pid, forged);
+  assert.notEqual(listed.observation.recoveryKind, "reset-to-pre-promotion",
+    "a hook chose the number, and the product offered to rewrite the repository over it");
+  assert.equal(listed.observation.recovery?.startsWith("ps "), true, listed.observation.recovery);
+
+  const report = await runCandidatePromotionsCommand({
+    args: [], roomId: "demo", mainPath: f.source, registry: f.registry, decidedBy: "local-cli",
+  });
+  assert.ok(!/reset --hard/u.test(report), report);
+  // The sentence the ninth round caught: a claim about what happened inside this product, decided
+  // by the contents of a repository. What is printed now is attributed and true either way.
+  assert.ok(!/process group FAILED/u.test(report), report);
+  assert.match(report, /nothing here can verify who wrote that marker/u);
+
+  // And the way out, once the owner has looked. The marker is still there and still says what it
+  // says, so no probe will ever account for this merge: the exit has to be the owner's.
+  process.kill(forged, "SIGKILL");
+  for (let attempt = 0; attempt < 100 && pidAlive(forged); attempt += 1) await delay(100);
+  await f.registry.abandonPromotionOwnerProcess({
+    promotionId: listed.id, roomId: "demo", mainPath: f.source, pid: process.pid,
+    confirmation: MERGE_OWNER_ABANDON_CONFIRMATION, decidedBy: "local-web",
+  });
+  const stuck = readable((await f.registry.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  assert.equal(stuck.pending?.code, "MERGE_IDENTITY_UNACCOUNTED",
+    "the marker is still there and still says this record never got its group");
+  await f.registry.abandonMergeProcessGroup({
+    promotionId: listed.id, roomId: "demo", mainPath: f.source, pgid: 0,
+    confirmation: MERGE_UNACCOUNTED_ABANDON_CONFIRMATION, decidedBy: "local-web",
+  });
+  const settled = await settledPromotion(f.registry, f.source, 100);
+  assert.notEqual(settled.state, "applying");
+  assert.equal(await head(f.source), beforeHead, "nothing here may write to main");
+});
+
+/**
+ * Mutation RECTRUST. `unreadableReleaseRequirement` asks with `recordTrusted: false`, and flipping
+ * it to `true` was measured green because no test anywhere put a `mergeGroupDisowned` into a row
+ * whose hash had failed — `grep -n mergeGroupDisowned test/` found none.
+ *
+ * That is the whole purpose of the flag: a row nobody can read must not be able to drop a live
+ * merge out of its own list of things to probe by claiming its owner already disowned it.
+ */
+test("an unreadable row cannot disown a live merge on its own say-so", async (t) => {
+  const f = await fixture(t);
+  const { promotionId, pgid } = await liveMerge(t, f);
+  const boot = Math.round(Date.now() / 1_000 - uptime());
+  damagePromotionRow(f.path, {
+    mergePgid: pgid,
+    mergeBootAtSec: boot,
+    observationJson: JSON.stringify({
+      code: "PROMOTION_STARTED", mainHead: null, mergePgid: pgid,
+      mergeGroup: { pgid, bootAtSec: boot, spawnedAt: null },
+      // The claim the row makes about itself, in a row whose integrity check has failed.
+      mergeGroupDisowned: { pgid, at: "2026-08-07T00:00:00.000Z", decidedBy: "local-web", bootAtSec: boot },
+      observedAt: "1970-01-01T00:00:00.000Z",
+    }),
+  });
+  assert.equal(groupAlive(pgid), true, "this test is only evidence while the merge is alive");
+  assert.match(await psGroup(pgid), /git[^\n]*merge/u);
+
+  const requirement = await releaseRequirement(f);
+  assert.deepEqual(requirement.alive, [["merge", pgid]],
+    "an unreadable row dropped a live merge from what gets probed by claiming it was disowned");
+  assert.equal(requirement.probeReadable, false);
+  assert.equal(requirement.confirmation, MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION);
+
+  const registry = new CandidateRegistry(f.data);
+  t.after(() => registry.close());
+  // The number has to be quoted, which is only required because the number is still visible.
+  await assert.rejects(
+    registry.abandonMergeProcessGroup({
+      promotionId, roomId: "demo", mainPath: f.source, pgid: 999_999,
+      confirmation: MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION, decidedBy: "local-web",
+    }),
+    /MERGE_GROUP_ABANDON_PGID_MISMATCH/u,
+  );
+  const released = unreadable(await registry.abandonMergeProcessGroup({
+    promotionId, roomId: "demo", mainPath: f.source, pgid,
+    confirmation: MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION, decidedBy: "local-web",
+  }));
+  assert.equal(released.holdsProjectExclusiveMarker, false);
+  assert.equal(groupAlive(pgid), true, "releasing a marker must not kill anything");
+});
+
+/**
+ * Mutations BUSYUNREAD and RELUNREAD. Both call sites of `unreadableReleaseRequirement` inside the
+ * class were passing the row's real outside sources, and replacing either with a trace-less reading
+ * was measured green — no test drove an unreadable row whose group is named ONLY from outside it.
+ *
+ * That row is not exotic: it is what a corruption that reaches `observation_json` leaves behind
+ * whenever the pgid write had already been lost, and it is the exact shape the sixth round measured
+ * releasing a project-wide marker over a `git merge` that `ps -g` was listing.
+ */
+test("an unreadable row whose merge only git's trace names still shows it, and still demands it", async (t) => {
+  const f = await fixture(t);
+  // A second task, approved and granted BEFORE anything writes, so the project-wide gate can be
+  // driven by a caller that has proved it holds the token — the only caller shown the pids — and
+  // so its refusal cannot come from the first merge having dirtied the tree.
+  const second = await f.registry.start({
+    actor: "codex1", clientRequestId: key(), roomId: "demo", mainPath: f.source, task: "second",
+  });
+  await commit(second.candidatePath, "second.txt", "second work\n", "second work");
+  await f.registry.complete({
+    actor: "codex1", clientRequestId: key(), taskId: second.taskId, roomId: "demo",
+    mainPath: f.source, summary: "also ready",
+  });
+  const preview = await f.registry.previewMainMerge({
+    taskId: second.taskId, roomId: "demo", mainPath: f.source,
+  });
+  const approval = await f.registry.requestMainMerge({
+    actor: "codex1", clientRequestId: key(), taskId: second.taskId, roomId: "demo",
+    mainPath: f.source, completionId: preview.completionId, previewDigest: preview.previewDigest,
+  });
+  const token = (await f.registry.grantMainMerge({
+    approvalId: approval.id, roomId: "demo", mainPath: f.source,
+    previewDigest: approval.binding.previewDigest,
+    confirmation: MERGE_APPROVAL_CONFIRMATION, decidedBy: "local-web",
+  })).approvalToken;
+
+  const { promotionId, pgid } = await liveMerge(t, f);
+  const registry = new CandidateRegistry(f.data);
+  t.after(() => registry.close());
+
+  damagePromotionRow(f.path, {
+    observationJson: "this used to be JSON", mergePgid: null, mergeBootAtSec: null,
+  });
+  assert.equal(groupAlive(pgid), true, "this test is only evidence while the merge is alive");
+
+  // PATH 11: the listing's own view of an unreadable row.
+  const requirement = await releaseRequirement(f);
+  assert.deepEqual(requirement.alive, [["merge", pgid]],
+    "the only source that names this merge is outside the row, and it was not read");
+  assert.deepEqual(requirement.recordedGroups.map((entry) => entry.source), ["trace"]);
+
+  // PATH 9: every OTHER task in the project. The refusal carries the number, so the owner is told
+  // what is in the way rather than only that something is.
+  await assert.rejects(
+    registry.promoteMainMerge({
+      approvalId: approval.id, token, action: MERGE_APPROVAL_GRANT,
+      taskId: second.taskId, roomId: "demo", mainPath: f.source,
+    }),
+    (error: Error & { alive?: ReadonlyArray<{ pid: number }>; probeReadable?: boolean }) =>
+      error.message === "MAIN_MERGE_PROMOTION_ROW_UNREADABLE"
+      && error.probeReadable === false
+      && (error.alive ?? []).some((entry) => entry.pid === pgid),
+  );
+
+  // PATH 11 again, at the door that actually writes: the number must be quoted.
+  await assert.rejects(
+    registry.abandonMergeProcessGroup({
+      promotionId, roomId: "demo", mainPath: f.source, pgid: 999_999,
+      confirmation: MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION, decidedBy: "local-web",
+    }),
+    /MERGE_GROUP_ABANDON_PGID_MISMATCH/u,
+  );
+  assert.equal(groupAlive(pgid), true, "nothing here may kill the merge");
+});
+
+/**
+ * Mutation ENTIRELY. `abandonPromotionEntirely` records whether the owner was abandoning a merge
+ * that was RUNNING, and reverting that reading to the payload alone was measured green.
+ *
+ * `whileRunning` is the owner's trail: it is what the record says they were told they were
+ * accepting. A `false` written while `ps -g` lists the merge is a trail that misrepresents the
+ * decision, and the payload is exactly the source a failed pgid write leaves empty.
+ */
+test("the combined release records what the owner was actually shown, from every source", async (t) => {
+  const f = await fixture(t);
+  const { promotionId, pgid } = await liveMerge(t, f);
+  // The owner process alive again (this test process), and the group removed from both in-row
+  // sources so that only git's trace names it.
+  rewritePromotionRow(f.path, ({ observation }) => {
+    const next = { ...observation };
+    delete next.mergePgid;
+    delete next.mergeGroup;
+    return { ownerPid: process.pid, observation: next };
+  });
+  assert.equal(groupAlive(pgid), true, "this test is only evidence while the merge is alive");
+
+  const registry = new CandidateRegistry(f.data);
+  t.after(() => registry.close());
+  const blocked = readable((await registry.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  assert.equal(blocked.pending?.code, "PROMOTION_OWNER_AND_MERGE_STILL_RUNNING");
+  assert.equal(blocked.pending?.alsoBlockedBy?.pid, pgid);
+
+  const released = await registry.abandonPromotionEntirely({
+    promotionId, roomId: "demo", mainPath: f.source, pid: process.pid, pgid,
+    confirmation: MERGE_PROMOTION_ABANDON_CONFIRMATION, decidedBy: "local-web",
+  });
+  assert.equal(released.observation.mergeGroupDisowned?.whileRunning, true,
+    "the trail says the owner abandoned a merge that was over; `ps -g` says otherwise");
+  // …and the record keeps offering only a look at it, never a rewrite, for as long as it lives.
+  assert.equal(released.observation.recoveryKind, "inspect-live-merge");
+  assert.equal(groupAlive(pgid), true, "nothing here may kill the merge");
 });
