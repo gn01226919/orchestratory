@@ -1379,6 +1379,80 @@ P1-1 沒被量到的那一半（hook 挑一個活 pid 把 task 卡住）已補�
 | --- | --- | --- |
 | **`leaderExitObserved`（「本程序親眼看著 merge leader 關閉」這條正向證據）在一種三重故障下可能被誤用**：`mergeIntoHead` 拋出 ∧ pgid 寫入失敗 ∧ spawn-record marker 寫入也失敗。此時沒有任何來源具名號碼，而產品仍會以「這次嘗試觀察過」下結論。突變 LEADEREXIT 存活即為證據，**本輪未能構造出可穩定重現的測試** | 三個獨立故障要同時發生；而且 `runProcess` 只有兩種拋出途徑，其中 spawn 失敗代表 git 根本沒跑（下結論正確），另一種 `PROCESS_TREE_CLEANUP_FAILED` 只有在 group 撐過 SIGKILL 時才發生。這一條**不宣稱已覆蓋**（[[PITFALLS]] #104） | **若 `runProcess` 新增任何拋出途徑即失效**——屆時必須重跑 LEADEREXIT 突變並補上能構造該狀態的測試；或把這條證據整個拿掉，代價是每一列 pgid 寫入失敗的促進都要 Owner 多打一句短語 |
 
+### v2 的第七處補正（2026-08-07，第十輪審查後）—— **信任模型重畫，不再是補規則**
+
+第七到第十輪，四次補正、四次同一個元形狀：
+
+| 輪次 | 標準說什麼 | 攻擊者換到哪個維度 |
+|---|---|---|
+| 7 → 8 | 不得列舉**欄位名** | 換一個不在資料庫裡的**來源** |
+| 8 → 9 | 三類以**來源**定義 | 三類寫成互斥，打**交集** |
+| 9 → 10 | (M) 內容**只能收緊** | 不改內容，把來源**刪掉**（存在性） |
+| 10 → 11 | (O) **缺席**只能往預設移動 | **供給**一個偽造的正向事實（寫入） |
+
+(O) 規定了「缺席不能放寬」，**卻從未規定誰有資格製造「在場」**。
+16 子集枚舉只有 `delete`，沒有 `write`——測試註解自己寫著
+「Deleting cannot supply an answer」，正確，但沒有人問過**誰能 supply an answer**。
+
+**所以不再補第七條規則。錯的是信任模型本身。**
+
+#### (T) 在 5-5 的對手模型下，owner uid 寫得到的持久化儲存，沒有一個是可信來源
+
+對手不是抽象的「同帳號惡意程序」。**是本階段親手製造的常態**：
+repo hook 以 Owner 身分、無沙箱、在 merge 進行中執行。它的能力已實測：
+
+- registry DB 的路徑是 `dirname(dirname($GIT_TRACE2_EVENT))/candidate-registry.sqlite`
+  ——**產品親手放進每一個 hook 環境的同一個變數**；
+- `mergePromotionHash()`／`mergeApprovalHash()`／`rowHash()` 全是
+  `sha(JSON.stringify([...公開欄位]))`，而 `sha()` 是**無金鑰 SHA-256**
+  ——**沒有鏈、沒有金鑰，能寫檔就能算出合法的 `row_hash`**；
+- `#verify()` 刻意不驗 `candidate_merge_promotions`。
+
+因此以下三句白紙黑字的宣稱是**假的**，一併作廢：
+`The two in-row sources are covered by the row hash`（`candidate-registry.ts:1721`）、
+`hash-chained database … the merge cannot reach past the chain`（`:6303`）、
+以及本文件原 (O) 第 (1)(3) 條裡的「雜湊鏈保護，hook 碰不到」。
+`row_hash` 是**完整性偵測**，不是防偽——它讓竄改可偵測，不讓竄改不可能。
+
+#### 只剩兩類正向事實
+
+1. **活著的本程序的第一手觀察**：這個 orchestrator 程序親自 spawn 了那個 merge，
+   持有 child handle，親眼看著它退出。**不跨程序存活。**
+2. **Owner 親自查看之後的宣告。**
+
+**列內來源、trace、spawn-record、git ref——全部降級為「提示」。**
+它們可以**增加**要探測的號碼、可以**觸發**更嚴格的要求，
+但**沒有一個能成為「這件事結束了」的理由**。
+
+#### 由此導出的三條硬規則
+
+**(T-1) 破壞性指令只能由第一手觀察產生。**
+`recovery` 若含 `reset --hard`／`--force`／`clean -fd` 之類，
+**只能**在本程序親自觀察到 merge 結束時遞出。
+只要 orchestrator 死過一次（正是需要復原的那個情況），
+**一律不得自動遞出破壞性指令**——改為「這裡是要看什麼、看完怎麼告訴我」。
+
+**(T-2) Owner 宣告結束等待，但永不授權破壞性指令。**
+這句話**已經逐字寫在 `MergeWriteConclusion.byOwnerDeclaration` 的註解裡**
+（`candidate-registry.ts:2113-2119`），而 `grep -rn byOwnerDeclaration src/ test/`
+只有四個命中、**全部在寫入端**——這個欄位被算出來，從來沒有被讀過。
+規則：算出來的判準必須有讀取端，否則不得宣稱它是保護。
+
+**(T-3) (O) 的子集測試框架擴為「刪除**或**偽造」。**
+每一個來源子集，除了 `delete`，還要有 `forge`：
+**以合法重算的 `row_hash` 寫入攻擊者選定的值**。
+四項寬鬆度（`destructiveOffer`／`notWaiting`／`shortPhraseAccepted`／`markerReleased`）
+在 `forge` 之下同樣不得由 false 轉 true。
+**框架骨架不換，換的是它枚舉的動作集合。**
+
+#### 明寫的代價（這是取捨，不是遺漏）
+
+orchestrator 在 merge 中途死亡之後，**產品不再提供自動回滾指令**。
+Owner 必須自己查看（產品給唯讀搜尋指令），確認之後手動處理。
+理由：在這個對手模型下，任何跨程序的「可以安全回滾」判斷都可能是 hook 寫的。
+**寧可讓 Owner 多做一次確認，也不遞出一行會跟活著的 merge 賽跑、
+並讓被覆蓋的 ignored 檔案消失的指令**（[[PITFALLS]] #94）。
+
 ### 可接受的殘餘風險（連同「何時失效」一起列，未列出的不得事後補認）
 
 | 殘餘風險 | 為什麼此階段可接受 | 何時失效 |
