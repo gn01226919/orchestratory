@@ -344,6 +344,14 @@ export function describePromotions(input: {
       lines.push(`  release     --confirm ${JSON.stringify(pending.release)}`);
     } else {
       lines.push(`  waiting     ${pending.code} (pid ${pending.pid})`);
+      if (pending.code === "MERGE_END_NOT_OBSERVED") {
+        // Amendment (T), and attributed rather than asserted for the same reason every other line
+        // here is. The number no longer answers — but it is a number read back out of this record,
+        // and this record is a file the merge's own hooks can write. Saying "the merge is over"
+        // from it is precisely what was measured happening while `ps -g` listed the `git merge`.
+        lines.push("              this record names that group and nothing here watched it end;"
+          + " the number comes from the record, which the merge's hooks can write");
+      }
       lines.push(`              ${pending.inspect}`);
       for (const also of pending.alsoBlockedBy === undefined ? [] : [pending.alsoBlockedBy]) {
         lines.push(`  and on      pid ${also.pid}`);
