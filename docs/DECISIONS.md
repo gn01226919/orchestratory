@@ -758,6 +758,30 @@ hook 清單真正把關的地方是 approval 綁定，在 merge 前一刻對 liv
   所以 pid 就是 pgid。這個來源唯讀、有界（前 64 KiB）、解析不到就回報「不可讀」而不是「沒有 merge」，
   而且**不宣稱完備**：它依賴 trace2 的 sid 格式，格式改了它會安靜地退回不可讀。
   同時因此規定：任何未來的 trace 保留／清理策略都必須排除「還在 `applying` 的促進」。
+- **修好一個判斷之後要問「還有哪幾條路徑做同一個判斷」（2026-08-07，第八輪審查後）。**
+  第七輪的三來源比對本身是對的，但只接到「可不可以釋放排他標記」一條路徑；
+  「可不可以下結論」那條——也就是會遞給 Owner `git reset --hard` 的那條——仍然只讀
+  `observation_json`。實測（`p8-race.mjs`，**零竄改**）：另一個程序對 registry DB 取
+  `BEGIN EXCLUSIVE`，`#recordMergePgid` 的寫入失敗被吞掉，git 已 detached 跑起來，
+  產品回報 `waiting nothing` 並遞出 `reset --hard`，而 `ps -g` 列出 `git merge`＋hook＋`sleep 900`。
+  決定：把比對集中到單一 `mergeIdentityStanding(row, trace)`，並把 `trace` 做成
+  `promotionPending()` 的**必要參數**，讓型別系統強迫每一個呼叫點帶上（[[PITFALLS]] #74 的手法
+  用在讀取面）。七條會下結論的路徑逐條列在 [[VERIFICATION]]，並各自有測試驅動。
+- **被觀察的對象碰得到的來源，只能收緊不能放寬（2026-08-07）。**
+  `GIT_TRACE2_EVENT` 的路徑出現在 hook 的環境變數裡，而 hook 是本階段引入的、以 Owner 身分
+  無沙箱執行的信任邊界。實測：hook 偽造一個 `start` 事件指向死號碼 → 短短語被接受、排他標記交還，
+  而 `ps -g` 同時列出活著的 merge。**考慮過但沒有採用**把 trace 改寫到 hook 看不到的 fd：
+  實測 `GIT_TRACE2_EVENT=<fd>` 確實讓 hook 只看到 `3`（也無法用 `: > /dev/fd/3` 截斷），
+  但 `lsof -p $$` 仍列得出檔案路徑，**所以那是遮蔽不是邊界**，而它要動 `process-runner`
+  這個安全關鍵模組。決定改用明文規則：trace 命名的號碼一律拿去探測（只增加拒絕的理由），
+  但**永遠不能讓一列變成「已回答」**；「有沒有回答」由 row 內的來源決定。
+- **靜默吞掉的寫入失敗要留下具名痕跡，而痕跡不能寫在剛剛失敗的地方（2026-08-07）。**
+  `#recordMergePgid` 的 `catch { return row; }` ＋ `process-runner` 的 `catch {}` 讓
+  「pgid 沒記到」與「沒有 pgid 可記」在紀錄上完全相同，而後者讀起來是「沒有東西在跑」。
+  決定：失敗時把那次寫入正在攜帶的號碼寫進 `promotion-traces/<id>.spawn-record.json`
+  （0600、owner-only 目錄、**不交給任何被觀察的對象**），並讓它一出現就使該列的「已回答」為 false；
+  `runProcess` 則在 `ProcessResult` 上回報 `spawnRecordFailed`。
+  **仍然不中止 merge**——git 已經在跑，中止只會留下一個沒有人在等的寫入。
 - **加欄位不動版本號，會把「降版」的失敗留在 SQLite 內部（2026-08-07）。**
   第六輪以 `ALTER TABLE ADD COLUMN` 加上兩個欄位並刻意不動 `user_version`，理由是「純加欄位、
   雜湊不變、不需要升級分支」。升級方向確實如此，但降版方向沒有名字：舊 build 看到 version 5、

@@ -40,6 +40,19 @@ export interface ProcessResult {
   durationMs: number;
   outputBytes: number;
   terminationReason?: "timeout" | "output-limit" | "cancelled";
+  /**
+   * True when `onSpawn` threw, i.e. the caller's record of this child's process group did not
+   * happen.
+   *
+   * The listener's failure is still not allowed to take the child down — it is already running, and
+   * killing it here would leave a half-finished write behind. What is no longer allowed is for the
+   * failure to be indistinguishable from success: `onSpawn` exists because the caller needs the
+   * group id of a DETACHED child, so "the listener threw" and "the listener recorded it" have
+   * opposite consequences for every later reader. Swallowing that difference is what let a promotion
+   * whose pgid write failed read back as a promotion that never spawned git
+   * (VERIFICATION amendment (N)).
+   */
+  spawnRecordFailed?: true;
 }
 
 const SAFE_ENV_KEYS = [
@@ -321,9 +334,12 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
 
     // Before any output is wired up, so the caller has the group id at the earliest instant it
     // exists. A listener that throws must not take the child down with it: the child is already
-    // running, and the only thing worse than not recording it is losing track of it.
+    // running, and the only thing worse than not recording it is losing track of it — so the throw
+    // is caught, and then REPORTED, because losing track of it silently is exactly what the old
+    // empty catch did.
+    let spawnRecordFailed = false;
     if (request.onSpawn && child.pid && process.platform !== "win32") {
-      try { request.onSpawn(child.pid); } catch { /* recorded or not, the child is already alive */ }
+      try { request.onSpawn(child.pid); } catch { spawnRecordFailed = true; }
     }
 
     const stdout: Buffer[] = [];
@@ -378,6 +394,7 @@ export async function runProcess(request: ProcessRequest): Promise<ProcessResult
         durationMs: Math.round(performance.now() - started),
         outputBytes,
         ...(terminationReason ? { terminationReason } : {}),
+        ...(spawnRecordFailed ? { spawnRecordFailed: true as const } : {}),
       });
     };
 

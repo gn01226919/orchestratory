@@ -328,7 +328,12 @@ export function describePromotions(input: {
       + `, ${promotion.mainHeadAfter ? `${promotion.mainHeadAfter.slice(0, 12)} now` : "not read"}`);
     const pending = promotion.pending;
     if (pending === undefined) {
-      lines.push("  waiting     nothing — this record is not blocked on any process");
+      // A statement about the RECORD, not about the repository. The previous wording — "this record
+      // is not blocked on any process" — was a factual assertion about the owner's machine, and it
+      // was measured false: `ps -g` listed the `git merge`, its hook and its `sleep` while this line
+      // was printed, because the record had lost the number (amendment (L), [[PITFALLS]] #86).
+      // Nothing here can promise what is running; it can only say what this record still names.
+      lines.push("  waiting     no process this record names is still being waited on");
     } else {
       lines.push(`  waiting     ${pending.code} (pid ${pending.pid})`);
       lines.push(`              ${pending.inspect}`);
@@ -340,6 +345,10 @@ export function describePromotions(input: {
         + (pending.code === "OWNER_PROCESS_STILL_RUNNING" ? ` --pid ${pending.pid}`
           : pending.alsoBlockedBy === undefined ? ` --pgid ${pending.pid}`
             : ` --pid ${pending.pid} --pgid ${pending.alsoBlockedBy.pid}`));
+    }
+    if (promotion.observation.mergeIdentityUnrecorded === true) {
+      lines.push("  recorded    the write that was carrying this merge's process group FAILED;"
+        + " what this record says about it is incomplete");
     }
     for (const difference of promotion.observation.differences ?? []) {
       lines.push(`  differs     ${difference}`);

@@ -302,3 +302,39 @@ test("subscription environment drops arbitrary secrets", () => {
   assert.equal(env[untrustedKey], undefined);
   assert.equal(env.NO_COLOR, "1");
 });
+
+/*
+ * FINDING B-2 (eighth round), amendment (N). `onSpawn` exists because the caller needs the process
+ * group of a DETACHED child — one that outlives the caller and keeps writing. Its throw is caught
+ * here on purpose (the child is already running and killing it would leave a half-finished write),
+ * and it used to be caught into an empty block, which made "the caller recorded the group" and "the
+ * caller could not record the group" the same result. That is one half of the double swallow that
+ * let a promotion whose pgid write failed read back as a promotion that never spawned git.
+ *
+ * Both directions, because "always report failure" would satisfy only one of them.
+ */
+test("a spawn listener that throws is reported, and one that does not is not", async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "orchestratory-spawn-record-")));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const node = process.execPath;
+  const quiet = ["-e", "process.exit(0)"];
+
+  const seen: number[] = [];
+  const recorded = await runProcess({
+    executable: node, args: quiet, cwd: root, timeoutMs: 10_000, outputLimitBytes: 4_096,
+    onSpawn: (pgid) => { seen.push(pgid); },
+  });
+  assert.equal(recorded.exitCode, 0);
+  assert.equal(seen.length, 1, "the listener was never called, so this test proves nothing");
+  assert.equal(recorded.spawnRecordFailed, undefined,
+    "a listener that succeeded was reported as having failed");
+
+  const lost = await runProcess({
+    executable: node, args: quiet, cwd: root, timeoutMs: 10_000, outputLimitBytes: 4_096,
+    onSpawn: () => { throw new Error("DATABASE_LOCKED"); },
+  });
+  // The child still ran to completion: a listener's failure may not take it down.
+  assert.equal(lost.exitCode, 0);
+  assert.equal(lost.spawnRecordFailed, true,
+    "the listener's failure left no trace, so `not recorded` and `nothing to record` are one result");
+});

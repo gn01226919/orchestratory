@@ -1085,6 +1085,8 @@ export class GitBroker {
   ): Promise<{
     exitCode: number;
     timedOut: boolean;
+    /** True when `onSpawn` threw, i.e. this merge ran with its process group recorded nowhere. */
+    spawnRecordFailed: boolean;
   }> {
     if (!/^[0-9a-f]{40,64}$/u.test(commit)) throw new Error("INVALID_GIT_HEAD");
     const workspace = await canonicalWorkspace(workspaceInput);
@@ -1103,7 +1105,11 @@ export class GitBroker {
       },
       ...(onSpawn === undefined ? {} : { onSpawn }),
     });
-    return { exitCode: result.exitCode, timedOut: result.terminationReason === "timeout" };
+    return {
+      exitCode: result.exitCode,
+      timedOut: result.terminationReason === "timeout",
+      spawnRecordFailed: result.spawnRecordFailed === true,
+    };
   }
 
   /** Undoes a merge git left in progress. Hooks stay disabled: aborting is not the owner's merge. */
