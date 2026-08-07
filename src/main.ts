@@ -334,6 +334,14 @@ export function describePromotions(input: {
       // was printed, because the record had lost the number (amendment (L), [[PITFALLS]] #86).
       // Nothing here can promise what is running; it can only say what this record still names.
       lines.push("  waiting     no process this record names is still being waited on");
+    } else if (pending.code === "MERGE_IDENTITY_UNACCOUNTED") {
+      // Amendment (O). The one reason that names no pid, printed as the state it is rather than as
+      // `pid undefined`. What replaces the number is the read-only SEARCH the record hands over —
+      // every merge this product starts carries the candidate head on its command line — and the
+      // phrase that ends the wait once the owner has looked.
+      lines.push(`  waiting     ${pending.code} (no source names a process for this merge)`);
+      lines.push(`              ${pending.inspect}`);
+      lines.push(`  release     --confirm ${JSON.stringify(pending.release)}`);
     } else {
       lines.push(`  waiting     ${pending.code} (pid ${pending.pid})`);
       lines.push(`              ${pending.inspect}`);
@@ -347,8 +355,15 @@ export function describePromotions(input: {
             : ` --pid ${pending.pid} --pgid ${pending.alsoBlockedBy.pid}`));
     }
     if (promotion.observation.mergeIdentityUnrecorded === true) {
-      lines.push("  recorded    the write that was carrying this merge's process group FAILED;"
-        + " what this record says about it is incomplete");
+      // Attributed, not asserted. The previous wording — "the write that was carrying this merge's
+      // process group FAILED" — was a statement about what happened on the owner's machine, derived
+      // from the EXISTENCE of a file in a directory the merge's own hooks can name: `GIT_TRACE2_EVENT`
+      // is handed to every hook, and the marker sits beside it. A hook writing that file made this
+      // product print a sentence about its own internals that was simply untrue (amendment (Q),
+      // [[PITFALLS]] #120). What is true either way is that something claimed it, and that this
+      // record therefore cannot account for its merge on its own.
+      lines.push("  recorded    a marker beside this promotion's trace says the write that would have"
+        + " carried its process group did not happen; nothing here can verify who wrote that marker");
     }
     for (const difference of promotion.observation.differences ?? []) {
       lines.push(`  differs     ${difference}`);
