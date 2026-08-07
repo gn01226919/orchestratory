@@ -1304,9 +1304,17 @@ trace 命名的號碼只進候選集合去探測（只會增加拒絕的理由�
 | 「四來源全滅」的觸發者是「還原時漏了 `promotion-traces/`」 | 殘餘風險表 | **假。** 觸發者是本階段自己列為信任邊界、以 Owner 身分無沙箱執行的 **repo hook**，兩行即可 |
 
 **(O) 的實作：`mergeWriteConclusion()` 是唯一的判準，預設是「無法下結論」。**
-只有四種**正向**事實能離開預設：(1) approval 從未被消耗（雜湊鏈保護，hook 碰不到）；
-(2) 本程序親自 spawn 並看著 merge leader 關閉（`ProcessRunner` 在整個 group 消失前不會 resolve）；
-(3) **列內**來源具名了一個號碼、而所有具名號碼都探測為 gone；(4) Owner 具名宣告。
+只有四種**正向**事實能離開預設：(1) approval 從未被消耗（~~雜湊鏈保護，hook 碰不到~~
+**⛔ 第十一輪實測證偽：`mergeApprovalHash()` 是無金鑰 SHA-256、`#verify()` 不驗這張表、
+DB 路徑由 `GIT_TRACE2_EVENT` 推導得出；hook 可以把 `consumed` 改回 `approved` 並重算 hash。
+本條已依 (T) 降級為提示，不再能下結論**）；
+(2) 本程序親自 spawn 並看著 merge leader 關閉（~~`ProcessRunner` 在整個 group 消失前不會 resolve~~
+**第十一輪更正措辭：這句全稱化之後是假的。`process-runner.ts:386` 的 `settleClosed()` 寫的是
+`if (terminationReason && processGroupExists()) return;`——只有「被自己終止的」子程序才等整個 group 消失；
+正常退出只等 leader 的 `close`。原始碼 `:5969` 的措辭是對的，本文件的括號錯在把它全稱化。
+這條證據的內容因此是「本程序看著 merge **leader** 關閉」，不是「整個 group 消失」**）；
+(3) **列內**來源具名了一個號碼、而所有具名號碼都探測為 gone（~~hook 碰不到~~
+**⛔ 第十一輪實測證偽，見 (T)；已降級為提示**）；(4) Owner 具名宣告。
 任何來源的刪除、清空、不可讀、解析失敗都只能拿走答案，永遠不能提供答案。
 **`namedInRow` 是承重的那一半**：兩個列外來源（trace／spawn-record）只能**增加**要探測的號碼
 （只會多一個拒絕的理由），永遠不能成為「已回答」的理由——否則 hook 寫一個指向死號碼的
@@ -1377,7 +1385,7 @@ P1-1 沒被量到的那一半（hook 挑一個活 pid 把 task 卡住）已補�
 
 | 殘餘風險 | 為什麼此階段可接受 | 何時失效 |
 | --- | --- | --- |
-| **`leaderExitObserved`（「本程序親眼看著 merge leader 關閉」這條正向證據）在一種三重故障下可能被誤用**：`mergeIntoHead` 拋出 ∧ pgid 寫入失敗 ∧ spawn-record marker 寫入也失敗。此時沒有任何來源具名號碼，而產品仍會以「這次嘗試觀察過」下結論。突變 LEADEREXIT 存活即為證據，**本輪未能構造出可穩定重現的測試** | 三個獨立故障要同時發生；而且 `runProcess` 只有兩種拋出途徑，其中 spawn 失敗代表 git 根本沒跑（下結論正確），另一種 `PROCESS_TREE_CLEANUP_FAILED` 只有在 group 撐過 SIGKILL 時才發生。這一條**不宣稱已覆蓋**（[[PITFALLS]] #104） | **若 `runProcess` 新增任何拋出途徑即失效**——屆時必須重跑 LEADEREXIT 突變並補上能構造該狀態的測試；或把這條證據整個拿掉，代價是每一列 pgid 寫入失敗的促進都要 Owner 多打一句短語 |
+| **`leaderExitObserved`（「本程序親眼看著 merge leader 關閉」這條正向證據）在一種三重故障下可能被誤用**：`mergeIntoHead` 拋出 ∧ pgid 寫入失敗 ∧ spawn-record marker 寫入也失敗。此時沒有任何來源具名號碼，而產品仍會以「這次嘗試觀察過」下結論。突變 LEADEREXIT 存活即為證據，**本輪未能構造出可穩定重現的測試** | 三個獨立故障要同時發生；而且 `runProcess` 只有兩種拋出途徑，其中 spawn 失敗代表 git 根本沒跑（下結論正確），另一種 `PROCESS_TREE_CLEANUP_FAILED` 只有在 group 撐過 SIGKILL 時才發生。這一條**不宣稱已覆蓋**（[[PITFALLS]] #104） | ~~**若 `runProcess` 新增任何拋出途徑即失效**~~ **第十一輪更正措辭：這個條件寫得不準確。**正確的失效條件是：**若這條 merge 呼叫開始使用 `stdoutConsumer`，或 `child.on('error')` 在 spawn 之後被觸發**——這兩條拋出途徑**今天就存在於 `process-runner.ts` 裡**（`consumerError` 會讓 `settleClosed()` 走 `reject`；`error` listener 在 spawn 後仍掛著），只是對 promotion 的這一次呼叫不可達（它不傳 consumer，且 spawn 之後的 `error` 在本用法下沒有觸發途徑）。屆時必須重跑 LEADEREXIT 突變並補上能構造該狀態的測試；或把這條證據整個拿掉。**另：第十一輪 (T-1) 已把這條證據的**授權範圍**縮到最小——它現在只能在**本程序內**授權破壞性指令，跨程序讀回一律不行，所以誤用的最壞後果從「遞出 `reset --hard`」降為「這一列少等一次」** |
 
 ### v2 的第七處補正（2026-08-07，第十輪審查後）—— **信任模型重畫，不再是補規則**
 
@@ -1453,11 +1461,188 @@ Owner 必須自己查看（產品給唯讀搜尋指令），確認之後手動�
 **寧可讓 Owner 多做一次確認，也不遞出一行會跟活著的 merge 賽跑、
 並讓被覆蓋的 ignored 檔案消失的指令**（[[PITFALLS]] #94）。
 
+### 第十一輪：(T)(T-1)(T-2)(T-3) 的實作與實測（2026-08-07）
+
+**一、`CONCLUDED_MERGE_REASONS` 由五條縮為三條。**
+`APPROVAL_NEVER_SPENT_NO_GIT_COMMAND_RAN` 與 `MERGE_GROUP_PROBED_GONE` **降級為提示**：
+它們仍然被算出來、仍然具名寫進 `mergeConclusion`，但**不再讓任何一列停止等待**。
+理由就是 (T)：兩者都是從「被觀察對象寫得到的持久化儲存」讀回來的。
+留下的三條是 `MERGE_LEADER_EXIT_OBSERVED`（本程序親自看著 leader 關閉）
+與兩條 Owner 宣告。**宣告本身也是列裡的位元組，hook 一樣寫得到**——
+它換到的是「少等一次」，換不到破壞性指令，因為那需要 `firstHand`，而 `firstHand` 不存在任何檔案裡。
+
+**二、`MergeWriteConclusion.firstHand`（新欄位）是 (T-1) 的唯一授權來源。**
+它等於 `options.leaderExitObserved === true`，只有 `#settlePromotion` 會傳，
+**沒有任何持久化途徑**。`#recoveryHint` 的破壞性分支現在要同時通過三道：
+`concluded` → 非 `byOwnerDeclaration` → `firstHand`。
+因此：**同一個程序內** merge 失敗仍然拿得到 `reset --hard`（既有測試不變）；
+**orchestrator 死過一次之後，任何讀取都拿不到**，包含把先前那次第一手結論讀回來的那一條。
+
+**三、`byOwnerDeclaration` 有讀取端了（(T-2)）。**
+第十輪它有四個命中、全部在寫入端。現在 `#recoveryHint` 讀它，
+而且是**具名宣告與未具名宣告兩格都讀**——BLOCKER-2 正是未具名那一格：
+`mergeAccountAbandoned` 不寫 `mergeGroupDisowned`，所以舊的 disowned-alive 守衛看不到它。
+具名宣告仍然分兩個方向回報（`inspect-live-merge` 與新的 `inspect-disowned-merge`），
+好讓那個探測的兩個方向都可觀察（[[PITFALLS]] #107）。
+
+**四、`#resolvePromotion` 的早退條件由「有 pending」改為「有東西還在回答」。**
+這是二、三之後的必要調整，而且方向是**更多唯讀觀察、更少自動結論**：
+`standing.blocking !== undefined`（leader 有回應／無法判定）或 owner 程序還活著才早退；
+否則照樣觀察（純唯讀），但**離開 `applying` 需要通過與 `#settlePromotion` 同一道閘**。
+若不這麼改，「崩潰後 merge 自己跑完」這個本函式存在的理由會變成永遠要 Owner 打一句短語。
+豁免的兩個狀態由 `selfEvidencingOutcome()` 定義並在該處逐字說明理由：
+`applied`（main 的 HEAD 就是那個被授權的雙親 commit）與
+`rolled-back`（main 逐位元回到促進前指紋且無 merge 殘留）——
+**這兩個是對「被保護的那個東西本身」的第一手觀察，不是對它的宣稱**，
+編一列紀錄產生不出來。第三個狀態 `needs-manual-review` 不豁免。
+
+**五、`#recoveryHint` 在未下結論時改為「什麼都不遞」**（原本遞唯讀搜尋）。
+唯讀搜尋本來就在 `pending.inspect` 裡；把它同時寫進 `recovery`
+會讓一列還在等待的紀錄看起來有解法。副作用是這條閘變得**更好殺**：
+16＋16 個子集測試量的 `destructiveOffer` 是
+`recoveryKind === "reset-to-pre-promotion" || recovery !== undefined`，
+現在這些測試真的會走到 `#recoveryHint`。
+
+**六、(T-3)：子集框架長出第二個動詞。**
+`IDENTITY_ACTIONS = [deleted, forged]` × `subsetsOf(IDENTITY_SOURCES)` = **32 條**。
+`forge` 的原語是 `forgePromotionRow()`——**依 `mergePromotionHash()` 的規則重算 `row_hash`**
+（含「兩個 merge group 欄位同時為 NULL 時不入雜湊」那條），
+以及對 trace 寫一個 `sid` 尾端為 `-P<hex>` 的 `start` 事件、對 marker 寫一份指定 pgid。
+攻擊者選定的值一律是**已經退出的 pid**，因為那正是製造 (O) 第三條正向事實的值。
+
+**七、實測（全部在 merge 活著、`ps -g` 同時列出 `git merge` 的情況下）：**
+
+| probe | 修復前 | 修復後 |
+| --- | --- | --- |
+| `x1-dbforge forge` | `unreadable:false`、`needs-manual-review`、`recovery: git … reset --hard`、`mergeConclusion: MERGE_GROUP_PROBED_GONE` | `state: applying`、`pending: MERGE_END_NOT_OBSERVED (pid <死號碼>)`、**`recovery: null`**、`mergeConclusion: null`（該次讀取尚未寫入結論欄位） |
+| `x2-unaccounted-exit` | STEP 2 `recoveryKind: reset-to-pre-promotion`、`recovery: git … reset --hard` | STEP 2 `recoveryKind: search-for-unaccounted-merge`、**`recovery` 是唯讀 `ps … grep -F <candidate head>`** |
+
+**六之二、實作過程中自己的測試抓到的三件事（都是本輪改動的副作用，一併記下）：**
+(a) **號碼洗白**：`#observeMain` 改成「未下結論就保留號碼」之後，`identity` 是**折合**過的值，
+會把 trace／spawn-record 的號碼寫進 payload——下一次讀取就看到「列內來源具名了它」，
+正是 (Q) 禁止的「列外來源升格為紀錄自己的答案」。修法：保留條件加上 `namedInRow`。
+被 `a promotion killed between spawning git and recording its group does not settle`
+與 `a record whose group was never written asks for the longer phrase even with nothing alive` 抓到。
+(b) **marker 的收緊在不可讀路徑上掉了**：`unreadableReleaseRequirement()` 的新 `answered`
+一開始漏了 `trace.unrecorded === null`，被同一條測試抓到。
+(c) **`rolled-back` 的快照窗**：自證豁免加上 `!trace.spawned`——
+只要有任何來源記錄過「git 起來過」，一棵看起來沒被動過的工作樹就不是「沒發生」而可能是「還沒發生」。
+被 `a hook that forges the spawn-record marker cannot make this record conclude, or lie about it` 抓到。
+三者都不是預想出來的，是既有測試在新行為下變紅逼出來的。
+
+**七之二、新增 pending code `MERGE_END_NOT_OBSERVED`（帶號碼）。**
+「紀錄具名了一個群組、群組不再回應、但沒有任何東西親眼看著它結束」現在是一個**具名狀態**，
+不是一個結論。Owner 的出路仍然是一步：引用紀錄印出的那個號碼＋既有的 `MERGE_GROUP_ABANDON_CONFIRMATION`。
+配合這一點，`#observeMain` 不再在「探測為 gone」時就抹掉號碼——**只有真的下了結論
+（或這一次觀察本身就是自證的 `applied`／`rolled-back`）才抹掉**，否則紀錄會在第一次讀取時
+把 Owner 唯一能引用的東西刪掉。CLI 對這個 code 多印一行歸屬式說明（號碼來自紀錄，紀錄 hook 寫得到）。
+
+**七之三、(S) 的路徑清單補上第 12 項 `previewMainMerge()`**（唯一「讀 main 卻不問促進是否未結」的入口），
+並補上把它的無害性釘住的測試，見殘餘風險表。
+
+**八、新增三條測試（都在 merge 活著時斷言，並先斷言 `groupAlive` 與 `ps -g`，依 #106）：**
+`a hook that rewrites both in-row sources to a dead number, hash and all, still cannot conclude`、
+`an approval rewritten to say nothing ever ran cannot end a wait over a live merge`（正向事實 #1）、
+`an owner ending a wait nothing can account for is handed no destructive command, asked while the
+merge is alive`（BLOCKER-2 的覆蓋缺口：既有四條測試都在 `process.kill(-pgid)` ＋
+`waitForGroupExit()` **之後**才呼叫那個出口）。
+另加兩條：
+`the rollback the process that watched the merge die may offer is not offered after a restart`
+——(T-1) 的正反兩面在同一條測試裡：**同一個程序**內仍然遞出 `reset --hard`（既有行為不變），
+**重開一個 registry 之後就不再遞**，即使紀錄裡寫著 `MERGE_LEADER_EXIT_OBSERVED`；
+`a preview taken over a live merge is a torn read that no write path will accept`（P2，見殘餘風險表）。
+
+**十一、(R) 的實跑：13 個突變，12 個變紅、1 個存活。**
+全部在**交付樹的完整複製**上跑同一組 15 條測試（`--test-name-pattern`），
+`BASE` 對照組 15/15 綠——**沒有這一條，任何紅都可能是 #106 而不是覆蓋**。
+**每一條紅都是 `ERR_ASSERTION`，沒有任何一條是逾時**（逾時不算殺掉）。
+
+| 突變 | 把哪一條接線改回舊行為 | 結果 | 變紅的測試 |
+| --- | --- | --- | --- |
+| BASE | 無 | 15/15 綠 | — |
+| T1GATE | 拿掉 `#recoveryHint` 的 `!conclusion.firstHand` 閘 | **紅 1** | `…is not offered after a restart` |
+| T2GATE | 拿掉 `#recoveryHint` 的 `conclusion.byOwnerDeclaration` 分支 | **紅 2** | `…needing a human, by name`／`…still has a way out: the row's own sources intact` |
+| PROBEDGONE | `MERGE_GROUP_PROBED_GONE` 放回 `CONCLUDED_MERGE_REASONS` 並改回 `settled()` | **紅 5** | 含 `a hook that rewrites both in-row sources to a dead number…` |
+| SPENTCONC | `APPROVAL_NEVER_SPENT_NO_GIT_COMMAND_RAN` 放回 `CONCLUDED` 並改回 `settled()` | **紅 1** | `an approval rewritten to say nothing ever ran…` |
+| RESOLVEGATE | 拿掉 `#resolvePromotion` 的「未下結論不得離開 `applying`」閘 | **紅 10** | 含兩條全集子集（delete＋forge） |
+| SELFEVID | `selfEvidencingOutcome()` 一律回 `true` | **紅 10** | 同上 |
+| SNAPSHOT | 拿掉 `selfEvidencingOutcome()` 的 `&& !trace.spawned` | **紅 1** | `a hook that forges the spawn-record marker…` |
+| HINTWRITE | 未下結論時改回遞出唯讀搜尋（第十輪行為） | **紅 7** | 含兩條全集子集 |
+| PGIDDROP | 探測為 gone 就抹掉號碼（不看有沒有下結論） | **紅 3** | 含 `…stops carrying its process group id` |
+| LAUNDER | 拿掉保留條件裡的 `!namedInRow`（列外來源的號碼被寫進 payload） | **紅 1** | `a promotion killed between spawning git and recording its group does not settle` |
+| MARKERUNREAD | 拿掉不可讀路徑 `answered` 的 `trace.unrecorded === null` | **紅 1** | `a record whose group was never written asks for the longer phrase…` |
+| **STOREDDECL** | 讀回先前結論時不再標記為 declaration（`settled(recorded)`） | **綠（存活）** | — |
+
+**SPENTCONC 第一次跑是綠的，那是 #106 而不是「這條沒有缺陷」。**
+原因逐字記下：`#assertMergeApprovalRow` 有一條不變式
+`(row.state === "approved") !== (row.token_hash !== null)`——一列 `consumed` 的核准 `token_hash` 是 NULL，
+把 `state` 改回 `approved` 卻不補 token 就成了 TAMPERED，`#promotionApprovalSpent` 的 `catch` 回 `true`，
+**攻擊根本沒走到它要打的那道閘，而測試照樣綠**。
+補上一個合法形狀的 `token_hash`（值不必對應任何真 token，這條路徑只讀 `state`）之後，
+同一個突變才變紅。**是存活的突變揭露了這件事，不是我讀程式碼讀出來的。**
+
+**STOREDDECL 存活的分析（#106 → #107 逐項排除，結論：等價，且理由是量出來的）**：
+(1) 前置條件：BASE 全綠、同一檔案內另外 11 個突變變紅，測試確實跑得到這個模組；
+(2) 兩者唯一有差的輸入是「`recordedMergeConclusion()` 回傳一個**宣告類**理由」。
+    要走到那個讀回，控制流必須先通過它上面兩個檢查
+    （`abandonedMergeAccount(row) === null` ∧ `disownedMergeGroup(row) === null`）。
+    而 `#observeMain` 寫 `mergeConclusion` 的值就是它當下的 `conclusion.reason`，
+    且**無條件**把 `mergeAccountAbandoned`／`mergeGroupDisowned` 帶進下一份 observation——
+    所以**凡是本產品自己寫出來的列，宣告理由一定伴隨宣告欄位**，讀回永遠不會回傳宣告類理由。
+(3) 唯一能製造「有宣告理由、沒有宣告欄位」的是**別人改寫這一列**，也就是 (T) 的對手。
+    而 `firstHand` 只有 `#settlePromotion` 會設（`grep leaderExitObserved` 四個命中，其中一個呼叫點），
+    **實測**：hook 在 merge 中途改寫該列並重算 hash 之後，`#settlePromotion` 的
+    `#writePromotion` 是對 `row_hash` 的 compare-and-set，**直接以
+    `MAIN_MERGE_PROMOTION_CONCURRENT_UPDATE` 拒絕**，不會走到 `#recoveryHint`。
+    其餘每一個呼叫點 `firstHand` 皆為 false，突變前後都落到非破壞性分支、輸出相同。
+    因此在**所有輸入下**兩者行為一致。這條路徑已補上測試
+    `a hook that rewrites the promotion row mid-merge cannot make this process settle on it`
+    把那個 compare-and-set 釘住。
+**依 #104 限定範圍**：以上只說明這 13 個突變的結果，不宣稱「所有突變都會被抓到」。
+
+**十二、回歸 probe 全套實跑（每一支都帶 repo 絕對路徑；這台機器沒有 `timeout` 指令）。**
+
+| probe／模式 | 結果 |
+| --- | --- |
+| `p7-col` col-pgid／col-boot／col-null-key／both-gone／hash-only（五模式） | 五者皆 `probeReadable: false`、`alive` 列出真正的 merge pgid、短短語 **REFUSED**、merge 仍活著 |
+| `p8-race` | `MERGE_SUBPROCESS_STILL_RUNNING (pid …)`、`recovery: null`、merge 仍活著 |
+| `p8-readable` payload-denies／payload-absent | 兩者皆 `MERGE_SUBPROCESS_STILL_RUNNING`、`recovery: null`、第二個 task 促進 **REFUSED `MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY`** |
+| `p8-trace` forge／pad／delete／none（四模式；`truncate`／`garbage` 不是這支腳本的模式名） | **forge：`probeReadable: false`、`recordedGroups` 只列 trace 的 999999、短短語 REFUSED** —— 即審查員標明要盯的那一條；其餘三模式同樣 LONG＋REFUSED |
+| `p8-deny` deny-live／deny-notrace／deny-dead | 三者皆 LONG phrase、`probeReadable: false`、短短語 REFUSED、第二個 task **REFUSED** |
+| `p8-schema`（對 v5 舊 runtime） | v5 目錄可開、升到 `user_version: 6`、`row_hash` 逐字不變；**舊 build 開 v6 → `CANDIDATE_REGISTRY_SCHEMA_UNSUPPORTED`**；新 build 開 v7 亦然 |
+| `q2-fourdead` hostile | `MERGE_IDENTITY_UNACCOUNTED`、`recovery: null`、`state: applying`、merge 仍活著 |
+| `q2-fourdead` control | `MERGE_SUBPROCESS_STILL_RUNNING (pid …)`、`recovery: null` |
+| `q3-forge-marker` | `PROMOTION_OWNER_AND_MERGE_STILL_RUNNING`＋`alsoBlockedBy`；CLI 維持歸屬式措辭 **`nothing here can verify who wrote that marker`**（沒有退回第一人稱斷言） |
+| **`q4 control`** | **`MERGE_SUBPROCESS_STILL_RUNNING (pid 6089)`＋`recovery: null`** —— 與第十輪基準逐字相同 |
+| `q4 hostile` | `MERGE_IDENTITY_UNACCOUNTED`、`recovery: null`、`state: applying`（第十輪此處是 `needs-manual-review`＋`reset --hard`） |
+| `x3-preview` hostile／control | `preview.approvable: false`＋具名 blockers；`requestMainMerge` **REFUSED `MAIN_MERGE_PROMOTION_UNRESOLVED`**；第二個 task 亦 REFUSED |
+| `x1-dbforge forge` | `state: applying`、`MERGE_END_NOT_OBSERVED (pid <死號碼>)`、**`recovery: null`**、merge 仍活著 |
+| `x2-unaccounted-exit` | STEP 2 `recoveryKind: search-for-unaccounted-merge`（唯讀 `ps … grep -F`），**不再是 `reset --hard`** |
+
+**十三、兩次 gate，機器空閒、彼此不併發（第九、十輪的假覆蓋率數字就是併發量出來的）。**
+
+| 執行 | 樹 | `tsc --noEmit` | `npm run check` | 測試 | all files（line／branch／funcs） | `candidate-registry.ts` |
+| --- | --- | --- | --- | --- | --- | --- |
+| Gate 1 | 靜止交付樹 | exit 0 | **exit 0** | 673／673 | 96.04／87.84／97.27 | 98.15／88.51／99.57 |
+| Gate 2 | `git clone --no-local` ＋ `checkout --detach 96af16e` ＋ `git apply` 交付 diff ＋ **`cp -R` node_modules（非 symlink）** | exit 0 | **exit 0** | 673／673 | 96.04／87.84／97.32 | 98.15／88.51／99.57 |
+
+門檻是 line 90／branch 85／functions 90，兩次都過。
+Gate 2 的複製忠實度是**逐檔 SHA-256 比對**過的：五個交付檔案與靜止樹逐位元相同，
+`git status` 在 clone 內只列出那五個檔案。
+**這兩次執行同時也是「完整跑過一次 `merge-promotion.test.ts`」的證據**——
+六條因信任模型改動而需要更新的測試修好之後，是這兩次（而不是先前任何一次逐條驗證）
+把整個檔案連同其餘 500 多條測試一起跑完。
+
 ### 可接受的殘餘風險（連同「何時失效」一起列，未列出的不得事後補認）
 
 | 殘餘風險 | 為什麼此階段可接受 | 何時失效 |
 | --- | --- | --- |
 | promotion 是本機單機操作，不處理遠端 push | 專案守則禁止自動 push，發布一律需人類批准 | 若未來加入自動化發布，立即失效 |
+| **⚠️ 第十一輪新增：不可讀那條路徑的「短短語 vs 長短語」仍然由列內來源的探測結果決定**（`unreadableReleaseRequirement()` 的 `answered`）。(T) 把 `conclusion.concluded` 從這條路徑拿掉之後，這裡**沒有**改成「沒看到活的就算數」（那是沉默，(O) 已關），而是保留原本的判準：列內來源具名了群組、讀數不衝突、且每一個具名號碼都探測為 gone。因此 hook 把兩個列內來源改寫成死號碼，可以把警告從長短語降級成短短語 | 這條路徑**不決定 main 發生了什麼、不遞任何指令、也不會在 Owner 沒打短語且沒引用號碼的情況下離開 `applying`**；它決定的只是紀錄警告得多大聲。而 32 條子集測試量到的 `shortPhraseAccepted` 在 delete 與 forge 之下都維持 false，因為 `pgid` 必須與紀錄印出的號碼相符 | **若不可讀列的釋放將來變成不需要引用號碼、或開始能決定 main 的結果即失效**；屆時這個判準必須跟著 `CONCLUDED_MERGE_REASONS` 一起收斂 |
+| **⚠️ 第十一輪新增：hook 仍然可以偽造「Owner 宣告」與「先前那次第一手結論」的位元組，讓一列停止等待。** `mergeAccountAbandoned`／`mergeGroupDisowned`／`mergeConclusion` 都住在 `observation_json` 裡，`row_hash` 是無金鑰 SHA-256——(T) 對這三個欄位一樣成立，本輪**沒有**也**不可能**用同一個資料庫關掉它 | 關掉它等於拿掉唯一的出路：能結束等待的只有 Owner 的宣告，而宣告只能記在這個 owner-writable 的地方。所以本輪改為**限制它換得到什麼**：偽造宣告換到「這一列少等一次、排他標記交還」，**換不到任何破壞性指令**，因為那需要 `firstHand`，而 `firstHand` 只存在於呼叫堆疊裡、沒有持久化途徑（`#recoveryHint` 的三道閘有測試，且 (T-2) 那一格是實測補上的）。同時它也換不到「這個 task 可以再促進」——那仍取決於下一次重新觀察到的指紋 | **若未來出現一個 merge hook 碰不到的宣告儲存（OS keychain、外部程序、或對 merge 子程序的真正身分驗證）即可整格關閉**；在那之前不得宣稱「偽造的紀錄不能影響任何結論」——只能宣稱「不能影響破壞性指令」 |
+| **⚠️ 第十一輪新增：`rolled-back` 是一個快照，所以一個「已經啟動但還沒寫入任何東西」的 `git merge` 原則上可能被讀成它。** `selfEvidencingOutcome()` 把 `rolled-back` 當成第一手證據，而它的內容是「main 逐位元在促進前指紋、且無 merge 殘留」 | 要走到這一格需要四個來源在同一批毫秒內同時沉默（pgid 那次寫入失敗 ∧ trace 不在 ∧ marker 不在），**而且不能有敵意 hook 參與**——git 在寫入工作樹**之前**不執行任何 hook，所以任何 hook 正在執行的促進，main 早就動了、讀不成 `rolled-back`。這一格的最壞後果是排他標記提早交還，不是遞出破壞性指令（`rolled-back` 不遞任何 recovery） | **若未來 git 新增一個在寫入工作樹之前執行的 hook，或 promotion 改為分步執行即失效**；屆時 `rolled-back` 必須改為需要一個跨兩次觀察的穩定窗 |
+| **⚠️ 第十一輪新增（這是 (T) 明寫的代價）：orchestrator 在 merge 中途死亡之後，紀錄不再自行收斂到 `needs-manual-review`，也不再遞出 `reset --hard`。** Owner 必須先結束等待（引用紀錄印出的號碼＋短語，或在沒有號碼時用 `MERGE_UNACCOUNTED_ABANDON_CONFIRMATION`），紀錄才會離開 `applying`。這比第十輪多花一步的**不是罕見情境，是每一次崩潰** | 這正是 (T)：崩潰之後所有「merge 結束了」的說法都來自 merge 自己的 hook 寫得到的檔案。**兩個例外仍自動收斂**，因為它們是對 repository 本身的第一手觀察：main 的 HEAD 就是被授權的雙親 commit（含 MERGE_HEAD 殘留那一格），或 main 逐位元回到促進前。差異、hook 清單與唯讀查看指令在 Owner 動作**之前**就已經逐項列出（觀察是唯讀的，需要證據的是下結論），所以這一步是「確認」不是「摸黑」 | **若未來能對 merge 子程序做真正的身分驗證（pidfd／程序啟動時刻）即可放寬**；或若 5-6 提供 rollback 介面，屆時「結束等待」與「決定結果」仍必須是兩個各自有 approval 的動作 |
+| **⚠️ 第十一輪新增：`previewMainMerge` 是唯一「讀 main 卻不問促進是否未結」的入口**，它會對一棵正在被 merge 改寫的工作樹跑完整指紋串流（撕裂讀），`previewDigest` 因此綁在一個撕裂快照上 | **這是取捨不是缺陷，但它的無害是被擋出來的、不是碰巧**：`requestMainMerge` 與 `grantMainMerge` 都過 `#assertNoUnresolvedPromotion`／`#assertMainNotBusy`，所以那個 digest 到不了任何寫入路徑，而 promotion 前的重驗會再擋一次。已加測試 `a preview taken over a live merge is a torn read that no write path will accept` 把「擋」釘住——它同時斷言 preview **成功回傳**（撕裂讀確實發生）與 `approvable:false` ＋具名 blockers ＋ request 被拒 | **若 preview 之後新增任何不經那兩道閘的寫入路徑即失效**；也若 preview 開始被快取並在促進時重用即失效 |
 | 不支援 merge 進行中的互動式衝突解決；有衝突就拒絕 | 有衝突時 Owner 本來就該自己看 | 若要支援 rebase／squash 等策略，需重訂 |
 | 單一 candidate → 單一 main，不處理多 candidate 排隊 | 結構上每 task 僅一筆未結核准 | 若開放多 candidate 併發 promotion，立即失效 |
 | submodule 與 LFS **偵測到即拒絕**，不做完整支援 | 兩者都會讓「回到操作前」變成無法保證 | 若 Owner 的專案開始使用，必須改為完整支援；**不檢查不算可接受** |
@@ -1480,7 +1665,7 @@ Owner 必須自己查看（產品給唯讀搜尋指令），確認之後手動�
 | **`promotion-traces/<id>.spawn-record.json` 這個第四來源，其路徑由 `dirname($GIT_TRACE2_EVENT)` 推導得出，因此 repo hook 可以建立、改寫或刪除它。**~~第九輪原文寫「不交給任何被觀察對象」「沉默的方向是 fail-closed」~~ **第十輪實測兩句皆假**（`q3-forge-marker.mjs`／`q4-killwindow-hook.mjs`）。現在的實際狀況是：hook **可以**讓一列促進永遠處於 `MERGE_IDENTITY_UNACCOUNTED`（寫一份 marker，或讓四個來源同時沉默），Owner 必須用 `MERGE_UNACCOUNTED_ABANDON_CONFIRMATION` 這一句才能結束等待 | 補正 (O) 把保證從「這個路徑藏得住」換成「**這個來源的存在與否都不能讓結論變寬鬆**」。剩下的能力只有 fail-CLOSED 一個方向：hook 能讓產品拒絕下結論，不能讓它下結論。代價是 Owner 多一句短語，而 [[PITFALLS]] #120 已證明藏路徑不是邊界（改成繼承 fd 之後 `lsof -p $$` 仍列得出路徑） | **若未來能對 merge 子程序做真正的身分驗證**（pidfd／程序啟動時刻）即可整格關閉；**若 promotion 變成高頻操作即失效**（與 trace 檔同一個保留問題），屆時保留策略必須把「還在 `applying` 的促進」排除在外 |
 | ~~**trace 與 spawn-record 都不在、而列內兩個來源同時說「沒有 group」時，一列仍然可能被讀成「沒有 merge 在跑」**~~ **第十輪已關閉，並且原本的裁決理由是錯的。** 原文說觸發條件是「還原時漏了 `promotion-traces/`」，實測觸發者是 repo hook 的兩行；原文說「一律當成活著會讓正常紀錄拿不到出路」，那是把「不下結論」跟「沒有出路」混為一談 | 補正 (O)：四個來源全部沉默時，結論停在 `MERGE_IDENTITY_UNACCOUNTED`，`pending` 不是 `undefined`、`recovery` 不是 `reset --hard`、短短語不可用、排他標記不釋放。出路是一句具名短語＋一個唯讀搜尋指令，不是死結。16 個子集全枚舉的測試守著這件事 | — |
 | **一個在同一次開機內被 OS 回收的 pid，會讓一列 `needs-manual-review` 的紀錄重新開始阻擋**（trace 名字裡的號碼現在也會被可讀路徑拿去探測） | 方向是 fail-closed，而且**不是死結**：`abandonMergeProcessGroup` 引用那個號碼即可解除，`promotions()` 會把號碼與 `ps` 指令印給 Owner。相對的另一邊是把 trace 排除在可讀路徑外，而那正是第八輪的 BLOCKER | **若 promotion 變成高頻操作、或 trace 保留期拉長到 pid 迴繞週期以上即失效**；屆時要用 pidfd／程序啟動時刻做真正的身分驗證 |
-| **任何 `merge_pgid` 欄位為 NULL 而 `observation_json` 又沒有 `mergePgid` 的列，現在一律停在「無法下結論」，不會自行收斂。**~~原文說這種列「仍會被讀成沒有 merge 在跑」~~ **第十輪把方向整個翻過來**：列內兩個來源沒有具名任何號碼時，列外來源（trace／spawn-record）不能替它回答，因為那兩個來源正是被觀察的 merge 碰得到的。代價是**真實常見的情境**（SQLite 被別的程序鎖住導致 pgid 那次寫入失敗，[[PITFALLS]] #65 說這在本機是日常）會需要 Owner 用 `MERGE_UNACCOUNTED_ABANDON_CONFIRMATION` 結束等待 | 這是補正 (O) 的直接後果，也是刻意的：能替這種列回答的只有 hook 碰得到的檔案，而一列能被 hook 結案的紀錄不算結案。方向是 fail-closed 且有具名出路（第 11 項要求的「有出路」，不是「不用花力氣」）。**由第九輪寫進資料庫的舊列**若帶 `mergePgid: null` 但沒有 `mergeConclusion`，升級後同樣會停在這個狀態，需要同一句短語 | **若未來能對 merge 子程序做真正的身分驗證即可放寬**；在那之前不得把列外來源升格為「已回答」的理由 |
+| **任何 `merge_pgid` 欄位為 NULL 而 `observation_json` 又沒有 `mergePgid` 的列，現在一律停在「無法下結論」，不會自行收斂。**~~原文說這種列「仍會被讀成沒有 merge 在跑」~~ **第十輪把方向整個翻過來**：列內兩個來源沒有具名任何號碼時，列外來源（trace／spawn-record）不能替它回答，因為那兩個來源正是被觀察的 merge 碰得到的。代價是**真實常見的情境**（SQLite 被別的程序鎖住導致 pgid 那次寫入失敗，[[PITFALLS]] #65 說這在本機是日常）會需要 Owner 用 `MERGE_UNACCOUNTED_ABANDON_CONFIRMATION` 結束等待 | 這是補正 (O) 的直接後果，也是刻意的：能替這種列回答的只有 hook 碰得到的檔案，而一列能被 hook 結案的紀錄不算結案。方向是 fail-closed 且有具名出路（第 11 項要求的「有出路」，不是「不用花力氣」）。**2026-08-07 第十一輪更正這一欄的代價描述**：~~代價是 Owner 多打一句短語~~——頻率沒有被低估（#65 是日常，`p8-race` 每次都重現），**被低估的是代價的內容**。第十輪的實際代價不是「多打一句短語」，而是**打完短語就拿到 `reset --hard`**：`x2-unaccounted-exit` 實測 Owner 照產品印的那一行做、一個字都沒多，下一次讀取的 `recoveryKind` 就是 `reset-to-pre-promotion`，而 `ps -g` 同時列著 `git merge`。(T-2) 已把這一格關掉，短語現在只結束等待、永不授權破壞性指令。**由第九輪寫進資料庫的舊列**若帶 `mergePgid: null` 但沒有 `mergeConclusion`，升級後同樣會停在這個狀態，需要同一句短語 | **若未來能對 merge 子程序做真正的身分驗證即可放寬**；在那之前不得把列外來源升格為「已回答」的理由 |
 | **`merge_pgid` 欄位與 `observation_json` 由不同版本的程序交錯寫入時可能不一致**（舊 build 只會寫 payload，不會清欄位） | 不一致會被 `#assertPromotionRow` 判為 `MAIN_MERGE_PROMOTION_ROW_TAMPERED`，該列進入不可讀路徑。~~而不可讀路徑會從欄位讀回 pgid 並要求長短語——方向是 fail-closed~~ **第七輪實測證偽：不可讀路徑當時是「欄位優先、看到就 return」，所以它讀回的是那個壞掉的欄位，探測到它已死，然後接受短短語——方向是 fail-OPEN。**第八輪已修：兩個來源不一致時答案是「不可讀」，兩個號碼都探測、都列出，短短語一律不可用（有測試，且突變 E／E2 兩個方向都會變紅）。另外**降版方向現在是具名的**：schema 移到 v6，舊 build 在開啟時就以 `CANDIDATE_REGISTRY_SCHEMA_UNSUPPORTED` 拒絕，不會走到交錯寫入 | **若同一個 data directory 會被兩個不同版本的 orchestrator 同時使用即失效**；本專案的 digest-pinned runtime 規則本來就禁止這件事，而 v6 讓舊 runtime 連開都開不起來 |
 | **核准畫面上那段揭露的「渲染」與「scroll-gate 是否真的把它算進去」，只有手動瀏覽器驗收＋digest guard，沒有自動 DOM 測試** | 專案沒有 DOM 測試執行器，加一個是新相依（pending decision D-006，Owner 裁決）。行為那一半（事實有沒有到達 payload）有 Node 測試守著；渲染那一半有 digest guard，程式一改就紅燈，逼人重跑 | **若 Owner 核准新增 DOM 測試執行器即失效**；也**若 digest guard 再被發現有涵蓋不到的角落**（它已被抓到過一次：只認 `^function` 而漏掉 `async function`）即失效 |
 | **`promotion-traces` 這個第三來源本身有三個已知限制，都不宣稱完備。** (1) merge 的 pid 是從 trace2 的 `sid` 尾端 `-P<hex>` **解析**出來的，不是問 git 拿的（[[PITFALLS]] #103 的形狀，但這裡沒有可問的對象——那個程序早就結束了）；(2) trace 不記錄開機時刻，所以那個 pid 屬於哪一次開機是**從 git 的啟動時間推導**的（早於本次開機即視為別的開機，容差內視為同一次）；(3) 只讀檔案前 64 KiB 找 `start` 事件；(4) **trace 檔不會被清空**，所以那個號碼在同一次開機內若被 OS 回收給別的程序，一列已損毀的紀錄會因此改要求長短語 | ~~四個限制的失敗方向都是 fail-closed~~ **⛔ 第八輪實測證偽**：第 (1) 條的失敗方向是 fail-OPEN。`GIT_TRACE2_EVENT` 的路徑出現在 hook 的環境變數裡，hook 偽造一個 `start` 事件指向死號碼 → `recordedGroups:[{trace,999999}]`、`alive:[]`、`probeReadable:true`、**短短語被接受、排他標記交還**，而 `ps -g` 同時列出活著的 merge（`p8-trace.mjs forge`）。刪除與截斷兩種模式確實是 fail-closed，偽造不是。**第九輪的修法**：trace 這個來源被明文降級為**只能收緊不能放寬**——它命名的號碼一律拿去探測（只會增加拒絕的理由），但**它自己永遠不能讓一列變成「已回答」**；「有沒有回答」由 row 內的來源決定，而探測只能把那個回答拿掉（見 (M)）。四種模式現在都 REFUSED。另外新增第四個來源 `spawn-record`（見下一列），它寫在 owner-only 資料目錄且**不交給任何被觀察的對象**。第 (2)(3)(4) 條維持原判：推導錯的方向是「不能排除」而不是「可以結案」；(4) 只影響**已經損毀**的列，且長短語＋引用那個號碼仍是出路，不會產生死結（第 11 項禁止的形狀）。而它存在的理由是 [[PITFALLS]] #115——前兩個來源共用同一列，這一個不是 | **若 git 改掉 trace2 的 sid 格式**，這個來源會退回「不可讀」（有測試：`a trace that proves a merge started without naming it is an unanswered question`）；~~不會給出錯的號碼~~ **已證偽——hook 可以讓它給出錯的號碼**，所以現在它給出的號碼只用來收緊，不用來放寬。**殘餘的部分**：hook 仍然可以**刪掉或改寫**這個檔案，那會讓這個來源沉默；沉默的方向是 fail-closed（回到只有 row 內來源，或回到「不可讀」）。把它改寫成 hook 看不到的路徑**沒有做**，理由是實測：把 `GIT_TRACE2_EVENT` 改成繼承的 fd 之後，hook 環境變數確實只剩 `3`，但 `lsof -p $$` 仍然列得出檔案路徑，所以那是遮蔽不是邊界，而它要動的是 `process-runner` 這個安全關鍵模組。保證來自「只能收緊」那條規則，不是來自路徑保密。升級 git 之後要重跑 `p7-col.mjs` 的五種模式與 `p8-trace.mjs` 的四種模式 |
