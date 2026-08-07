@@ -405,6 +405,21 @@ reflog 是 append-only，`git merge --abort` **必然** append 一筆 `reset: mo
     因此：**merge 子程序的 pgid 必須寫進意圖紀錄，且在該 pgid 仍存在時不得下任何結論。**
     測試必須涵蓋「發起者已死、被它啟動的 merge 還活著」這個組合。
 
+    **2026-08-07 補正 (G)（第七輪審查後）**：原文照字面可以被「settle 在錯的號碼上、探測到它已死、
+    於是下結論」完整滿足——第七輪的洞正是這個形狀。措辭改為：
+    **「pgid 仍存在，或無法確定 pgid 是哪一個時，都不得下結論。」**
+
+    **第八輪的實作對照（逐句查過，不是憑印象）**：
+    - 「無法確定是哪一個」現在是一個明確的狀態。`durableMergeIdentity()` 對三個來源分別讀，
+      兩個 in-row 來源答案不同時回 `readable: false`，並把**每一個**候選都交出去探測；
+      `unreadableReleaseRequirement()` 逐一探測而不是只探測「偏好的那一個」，
+      任何一個答 `merge-running` 或 `unknown` 都進 `alive`，短短語即不可用。
+    - 「可讀的列」不可能發生來源不一致：`#assertPromotionRow` 對
+      `merge_pgid !== null && promotionPgid(row) !== merge_pgid` 直接判 `ROW_TAMPERED`，
+      該列因此走不可讀路徑而不是 `promotionPending()`。這條檢查有測試守著（突變 M15／本輪突變 E）。
+    - `mergeGroupState()` 的 `unknown` 與 `merge-running` 在阻擋上同等處理，
+      所以「探測不出來」與「還活著」導向同一個動作，不折疊成任何一邊（[[PITFALLS]] #85）。
+
 13. **凡是還會變的狀態，紀錄不得一次寫死。**
     每次讀取重新觀察，或紀錄自稱「as observed at T」並可重算。
     實測後果：reconciliation 寫成 `needs-manual-review` 後永不再觀察，於是
@@ -771,7 +786,7 @@ pathspec 的 `git` 指令」，2026-08-07 第五輪審查指出並更正：實�
 
 | 發現 | 修正 | 守它的測試 |
 | --- | --- | --- |
-| **F-1（BLOCKER）** 第六輪的修復只覆蓋「損毀剛好沒碰到 payload」的子情況。第五輪的 probe 只把 `row_hash` 歸零；審查員把 `observation_json` 也一起損毀（兩種模式：整段非 JSON、以及合法 JSON 但缺 `mergePgid`／`mergeGroup`），第五輪的三個症狀全部回來：短短語被接受、`--pgid 999999` 被接受、排他標記在 `ps -g` 證明 merge leader＋hook＋sleep 都活著時被交還。**根因是結構性的**：`owner_pid` 有自己的欄位，`mergePgid`／`mergeGroup` 只存在 `observation_json`——而那正是損毀時第一個不能信的東西。`promotionGroupIdentity()` 對讀不到的 JSON 回 `null`，`unreadableReleaseRequirement()` 把 `null` 當成「沒有 merge 活著」，也就是往不安全方向決定（[[PITFALLS]] #85）。**被證偽的宣稱**：第六輪 F1 那列寫「三者都已把不可解析的 `observation_json` 當成『不決定任何事』」——已在原處標記並改寫 | 三件事。(a) **把 merge 的 pgid 與開機時刻搬進 `candidate_merge_promotions` 的獨立欄位** `merge_pgid`／`merge_boot_at_sec`（比照 `owner_pid`）。欄位不由呼叫端傳入，而是在 `#writePromotion` 內**從即將寫入的 observation 推導**，所以走過那個 helper 的列不會持有兩個不同的答案，也不會有人忘記在 merge 結束時清掉它（[[PITFALLS]] #74／#102）。**唯一不維護這一對的寫入是 `#releaseUnreadablePromotion`**（它刻意以 raw UPDATE 改一列本來就讀不了的 payload），而 `#assertPromotionRow` 無論如何都把「欄位與 payload 不一致」判為損壞。(b) 新增 `durableMergeIdentity()`：欄位優先、`observation_json` 次之（給沒有欄位的舊列），並回傳 `readable` 旗標——**「讀不到 merge 身分」與「探測不出來」一樣算活著、一樣只給長短語**。(c) 相容性：`mergePromotionHash()` 只在兩個欄位至少有一個非 null 時才把它們納入雜湊，所以前一個 commit 寫出的列雜湊不變；欄位以 `ALTER TABLE ADD COLUMN` 在開啟時冪等補上（比照既有的 `#assertPromotionExclusivity`），不需要版本號變更 | 三條。「a promotion row whose payload is destroyed with its hash still names the merge writing main」——**先斷言 `groupAlive(pgid)` 為 true**（[[PITFALLS]] #106）並在每一步重新斷言，兩種損毀模式各跑一次，各自斷言短短語被拒、`pgid 999999` 被拒、拒絕後 `storedState` 仍為 `applying`、`release.alive` 精確等於 `[["merge", pgid]]`；接著**連欄位也毀掉**，斷言 `alive` 為空但 `probeReadable` 為 `false`、短短語仍被拒、釋放後 merge 仍活著且整棵樹逐位元不變。同一條測試裡另有一段**雜湊有效但欄位與 payload 不一致**的情境（`observation_json` 被改成「沒有 group」並把雜湊算回去），斷言該列被判為不可讀且仍具名那個 `ps -g` 看得到的 pgid——這一段是突變 M15 打出來的缺口。「a destroyed payload does not make a finished merge block the project forever」是**反方向**（[[PITFALLS]] #107）：同樣毀掉 payload，但 merge 真的結束了，於是短短語才是能用的那一句、長短語被拒；**第三段**是欄位為空且 payload 明說 `mergePgid: null` 時短短語仍然成立——這一段是突變 M3 打出來的缺口。「a promotion row written before the merge-group columns existed still opens, and still blocks」覆蓋標準第 11 項 |
+| **F-1（BLOCKER）** 第六輪的修復只覆蓋「損毀剛好沒碰到 payload」的子情況。第五輪的 probe 只把 `row_hash` 歸零；審查員把 `observation_json` 也一起損毀（兩種模式：整段非 JSON、以及合法 JSON 但缺 `mergePgid`／`mergeGroup`），第五輪的三個症狀全部回來：短短語被接受、`--pgid 999999` 被接受、排他標記在 `ps -g` 證明 merge leader＋hook＋sleep 都活著時被交還。**根因是結構性的**：`owner_pid` 有自己的欄位，`mergePgid`／`mergeGroup` 只存在 `observation_json`——而那正是損毀時第一個不能信的東西。`promotionGroupIdentity()` 對讀不到的 JSON 回 `null`，`unreadableReleaseRequirement()` 把 `null` 當成「沒有 merge 活著」，也就是往不安全方向決定（[[PITFALLS]] #85）。**被證偽的宣稱**：第六輪 F1 那列寫「三者都已把不可解析的 `observation_json` 當成『不決定任何事』」——已在原處標記並改寫 | 三件事。(a) **把 merge 的 pgid 與開機時刻搬進 `candidate_merge_promotions` 的獨立欄位** `merge_pgid`／`merge_boot_at_sec`（比照 `owner_pid`）。欄位不由呼叫端傳入，而是在 `#writePromotion` 內**從即將寫入的 observation 推導**，所以走過那個 helper 的列不會持有兩個不同的答案，也不會有人忘記在 merge 結束時清掉它（[[PITFALLS]] #74／#102）。**唯一不維護這一對的寫入是 `#releaseUnreadablePromotion`**（它刻意以 raw UPDATE 改一列本來就讀不了的 payload），而 `#assertPromotionRow` 無論如何都把「欄位與 payload 不一致」判為損壞。(b) 新增 `durableMergeIdentity()`：~~欄位優先、`observation_json` 次之（給沒有欄位的舊列）~~**——「欄位優先」已於第八輪被實測證偽並改寫，見下方第八輪 P0 那列：欄位非 null 就 return、永遠不看 payload，正是第七輪 P0 的根因。現在三個來源都讀，兩個來源打架時答案是「不可讀」**——並回傳 `readable` 旗標——**「讀不到 merge 身分」與「探測不出來」一樣算活著、一樣只給長短語**。(c) 相容性：`mergePromotionHash()` 只在兩個欄位至少有一個非 null 時才把它們納入雜湊，所以前一個 commit 寫出的列雜湊不變；欄位以 `ALTER TABLE ADD COLUMN` 在開啟時冪等補上（比照既有的 `#assertPromotionExclusivity`），~~不需要版本號變更~~**——第八輪 P2-11 更正：不動版本號讓「降版」方向沒有名字，舊 build 會在 SQLite 內部炸出 `has 19 columns but 17 values were supplied`。版本已改為 v6** | 三條。「a promotion row whose payload is destroyed with its hash still names the merge writing main」——**先斷言 `groupAlive(pgid)` 為 true**（[[PITFALLS]] #106）並在每一步重新斷言，兩種損毀模式各跑一次，各自斷言短短語被拒、`pgid 999999` 被拒、拒絕後 `storedState` 仍為 `applying`、`release.alive` 精確等於 `[["merge", pgid]]`；接著**連欄位也毀掉**，斷言 `alive` 為空但 `probeReadable` 為 `false`、短短語仍被拒、釋放後 merge 仍活著且整棵樹逐位元不變。同一條測試裡另有一段**雜湊有效但欄位與 payload 不一致**的情境（`observation_json` 被改成「沒有 group」並把雜湊算回去），斷言該列被判為不可讀且仍具名那個 `ps -g` 看得到的 pgid——這一段是突變 M15 打出來的缺口。「a destroyed payload does not make a finished merge block the project forever」是**反方向**（[[PITFALLS]] #107）：同樣毀掉 payload，但 merge 真的結束了，於是短短語才是能用的那一句、長短語被拒；**第三段**是欄位為空且 payload 明說 `mergePgid: null` 時短短語仍然成立——這一段是突變 M3 打出來的缺口。「a promotion row written before the merge-group columns existed still opens, and still blocks」覆蓋標準第 11 項 |
 | **F-2（P2）** `redactConfigSubsection()` 只接到 `programs`，同一個函式裡三行之外的 `drivers`／`filters` 整條繞過。實測（真實 `git config` 寫入合成 token）：兩份清單各自逐字帶出 URL 形狀鍵裡的 token，token 同時上核准畫面（`public/room.js:3005-3006`）也同時以位元組存在 SQLite。**被證偽的宣稱**：第六輪 VERIFICATION F6 與 THREAT_MODEL F26 第五次更正都寫「所以秘密既不上畫面也不進資料庫」——**這是 [[PITFALLS]] #108 在同一輪原地復發**，兩處都已標記並改寫 | `drivers`／`filters` 的**鍵名**改走同一個 `redactConfigSubsection()`。**值仍逐字顯示**，這是刻意的取捨並已在殘餘風險表寫明：對這兩份清單而言值就是 git 會執行的指令 | 一條新的，在 `test/git-broker.test.ts`，用真實 `git config` 寫入**非 `credential`** 的 URL 形狀鍵（`merge.<url>.driver` 與 `filter.<url>.clean`）——既有測試只打到遮蔽函式的第一臂，這條才打得到第二臂。斷言整個 `HookEnvironment` 的 JSON 裡找不到那兩個 token、`merge.mine.driver` 與 `filter.lfs.clean` 仍逐字列出（含值）、`configDigest` 與 `fingerprint` 仍會因為改動該鍵的值而改變 |
 | **F-3（P2）** `orchestrator candidates promotions` 自稱唯讀，實際會寫入權威列、audit chain 與 room ledger。審查員以 `orphan-refs` 為對照組實測：對照組的 promotion row、audit 筆數與三個 sqlite 摘要全部未變，這一條全變（該對照組本輪未由我重跑；我重跑的是寫入側，見右欄測試）。**寫入本身是第 13 項要求的收斂，不是 bug；標示才是** | CLI 表頭、`helpText()`、`describePromotions()` 的註解與殘餘風險表四處全部改成實話：「列出時會重新觀察並更新未結的紀錄；這裡沒有任何東西會寫入 main」。**節流沒有一致化**，理由分開講（見下） | 兩條。`test/main-cli.test.ts` 斷言新文案存在、`Read-only.` 不再出現、`helpText()` 不再有 `# read-only`；`test/merge-promotion.test.ts` 的「listing promotions re-observes and updates the record」用真實 registry 斷言一次列出就讓 `state` 與 `row_hash` 都改變、且送出恰好一筆 `re-observed` 事件，第二次列出不再送 |
 | **F-4（P2）** `#liveGates` 的 fail-closed catch 零測試，而上一輪寫下的「到不了」理由只對了一半：持久失敗確實先炸在 `#previewSnapshot`，但 `previewMainMerge` 對同一個 `mainPath` **讀了兩次** restore point，只讓第二次失敗就會執行到那個 catch | 註解改寫成實話並附上實測結果。**不加第二個阻擋項這個決定維持不變**，理由寫在原處 | 一條，兩個方向各打一次：先斷言一次 preview 確實讀了 **2 次**（否則這條測試在測別的東西），再讓**第 1 次**失敗（拋出，也就是舊註解描述的那條路）與讓**第 2 次**失敗（回傳 `blockers` 精確等於 `["MAIN_WORKING_TREE_UNREADABLE"]`、`hooks.unreadable` 為 true），最後斷言恢復後同一份 snapshot 的 `previewDigest` 不變且重新可核准（暫時性失敗不得燒掉東西） |
@@ -908,6 +923,120 @@ EXIT=0
 規則：任何 CLI 輸出、`helpText()`、畫面文字或 docs 的**性質形容詞**
 （「唯讀」「不刪除」「全部」「一律」「既不…也不…」），必須有一條測試或 probe 佐證。
 
+### 第八輪修正紀錄（2026-08-07，對照第七輪審查的 P0／P1／P2／P3）
+
+第七輪不通過。**這一輪也有我自己寫下的全稱宣稱被證偽**（[[PITFALLS]] #104），
+標在下表對應列，並在原處改寫而不是刪掉。
+
+審查員的 probe 是 `scratchpad/r7/p7-col.mjs`，五種模式全部由我重跑，**修復前後的實際輸出都在下表**。
+
+| 發現 | 修正 | 守它的測試 |
+| --- | --- | --- |
+| **P0（BLOCKER）** 三種損毀形狀全部 ACCEPTED（短短語＋`--pgid 999999`），而 `ps -g` 同時證明 `git merge`＋`pre-merge-commit`＋`sleep 900` 三個程序活著、main 已半套用（`A  a.txt`）：(a) `merge_pgid` 改成 999999（payload 完好且指向活著的 merge）、(b) `merge_boot_at_sec` 改成 1、(c) 欄位 NULL＋payload 是合法 JSON 但缺 `mergePgid`。三種情況產品都回報 `alive: []`、`probeReadable: true`、短短語。**根因**：`#assertPromotionRow` 已經偵測到「欄位與 payload 不一致」並判為 `ROW_TAMPERED`，`durableMergeIdentity()` 卻一看到欄位非 null 就 `return { identity: column, readable: true }`，**永遠不看 payload**——已經發現兩個來源打架，卻挑一個當權威還標成可讀。三個 ⛔ 之後 task B 都只被 `MAIN_MERGE_APPROVAL_BINDING_CHANGED:mainDirtyFingerprint` 擋下，也就是**上一輪 commit message 宣稱不再依賴的那個巧合** | 四件事。(a) **`durableMergeIdentity()` 讀三個來源**：兩個欄位、`observation_json`，以及**第三個不住在資料庫裡的來源**——這次促進的 `promotion-traces/<id>.jsonl`（git 自己的 trace2 stream，`sid` 尾端以十六進位帶著 git 程序自己的 pid，而 git 是 detached 起的所以 pid＝pgid）。[[PITFALLS]] #115 要問的正是「B 是不是也住在 A 裡面」——兩個欄位與 payload 共用同一列，trace 檔不是。(b) **兩個 in-row 來源都答且答案不同 → `readable: false`**，而且**每一個候選各自探測**、`alive` 逐一具名，不再只探測「偏好的那一個」。新增 `recordedGroups`（帶來源名的完整清單）進到 `UnreadableMergePromotion.release`、`MergeUnreadablePromotionError`、durable 的 `unreadableRecordReleased` 與 audit `detail`，CLI 也逐行印出並在不一致時多印一行。(c) `columnMergeIdentity()` **拒收半對**（有 pgid 沒 boot）：每一次寫入都同時寫這兩欄，所以半對是損毀不是舊格式（[[PITFALLS]] #105）。(d) 釋放時 pgid 必須等於**任一個**具名的活著 merge，不再是「第一個」 | 三條新測試，各自先 `assert(groupAlive(pgid))` 並在每一步重新斷言（[[PITFALLS]] #106），三種損毀落點一條一條打：`merge_pgid` 改死號碼、`merge_boot_at_sec` 改別的開機、兩欄 NULL＋payload 合法但無 group。各自斷言：`ps -g` 真的看得到 `git merge`、短短語以兩個號碼各試一次都被拒、`--pgid 999999` 連長短語也被拒、`alive` 精確等於 `[["merge", 那個 ps 看得到的 pgid]]`、`probeReadable` 為 `false`、`recordedGroups` 同時含兩個號碼、拒絕後 `storedState` 仍為 `applying`、**task B 以 `MAIN_MERGE_PROMOTION_ROW_UNREADABLE` 被擋（不是 `mainDirtyFingerprint`）**、merge 仍活著、整棵樹逐位元不變 |
+| **P1-6** `merge_boot_at_sec` 只有「它存在」的斷言，沒有任何斷言在守「它有用」（[[PITFALLS]] #83 同形）。突變 A（`columnMergeIdentity()` 永遠回 `bootAtSec: null`）12/12 全綠 | 不改行為，補行為測試；並順帶把「半對」定為損毀（見 P0 (c)） | 一條新測試「the merge-group columns are the only source, and the boot in them is part of the answer」，**把 trace 檔刪掉**讓欄位真的是唯一來源，三段互相需要：(1) 產品自己寫的欄位必須具名那個 merge；(2) 同一個**活著**的 pid 配上「另一次開機」的 boot 必須**停止**計數（先斷言 `kill(pgid,0)` 仍成功，否則這段什麼都沒證明）；(3) pgid 在、boot 被 NULL 掉＝(E) 的第二類（兩欄位組合損毀）→ 不可讀、長短語 |
+| **P1-7** `durableMergeIdentity` 的「payload 解析出來不是物件」分支零覆蓋，突變 D 12/12 全綠 | 不改行為，補測試 | 一條新測試「a payload that parses to something other than an object answers nothing about the merge」，三種形狀（`[1,2,3]`／`42`／`"a string"`）各打一次。merge **先被結束**、trace 檔**先被刪掉**，所以 `alive` 為空的原因與 payload 無關——這條測的只有短語，而只有 payload 能移動它 |
+| **P1-8** 殘餘風險第 126 列被實測證偽（「不可讀路徑會從欄位讀回 pgid 並要求長短語——方向是 fail-closed」）；第 125 列的範圍應從「舊列」擴為「任何 `merge_pgid` 為 NULL 的列」 | 兩列都已改寫（見下方殘餘風險表，原文以刪除線保留）。**第 125 列同時被實作縮小**：`promotion-traces` 這個第三來源讓「欄位 NULL＋payload 說沒有 group」不再等於「沒有 merge 在跑」——只要 trace 檔還在。**trace 檔也不見時仍然無法分辨**，那一格照實留在殘餘風險表 | P0 的第三條測試就是這一格；另有一段把 trace 檔刪掉、斷言 `alive` 為空且 `probeReadable` 為 `false` |
+| **P2-9** 上一輪 commit message 的兩句全稱宣稱被證偽 | 在本檔標記並改寫，見本表下方「被證偽的宣稱」小節。**commit message 本身不能改**（歷史不可改寫），所以更正住在這裡 | 不適用（文件） |
+| **P2-10** 「值逐字顯示」那一列敘述不完整；merge driver 的 argv 是否真的落進 `promotion-traces/*.jsonl` 只是推論 | 殘餘風險那一列改寫，補上 (a)(b)(c) 三句。**並且實測了那個推論**：見下方「merge driver argv 的實測」 | 不適用（文件＋一次性實測） |
+| **P2-11** 降版時 `table candidate_merge_promotions has 19 columns but 17 values were supplied` 是 SQLite 的原始訊息，不是具名錯誤 | **schema 版本 v5 → v6**。舊 build 的 `version > SCHEMA_VERSION` 檢查會在**開啟時**就以 `CANDIDATE_REGISTRY_SCHEMA_UNSUPPORTED` 拒絕，不再走到它自己的位置式 INSERT。`#upgrade` 新增 `from === 5` 分支（只動版本號，欄位仍由冪等的 `#assertPromotionGroupColumns()` 補上，每一列的 `row_hash` 不變） | 一條新測試「a v5 promotion database upgrades by name, and a newer one is refused before anything is written」：先**實測**舊 build 的十七值位置式 INSERT 對 v5 形狀確實有效（否則這條測的是別的東西）、再斷言開啟後版本變 6 且 `row_hash` 逐字不變、最後以 `user_version=7` 走同一個守衛斷言具名拒絕 |
+| **P3-12** `src/main.ts:195` 的 doc comment 仍寫「the read-only listing」 | 改寫，並在同一段寫明它為什麼不是唯讀 | 不適用（註解）；同一句話的產品面由 `test/main-cli.test.ts` 的 `Read-only.` 斷言守著 |
+| **P3-13** `orphan-refs` 的 `# read-only; lists, never deletes` 沒有任何「執行前後資料庫位元組相同」的斷言，唯一證據住在第六輪審查報告裡（[[PITFALLS]] #81） | 不改行為，補測試 | 一條新測試「\`orphan-refs\` says read-only, and the bytes of every database are the same afterwards」。量測是**成對括起來的**：只開關不做事是基準線，所以比較的是掃描本身而不是開資料庫的代價；而且**先驗敏感度**——一個確實會寫的 bracket 必須讓摘要改變，否則位元相等是為了錯的理由通過（[[PITFALLS]] #97）。同時斷言那個 ref 掃描完仍在（句子的後半） |
+
+**probe 的實際輸出（`scratchpad/r7/p7-col.mjs`，五種模式，修復前後各跑一次）**：
+
+| 模式 | 修復前 | 修復後 |
+| --- | --- | --- |
+| `baseline`（只毀 `row_hash`，對照組） | REFUSED，`alive=[{merge,pgid}]`，`probeReadable:true` | 不變 |
+| `col-pgid` | **ACCEPTED**，`alive=[]`，`probeReadable:true` | REFUSED，`alive=[{merge,那個 ps 看得到的 pgid}]`，`probeReadable:false` |
+| `col-boot` | **ACCEPTED**，`alive=[]`，`probeReadable:true` | 同上 |
+| `col-null-key` | **ACCEPTED**，`alive=[]`，`probeReadable:true` | 同上 |
+| `both-gone` | REFUSED，`alive=[]`，`probeReadable:false` | REFUSED，`alive=[{merge,pgid}]`（trace 具名它），`probeReadable:true` |
+
+三個 ⛔ 之後 task B 的答案也從 `MAIN_MERGE_APPROVAL_BINDING_CHANGED:mainDirtyFingerprint`
+變成 `MAIN_MERGE_PROMOTION_ROW_UNREADABLE`。
+
+**被證偽的宣稱（`5363edd` 的 commit message，兩句）。** commit message 不能改寫，更正住在這裡：
+
+- ~~「A merge whose identity cannot be read counts as running.」~~ **假。** `col-null-key` 情境下，
+  身分讀不到（欄位 NULL、payload 沒有 group）而產品回報 `alive: []`、`probeReadable: true` 並接受短短語。
+  正確的敘述是：**修復後**，「兩個來源打架」與「沒有任何來源答得出來」都算不可讀，而不可讀一律要求長短語；
+  但它在第七輪並不成立。
+- ~~「turned away by name instead of by the accident of a dirty worktree」~~ **只在損毀落在 payload 時成立。**
+  損毀落在欄位時，task B 得到的正是 `mainDirtyFingerprint`。修復後三種落點都以
+  `MAIN_MERGE_PROMOTION_ROW_UNREADABLE` 具名擋下（有測試）。
+
+**merge driver argv 的實測（P2-10 的推論改為實測）。** 在 `mktemp -d` 的臨時 repo 上，
+以 `merge.mine.driver` 設定一個帶合成 token 的指令、`.gitattributes` 寫 `* merge=mine`，
+製造雙邊都改同一檔案的 merge，並以 `GIT_TRACE2_EVENT` 收 trace。結果：
+
+```
+{"event":"child_start",...,"child_class":"?","use_shell":true,
+ "argv":["/tmp/driver-marker.sh SECRET-TOKEN-abc123 .merge_file_… .merge_file_… .merge_file_… 7 'f.txt'"]}
+```
+
+**driver 的完整指令列（含嵌在裡面的 token）逐字進入 trace 檔**，也就是會逐字進入
+`promotion-traces/<id>.jsonl`。附帶一個與 `readExecutedHooks` 有關的細節：它的 `child_class` 是 `"?"`
+而不是 `"hook"`，所以**不會**出現在 `hooksExecuted` 清單裡——位元組在檔案裡，但那份清單看不到它。
+
+### 第八輪的突變測試（十五個，全部實際跑過並附輸出）
+
+方法與前幾輪相同：`rsync` 複製工作樹到臨時目錄（`node_modules` 以 symlink 共用）、套用**一個**編輯、
+跑測試子集、記下變紅的測試名。**子集基準線**（未突變的樹，實際輸出）：
+`tests 11 / pass 11 / fail 0`，pattern 為
+`payload|a live merge is still named when|only source, and the boot|other than an object|merge-group columns existed|shorter phrase|v5 promotion database|orphan-refs`。
+`N` 的基準線是 `test/main-cli.test.ts` 的 `promotion records are listable` → `1/1`。
+
+| # | 突變 | 檔案 | 結果 |
+| --- | --- | --- | --- |
+| **E** | **欄位優先、看到就 return（第七輪的原形，本輪的核心決定）** | `candidate-registry.ts` | `pass=8 fail=3`：payload is destroyed…／merge_pgid column…／merge_boot_at_sec column… |
+| **E2** | **反方向**（[[PITFALLS]] #107）：payload 優先、看到就 return | `candidate-registry.ts` | `pass=9 fail=2`：merge_pgid column…／merge_boot_at_sec column… |
+| A | `columnMergeIdentity()` 永遠回 `bootAtSec: null` | `candidate-registry.ts` | `pass=9 fail=2`：merge_boot_at_sec column…／only source, and the boot… |
+| B | `#writePromotion` 不把 boot 寫進欄位 | `candidate-registry.ts` | `pass=6 fail=5` |
+| C | `columnMergeIdentity()` 接受半對（有 pgid 沒 boot） | `candidate-registry.ts` | `pass=10 fail=1`：only source, and the boot… |
+| D | payload 解析出來不是物件時算「有答案」 | `candidate-registry.ts` | `pass=10 fail=1`：parses to something other than an object… |
+| F | 拿掉 `promotion-traces` 這個第三來源 | `candidate-registry.ts` | `pass=9 fail=2`：payload is destroyed…／both merge columns are NULL… |
+| G | 只探測「達成共識的那一個」，不逐一探測候選 | `candidate-registry.ts` | `pass=8 fail=3` |
+| H | 「紀錄說沒有 group，但有一個 group 還活著」不再視為矛盾 | `candidate-registry.ts` | `pass=10 fail=1`：both merge columns are NULL… |
+| I | `sameMergeGroup()` 只比 pgid、不比 boot | `candidate-registry.ts` | `pass=10 fail=1`：merge_boot_at_sec column… |
+| J | 釋放不再要求引用看得到的號碼 | `candidate-registry.ts` | `pass=7 fail=4` |
+| K | `#upgrade` 沒有 `from === 5` 分支 | `candidate-registry.ts` | `pass=10 fail=1`：v5 promotion database upgrades by name… |
+| L | `SCHEMA_VERSION` 退回 5 | `candidate-registry.ts` | `pass=10 fail=1`：同上 |
+| M | `orphanRecoveryRefs()` 順手寫一次資料庫 | `candidate-registry.ts` | `pass=10 fail=1`：\`orphan-refs\` says read-only… |
+| N | CLI 不再印 `recorded …` 那幾行 | `main.ts` | `pass=0 fail=1`：promotion records are listable… |
+
+**十五個全部變紅，沒有需要依 #106／#107 排除的全綠案例。**
+這裡只能宣稱「這十五個突變會被抓到」，不能宣稱「所有突變都會被抓到」（[[PITFALLS]] #104）。
+
+**沒有被突變覆蓋的部分，分開講。** `public/room.js` 本輪**一個字都沒改**
+（`recordedGroups` 目前只走 CLI 與 API，核准畫面的揭露路徑未動），
+所以 `test/merge-dialog-acceptance.test.ts` 的 digest guard 仍然是綠的，
+**第六輪的瀏覽器驗收沒有過期**。`src/main.ts:195` 的 doc comment 是註解，沒有突變覆蓋它；
+它旁邊那句對使用者說的話由 `test/main-cli.test.ts` 守著。
+
+### 第八輪的完整 gate（2026-08-07，靜止樹，實際輸出）
+
+`npm run check`（hygiene → syntax → typecheck → coverage 測試 → fuzz → SBOM → 本機掃描 → history 掃描）
+**exit code 0**，開發 repo 與**乾淨 detached clone** 各跑一次，兩者數字相同：
+
+```
+ℹ tests 618
+ℹ pass 618
+ℹ fail 0
+ℹ all files                         |  95.79 |    87.67 |   97.23 |
+EXIT=0
+```
+
+門檻為 line 90／branch 85／function 90，以 command exit code 為準而不是抄畫面百分比（[[PITFALLS]] #34）。
+第七輪基準為 611 條，本輪 618（新增 7 條：三條損毀落點、欄位／boot 行為、非物件 payload、
+v5→v6 升級與降版、`orphan-refs` 位元組不變）。
+
+**clone 的做法**：`git clone --no-hardlinks` 後 `checkout --detach 8802edd`，
+再把工作樹 rsync 上去，`node_modules` **用 `cp -R` 複製而不是 symlink**；
+跑完以 `diff -r -q`（排除 `.git`／`node_modules`／`dist`）確認兩棵樹逐檔相同（exit 0）。
+
+**這一段文字是在兩次 gate 都跑完之後才寫進本檔的**，也就是那兩次 gate 跑的樹與交付樹的唯一差異就是這一段；
+除此之外沒有任何檔案在 gate 執行期間被修改（所有原始碼與文件的 mtime 都早於 gate 啟動時刻）。
+
 ### 可接受的殘餘風險（連同「何時失效」一起列，未列出的不得事後補認）
 
 | 殘餘風險 | 為什麼此階段可接受 | 何時失效 |
@@ -921,7 +1050,7 @@ EXIT=0
 | **`needs-manual-review` 沒有「Owner 按一下就結案」的按鈕**；它只能藉由 Owner 真的把 main 復原（或那次 merge 真的完成）而在下一次讀取時自行收斂 | 這正是「唯讀 reconciliation」的必然結果：能結案的唯一證據是重新觀察到的指紋，不是一個宣告。第一輪的缺陷不是「沒有按鈕」，而是**寫死之後永不再觀察**，那已修復並有測試（見下） | **若第二輪接上 GUI 出口**，必須同時提供「重新觀察」的顯式動作與逐項差異的畫面。**2026-08-06 第四輪審查更正（本輪接受）**：上一版這一欄寫「在那之前 Owner 的路徑是 CLI／API 的 `promotions()`」——**那句話與實作不符**。`grep -rn promotions src/main.ts src/ui src/mcp` 為零，`orchestrator candidates` 只有 `orphan-refs` 一個子指令，**`promotions()` 沒有任何 CLI 或 HTTP 出口**；唯一的呼叫方式是自己寫 Node script 直接 `new CandidateRegistry(dataDir)`。這是 [[PITFALLS]] #77／#109 同形（未經驗證就把「有出口」寫進文件）。**目前 Owner 沒有可用的成品路徑**，這件事本身列為未關閉項而不是既有能力。**2026-08-07 第六輪已關閉**：`orchestrator candidates promotions <workspace>` 列出（會重新觀察並更新未結紀錄），`… release …` 為三個釋放動作的出口；此欄保留原文以留下更正的痕跡 |
 | **attributes 閘門不宣稱完備。** 兩半合起來仍看不到一種形狀：一份**全域** attributes 檔，其 pattern 既不匹配本 repo 任何 tracked／ignored 路徑，也不匹配 `ATTRIBUTES_PROBE_PATHS` 那份代表性清單 | 這種規則按定義不會套用到本 repo 現有的任何檔案；要生效必須同時有人在 candidate 內新增一個匹配它的新路徑。而 `filter.*.clean/smudge` 的**設定**本身仍是獨立的拒絕條件，那才是 LFS 之類的實際形狀 | **若 promotion 開始接受會新增任意副檔名的 candidate 而不逐一詢問 git**，或若代表性清單停止跟著實務更新，即失效。正確的下一步是把 candidate 即將寫入的**確切路徑**也餵給 `check-attr` |
 | **`#upgrade` 的 `from === 1` / `from === 3` 分支對含 completed candidate 的舊庫是假支援**：加表本身成功，但 registry 隨後在讀取層以 `CANDIDATE_COMPLETION_PREVIEW_INVALID` 開不起來 | 這是 `a75e904` 引入的、不是 5-5 造成的，且 v1／v3 都是**未發布**的內部版本；Owner 目前的正式 DB 是 v4→v5 路徑，該路徑有真實資料庫的回歸測試 | **若任何 v1／v3 資料庫需要真的被打開即失效**——屆時必須是真正的 completion 升級，或至少一個具名的 fail-loud 錯誤碼取代目前的通用解析失敗。第二輪已把它記為必須具名；本輪**未實作**，維持列在此處 |
-| **每一次 promotion 會在 owner-only data directory 留下一份 git trace 檔案（`promotion-traces/<id>.jsonl`），產品不刪除它。** 檔案內含這次執行過的 hook argv，也就是 Owner 自己 repo 內的指令；`GIT_TRACE2_EVENT` 的路徑同時會出現在 hook 的環境變數裡 | 它是「哪些 hook 真的跑過、退出碼是多少」的**唯一觀察來源**，而且崩潰後仍可讀——刪掉它就等於把第 5 項的事實斷言換回常數。目錄是 0700，hook 本來就以 Owner 身分執行、看得到的東西不比它自己多 | **若 promotion 變成高頻操作即失效**（磁碟成長無上限）；屆時需要有界保留策略，且刪除必須走本專案的兩段式刪除規則 |
+| **每一次 promotion 會在 owner-only data directory 留下一份 git trace 檔案（`promotion-traces/<id>.jsonl`），產品不刪除它。** 檔案內含這次執行過的 hook argv，也就是 Owner 自己 repo 內的指令；`GIT_TRACE2_EVENT` 的路徑同時會出現在 hook 的環境變數裡 | 它是「哪些 hook 真的跑過、退出碼是多少」的**唯一觀察來源**，而且崩潰後仍可讀——刪掉它就等於把第 5 項的事實斷言換回常數。目錄是 0700，hook 本來就以 Owner 身分執行、看得到的東西不比它自己多 | **若 promotion 變成高頻操作即失效**（磁碟成長無上限）；屆時需要有界保留策略，且刪除必須走本專案的兩段式刪除規則。**第八輪追加：這個檔案現在還是 merge 身分的第三個來源**（見 P0），所以任何保留策略都必須把「還在 `applying` 的促進」排除在外，否則清掉它就等於把一列已損毀紀錄的最後一個號碼來源拿走 |
 | **標準第 7 項的「期間偵測」目前是事後偵測**（見上方裁決請求），未取得 Owner 裁決前**不算已接受** | `authorizedMergeCommit` 的雙親判準使外部推進不可能被誤記為 applied，且差異逐項具名 | 若 promotion 改為控制面分步執行，或開放多 candidate 併發，立即失效 |
 | **把整份 config 納入綁定，代價是良性的 `git config` 寫入也會燒掉核准。** 核准存活期間對 main 的任何一次設定寫入都讓它終局 `invalidated`，Owner 必須重新 preview 與核准 | 這是 fail-closed 的方向，而反過來（只綁一份鍵名清單）已經被實測證明會放行 `gpg.program`。core config 在核准的 15／5 分鐘窗內本來就極少改動 | **若 promotion 變成高頻操作、或 Owner 的工作流程會在該窗內動 `.git/config`（例如自動化的 `git remote`／`branch --track`）即失效**；屆時要改為「只綁會導致執行的鍵，並且那份清單本身要有跟得上 git 的機制」 |
 | **`programs`（核准畫面上逐項揭露的設定鍵）明確不宣稱完整。** 它是一條正規表達式，只決定哪些鍵會被**顯示**；沒有匹配到的鍵仍然被 `configDigest` 綁定，但 Owner 在畫面上看不到它的名字 | 完整性由 digest 那一半承擔：沒被列出不等於沒被綁定。要讓一個未列出的鍵生效，攻擊者仍必須在核准之前就把它放好，而那會改變 digest 之外的東西嗎——不會，所以這一條的真正邊界寫在下一欄 | **若某個 git 版本新增一個「core config 已存在、preview 當下就在那裡」的程式執行鍵**，它會被綁定（所以核准後改它會被擋）但**不會被揭露**，Owner 看不到它。修法是把 `programs` 的判準改為「白名單允許的鍵以外，任何值看起來像路徑或指令的鍵一律列出」，或直接拒絕未知鍵 |
@@ -930,11 +1059,13 @@ EXIT=0
 | **`abandonPromotionEntirely()` 可以在 merge 真的還在寫 main 時被使用。** 產品不殺程序、不碰 main，但那一刻的「不再等待」是 Owner 的宣告而不是觀察 | 替代方案是把那個狀態留成死結，而死結已實測會永久報廢 task（第 11 項禁止）。風險被壓在三個地方：短語**說出**正在放棄兩個程序且其中一個可能還在寫 main；必須寫出記錄上的**兩個**確切號碼；只要那個 pid 還活著，`#recoveryHint` 一律只給唯讀的 `inspect-live-merge`，永遠不給 `reset --hard`（[[PITFALLS]] #94） | **若未來能對 merge 子程序做真正的身分驗證**（例如以 pidfd／程序啟動時刻比對），這條退化為不必要；在那之前不得再放寬短語或省略號碼 |
 | **一列讀不了的促進紀錄，釋放之後仍然讀不了，而它自己的 task 仍然沒有產品側出路。** `#assertNoUnresolvedPromotion` 會對它永遠回 `MAIN_MERGE_PROMOTION_UNRESOLVED` | 本輪修的是**爆炸半徑**（整個專案 → 一個 task），不是損壞本身。要給那個 task 出路，只能是「重算 row hash」，而那等於替一列來源不明的資料重新背書（[[PITFALLS]] #28／#57），代價比留著一個具名的死 task 高 | **若 SQLite 檔案損壞在實務上不只是理論**（例如 Owner 回報過一次）即失效；屆時正確做法是離線的 registry 修復工具＋逐列人工確認，而不是線上重新背書 |
 | ~~**`promotions()` 與三個釋放動作沒有任何 CLI 或 HTTP 出口。**~~ **已於第六輪關閉**：`orchestrator candidates promotions <workspace>`（列出；**第七輪更正：原寫「唯讀列出」，實際會重新觀察並更新未結的紀錄**）與 `… release <promotion-id> --confirm <phrase> [--pid N] [--pgid N]`（三個釋放動作，依 Owner 引用的號碼分派）。路徑過 `workspaces.assertAllowed()`，room 由 workspace 反查；輸出只有 id、狀態、pid 與唯讀 `ps` 指令 | 這**不是**替 `promoteMainMerge` 開出口——寫入 main 仍然刻意沒有產品側路徑，`helpText()` 也有一條斷言確認它沒被寫進說明 | 若未來接上 GUI，兩個動詞必須維持分離（觀察不需短語、釋放需要短語＋確切號碼） |
-| **核准畫面仍會逐字顯示 `merge.<name>.driver` 與 `filter.<name>.clean/smudge` 的『值』**（也就是那條指令），而 `programs` 只顯示鍵名。**第七輪更正**：這一列在第六輪寫下時，那兩份清單連**鍵名**都沒有遮蔽——實測 `merge.https://u:<token>@github.com.driver` 逐字上畫面也逐字入庫，而同一輪的交付說明宣稱「秘密既不上畫面也不進資料庫」。鍵名已修，值仍如本列所述 | 這是刻意的不對稱：driver／filter 的值**就是會被執行的那個指令**，不顯示它等於把最該看的東西藏起來；`programs` 那一半顯示鍵名就足以說明「有一個 credential helper 會跑」。第六輪修掉的是**鍵名**裡的秘密，不是這一項 | **若 Owner 的 repo 把秘密寫進 merge driver 或 filter 的指令字串即失效**——屆時正確做法是對值做遮蔽並改為「以雜湊呈現＋要求 Owner 到終端自行查看」，而不是靜默截斷 |
-| **一列讀不了的促進紀錄，如果連 `merge_pgid` 欄位也一起壞了，產品無法要求 Owner 引用任何號碼**——沒有號碼可引。那一刻剩下的唯一保護是長短語（它明說 main 可能正在被寫）與 `probeReadable: false` 的揭露 | 要求引用一個讀不到的號碼等於把那一列變成死結，而死結已實測會永久報廢 task（第 11 項禁止）。方向仍是 fail-closed：讀不到一律當成活著，短短語一律被拒 | **若未來能從 `promotion-traces/<id>.jsonl` 或 pidfd 之類不共享損壞的來源重建 merge 身分即失效**——屆時必須恢復「引用確切號碼」的要求 |
-| **由前一個 commit 寫出、`merge_pgid` 欄位為 NULL 的舊列，如果它的 `observation_json` 被改成「合法 JSON 但沒有 `mergePgid`」，仍會被讀成「沒有 merge 在跑」** | 這正是本輪新增欄位要消滅的形狀，而欄位只能保護**這個 build 之後寫出的列**。舊列除了 `observation_json` 之外沒有第二個來源，任何「一律當成活著」的替代做法會讓每一列尚未 spawn git 的正常促進紀錄也永遠拿不到短短語 | **若這個分支曾經以舊 commit 執行過真實 promotion 且該列仍在 `applying`，即失效**——屆時應以離線工具把該列的欄位補上再繼續 |
-| **`merge_pgid` 欄位與 `observation_json` 由不同版本的程序交錯寫入時可能不一致**（舊 build 只會寫 payload，不會清欄位） | 不一致會被 `#assertPromotionRow` 判為 `MAIN_MERGE_PROMOTION_ROW_TAMPERED`，該列進入不可讀路徑，而不可讀路徑會從欄位讀回 pgid 並要求長短語——**方向是 fail-closed** | **若同一個 data directory 會被兩個不同版本的 orchestrator 同時使用即失效**；本專案的 digest-pinned runtime 規則本來就禁止這件事 |
+| **`merge.<name>.driver` 與 `filter.<name>.clean/smudge` 的『值』逐字出現在三個地方**（核准畫面、SQLite 的 `preview_json`、以及每次促進的 `promotion-traces/<id>.jsonl`），而 `programs` 只顯示鍵名。**第七輪更正**：這一列在第六輪寫下時，那兩份清單連**鍵名**都沒有遮蔽——實測 `merge.https://u:<token>@github.com.driver` 逐字上畫面也逐字入庫，而同一輪的交付說明宣稱「秘密既不上畫面也不進資料庫」。鍵名已修，值仍如本列所述。**第八輪補三句**：(a) 值同時存在**畫面／SQLite／`promotion-traces` 三處**，不是只有畫面；第三處已**實測**——git 的 trace2 把 driver 的完整指令列（含嵌在裡面的合成 token）以 `child_start.argv` 逐字寫出，見上方「merge driver argv 的實測」。(b) **把值存進 SQLite 不是揭露的必要條件，只是目前的實作選擇**：綁定靠的是 `configDigest`，與揭露清單是兩條路；`inspectMergeApproval` 的 live 掃描已經證明「核准當下重新讀 config 再顯示」是可行的。(c) 觸發條件不需要 Owner 做任何事——**只要 repo 內存在任何 driver／filter 設定**即成立，因為 `.git/config` 是 linked worktree 共用的，不可信的 candidate worktree 在核准之前就能寫進去 | 這是刻意的不對稱：driver／filter 的值**就是會被執行的那個指令**，不顯示它等於把最該看的東西藏起來；`programs` 那一半顯示鍵名就足以說明「有一個 credential helper 會跑」。第六輪修掉的是**鍵名**裡的秘密，不是這一項 | **只要 Owner 的 repo 內存在任何 merge driver 或 content filter 設定即失效**（不需要它含有秘密，也不需要 Owner 主動做什麼）——屆時正確做法是：值改以雜湊呈現＋要求 Owner 到終端自行查看，同時把 `promotion-traces` 的保留改為有界並走本專案的兩段式刪除規則 |
+| ~~**一列讀不了的促進紀錄，如果連 `merge_pgid` 欄位也一起壞了，產品無法要求 Owner 引用任何號碼**~~**第八輪已大幅縮小**：`promotion-traces/<id>.jsonl` 現在是第三個來源，而它不住在資料庫裡，所以「兩個欄位＋payload 全毀」的列仍然能具名 pgid 並要求引用（實測：`both-gone` 模式從 `alive=[]` 變成 `alive=[{merge,pgid}]`）。**剩下的那一格是：連 trace 檔也不在**（被刪、寫入失敗、或 data directory 部分遺失）。那一刻剩下的唯一保護是長短語與 `probeReadable: false` 的揭露 | 要求引用一個讀不到的號碼等於把那一列變成死結，而死結已實測會永久報廢 task（第 11 項禁止）。方向仍是 fail-closed：讀不到一律當成活著，短短語一律被拒（有測試） | **若 trace 檔開始被保留策略清理即失效**——屆時保留策略必須把「還在 `applying` 的促進」排除在外；另外若未來能以 pidfd 之類的方式做真正的身分驗證，這一格可以完全關閉 |
+| **任何 `merge_pgid` 欄位為 NULL 的列**（不只舊列——第七輪實測：對本 build 寫出的列把 INTEGER 欄位損毀成 NULL 就重現同一結果，而**程式無法分辨「因為是舊列所以沒有」與「因為壞了所以沒有」**），**如果它的 `observation_json` 同時是「合法 JSON 但沒有 `mergePgid`」，而且 trace 檔也不在，仍會被讀成「沒有 merge 在跑」**。~~原文只把範圍寫成「由前一個 commit 寫出的舊列」，第七輪審查證偽~~ | 第八輪把這一格縮到只剩「trace 檔也不在」：只要 trace 還在，這個形狀就會被具名擋下（有測試，`p7-col.mjs col-null-key` 也從 ACCEPTED 變成 REFUSED）。剩下的部分無解的原因是結構性的——沒有任何來源能區分「沒有東西可記」與「記過但被抹掉」，而「一律當成活著」會讓每一列尚未 spawn git 的正常促進紀錄也永遠拿不到短短語（第 11 項禁止的形狀，突變 M3 已證明） | **若 trace 檔開始被清理、或 data directory 只還原了 SQLite 而沒還原 `promotion-traces/` 即失效** |
+| **`merge_pgid` 欄位與 `observation_json` 由不同版本的程序交錯寫入時可能不一致**（舊 build 只會寫 payload，不會清欄位） | 不一致會被 `#assertPromotionRow` 判為 `MAIN_MERGE_PROMOTION_ROW_TAMPERED`，該列進入不可讀路徑。~~而不可讀路徑會從欄位讀回 pgid 並要求長短語——方向是 fail-closed~~ **第七輪實測證偽：不可讀路徑當時是「欄位優先、看到就 return」，所以它讀回的是那個壞掉的欄位，探測到它已死，然後接受短短語——方向是 fail-OPEN。**第八輪已修：兩個來源不一致時答案是「不可讀」，兩個號碼都探測、都列出，短短語一律不可用（有測試，且突變 E／E2 兩個方向都會變紅）。另外**降版方向現在是具名的**：schema 移到 v6，舊 build 在開啟時就以 `CANDIDATE_REGISTRY_SCHEMA_UNSUPPORTED` 拒絕，不會走到交錯寫入 | **若同一個 data directory 會被兩個不同版本的 orchestrator 同時使用即失效**；本專案的 digest-pinned runtime 規則本來就禁止這件事，而 v6 讓舊 runtime 連開都開不起來 |
 | **核准畫面上那段揭露的「渲染」與「scroll-gate 是否真的把它算進去」，只有手動瀏覽器驗收＋digest guard，沒有自動 DOM 測試** | 專案沒有 DOM 測試執行器，加一個是新相依（pending decision D-006，Owner 裁決）。行為那一半（事實有沒有到達 payload）有 Node 測試守著；渲染那一半有 digest guard，程式一改就紅燈，逼人重跑 | **若 Owner 核准新增 DOM 測試執行器即失效**；也**若 digest guard 再被發現有涵蓋不到的角落**（它已被抓到過一次：只認 `^function` 而漏掉 `async function`）即失效 |
+| **`promotion-traces` 這個第三來源本身有三個已知限制，都不宣稱完備。** (1) merge 的 pid 是從 trace2 的 `sid` 尾端 `-P<hex>` **解析**出來的，不是問 git 拿的（[[PITFALLS]] #103 的形狀，但這裡沒有可問的對象——那個程序早就結束了）；(2) trace 不記錄開機時刻，所以那個 pid 屬於哪一次開機是**從 git 的啟動時間推導**的（早於本次開機即視為別的開機，容差內視為同一次）；(3) 只讀檔案前 64 KiB 找 `start` 事件；(4) **trace 檔不會被清空**，所以那個號碼在同一次開機內若被 OS 回收給別的程序，一列已損毀的紀錄會因此改要求長短語 | 四個限制的失敗方向都是 fail-closed：格式變了就解析不到，於是回報「有起過 merge、但沒有人說得出號碼」＝不可讀＝長短語；推導錯的方向是「不能排除」而不是「可以結案」；(4) 只影響**已經損毀**的列，而且長短語＋引用那個號碼仍是可用的出路，不會產生死結（第 11 項禁止的形狀）。而它存在的理由是 [[PITFALLS]] #115——前兩個來源共用同一列，這一個不是 | **若 git 改掉 trace2 的 sid 格式**，這個來源只會安靜地退回「不可讀」，不會給出錯的號碼；但那時第 125／126 列的殘餘風險會回到第七輪的大小，**所以升級 git 之後要重跑 `p7-col.mjs` 的五種模式** |
+| **schema 移到 v6 之後，任何 `SCHEMA_VERSION = 5` 的既有 runtime 再也打不開這個 data directory**（`CANDIDATE_REGISTRY_SCHEMA_UNSUPPORTED`）。這是刻意的，但它是一個**不可逆的單向動作**：本 build 開過一次，`user_version` 就是 6 | 替代方案是讓舊 build 在 SQLite 內部炸出 `has 19 columns but 17 values were supplied`，那既不具名也不早。方向都是 fail-closed，差別只在「開啟時具名」與「寫入途中無名」 | **若 Owner 需要回到 digest-pinned 的舊 runtime 即失效**——屆時唯一的路是先備份、再以離線工具把兩個欄位 DROP 掉並把 `user_version` 改回 5。**這件事需要 Owner 知情**：在讓本 build 碰正式 data directory 之前先取一份備份 |
 
 **已從殘餘風險移除、改列為必修**：
 

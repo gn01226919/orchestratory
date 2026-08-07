@@ -192,7 +192,11 @@ export function describeOrphanRecoveryRefs(input: {
 }
 
 /**
- * The three release actions and the read-only listing, as the CLI sees them.
+ * The three release actions and the listing, as the CLI sees them.
+ *
+ * The listing is NOT read-only: it re-observes every unsettled record and updates it. That is the
+ * convergence bar item 13 requires, and calling it "read-only" here was the same untrue adjective
+ * the command's own header used to print ([[PITFALLS]] #116).
  *
  * Narrower than `CandidateRegistry` on purpose: this command may observe promotions and stop a
  * record from waiting, and it must not be able to reach `promoteMainMerge` — writing to main stays
@@ -297,6 +301,16 @@ export function describePromotions(input: {
         if (promotion.release.probeReadable === false) {
           lines.push("  alive       UNKNOWN — this record's merge group could not be read at all;"
             + " that is not the same as nothing running");
+        }
+        // Every number the record names, including the ones that probed dead. When two sources
+        // disagree the owner is shown BOTH, because "this code preferred the column" is not a fact
+        // about their machine — it was the preference that released a marker over a live merge.
+        for (const recorded of promotion.release.recordedGroups ?? []) {
+          lines.push(`  recorded    ${recorded.source} says pgid ${recorded.pgid}`
+            + ` (boot ${recorded.bootAtSec === null ? "not recorded" : recorded.bootAtSec})`);
+        }
+        if ((promotion.release.recordedGroups ?? []).length > 1) {
+          lines.push("  recorded    the sources above do not agree; none of them can be ruled out");
         }
         for (const alive of promotion.release.alive) {
           lines.push(`  alive       ${alive.kind} pid ${alive.pid}`);

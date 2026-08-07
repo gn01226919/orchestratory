@@ -267,6 +267,34 @@ test("promotion records are listable and releasable from the CLI, and the two ar
   assert.match(unprobed, /MAY BE WRITING TO MAIN/u);
   assert.doesNotMatch(unprobed, /--pgid/u);
 
+  // FINDING P0 (seventh round). When two sources name different groups the owner must see BOTH
+  // numbers. Printing only the one that probed alive would show them the same screen as a record
+  // with a single source, and "the column was preferred" is not a fact about their machine — it was
+  // the preference that released the project's marker over a merge that was still writing.
+  const contested = describePromotions({
+    mainPath: "/workspace/project",
+    promotions: [{
+      id, taskId, state: "unreadable", unreadable: true,
+      storedState: "applying", holdsProjectExclusiveMarker: true,
+      release: {
+        confirmation: "STOP LETTING AN UNREADABLE RECORD BLOCK THIS PROJECT WHILE ONE OF ITS"
+          + " PROCESSES IS STILL ALIVE AND MAY BE WRITING TO MAIN",
+        alive: [{ kind: "merge", pid: 5151, inspect: "ps -o pid,ppid,pgid,stat,lstart,command -g 5151" }],
+        probeReadable: false,
+        recordedGroups: [
+          { source: "column", pgid: 999_999, bootAtSec: 1_776_000_000 },
+          { source: "payload", pgid: 5151, bootAtSec: 1_776_000_000 },
+        ],
+      },
+    } as unknown as Parameters<typeof describePromotions>[0]["promotions"][number]],
+  });
+  assert.match(contested, /recorded {4}column says pgid 999999 \(boot 1776000000\)/u);
+  assert.match(contested, /recorded {4}payload says pgid 5151 \(boot 1776000000\)/u);
+  assert.match(contested, /recorded {4}the sources above do not agree; none of them can be ruled out/u);
+  // The dead number is reported as recorded, never as alive: an audit line is an observation.
+  assert.doesNotMatch(contested, /alive {7}merge pid 999999/u);
+  assert.match(contested, /--pgid 5151/u);
+
   // Argument handling, both directions: which release is called is decided by which numbers the
   // owner quoted, and a request with no phrase never reaches any of them.
   const calls: string[] = [];
