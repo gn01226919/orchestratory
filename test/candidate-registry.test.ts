@@ -662,7 +662,7 @@ test("candidate registry rejects a future schema version", async (t) => {
   const path = registry.path;
   registry.close();
   const db = new DatabaseSync(path);
-  db.exec("PRAGMA user_version=6");
+  db.exec("PRAGMA user_version=7");
   db.close();
   assert.throws(() => new CandidateRegistry(data), /CANDIDATE_REGISTRY_SCHEMA_UNSUPPORTED/u);
 });
@@ -734,7 +734,7 @@ test("candidate registry validates bounded public inputs and lifecycle state", a
   await assert.rejects(registry.reconcileCreating(86_400_001), /CANDIDATE_RECOVERY_GRACE_INVALID/u);
   await assert.rejects(registry.reconcileCreating(1.5), /CANDIDATE_RECOVERY_GRACE_INVALID/u);
   assert.equal(registry.inventory().tasks, 1);
-  assert.deepEqual(registry.integrity(), { schemaVersion: 5, quickCheck: "ok", rowsValid: true });
+  assert.deepEqual(registry.integrity(), { schemaVersion: 6, quickCheck: "ok", rowsValid: true });
   await registry.complete({
     actor: "codex", clientRequestId: key(), taskId: task.taskId, roomId: "demo", mainPath: source, summary: "complete boundary test",
     tests: [{ command: "node --test", status: "not-run" }], knownRisks: ["none"],
@@ -1065,11 +1065,11 @@ test("a v1 candidate database upgrades to the request ledger without disturbing 
   const upgraded = new CandidateRegistry(data);
   assert.deepEqual(upgraded.get(task.taskId), task);
   assert.equal(upgraded.inventory().tasks, 1);
-  assert.deepEqual(upgraded.integrity(), { schemaVersion: 5, quickCheck: "ok", rowsValid: true });
+  assert.deepEqual(upgraded.integrity(), { schemaVersion: 6, quickCheck: "ok", rowsValid: true });
   upgraded.close();
 
   db = new DatabaseSync(path);
-  assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 5);
+  assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 6);
   assert.equal((db.prepare("SELECT COUNT(*) AS total FROM candidate_requests").get() as { total: number }).total, 0);
   for (const table of ["candidate_merge_approvals", "candidate_merge_promotions"]) {
     assert.equal(
@@ -1096,13 +1096,13 @@ test("a v3 candidate database gains the merge approval table without disturbing 
 
   const upgraded = new CandidateRegistry(data);
   assert.deepEqual(upgraded.get(task.taskId), task);
-  assert.deepEqual(upgraded.integrity(), { schemaVersion: 5, quickCheck: "ok", rowsValid: true });
+  assert.deepEqual(upgraded.integrity(), { schemaVersion: 6, quickCheck: "ok", rowsValid: true });
   assert.equal(upgraded.inventory().mergeApprovals, 0);
   upgraded.close();
   assert.deepEqual(tableRows(path, "candidates"), candidatesBefore);
 
   db = new DatabaseSync(path);
-  assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 5);
+  assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 6);
   assert.equal(
     (db.prepare("SELECT COUNT(*) AS total FROM candidate_merge_promotions").get() as { total: number }).total,
     0,
@@ -1489,7 +1489,7 @@ test("checkpoint and complete reject an invalid room id before touching the requ
 
   registry.close();
   registry = new CandidateRegistry(data);
-  assert.deepEqual(registry.integrity(), { schemaVersion: 5, quickCheck: "ok", rowsValid: true });
+  assert.deepEqual(registry.integrity(), { schemaVersion: 6, quickCheck: "ok", rowsValid: true });
   assert.equal(registry.get(task.taskId)?.status, "active");
   assert.equal(registry.inventory().tasks, 1);
 });
@@ -1950,7 +1950,7 @@ test("a succeeded candidate request is never demoted by a later failure verdict"
   const settled = storedRequest(path, startInput.clientRequestId);
   assert.equal(settled.state, "succeeded");
   assert.notEqual(settled.receipt, null);
-  assert.deepEqual(registry.integrity(), { schemaVersion: 5, quickCheck: "ok", rowsValid: true });
+  assert.deepEqual(registry.integrity(), { schemaVersion: 6, quickCheck: "ok", rowsValid: true });
   assert.equal(registry.inventory().tasks, 1);
 });
 
@@ -2295,7 +2295,7 @@ test("a stale seat cannot record a verdict on the reservation another seat adopt
     ], { cwd: source })).stdout.split("\n").filter(Boolean),
     [adopted.recoveryRef],
   );
-  assert.deepEqual(liveSeat.integrity(), { schemaVersion: 5, quickCheck: "ok", rowsValid: true });
+  assert.deepEqual(liveSeat.integrity(), { schemaVersion: 6, quickCheck: "ok", rowsValid: true });
 });
 
 test("a settle whose token the reservation no longer holds is refused without leaking its code", async (t) => {
@@ -2345,7 +2345,7 @@ test("a settle whose token the reservation no longer holds is refused without le
   assert.equal(storedRequest(path, completeInput.clientRequestId).state, "succeeded");
   assert.equal(registry.inventory().checkpoints, 1);
   assert.equal(countRequests(path), 2);
-  assert.deepEqual(registry.integrity(), { schemaVersion: 5, quickCheck: "ok", rowsValid: true });
+  assert.deepEqual(registry.integrity(), { schemaVersion: 6, quickCheck: "ok", rowsValid: true });
 });
 
 test("a v2 candidate database is refused instead of silently rebuilding its ledger", async (t) => {
@@ -2431,7 +2431,7 @@ test("a candidate settle survives a clock that steps backwards after the mutatio
   assert.deepEqual(requestClock(path, checkpointInput.clientRequestId), { created: base, updated: base });
   assert.equal(seat.inventory().requestsPending, 0);
   assert.equal(seat.inventory().checkpoints, 1);
-  assert.deepEqual(seat.integrity(), { schemaVersion: 5, quickCheck: "ok", rowsValid: true });
+  assert.deepEqual(seat.integrity(), { schemaVersion: 6, quickCheck: "ok", rowsValid: true });
 });
 
 test("a live candidate creator is never reaped by a concurrent seat, at any grace", async (t) => {

@@ -745,6 +745,28 @@ hook 清單真正把關的地方是 approval 綁定，在 merge 前一刻對 liv
   **未讀到是 `null`、讀到但沒有 hook 是 `[]`**，兩者不折疊。audit 與 room ledger 由新的
   `onMergePromotion` sink 寫入，與既有的 drift sink 同形：durable 先行、listener 例外被吞、
   帳本只登公開資訊（不含專案路徑、approval id、token）。
+- **「A 壞了還可以靠 B」要先問 B 是不是住在 A 裡面（2026-08-07，第七輪審查後）。**
+  第六輪把 merge 的 pgid 從 `observation_json` 搬進 `merge_pgid`／`merge_boot_at_sec` 兩個欄位，
+  理由是「欄位是損毀的 payload 帶不走的來源」。第七輪實測證明那個理由只覆蓋一半：
+  **兩個欄位與 payload 住在同一列**，損毀落在欄位上時，「欄位優先」反而讓產品挑了壞掉的那個當權威
+  （`p7-col.mjs col-pgid`／`col-boot`／`col-null-key` 三種形狀全部接受短短語，而 `ps -g`
+  同時證明 merge 活著）。決定兩件事：
+  (a) **兩個 in-row 來源答案不同時，答案是「不可讀」**，不挑任何一個當權威，
+  兩個號碼都探測、都列給 Owner 看（[[PITFALLS]] #85 的一般化）；
+  (b) **加入第三個不住在資料庫裡的來源**——同一次促進的 `promotion-traces/<id>.jsonl`。
+  git 的 trace2 session id 尾端以十六進位帶著 git 自己的 pid，而 merge 是 `detached` 起的，
+  所以 pid 就是 pgid。這個來源唯讀、有界（前 64 KiB）、解析不到就回報「不可讀」而不是「沒有 merge」，
+  而且**不宣稱完備**：它依賴 trace2 的 sid 格式，格式改了它會安靜地退回不可讀。
+  同時因此規定：任何未來的 trace 保留／清理策略都必須排除「還在 `applying` 的促進」。
+- **加欄位不動版本號，會把「降版」的失敗留在 SQLite 內部（2026-08-07）。**
+  第六輪以 `ALTER TABLE ADD COLUMN` 加上兩個欄位並刻意不動 `user_version`，理由是「純加欄位、
+  雜湊不變、不需要升級分支」。升級方向確實如此，但降版方向沒有名字：舊 build 看到 version 5、
+  接受這個資料庫，然後在自己的位置式 INSERT 上炸出
+  `table candidate_merge_promotions has 19 columns but 17 values were supplied`。
+  決定把 schema 移到 **v6**：舊 build 既有的 `version > SCHEMA_VERSION` 檢查會在**開啟時**
+  就以 `CANDIDATE_REGISTRY_SCHEMA_UNSUPPORTED` 拒絕。**代價是明知且不可逆的**——本 build 開過一次，
+  digest-pinned 的舊 runtime 就再也打不開那個 data directory，回退需要離線工具。
+  這一項列入殘餘風險表並需要 Owner 知情。
 
 **一項提交 Owner 裁決，未自行改標準。** 標準第 7 項要求「promotion 期間偵測外部推進並中止」。
 單機 git 上這做不到：`git merge` 是外部程序，控制面在它執行期間沒有中止點，任何輪詢只縮小 TOCTOU 窗。
