@@ -344,6 +344,14 @@ export function describePromotions(input: {
       lines.push(`  release     --confirm ${JSON.stringify(pending.release)}`);
     } else {
       lines.push(`  waiting     ${pending.code} (pid ${pending.pid})`);
+      if (pending.code === "MERGE_GROUP_SURVIVOR_STILL_RUNNING") {
+        // Amendment (U). Said in full rather than left to the code name, because the shape is
+        // counter-intuitive and the owner is the one deciding: the `git merge` itself has exited,
+        // and what is still alive is something it started. Measured appending to a tracked file in
+        // main six seconds after this product had already offered `git reset --hard`.
+        lines.push("              the leader of this group did not answer and the group did:"
+          + " what is still there is something the merge left, and it can still write to main");
+      }
       if (pending.code === "MERGE_END_NOT_OBSERVED") {
         // Amendment (T), and attributed rather than asserted for the same reason every other line
         // here is. The number no longer answers — but it is a number read back out of this record,
@@ -361,6 +369,19 @@ export function describePromotions(input: {
         + (pending.code === "OWNER_PROCESS_STILL_RUNNING" ? ` --pid ${pending.pid}`
           : pending.alsoBlockedBy === undefined ? ` --pgid ${pending.pid}`
             : ` --pid ${pending.pid} --pgid ${pending.alsoBlockedBy.pid}`));
+    }
+    // P2 of the eleventh round's review: this fact was already in the payload and the listing did not
+    // print it. The record named a live process group in `mergeGroupSurvivors` on the same pass that
+    // printed "no process this record names is still being waited on" and a `reset --hard`. The
+    // reason it can no longer say both is the amendment (U) gate in the registry; printing it is so
+    // the owner can see the thing that gate is about, and so the two lines can be read together.
+    if (promotion.observation.mergeGroupSurvivors !== undefined) {
+      // Attributed to the probe that produced it rather than asserted as a fact about the machine,
+      // the way every other line here is: this says what was asked and what came back, and hands
+      // over the read-only command that shows the owner the same thing.
+      lines.push(`  survivors   this record names pgid ${promotion.observation.mergeGroupSurvivors.pgid};`
+        + " its leader did not answer and the group did");
+      lines.push(`              ${promotion.observation.mergeGroupSurvivors.inspect}`);
     }
     if (promotion.observation.mergeIdentityUnrecorded === true) {
       // Attributed, not asserted. The previous wording — "the write that was carrying this merge's
