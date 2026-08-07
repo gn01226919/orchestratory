@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { closeSync, mkdirSync, openSync, readSync, realpathSync, statSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { uptime } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -630,6 +630,15 @@ export interface MergePromotionObservation {
     whileRunning?: boolean;
   };
   /**
+   * True when the single write that records the merge's process group is KNOWN to have failed.
+   *
+   * Amendment (N). It is not "no group was recorded" — it is "a group existed and this record did
+   * not get it", which is the opposite conclusion, and until this field existed the two were the
+   * same bytes on disk. Set from a marker file rather than from this payload, because the reason the
+   * payload lacks the number is that writing to this database failed.
+   */
+  mergeIdentityUnrecorded?: true;
+  /**
    * Recorded when the owner declared, explicitly and by pid, that the process which STARTED this
    * promotion is not one this record should keep waiting for.
    *
@@ -756,6 +765,17 @@ export interface MergePromotionEvent {
   detail?: Record<string, unknown>;
 }
 
+/**
+ * Where a recorded merge process group was read from.
+ *
+ * Named per source rather than folded into one number because the whole reason there is more than
+ * one is that they can disagree, and the owner is the one who has to look at the disagreement. Two
+ * of them live in the promotion row (`column`, `payload`) and two do not: `trace` is git's own event
+ * stream for this promotion, and `spawn-record` is the marker this product writes when the single
+ * write that was carrying the group id failed ([[PITFALLS]] #115, #119).
+ */
+export type MergeIdentitySourceName = "column" | "payload" | "trace" | "spawn-record";
+
 /** A promotion row whose integrity check failed. Reported, never silently dropped. */
 export interface UnreadableMergePromotion {
   id: string;
@@ -798,7 +818,7 @@ export interface UnreadableMergePromotion {
      * the disagreement itself, shown rather than resolved: the owner sees both numbers.
      */
     recordedGroups: Array<{
-      source: "column" | "payload" | "trace"; pgid: number; bootAtSec: number | null;
+      source: MergeIdentitySourceName; pgid: number; bootAtSec: number | null;
     }>;
   };
   /** The owner's declaration, echoed back. Attributed, never presented as an observation. */
@@ -1618,19 +1638,19 @@ interface MergeIdentityReading {
   /** Which source said what, so a disagreement can be shown rather than resolved silently. */
   sources: readonly MergeIdentitySource[];
   /**
-   * True when the row's own payload states, affirmatively, that no group is recorded.
+   * True when NO source inside the row named a group and one outside it did.
    *
-   * On its own that is an answer — it is what a settled promotion and a promotion that never spawned
-   * git both look like. It becomes a CONTRADICTION only once a group named by some other source
-   * turns out to still be alive, because a live group cannot be one an observation established was
-   * over. That test needs a probe, so it is made where the probing happens.
+   * Such a number is still probed — that can only add a reason to refuse — but on its own it never
+   * makes the record answered: a group only the outside source names, still answering "alive", is a
+   * record that has not said what is writing to main. That test needs a probe, so it is made where
+   * the probing happens ([[PITFALLS]] #120, VERIFICATION amendment (M)).
    */
-  recordDeniesGroup: boolean;
+  outsideRowOnly: boolean;
 }
 
 /** One source's answer about the merge group, kept attributed. */
 interface MergeIdentitySource {
-  source: "column" | "payload" | "trace";
+  source: MergeIdentitySourceName;
   identity: MergeProcessGroupIdentity;
 }
 
@@ -1719,58 +1739,177 @@ function foldMergeGroup(
  * is "unreadable", and every group any of them named is carried out for probing.** Picking one and
  * labelling it readable is [[PITFALLS]] #85 with two candidates instead of one.
  *
- * Three sources, and only one of them lives in the damaged row:
+ * Four sources, and only two of them live in the damaged row:
  *  - the two columns, which a damaged payload does not take with it;
  *  - `observation_json`, which is the only source a row written before those columns has;
  *  - git's own trace stream for this promotion, which lives in a FILE, not in SQLite at all — the
- *    check [[PITFALLS]] #115 asks for, since the first two share a row and therefore a failure.
+ *    check [[PITFALLS]] #115 asks for, since the first two share a row and therefore a failure;
+ *  - and this product's own marker for a pgid write that FAILED, which is the only source that can
+ *    distinguish "there was no group" from "this record never got the group" (amendment (N)).
  *
  * The contest test is scoped to the two IN-ROW sources, for the reason spelled out at it below; the
- * trace still contributes a candidate to probe, and its number blocking a release is what the
- * measured `col-null-key` corruption needed.
+ * outside sources still contribute candidates to probe, and one of their numbers blocking a release
+ * is what the measured `col-null-key` corruption needed.
+ *
+ * They cannot do more than that. git's trace path is handed to every hook this promotion runs, and a
+ * hook forging a `start` event that named a dead pid was measured turning "nobody could answer" into
+ * "asked, and the answer is no" — short phrase accepted, project marker handed back, `ps -g` still
+ * listing the merge. Amendment (M): a source the observed thing can reach may tighten, never loosen.
  *
  * `readable: false` never means "no merge". It means the record's answer is missing or contested,
  * and callers must treat it exactly as they treat a probe that comes back undecidable.
  */
-function durableMergeIdentity(row: PromotionRow, trace: TraceMergeReading): MergeIdentityReading {
+function durableMergeIdentity(
+  row: PromotionRow, trace: TraceMergeReading, options: { disowned: MergeProcessGroupIdentity | null },
+): MergeIdentityReading {
   const column = columnMergeIdentity(row);
   const payload = payloadMergeIdentity(row);
+  // A group the owner has explicitly stopped waiting on is dropped from EVERY source, not just from
+  // the payload the release rewrote. Without this the release was undone one read later: the payload
+  // no longer named the group, git's trace still did, and the record went straight back to waiting on
+  // the number the owner had just disowned — a release with no effect is the dead end bar item 11
+  // forbids. The caller decides whether this row may speak for its own owner decisions.
+  const disowned = options.disowned;
+  const named = (identity: MergeProcessGroupIdentity | null): MergeProcessGroupIdentity | null =>
+    identity !== null && disowned !== null && sameMergeGroup(identity, disowned) ? null : identity;
+  const columnNamed = named(column);
+  const payloadNamed = named(payload.identity);
+  const traceNamed = named(trace.identity);
+  const spawnRecordNamed = named(trace.unrecorded);
   const sources: MergeIdentitySource[] = [];
-  if (column !== null) sources.push({ source: "column", identity: column });
-  if (payload.identity !== null) sources.push({ source: "payload", identity: payload.identity });
-  if (trace.identity !== null) sources.push({ source: "trace", identity: trace.identity });
-  const named: MergeProcessGroupIdentity[] = [];
+  if (columnNamed !== null) sources.push({ source: "column", identity: columnNamed });
+  if (payloadNamed !== null) sources.push({ source: "payload", identity: payloadNamed });
+  if (traceNamed !== null) sources.push({ source: "trace", identity: traceNamed });
+  if (spawnRecordNamed !== null) sources.push({ source: "spawn-record", identity: spawnRecordNamed });
+  const candidates: MergeProcessGroupIdentity[] = [];
   for (const entry of sources) {
-    const at = named.findIndex((seen) => sameMergeGroup(seen, entry.identity));
-    if (at === -1) named.push(entry.identity);
-    else named[at] = foldMergeGroup(named[at] as MergeProcessGroupIdentity, entry.identity);
+    const at = candidates.findIndex((seen) => sameMergeGroup(seen, entry.identity));
+    if (at === -1) candidates.push(entry.identity);
+    else candidates[at] = foldMergeGroup(candidates[at] as MergeProcessGroupIdentity, entry.identity);
   }
   // The contest is between the two IN-ROW sources only, and it has two shapes: both name a group
   // and the groups differ, or one names a group while the other states there is none. Either way the
   // record contradicts itself about the number that decides whether main is being written.
   //
-  // The trace is deliberately not part of this test. It records a group that EXISTED; a payload that
-  // says `mergePgid: null` records a later observation that the group is over. Those are a timeline,
-  // not a contradiction — and treating them as one would put the short phrase permanently out of
-  // service for every promotion that ever spawned git, which is the shape bar item 11 forbids and
-  // the shape mutation M3 caught last round.
-  const recordDeniesGroup = payload.identity === null && payload.answered;
-  const contested = column !== null
-    && ((payload.identity !== null && !sameMergeGroup(column, payload.identity)) || recordDeniesGroup);
-  const common = { candidates: named, sources, recordDeniesGroup };
+  // The outside sources are deliberately not part of this test. They record a group that EXISTED; a
+  // payload that says `mergePgid: null` records a later observation that the group is over. Those
+  // are a timeline, not a contradiction — and treating them as one would put the short phrase
+  // permanently out of service for every promotion that ever spawned git, which is the shape bar
+  // item 11 forbids and the shape mutation M3 caught two rounds ago. What DOES turn the timeline
+  // into a contradiction is a probe: a group that is still alive cannot be one an observation
+  // established was over, and that test is made in `mergeIdentityStanding` where the probing is.
+  const recordDeniesGroup = payloadNamed === null && payload.answered;
+  const contested = columnNamed !== null
+    && ((payloadNamed !== null && !sameMergeGroup(columnNamed, payloadNamed)) || recordDeniesGroup);
+  const inRow = columnNamed ?? payloadNamed;
+  const outside = traceNamed ?? spawnRecordNamed;
+  const common = { candidates, sources, outsideRowOnly: inRow === null && outside !== null };
   if (contested) return { identity: null, readable: false, ...common };
-  if (named.length === 1) {
-    return { identity: named[0] as MergeProcessGroupIdentity, readable: true, ...common };
+  if (inRow !== null) {
+    // An outside source naming a DIFFERENT group is a third opinion nothing can rule out. Neither
+    // number is dropped, and neither is the answer.
+    if (outside !== null && !sameMergeGroup(inRow, outside)) {
+      return { identity: null, readable: false, ...common };
+    }
+    return {
+      identity: outside === null ? inRow : foldMergeGroup(inRow, outside),
+      readable: true,
+      ...common,
+    };
   }
-  if (named.length > 1) {
-    // Reachable without an in-row contest: the trace names one group and a surviving in-row source
-    // names another. Nothing can rule either out, so neither is dropped.
-    return { identity: null, readable: false, ...common };
+  // No source INSIDE the row names a group.
+  //
+  // git's trace can still name one, and that number is carried out to be probed — which can only add
+  // a reason to refuse. What it must never do is make this record READABLE on its own: the path of
+  // that file is handed to every hook this promotion runs, and a hook that writes a `start` event
+  // naming a number nothing is using would otherwise turn "nobody could answer" into "asked, and the
+  // answer is no". That was measured: a forged session id got the short phrase accepted and the
+  // project's exclusive marker handed back while `ps -g` listed the live `git merge`
+  // ([[PITFALLS]] #120, amendment (M) — a source the observed thing controls may tighten, never
+  // loosen). So whether the question was ANSWERED stays the payload's to say, and the probe in
+  // `mergeIdentityStanding` can only take that answer away.
+  if (trace.unrecorded !== null) {
+    // The one write that was carrying the group id is KNOWN to have failed. Amendment (N): that is a
+    // named fact, and a record whose own account of the merge is known to be incomplete has not
+    // answered anything, whatever else is in it.
+    return { identity: outside, readable: false, ...common };
   }
-  // Nothing names a group. The payload's own statement decides — unless git's trace proves a merge
-  // was started for this promotion and could not be named, in which case a group existed and no
-  // surviving source can say which. That is an unanswered question, never "nothing is running".
+  if (outside !== null) return { identity: outside, readable: payload.answered, ...common };
+  // Nothing names a group at all. A trace proving a merge was started for this promotion without
+  // naming it is an unanswered question, never "nothing is running".
   return { identity: null, readable: trace.spawned ? false : payload.answered, ...common };
+}
+
+/**
+ * The merge group the owner has declared this record is no longer waiting on, or `null`.
+ *
+ * Read from `observation_json`, so it is a statement the row makes about itself — which is why the
+ * caller has to say whether this row's integrity check passed. A row that failed its hash does not
+ * get to drop a live merge from its own list of things to probe.
+ */
+function disownedMergeGroup(row: PromotionRow): MergeProcessGroupIdentity | null {
+  try {
+    const value = (JSON.parse(row.observation_json) as MergePromotionObservation).mergeGroupDisowned;
+    if (!value || typeof value !== "object") return null;
+    const pgid = recordedPgid(value.pgid);
+    if (pgid === null) return null;
+    const bootAtSec = typeof value.bootAtSec === "number" && Number.isSafeInteger(value.bootAtSec)
+      ? value.bootAtSec : null;
+    return { pgid, bootAtSec, spawnedAt: typeof value.at === "string" ? value.at : null };
+  } catch { return null; }
+}
+
+/**
+ * Everything every path that concludes about a promotion has to ask, asked once.
+ *
+ * The eighth round's blocker lived precisely in the absence of this function. The three-source
+ * comparison existed and was correct, and it was wired into exactly ONE of the two decisions that
+ * use it — "may this record's exclusive marker be released" — while "may a conclusion be drawn about
+ * this repository" went on reading `observation_json` alone. That second decision is the one that
+ * hands the owner a `git reset --hard`. Amendment (I): after fixing a judgement, list every path
+ * that makes the same judgement and wire them ALL to it. There is now one place to wire, and the
+ * type system requires a trace at every call site ([[PITFALLS]] #74, #119).
+ */
+interface MergeIdentityStanding {
+  /** What the record says, before anything was probed. */
+  reading: MergeIdentityReading;
+  /** Every group this record names that a probe cannot rule out, deduplicated by number. */
+  alive: ReadonlyArray<{ identity: MergeProcessGroupIdentity; state: MergeGroupState }>;
+  /** The one to report, a leader answering "alive" ahead of one nobody can decide about. */
+  blocking: { identity: MergeProcessGroupIdentity; state: MergeGroupState } | undefined;
+  /**
+   * False when the record's answer about the merge is missing, contested, or contradicted by a
+   * probe. Never means "no merge": it means this record did not answer the question.
+   */
+  answered: boolean;
+}
+
+function mergeIdentityStanding(
+  row: PromotionRow, trace: TraceMergeReading, options: { recordTrusted: boolean },
+): MergeIdentityStanding {
+  const reading = durableMergeIdentity(row, trace, {
+    disowned: options.recordTrusted ? disownedMergeGroup(row) : null,
+  });
+  const alive: Array<{ identity: MergeProcessGroupIdentity; state: MergeGroupState }> = [];
+  // Every candidate is probed, not just the one a preference order would have picked. "unknown"
+  // counts as alive on purpose: an undecidable probe is not evidence the merge is over, and this is
+  // the one decision where being wrong means concluding over a live write.
+  for (const candidate of reading.candidates) {
+    const state = mergeGroupState(candidate);
+    if (state !== "merge-running" && state !== "unknown") continue;
+    if (alive.some((entry) => entry.identity.pgid === candidate.pgid)) continue;
+    alive.push({ identity: candidate, state });
+  }
+  return {
+    reading,
+    alive,
+    blocking: alive.find((entry) => entry.state === "merge-running") ?? alive[0],
+    // A group that only a source OUTSIDE the row named, still answering "alive", against a record
+    // whose own sources did not name it: the record has not answered the question, whatever it says.
+    // This is the probe that turns "the payload's `null` is a later observation" into "the payload's
+    // `null` is contradicted by something that is running right now".
+    answered: reading.readable && !(reading.outsideRowOnly && alive.length > 0),
+  };
 }
 
 /** The most bytes of a promotion's trace stream this will read while looking for the merge's pid. */
@@ -1786,16 +1925,26 @@ const MAX_TRACE_IDENTITY_BYTES = 64 * 1024;
  */
 const TRACE_SESSION_PID_PATTERN = /-P([0-9a-fA-F]{1,12})$/u;
 
-/** What git's own trace stream says about the merge one promotion started. */
+/** What the two sources OUTSIDE the promotion row say about the merge it started. */
 interface TraceMergeReading {
-  /** True when the trace records a git process having started for this promotion. */
+  /** True when either outside source records a git process having started for this promotion. */
   spawned: boolean;
   /** The group that process led, or null when there is no trace or its session id did not parse. */
   identity: MergeProcessGroupIdentity | null;
+  /**
+   * The group the ONE write that records it was carrying when that write failed, from this
+   * product's own marker file — or `null` when no such failure was recorded.
+   *
+   * Amendment (N). `#recordMergePgid` swallowed its failure and `runProcess` swallowed a throwing
+   * listener on top of it, so "the group was never recorded" and "there was no group to record"
+   * became the same durable record — and the second reads as "nothing is running". A marker beside
+   * the trace says which of the two it was, and names the number the failed write was carrying.
+   */
+  unrecorded: MergeProcessGroupIdentity | null;
 }
 
 /** A trace-less reading, for the callers that have no promotion id to look one up by. */
-const NO_TRACE_READING: TraceMergeReading = { spawned: false, identity: null };
+const NO_TRACE_READING: TraceMergeReading = { spawned: false, identity: null, unrecorded: null };
 
 /** A bounded prefix of a file, read synchronously. Never throws; an unreadable file is `null`. */
 function readFilePrefix(path: string, bytes: number): string | null {
@@ -1857,7 +2006,7 @@ function traceMergeIdentity(tracePath: string | null): TraceMergeReading {
     const startedAt = typeof event.time === "string" ? Date.parse(event.time) : Number.NaN;
     const match = TRACE_SESSION_PID_PATTERN.exec(sid);
     const pgid = match === null ? null : recordedPgid(Number.parseInt(match[1] as string, 16));
-    if (pgid === null) return { spawned: true, identity: null };
+    if (pgid === null) return { spawned: true, identity: null, unrecorded: null };
     return {
       spawned: true,
       identity: {
@@ -1865,10 +2014,38 @@ function traceMergeIdentity(tracePath: string | null): TraceMergeReading {
         bootAtSec: traceBootAtSec(Number.isFinite(startedAt) ? startedAt : null),
         spawnedAt: Number.isFinite(startedAt) ? new Date(startedAt).toISOString() : null,
       },
+      unrecorded: null,
     };
   }
   return NO_TRACE_READING;
 }
+
+/**
+ * The group a failed `#recordMergePgid` was carrying, read back from its marker file.
+ *
+ * Written by this product into its own 0700 data directory and never named to anything the merge
+ * runs, which is the difference between it and git's trace: amendment (M) is about a source the
+ * observed thing can reach, and this one it cannot. It asserts nothing it did not read — a missing,
+ * unreadable or unparsable marker is `null`.
+ */
+function unrecordedMergeIdentity(path: string): MergeProcessGroupIdentity | null {
+  const raw = readFilePrefix(path, MAX_SPAWN_RECORD_BYTES);
+  if (raw === null) return null;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const pgid = recordedPgid(parsed.pgid);
+    if (pgid === null) return null;
+    return {
+      pgid,
+      bootAtSec: typeof parsed.bootAtSec === "number" && Number.isSafeInteger(parsed.bootAtSec)
+        ? parsed.bootAtSec : null,
+      spawnedAt: typeof parsed.at === "string" ? parsed.at : null,
+    };
+  } catch { return null; }
+}
+
+/** The most bytes of a spawn-record marker this will read. It holds three fields. */
+const MAX_SPAWN_RECORD_BYTES = 4 * 1024;
 
 /**
  * This machine's boot instant in whole seconds, derived from the monotonic uptime.
@@ -1955,24 +2132,32 @@ function inspectPidCommand(pid: number): string {
  * saying WHICH process is writing gives the owner a status instead of a lever — that was the
  * measured failure: a promotion frozen on `applying` with nothing anywhere naming what to inspect.
  */
-function promotionPending(row: PromotionRow): MergePromotionPending | undefined {
+function promotionPending(
+  row: PromotionRow, trace: TraceMergeReading,
+): MergePromotionPending | undefined {
   if (row.state === "applied" || row.state === "rolled-back") return undefined;
-  const identity = promotionGroupIdentity(row);
-  const group = mergeGroupState(identity);
-  const mergeBlocking = identity !== null && group !== "gone" && group !== "none"
-    && group !== "merge-done-group-alive";
+  // Every source, not just `observation_json`. This function is the gate in front of every
+  // conclusion — `#resolvePromotion` returns early on it, `#assertNoUnresolvedPromotion` and
+  // `#assertMainNotBusy` refuse on it, the three releases dispatch on it, and the listing prints it
+  // — and while it read one source, a promotion whose pgid write had failed reported
+  // "not blocked on any process" and offered `git reset --hard` over a `git merge` that `ps -g` was
+  // listing. The trace is a required parameter so that a new caller cannot repeat that by omission.
+  const standing = mergeIdentityStanding(row, trace, { recordTrusted: true });
+  const blocking = standing.blocking;
   if (row.state === "applying" && ownerProcessAlive(row) !== false) {
     // Both numbers alive is its own state, not the owner state with a footnote. Reporting it as
     // `OWNER_PROCESS_STILL_RUNNING` handed out a release phrase that the merge check then refused,
     // and the merge release refused on the owner — a cycle with no exit and a permanently retired
     // task. Naming it is what lets `pending.release` be a phrase that actually works.
-    return mergeBlocking && identity !== null
+    return blocking !== undefined
       ? {
         code: "PROMOTION_OWNER_AND_MERGE_STILL_RUNNING",
         pid: row.owner_pid,
         inspect: inspectPidCommand(row.owner_pid),
         release: MERGE_PROMOTION_ABANDON_CONFIRMATION,
-        alsoBlockedBy: { pid: identity.pgid, inspect: inspectGroupCommand(identity.pgid) },
+        alsoBlockedBy: {
+          pid: blocking.identity.pgid, inspect: inspectGroupCommand(blocking.identity.pgid),
+        },
       }
       : {
         code: "OWNER_PROCESS_STILL_RUNNING",
@@ -1981,12 +2166,12 @@ function promotionPending(row: PromotionRow): MergePromotionPending | undefined 
         release: MERGE_OWNER_ABANDON_CONFIRMATION,
       };
   }
-  if (!mergeBlocking || identity === null) return undefined;
-  const running = group === "merge-running";
+  if (blocking === undefined) return undefined;
+  const running = blocking.state === "merge-running";
   return {
     code: running ? "MERGE_SUBPROCESS_STILL_RUNNING" : "MERGE_PROCESS_GROUP_UNDECIDABLE",
-    pid: identity.pgid,
-    inspect: inspectGroupCommand(identity.pgid),
+    pid: blocking.identity.pgid,
+    inspect: inspectGroupCommand(blocking.identity.pgid),
     // A leader that is answering "alive" is a merge that may be writing main right now, and the
     // phrase offered says so. The record must not hand out the shorter one here: it is the same
     // sentence an owner would use for a group nobody can decide about, and the two states are not
@@ -2069,18 +2254,16 @@ function unreadableReleaseRequirement(row: PromotionRow, trace: TraceMergeReadin
    * Every group the record names, attributed to the source that named it. More than one entry means
    * the sources disagree; the owner sees both numbers rather than the one this code preferred.
    */
-  recordedGroups: Array<{ source: "column" | "payload" | "trace"; pgid: number; bootAtSec: number | null }>;
+  recordedGroups: Array<{ source: MergeIdentitySourceName; pgid: number; bootAtSec: number | null }>;
 } {
   const alive: Array<{ kind: "merge" | "owner"; pid: number; inspect: string }> = [];
-  const reading = durableMergeIdentity(row, trace);
-  // Every candidate is probed, not just the one a preference order would have picked. "unknown"
-  // counts as alive on purpose: an undecidable probe is not evidence the merge is over, and this is
-  // the one decision where being wrong means publishing over a live write.
-  for (const candidate of reading.candidates) {
-    const group = mergeGroupState(candidate);
-    if (group !== "merge-running" && group !== "unknown") continue;
-    if (alive.some((entry) => entry.kind === "merge" && entry.pid === candidate.pgid)) continue;
-    alive.push({ kind: "merge", pid: candidate.pgid, inspect: inspectGroupCommand(candidate.pgid) });
+  // `recordTrusted: false` on purpose: this row failed its integrity check, so its own claim to have
+  // disowned a process group is not something it may use to drop a live merge from what gets probed.
+  const standing = mergeIdentityStanding(row, trace, { recordTrusted: false });
+  for (const entry of standing.alive) {
+    alive.push({
+      kind: "merge", pid: entry.identity.pgid, inspect: inspectGroupCommand(entry.identity.pgid),
+    });
   }
   if (ownerProcessAlive(row) !== false && Number.isSafeInteger(row.owner_pid) && row.owner_pid > 1) {
     alive.push({ kind: "owner", pid: row.owner_pid, inspect: inspectPidCommand(row.owner_pid) });
@@ -2089,16 +2272,12 @@ function unreadableReleaseRequirement(row: PromotionRow, trace: TraceMergeReadin
     // An unreadable group is the same answer as a live one, because it is the same amount of
     // evidence that main is not being written: none. The difference between them is reported in
     // `probeReadable` rather than resolved in favour of the convenient reading.
-    confirmation: alive.length > 0 || !reading.readable
+    confirmation: alive.length > 0 || !standing.answered
       ? MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION
       : MERGE_UNREADABLE_ABANDON_CONFIRMATION,
     alive,
-    // A record that says "no group" while a group it did not name is still alive is not an answered
-    // question, whatever the rest of the row looks like: a live group cannot be one an observation
-    // established was over. This is the test that needs the probe, so it is made here.
-    probeReadable: reading.readable
-      && !(reading.recordDeniesGroup && alive.some((entry) => entry.kind === "merge")),
-    recordedGroups: reading.sources.map((entry) => ({
+    probeReadable: standing.answered,
+    recordedGroups: standing.reading.sources.map((entry) => ({
       source: entry.source, pgid: entry.identity.pgid, bootAtSec: entry.identity.bootAtSec,
     })),
   };
@@ -2243,7 +2422,7 @@ export class MergeUnreadablePromotionError extends Error {
   readonly probeReadable: boolean;
   /** Every group the record names, attributed. More than one entry IS the reason for the refusal. */
   readonly recordedGroups: ReadonlyArray<{
-    source: "column" | "payload" | "trace"; pgid: number; bootAtSec: number | null;
+    source: MergeIdentitySourceName; pgid: number; bootAtSec: number | null;
   }>;
 
   constructor(
@@ -2253,7 +2432,7 @@ export class MergeUnreadablePromotionError extends Error {
       alive: ReadonlyArray<{ kind: "merge" | "owner"; pid: number; inspect: string }>;
       probeReadable?: boolean;
       recordedGroups?: ReadonlyArray<{
-        source: "column" | "payload" | "trace"; pgid: number; bootAtSec: number | null;
+        source: MergeIdentitySourceName; pgid: number; bootAtSec: number | null;
       }>;
     } = { confirmation: MERGE_UNREADABLE_ABANDON_CONFIRMATION, alive: [] },
   ) {
@@ -5179,7 +5358,9 @@ export class CandidateRegistry {
       }
       // Cheap first, and it is also the commonest answer: a promotion still being written is decided
       // by two `kill(pid, 0)` probes and no Git at all.
-      if (promotionPending(row) !== undefined) throw new Error("MAIN_MERGE_PROMOTION_UNRESOLVED");
+      if (promotionPending(row, this.#promotionTrace(row)) !== undefined) {
+        throw new Error("MAIN_MERGE_PROMOTION_UNRESOLVED");
+      }
       // Re-observation streams the whole working tree and can take up to the content-hash deadline.
       // A caller that has not proved it holds the token gets it at most once per throttle window,
       // and a window it is not entitled to fails CLOSED — refusing costs nobody a repository, while
@@ -5241,7 +5422,9 @@ export class CandidateRegistry {
           probeReadable: requirement.probeReadable,
         });
       }
-      if (promotionPending(row) !== undefined) throw new Error("MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY");
+      if (promotionPending(row, this.#promotionTrace(row)) !== undefined) {
+        throw new Error("MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY");
+      }
       const last = this.#promotionResolvedAt.get(row.id) ?? 0;
       if (!options.authenticated && this.#now() - last < MERGE_PREVIEW_RECOMPUTE_THROTTLE_MS) {
         throw new Error("MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY");
@@ -5260,14 +5443,18 @@ export class CandidateRegistry {
    * Reads the repository and reports what it finds. It runs no Git command that writes, and it never
    * infers: a value it could not read stays `null`.
    */
-  async #observeMain(row: PromotionRow, attempt?: { exitCode: number; timedOut: boolean }): Promise<{
+  async #observeMain(
+    row: PromotionRow, trace: TraceMergeReading, attempt?: { exitCode: number; timedOut: boolean },
+  ): Promise<{
     observation: MergePromotionObservation;
     state: MergePromotionState;
     headAfter: string | null;
   }> {
     const restore = JSON.parse(row.restore_json) as GitRestorePoint;
     const previous = JSON.parse(row.observation_json) as MergePromotionObservation;
-    const identity = promotionGroupIdentity(row);
+    // Every source, for the same reason `promotionPending` reads every source: this is the other
+    // half of the decision that hands the owner a recovery command, and it was reading one.
+    const identity = mergeIdentityStanding(row, trace, { recordTrusted: true }).reading.identity;
     // Re-asked on every pass, and a group established to be over is written out as `null` rather
     // than carried into the next record. Carrying it forever is what let a number belonging to a
     // long-dead process — or, after a reboot, to something else entirely — keep answering "the
@@ -5295,6 +5482,10 @@ export class CandidateRegistry {
       ...(previous.ownerProcessDisowned === undefined
         ? {} : { ownerProcessDisowned: previous.ownerProcessDisowned }),
       ...(previous.ownerBootAtSec === undefined ? {} : { ownerBootAtSec: previous.ownerBootAtSec }),
+      // Amendment (N): the one write that records the merge's group is the only evidence that group
+      // exists, and its failure used to leave no trace at all. Named here so a reader can tell
+      // "this record never had the number" from "this promotion never spawned git".
+      ...(trace.unrecorded === null ? {} : { mergeIdentityUnrecorded: true as const }),
       observedAt: new Date(this.#now()).toISOString(),
     };
     const hooks = await readExecutedHooks(this.#promotionTracePath(row.id));
@@ -5405,7 +5596,7 @@ export class CandidateRegistry {
 
   /** Records the outcome of the attempt this process just made. */
   async #settlePromotion(row: PromotionRow, attempt: { exitCode: number; timedOut: boolean }): Promise<PromotionRow> {
-    const observed = await this.#observeMain(row, attempt);
+    const observed = await this.#observeMain(row, this.#promotionTrace(row), attempt);
     if (observed.state !== "applied") this.#recoveryHint(row, observed.observation);
     this.#faultPoint?.("promotion-outcome-write");
     const next = this.#writePromotion(row, {
@@ -5438,12 +5629,13 @@ export class CandidateRegistry {
    */
   async #resolvePromotion(row: PromotionRow): Promise<PromotionRow> {
     if (row.state === "applied" || row.state === "rolled-back") return row;
-    if (promotionPending(row) !== undefined) return row;
+    const trace = this.#promotionTrace(row);
+    if (promotionPending(row, trace) !== undefined) return row;
     // Strictly read-only. No reset, no checkout, no `merge --abort`, no `clean`, no touching
     // `.git/config` and no removing a lock file: after a kill during a hook the rewritten index is
     // bit-for-bit indistinguishable from work the owner staged themselves, so an automatic rollback
     // here would be this product deleting the owner's work while reporting success.
-    const observed = await this.#observeMain(row);
+    const observed = await this.#observeMain(row, trace);
     // The approval was spent only if it reached `consumed`. An intent row beside an approval that is
     // still answerable means the crash happened before anything could run, and that is not a state
     // anyone needs to inspect by hand.
@@ -5484,18 +5676,49 @@ export class CandidateRegistry {
    * reader falls back to re-observation, which is what actually converges the answer.
    */
   #recordMergePgid(row: PromotionRow, pgid: number): PromotionRow {
+    const identity: MergeProcessGroupIdentity = {
+      pgid,
+      bootAtSec: bootAtSec(),
+      spawnedAt: new Date(this.#now()).toISOString(),
+    };
     try {
+      this.#faultPoint?.("merge-pgid-record");
       const observation = JSON.parse(row.observation_json) as MergePromotionObservation;
-      const identity: MergeProcessGroupIdentity = {
-        pgid,
-        bootAtSec: bootAtSec(),
-        spawnedAt: new Date(this.#now()).toISOString(),
-      };
       return this.#writePromotion(row, {
         observation_json: JSON.stringify({ ...observation, mergePgid: pgid, mergeGroup: identity }),
         updated_at_ms: Math.max(row.started_at_ms, this.#now()),
       });
-    } catch { return row; }
+    } catch {
+      // Amendment (N). The merge is already running, so refusing to proceed here would leave a
+      // repository being written by a process nobody is waiting on — the failure still may not abort
+      // anything. What it may no longer do is vanish: this is the ONE write that records the number,
+      // and losing it silently made "not recorded" and "nothing to record" the same bytes on disk.
+      // Measured with nothing forged at all: another process holding the database across this write
+      // (the ordinary condition PITFALLS #65 documents) left a perfectly readable row reporting
+      // "not blocked on any process" and offering `git reset --hard` while `ps -g` listed the merge.
+      //
+      // The mark goes to a FILE, because the thing that just failed is writing to this database.
+      this.#markMergeIdentityUnrecorded(row.id, identity);
+      return row;
+    }
+  }
+
+  /**
+   * Records, outside SQLite, that the write which was carrying this merge's group id did not happen.
+   *
+   * Best effort by necessity — there is no third place to put it if this fails too — but it fails in
+   * the direction that keeps the question open: with neither the row nor this marker, git's own
+   * trace still proves a merge was started and the reading stays unanswered.
+   */
+  #markMergeIdentityUnrecorded(promotionId: string, identity: MergeProcessGroupIdentity): void {
+    try {
+      mkdirSync(join(this.#dataDirectory, "promotion-traces"), { recursive: true, mode: 0o700 });
+      writeFileSync(
+        this.#promotionSpawnRecordPath(promotionId),
+        JSON.stringify({ pgid: identity.pgid, bootAtSec: identity.bootAtSec, at: identity.spawnedAt }),
+        { mode: 0o600 },
+      );
+    } catch { /* the trace file still says a merge was started; the reading stays unanswered */ }
   }
 
   #promotionRow(id: string): PromotionRow | undefined {
@@ -5602,15 +5825,27 @@ export class CandidateRegistry {
     }
     JSON.parse(row.restore_json);
     JSON.parse(row.observation_json);
-    // The column and the observation are one fact written twice, so disagreement is damage. Checked
-    // in one direction only: a row written before these columns existed carries the group solely in
-    // `observation_json`, and a null column there is an upgrade, not tampering (bar item 11).
+    // The two columns are one fact written together: every write that sets either sets both, and a
+    // row written before they existed carries NULL in BOTH. Half of the pair is therefore damage in
+    // either direction, and this is the half of the bidirectional check that CAN be made without
+    // mistaking an upgrade for tampering.
+    if ((row.merge_pgid === null) !== (row.merge_boot_at_sec === null)) {
+      throw new Error("MAIN_MERGE_PROMOTION_ROW_TAMPERED");
+    }
+    // The column and the observation are one fact written twice, so disagreement is damage. Only
+    // this direction can be an error: a row written before these columns existed carries the group
+    // solely in `observation_json`, and a null column beside a payload that names a group is an
+    // upgrade, not tampering (bar item 11). The MIRROR of it — a null column, a payload that names
+    // nothing, and a merge that some source outside the row can still see — is the shape this check
+    // cannot name and `durableMergeIdentity` refuses instead, because the record and the upgrade
+    // look identical here and only a probe tells them apart.
     if (row.merge_pgid !== null && promotionPgid(row) !== row.merge_pgid) {
       throw new Error("MAIN_MERGE_PROMOTION_ROW_TAMPERED");
     }
   }
 
   #publicPromotion(row: PromotionRow): MergePromotion {
+    const pending = promotionPending(row, this.#promotionTrace(row));
     return {
       id: row.id,
       approvalId: row.approval_id,
@@ -5627,7 +5862,7 @@ export class CandidateRegistry {
       ownerAlive: row.state === "applying" ? ownerProcessAlive(row) : null,
       // Derived on every read, not stored: it is a statement about processes that are alive right
       // now, and a stored copy of it would be out of date the moment it was written.
-      ...(promotionPending(row) === undefined ? {} : { pending: promotionPending(row) as MergePromotionPending }),
+      ...(pending === undefined ? {} : { pending }),
       startedAt: new Date(row.started_at_ms).toISOString(),
       updatedAt: new Date(row.updated_at_ms).toISOString(),
     };
@@ -5643,6 +5878,17 @@ export class CandidateRegistry {
   }
 
   /**
+   * Where the failure of the one write that records a merge's process group is marked.
+   *
+   * Beside the trace and never named to anything the promotion runs, which is the difference between
+   * it and `GIT_TRACE2_EVENT`: that path is handed to every hook, this one is not handed to
+   * anything.
+   */
+  #promotionSpawnRecordPath(promotionId: string): string {
+    return join(this.#dataDirectory, "promotion-traces", `${promotionId}.spawn-record.json`);
+  }
+
+  /**
    * What git's own trace says about this row's merge — the one source of that fact that is not in
    * the database.
    *
@@ -5652,7 +5898,14 @@ export class CandidateRegistry {
    */
   #promotionTrace(row: PromotionRow): TraceMergeReading {
     if (typeof row.id !== "string" || !UUID_PATTERN.test(row.id)) return NO_TRACE_READING;
-    return traceMergeIdentity(this.#promotionTracePath(row.id));
+    const traced = traceMergeIdentity(this.#promotionTracePath(row.id));
+    const unrecorded = unrecordedMergeIdentity(this.#promotionSpawnRecordPath(row.id));
+    if (unrecorded === null) return traced;
+    return {
+      spawned: true,
+      identity: traced.identity,
+      unrecorded,
+    };
   }
 
   /**
@@ -5713,7 +5966,7 @@ export class CandidateRegistry {
     // Only a group that is actually the reason may be abandoned. An owner process that is still
     // alive is a promotion in flight in another window, and disowning its merge would let two
     // readers describe one repository.
-    const pending = promotionPending(row);
+    const pending = promotionPending(row, this.#promotionTrace(row));
     if (pending === undefined) throw new Error("MAIN_MERGE_PROMOTION_NOT_BLOCKED");
     if (pending.code === "PROMOTION_OWNER_AND_MERGE_STILL_RUNNING") {
       throw new MergePromotionDoublyBlockedError(
@@ -5808,7 +6061,7 @@ export class CandidateRegistry {
     if (row.state === "applied" || row.state === "rolled-back") {
       throw new Error("MAIN_MERGE_PROMOTION_ALREADY_SETTLED");
     }
-    const pending = promotionPending(row);
+    const pending = promotionPending(row, this.#promotionTrace(row));
     // The combined state is refused HERE too, and with the route rather than a wall. Falling through
     // to the merge-still-running refusal below would be the same answer the cycle used to give.
     if (pending?.code === "PROMOTION_OWNER_AND_MERGE_STILL_RUNNING") {
@@ -5890,7 +6143,7 @@ export class CandidateRegistry {
     if (row.state === "applied" || row.state === "rolled-back") {
       throw new Error("MAIN_MERGE_PROMOTION_ALREADY_SETTLED");
     }
-    const pending = promotionPending(row);
+    const pending = promotionPending(row, this.#promotionTrace(row));
     if (pending === undefined || pending.code !== "PROMOTION_OWNER_AND_MERGE_STILL_RUNNING"
       || pending.alsoBlockedBy === undefined) {
       throw new Error("MAIN_MERGE_PROMOTION_NOT_DOUBLY_BLOCKED");
@@ -5904,7 +6157,8 @@ export class CandidateRegistry {
     const observation = JSON.parse(row.observation_json) as MergePromotionObservation;
     // `whileRunning` is what stops `#recoveryHint` offering `reset --hard` over a tree a live merge
     // may be writing, and it is asked again on every read rather than frozen here.
-    const running = mergeGroupState(promotionGroupIdentity(row)) === "merge-running";
+    const running = mergeIdentityStanding(row, this.#promotionTrace(row), { recordTrusted: true })
+      .blocking?.state === "merge-running";
     const at = new Date(this.#now()).toISOString();
     const disowned = {
       ...observation,
