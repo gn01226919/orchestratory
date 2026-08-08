@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import {
   chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rm, stat, writeFile,
 } from "node:fs/promises";
+import { chmodSync, writeFileSync } from "node:fs";
 import { tmpdir, uptime } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
@@ -8007,4 +8008,475 @@ test("a merge that succeeded and left a live process keeps the project's marker,
 
   for (let attempt = 0; attempt < 300 && !await exists(wrote); attempt += 1) await delay(100);
   assert.equal(await exists(wrote), true, "the survivor never wrote, so this scenario is not the one");
+});
+
+/*
+ * ============================================================================================
+ * FOURTEENTH ROUND — amendments (W-1), (W-2), (W-3).
+ * ============================================================================================
+ *
+ * (V-3) replaced "prove nothing survived" with "did this promotion run repository code", and said
+ * the product already knew the answer because it enumerates hooks for the approval screen. Both
+ * halves of that sentence were wrong in a way nothing here measured:
+ *
+ *  - the enumeration asked the WRONG QUESTION of git (`--list` + `.find`, which takes the first of
+ *    several occurrences and does not expand `~` or `%(prefix)/`), so a repository could run a hook
+ *    while the approval screen said no hook would run;
+ *  - the enumeration is a SNAPSHOT taken before the merge is spawned, so a hook installed in the
+ *    window between them ran while the answer stayed `false` — and `hooksExecuted`, in the same
+ *    payload, named it.
+ */
+
+/** What git itself says the hook directory is, asked exactly as the merge will resolve it. */
+async function gitHooksDirectory(workspace: string): Promise<string> {
+  const value = (await execFileAsync("git", ["rev-parse", "--git-path", "hooks"], { cwd: workspace }))
+    .stdout.trim();
+  // The product canonicalises its workspace before joining a relative answer, so this does too;
+  // otherwise a `/var` -> `/private/var` symlink shows up as a disagreement that is not one.
+  return value.startsWith("/") ? value : join(await realpath(workspace), value);
+}
+
+/**
+ * AMENDMENT (W-1). The hook directory is git's answer, not this code's reading of git's config.
+ *
+ * The three spellings are the ones measured to diverge on git 2.50.1, and the assertion is the same
+ * for all three: whatever `git rev-parse --git-path hooks` says under the promotion environment is
+ * what the inventory is taken from. The duplicate-key case is the one with teeth — `git config
+ * --list` prints both lines and git uses the SECOND, so a `.find()` over the listing reports
+ * `/dev/null` for a repository that runs the hook in the other directory.
+ */
+test("the hook inventory comes from git's own resolution of core.hooksPath, not from the listing", async (t) => {
+  const broker = new GitBroker();
+  const root = await mkdtemp(join(tmpdir(), "orchestratory-hookspath-"));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const source = join(root, "repo");
+  const real = join(root, "real-hooks");
+  await mkdir(source);
+  await mkdir(real);
+  await execFileAsync("git", ["init", "-b", "main"], { cwd: source });
+  await commit(source, "README.md", "main\n", "initial");
+  await writeFile(join(real, "pre-merge-commit"), "#!/bin/sh\nexit 1\n", { encoding: "utf8", mode: 0o700 });
+
+  const config = join(source, ".git", "config");
+  const rewrite = async (body: string): Promise<void> => {
+    const kept = (await readFile(config, "utf8")).split("\n")
+      .filter((line) => !/hooksPath/iu.test(line)).join("\n");
+    await writeFile(config, `${kept}\n[core]\n${body}\n`, "utf8");
+  };
+
+  // 1. The duplicate. git uses the last occurrence; the listing prints both, first one first.
+  await rewrite(`\thooksPath = /dev/null\n\thooksPath = ${real}`);
+  const duplicate = await broker.hookEnvironment(source);
+  assert.equal(duplicate.hooksPath, await gitHooksDirectory(source),
+    "the reported hook directory is not the one git resolved");
+  assert.equal(duplicate.hooksPath, real, "git resolves the LAST occurrence; this took another one");
+  assert.deepEqual(duplicate.hooks.map((entry) => entry.name), ["pre-merge-commit"],
+    "the repository runs a hook out of this directory and the inventory does not name it");
+  assert.equal(duplicate.unreadable, false);
+
+  // 2. `%(prefix)/`, which git expands and a plain string read does not. Asserted against git's own
+  // answer rather than against a path this test computes, which is the whole point of (W-1).
+  await rewrite("\thooksPath = %(prefix)/orchestratory-probe-hooks");
+  const prefixed = await broker.hookEnvironment(source);
+  const gitPrefixed = await gitHooksDirectory(source);
+  assert.equal(prefixed.hooksPath, gitPrefixed);
+  assert.ok(!gitPrefixed.includes("%(prefix)"), "git did not expand it, so this case proves nothing");
+  assert.ok(!gitPrefixed.startsWith(source), "git resolved it inside the workspace; not the case");
+  assert.deepEqual(prefixed.hooks, [], "nothing is there, and 'nothing there' is an empty inventory");
+  assert.equal(prefixed.unreadable, false);
+
+  // 3. Relative, and unset. Both already worked; they are here so a fix cannot break them silently.
+  await rewrite("\thooksPath = relative-hooks");
+  assert.equal((await broker.hookEnvironment(source)).hooksPath, await gitHooksDirectory(source));
+  const kept = (await readFile(config, "utf8")).split("\n")
+    .filter((line) => !/hooksPath/iu.test(line)).join("\n");
+  await writeFile(config, kept, "utf8");
+  const unset = await broker.hookEnvironment(source);
+  assert.equal(unset.hooksPath, await gitHooksDirectory(source));
+  assert.equal(unset.hooksPath, join(await realpath(source), ".git", "hooks"));
+});
+
+/**
+ * AMENDMENT (W-1), end to end: the same repository, promoted.
+ *
+ * Two `core.hooksPath` lines, a hook in the second directory that leaves a process behind, and the
+ * question is whether the promotion still treats itself as having run repository code. Before the
+ * fix this record went terminal `rolled-back`, offered `git reset --hard`, and let a second
+ * promotion write the same main.
+ */
+test("a promotion whose hooks path git reads differently is still a promotion that ran repository code", async (t) => {
+  const f = await fixture(t);
+  const real = join(f.root, "real-hooks");
+  await mkdir(real);
+  const started = join(f.root, "hook-entered");
+  await writeFile(join(real, "pre-merge-commit"),
+    `#!/bin/sh\ntouch ${JSON.stringify(started)}\nexit 1\n`, { encoding: "utf8", mode: 0o700 });
+  const config = join(f.source, ".git", "config");
+  await writeFile(config,
+    `${await readFile(config, "utf8")}[core]\n\thooksPath = /dev/null\n\thooksPath = ${real}\n`, "utf8");
+
+  const other = await secondApprovedTask(f);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const beforeHead = await head(f.source);
+  const result = await promote(f, approval, token);
+
+  assert.equal(await exists(started), true, "git ran no hook, so this scenario is not the one");
+  assert.equal(result.promotion.state, "applying",
+    "a promotion that ran an unsandboxed hook settled itself on the leader's exit");
+  assert.equal(result.promotion.observation.mergeConclusion,
+    "MERGE_UNTRUSTED_PROGRAMS_RAN_LEADER_EXIT_INSUFFICIENT");
+  assert.equal(result.promotion.observation.recovery, undefined,
+    `a destructive command was offered: ${result.promotion.observation.recovery}`);
+  assert.equal(result.promotion.observation.recoveryKind, undefined);
+  assert.equal(await head(f.source), beforeHead);
+  await assert.rejects(
+    f.registry.promoteMainMerge({
+      approvalId: other.approval.id, token: other.token, action: MERGE_APPROVAL_GRANT,
+      taskId: other.taskId, roomId: "demo", mainPath: f.source,
+    }),
+    /MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY/u,
+  );
+});
+
+/**
+ * AMENDMENT (W-2). The hook arrives AFTER the inventory was read.
+ *
+ * No race is run here. The window is produced with the product's own fault point, at
+ * `approval-consume-write` — which is inside the window the probe exploits, between
+ * `#authorizeMainMerge` reading `restore.hooks` and `mergeIntoHead` spawning git. The real attacker
+ * does not need the fault point either: the product `mkdir`s `promotion-traces` in the same window
+ * and that is visible to any process with the owner's uid.
+ *
+ * So the BEFORE half is honestly empty and the AFTER half is not, which is exactly the union
+ * (W-2) asks for.
+ */
+test("a hook installed after the inventory was read still makes the leader's exit insufficient", async (t) => {
+  const f = await fixture(t);
+  const started = join(f.root, "hook-entered");
+  const hookPath = join(f.source, ".git", "hooks", "pre-merge-commit");
+  const other = await secondApprovedTask(f);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const beforeHead = await head(f.source);
+
+  const preview = await f.registry.previewMainMerge({
+    taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+  });
+  assert.deepEqual(preview.hooks.hooks, [], "the snapshot already sees a hook; the window is not the subject");
+  assert.deepEqual(preview.hooks.drivers, []);
+
+  const promoter = new CandidateRegistry(f.data, {
+    faultPoint: (point) => {
+      if (point !== "approval-consume-write") return;
+      writeFileSync(hookPath, `#!/bin/sh\ntouch ${JSON.stringify(started)}\nexit 1\n`, "utf8");
+      chmodSync(hookPath, 0o700);
+    },
+  });
+  t.after(() => promoter.close());
+  const result = await promoter.promoteMainMerge({
+    approvalId: approval.id, token, action: MERGE_APPROVAL_GRANT,
+    taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+  });
+
+  // Preconditions, asserted rather than assumed ([[PITFALLS]] #106/#129): the hook really ran, and
+  // git really reported it, so the AFTER half really is the only half that can see it.
+  assert.equal(await exists(started), true, "the late hook never ran, so this measures nothing");
+  assert.deepEqual(result.promotion.observation.hooksExecuted?.map((entry) => entry.name),
+    ["pre-merge-commit"], "git's trace does not name the hook, so the observed half has no input");
+
+  assert.equal(result.promotion.state, "applying",
+    "a promotion whose own record names the hook it ran settled itself on the leader's exit");
+  assert.equal(result.promotion.observation.mergeConclusion,
+    "MERGE_UNTRUSTED_PROGRAMS_RAN_LEADER_EXIT_INSUFFICIENT");
+  assert.equal(result.promotion.observation.recovery, undefined,
+    `a destructive command was offered beside a named hook run: ${result.promotion.observation.recovery}`);
+  assert.equal(result.promotion.observation.recoveryKind, undefined);
+  assert.equal(result.mainMutated, false);
+  assert.equal(await head(f.source), beforeHead);
+
+  const report = await runCandidatePromotionsCommand({
+    args: [], roomId: "demo", mainPath: f.source, registry: promoter, decidedBy: "local-cli",
+  });
+  assert.ok(!/reset --hard/u.test(report), `the CLI offered a destructive command:\n${report}`);
+  await assert.rejects(
+    promoter.promoteMainMerge({
+      approvalId: other.approval.id, token: other.token, action: MERGE_APPROVAL_GRANT,
+      taskId: other.taskId, roomId: "demo", mainPath: f.source,
+    }),
+    /MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY/u,
+  );
+});
+
+/**
+ * AMENDMENT (W-2), the other direction ([[PITFALLS]] #107).
+ *
+ * The union has two halves and neither may be weakened by the other being false. Here the BEFORE
+ * half is the only one with anything in it: the repository has an executable hook, and the merge
+ * fails before git ever runs one, so git's trace names no repository program at all. The record must
+ * still refuse to settle on the leader's exit.
+ */
+test("a promotion whose hook never got to run is judged by the inventory that named it", async (t) => {
+  const f = await fixture(t);
+  // `post-merge` runs only after a merge commit exists, and this merge will not get that far.
+  await hook(f, "post-merge", "#!/bin/sh\nexit 0\n");
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const beforeHead = await head(f.source);
+
+  await chmod(f.source, 0o500);
+  let result: Awaited<ReturnType<typeof promote>>;
+  try {
+    result = await promote(f, approval, token);
+  } finally {
+    await chmod(f.source, 0o755);
+  }
+
+  // The preconditions that make this the BEFORE-only case.
+  assert.notEqual(result.promotion.observation.attempt?.exitCode, 0, "the merge succeeded");
+  assert.deepEqual(result.promotion.observation.hooksExecuted ?? [], [],
+    "a hook ran after all, so both halves are true and this measures nothing");
+  assert.equal(result.promotion.state, "applying",
+    "the inventory named an executable hook and the leader's exit settled it anyway");
+  assert.equal(result.promotion.observation.mergeConclusion,
+    "MERGE_UNTRUSTED_PROGRAMS_RAN_LEADER_EXIT_INSUFFICIENT");
+  assert.equal(result.promotion.observation.recovery, undefined);
+  assert.equal(await head(f.source), beforeHead);
+});
+
+/**
+ * AMENDMENTS (V-5)/(W-3). The situation `restore.hooks.unreadable` claimed to cover, covered.
+ *
+ * That disjunct sat inside `untrustedProgramsRan` and could never fire: `restorePoint()` pushes
+ * `MAIN_HOOK_DIRECTORY_UNREADABLE` for the same condition and `#authorizeMainMerge` throws on any
+ * blocker. It has been removed, so this asserts the gates that do the work instead, both of them
+ * refusals rather than tightenings, and both measured rather than reasoned about:
+ *
+ *  - unreadable BEFORE the owner looks: the preview is not approvable, by name, and no approval can
+ *    be raised over it, so a promotion never exists;
+ *  - unreadable AFTER the approval: the inventory is part of the binding, so the promotion is
+ *    refused as drift and spends nothing — asserted by promoting successfully afterwards with the
+ *    SAME token.
+ */
+test("a hook directory that cannot be listed refuses the promotion by name, before anything runs", async (t) => {
+  const f = await fixture(t);
+  const hooks = join(f.source, ".git", "hooks");
+  const beforeHead = await head(f.source);
+
+  // Unreadable before anything is approved.
+  await chmod(hooks, 0o000);
+  let restore: Awaited<ReturnType<GitBroker["restorePoint"]>>;
+  let preview: Awaited<ReturnType<CandidateRegistry["previewMainMerge"]>>;
+  try {
+    restore = await new GitBroker().restorePoint(f.source);
+    preview = await f.registry.previewMainMerge({
+      taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+    });
+    await assert.rejects(
+      f.registry.requestMainMerge({
+        actor: "codex1", clientRequestId: key(), taskId: f.task.taskId, roomId: "demo",
+        mainPath: f.source, completionId: preview.completionId, previewDigest: preview.previewDigest,
+      }),
+      /MAIN_HOOK_DIRECTORY_UNREADABLE|MAIN_MERGE_NOT_APPROVABLE/u,
+      "an approval was raised over an inventory nobody could read",
+    );
+  } finally {
+    await chmod(hooks, 0o755);
+  }
+  assert.equal(restore.hooks.unreadable, true, "the directory was readable, so this proves nothing");
+  assert.deepEqual(restore.hooks.hooks, [], "unreadable must never be reported alongside an inventory");
+  assert.ok(restore.blockers.includes("MAIN_HOOK_DIRECTORY_UNREADABLE"), restore.blockers.join(","));
+  assert.equal(preview.approvable, false);
+  assert.ok(preview.blockers.includes("MAIN_HOOK_DIRECTORY_UNREADABLE"), preview.blockers.join(","));
+
+  // Unreadable only after the owner approved: the same condition, one gate over, still a refusal.
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  await chmod(hooks, 0o000);
+  try {
+    await assert.rejects(promote(f, approval, token), /MAIN_MERGE_APPROVAL_BINDING_CHANGED/u,
+      "an inventory that stopped being readable was allowed to write main");
+  } finally {
+    await chmod(hooks, 0o755);
+  }
+  assert.equal(await head(f.source), beforeHead, "the refused promotion moved main");
+  assert.equal(await status(f.source), "");
+
+  // Drift invalidates the approval rather than holding it — that is F25, not this amendment — so
+  // what is asserted here is that the task is not wedged by the refusal: a fresh approval over the
+  // readable repository still promotes ([[PITFALLS]] #85).
+  const raised = await raise(f);
+  const again = await promote(f, raised, await grant(f, raised));
+  assert.equal(again.mainMutated, true);
+});
+
+/**
+ * AMENDMENT (W-2), the leg that is NOT a hook.
+ *
+ * F26 recorded, three rounds ago, that git reports a `merge.<name>.driver` with `child_class: "?"`
+ * and therefore that such a child never appears in `hooksExecuted`. That is the same family
+ * [[PITFALLS]] #108 is about: pinning one member and forgetting its sibling. So the observed half
+ * asks about every child git started that was not git itself, and this is the case that
+ * distinguishes the two questions — the attributes are committed and harmless, the DRIVER is
+ * configured inside the same window the late hook uses, and no hook runs at any point.
+ */
+test("a merge driver configured after the inventory was read is observed even though it is not a hook", async (t) => {
+  const lines = (change: string): string =>
+    Array.from({ length: 30 }, (_, index) => (index === 0 ? change : `line ${index}`)).join("\n") + "\n";
+  const f = await fixture(t, {
+    initial: { ".gitattributes": "*.conf merge=late\n", "shared.conf": lines("line 0") },
+    beforeComplete: async ({ source, candidatePath }) => {
+      // Both sides edit the same file, far enough apart that the DEFAULT driver merges them cleanly
+      // — the approval has to be reachable, and no driver is configured yet.
+      await commit(source, "shared.conf", lines("line 0").replace("line 29", "main edit"), "main edit");
+      await commit(candidatePath, "shared.conf", lines("candidate edit"), "candidate edit");
+    },
+  });
+  const ran = join(f.root, "driver-ran");
+  const driver = join(f.root, "late-driver.sh");
+  await writeFile(driver, `#!/bin/sh\ntouch ${JSON.stringify(ran)}\nexit 1\n`,
+    { encoding: "utf8", mode: 0o700 });
+
+  const preview = await f.registry.previewMainMerge({
+    taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+  });
+  assert.equal(preview.approvable, true, preview.blockers.join(","));
+  assert.deepEqual(preview.hooks.drivers, [], "the snapshot already sees the driver; wrong window");
+  assert.deepEqual(preview.hooks.hooks, []);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const beforeHead = await head(f.source);
+
+  const promoter = new CandidateRegistry(f.data, {
+    faultPoint: (point) => {
+      if (point !== "approval-consume-write") return;
+      execFileSync("git", ["config", "merge.late.name", "late driver"], { cwd: f.source });
+      execFileSync("git", ["config", "merge.late.driver", `${driver} %A %O %B`], { cwd: f.source });
+    },
+  });
+  t.after(() => promoter.close());
+  const result = await promoter.promoteMainMerge({
+    approvalId: approval.id, token, action: MERGE_APPROVAL_GRANT,
+    taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+  });
+
+  // Preconditions ([[PITFALLS]] #106/#129): the driver ran, and NO hook ran, so the hook-shaped
+  // question cannot be the one that answered.
+  assert.equal(await exists(ran), true, "the late driver never ran, so this measures nothing");
+  assert.deepEqual(result.promotion.observation.hooksExecuted ?? [], [],
+    "a hook ran, so this is not the not-a-hook case");
+
+  assert.equal(result.promotion.state, "applying",
+    "unsandboxed repository code ran and the leader's exit settled the record anyway");
+  assert.equal(result.promotion.observation.mergeConclusion,
+    "MERGE_UNTRUSTED_PROGRAMS_RAN_LEADER_EXIT_INSUFFICIENT");
+  assert.equal(result.promotion.observation.recovery, undefined,
+    `a destructive command was offered: ${result.promotion.observation.recovery}`);
+  assert.equal(result.mainMutated, false);
+  assert.equal(await head(f.source), beforeHead);
+  assert.equal(await status(f.source), "");
+});
+
+/**
+ * AMENDMENT (W-1), the sibling key. `core.attributesFile` was read with a plain `--get` and expanded
+ * by hand — the same class of guess as `core.hooksPath`, one function over. It now asks git
+ * (`config --get --path`), which expands `~`, `%(prefix)/` and `~user/` the way git does, and the
+ * three exits are distinguished instead of collapsed into `.catch(() => "")`.
+ *
+ * ⚠️ Stated rather than implied: this is NOT measured to change an outcome. `git check-attr` — the
+ * primary half of the same gate — refuses on its own when the value cannot be expanded, so the old
+ * code reached the same refusal by a different road. What this asserts is the refusal itself, so a
+ * later edit that makes either half answer "no filter" to a question it could not ask fails here.
+ */
+test("an attributes file git itself refuses to expand is a closed gate, not an empty one", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "orchestratory-attrsfile-"));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const source = join(root, "repo");
+  await mkdir(source);
+  await execFileAsync("git", ["init", "-b", "main"], { cwd: source });
+  await commit(source, "README.md", "main\n", "initial");
+  const broker = new GitBroker();
+  assert.deepEqual((await broker.restorePoint(source)).blockers, [],
+    "this repository is already refused, so the assertion below would prove nothing");
+
+  // A spelling git parses and then declines to resolve: `~<user>` needs a passwd entry.
+  await execFileAsync("git", ["config", "core.attributesFile", "~orchestratory-no-such-user/attrs"],
+    { cwd: source });
+  // Measured, and reported as measured rather than as the shape that was expected: git refuses this
+  // value so early that `git status` itself exits non-zero, so the refusal arrives as a thrown
+  // `GIT_COMMAND_FAILED` from `inspect()` before the attributes gate is ever consulted. That is
+  // still fail-closed — what must never happen is a restore point that comes back CLEAN — and it is
+  // what this asserts, rather than a blocker name that this path does not reach.
+  await assert.rejects(broker.restorePoint(source), /GIT_COMMAND_FAILED/u,
+    "a value git refuses to expand produced a usable restore point");
+});
+
+/**
+ * AMENDMENT (W-2), the [[PITFALLS]] #107 cell this round's first mutation run found empty.
+ *
+ * `W-V3DRIVER` — dropping `restore.hooks.drivers` from the pre-merge snapshot — came back 9/9 GREEN
+ * after the union was added, and the reason is real rather than equivalence: every existing driver
+ * test has a driver that RUNS, so git's trace names it and the observed half answers on its own. The
+ * cell with no test in it is the mirror of the hook one: a driver the inventory named and the merge
+ * never reached.
+ *
+ * So this is that cell. The driver is configured before the approval, the merge fails on a read-only
+ * working tree before any content merge happens, and the record must still refuse to settle on the
+ * leader's exit — from the snapshot alone.
+ */
+test("a promotion whose merge driver never got to run is judged by the inventory that named it", async (t) => {
+  let ran = "";
+  const f = await fixture(t, {
+    initial: { ".gitattributes": "*.conf merge=quiet\n", "shared.conf": "base\n" },
+    beforeComplete: async ({ source, candidatePath }) => {
+      const root = join(source, "..");
+      ran = join(root, "driver-ran");
+      const driver = join(root, "quiet-driver.sh");
+      // Exits 0 wherever it runs, so the PREVIEW's simulated merge stays approvable; the marker is
+      // what says whether it ran at all.
+      await writeFile(driver, `#!/bin/sh\ntouch ${JSON.stringify(ran)}\nexit 0\n`,
+        { encoding: "utf8", mode: 0o700 });
+      await execFileAsync("git", ["config", "merge.quiet.name", "quiet driver"], { cwd: source });
+      await execFileAsync("git", ["config", "merge.quiet.driver", `${driver} %A %O %B`], { cwd: source });
+      // Only ONE side edits the file the attribute points at, so git never needs a content merge and
+      // the driver is configured without being invoked. Read-only-working-tree was tried first and
+      // measured NOT to work: git still runs the driver and fails afterwards.
+      await commit(candidatePath, "shared.conf", "from candidate\n", "candidate edit");
+      void source;
+    },
+  });
+
+  const preview = await f.registry.previewMainMerge({
+    taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+  });
+  assert.equal(preview.approvable, true, preview.blockers.join(","));
+  assert.equal(preview.hooks.drivers.length, 1, "the snapshot does not name the driver");
+  assert.deepEqual(preview.hooks.hooks, [], "a hook would answer instead of the driver; not the cell");
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const beforeHead = await head(f.source);
+
+  // The preview's own simulation may have run it; only what happens from here matters.
+  await rm(ran, { force: true });
+  await chmod(f.source, 0o500);
+  let result: Awaited<ReturnType<typeof promote>>;
+  try {
+    result = await promote(f, approval, token);
+  } finally {
+    await chmod(f.source, 0o755);
+  }
+
+  // Preconditions ([[PITFALLS]] #106/#129): the merge failed, and NOTHING out of the repository ran,
+  // so only the snapshot can be answering.
+  assert.notEqual(result.promotion.observation.attempt?.exitCode, 0, "the merge succeeded");
+  assert.equal(await exists(ran), false, "the driver ran after all, so the observed half answers");
+  assert.deepEqual(result.promotion.observation.hooksExecuted ?? [], []);
+
+  assert.equal(result.promotion.state, "applying",
+    "the inventory named a merge driver and the leader's exit settled the promotion anyway");
+  assert.equal(result.promotion.observation.mergeConclusion,
+    "MERGE_UNTRUSTED_PROGRAMS_RAN_LEADER_EXIT_INSUFFICIENT");
+  assert.equal(result.promotion.observation.recovery, undefined);
+  assert.equal(result.mainMutated, false);
+  assert.equal(await head(f.source), beforeHead);
 });

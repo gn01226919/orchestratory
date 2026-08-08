@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { open, readdir, readFile, stat, type FileHandle } from "node:fs/promises";
-import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { canonicalWorkspace, resolveExistingInside } from "../security/workspace.ts";
 import {
@@ -22,7 +21,22 @@ import {
  * substitution a drift refusal instead of an execution.
  */
 export interface HookEnvironment {
-  /** Where git says hooks come from, as configured. */
+  /**
+   * The hook directory GIT resolved for this repository, asked of git rather than derived here.
+   *
+   * Amendment (W-1). This used to be `git config --list` filtered with
+   * `.find(entry => entry.key === "core.hookspath")`, and every part of that was a guess at another
+   * program's semantics: `--list` prints EVERY occurrence while git's effective value is the LAST
+   * one, and git expands `~` and `%(prefix)/` in a path-typed value while a plain string read does
+   * not. Measured on git 2.50.1 — a repository whose config names `core.hooksPath` twice ran the
+   * hook in the second directory while this field reported the first, so the approval screen said
+   * "this promotion will run no repository hook" about a promotion that ran one.
+   *
+   * `git rev-parse --git-path hooks`, asked under the promotion environment, is git answering the
+   * same question git will answer during the merge: last occurrence wins, `~` and `%(prefix)/` are
+   * expanded, worktree-scoped config and `include.path` are honoured — all four measured. Empty
+   * only when git could not be asked at all, and that case sets `unreadable`.
+   */
   hooksPath: string;
   /** Executable hooks present there, name and content hash, sorted. */
   hooks: Array<{ name: string; sha256: string; bytes: number }>;
@@ -75,7 +89,15 @@ export interface HookEnvironment {
    * after the owner approved, is a binding change and a refusal.
    */
   configDigest: string;
-  /** True when the hook directory could not be listed; never reported as "no hooks". */
+  /**
+   * True when the hook inventory could not be established; never reported as "no hooks".
+   *
+   * Two ways in, and amendment (W-1) added the second: the directory could not be LISTED, or git
+   * could not be asked WHERE it is. The second used to be the silent one — a hooks path this code
+   * resolved differently from git produced a confident, wrong, empty inventory rather than a
+   * refusal. `restorePoint()` turns this into `MAIN_HOOK_DIRECTORY_UNREADABLE`, which refuses the
+   * promotion outright; nothing downstream is asked to tighten on it.
+   */
   unreadable: boolean;
   fingerprint: string;
 }
@@ -248,20 +270,6 @@ const PROMOTION_STATE_FILES: ReadonlyArray<readonly [string, string]> = [
 ];
 const SENSITIVE_UNTRACKED_PATH = /(?:^|\/)(?:\.env(?:\.[^/]*)?|[^/]+\.(?:pem|key|p12|pfx))$/iu;
 
-/**
- * git's `expand_user_path`, for the two spellings this product can resolve honestly.
- *
- * `~/x` is the owner's home; a bare `~` is the home itself. `~someone/x` needs a passwd lookup this
- * process does not do, so it throws rather than resolving to something git would not read — a path
- * that silently fails to exist turns this gate off.
- */
-function expandUserPath(value: string, workspace: string): string {
-  if (value === "~") return homedir();
-  if (value.startsWith("~/")) return join(homedir(), value.slice(2));
-  if (value.startsWith("~")) throw new Error("UNSUPPORTED_ATTRIBUTES_FILE_PATH");
-  return isAbsolute(value) ? value : join(workspace, value);
-}
-
 /** One hook git actually ran during a promotion, as reported by git's own trace stream. */
 export interface ObservedHookRun {
   /** The hook name git reports, e.g. `pre-merge-commit`. */
@@ -285,13 +293,30 @@ export interface ObservedHookRun {
  * observed" and "observed that none ran" — and collapsing them is how a record starts lying.
  */
 export async function readExecutedHooks(traceFile: string): Promise<ObservedHookRun[] | null> {
+  const children = await readTraceChildren(traceFile);
+  return children === null
+    ? null
+    : children.filter((child) => child.childClass === "hook")
+      .map(({ name, path, exitCode }) => ({ name, path, exitCode }));
+}
+
+/** One child process git started during a promotion, with the two fields that say whose code it is. */
+interface ObservedChild extends ObservedHookRun {
+  /** git's own classification: `"hook"` for a hook, `"?"` for everything it does not name. */
+  childClass: string;
+  /** True when git handed a command LINE to a shell — how `merge.<name>.driver` is started. */
+  shell: boolean;
+}
+
+/** Every child in one promotion's trace, in start order, or null when the trace could not be read. */
+async function readTraceChildren(traceFile: string): Promise<ObservedChild[] | null> {
   let contents: string;
   try {
     const info = await stat(traceFile);
     if (!info.isFile() || info.size > MAX_HOOK_TRACE_BYTES) return null;
     contents = await readFile(traceFile, "utf8");
   } catch { return null; }
-  const started = new Map<string, ObservedHookRun>();
+  const started = new Map<string, ObservedChild>();
   const order: string[] = [];
   for (const line of contents.split("\n")) {
     if (line.length === 0) continue;
@@ -301,12 +326,14 @@ export async function readExecutedHooks(traceFile: string): Promise<ObservedHook
     const childId = typeof event.child_id === "number" ? String(event.child_id) : undefined;
     if (childId === undefined) continue;
     const id = `${sid}#${childId}`;
-    if (event.event === "child_start" && event.child_class === "hook") {
+    if (event.event === "child_start") {
       const argv = Array.isArray(event.argv) ? event.argv : [];
-      const run: ObservedHookRun = {
+      const run: ObservedChild = {
         name: typeof event.hook_name === "string" ? event.hook_name : "",
         path: typeof argv[0] === "string" ? argv[0] : "",
         exitCode: null,
+        childClass: typeof event.child_class === "string" ? event.child_class : "",
+        shell: event.use_shell === true,
       };
       if (!started.has(id)) order.push(id);
       started.set(id, run);
@@ -317,7 +344,44 @@ export async function readExecutedHooks(traceFile: string): Promise<ObservedHook
       if (run && typeof event.code === "number") run.exitCode = event.code;
     }
   }
-  return order.map((id) => started.get(id)).filter((run): run is ObservedHookRun => run !== undefined);
+  return order.map((id) => started.get(id)).filter((run): run is ObservedChild => run !== undefined);
+}
+
+/**
+ * Whether git STARTED a program during this promotion that was not git itself — the observed half of
+ * "did this promotion execute code this repository named".
+ *
+ * Amendment (W-2). The other half, `restore.hooks`, is a snapshot taken before the merge is spawned,
+ * and the gap between the two is wide enough to walk through: the product's own `mkdir` of
+ * `promotion-traces` is a publicly visible starting gun, and a process with the owner's uid sharing
+ * main's common `.git` can drop in a hook after the inventory has been read. A promotion that ran
+ * such a hook was settled by its leader's exit and handed `git reset --hard`, in the same payload
+ * whose `hooksExecuted` named the hook by file name.
+ *
+ * Three legs, all measured on git 2.50.1 rather than reasoned about, and each of them only ever
+ * ADDS a reason to tighten:
+ *
+ *  - `child_class: "hook"` — how git reports a hook.
+ *  - `use_shell: true` — how git reports a `merge.<name>.driver`, whose `child_class` is `"?"`. The
+ *    round that documented that difference in F26 also recorded that such a child does NOT appear in
+ *    `hooksExecuted`, which is exactly why a second question is asked here.
+ *  - an `argv[0]` that is not `git` — everything else. An ordinary merge starts `git stash create`
+ *    and `git maintenance run`, both with `argv[0] === "git"`, so this leg is quiet on the
+ *    repositories (V-3) is meant to leave alone, and a child git starts under some future name is
+ *    counted as untrusted rather than skipped.
+ *
+ * This is NOT claimed to enumerate the ways a repository can get code executed during a merge; it is
+ * claimed to report children git said it started. Returns null when the trace could not be read at
+ * all — null is "not observed", and the caller may not read it as "nothing ran".
+ */
+export async function readExecutedRepositoryPrograms(
+  traceFile: string,
+): Promise<ObservedHookRun[] | null> {
+  const children = await readTraceChildren(traceFile);
+  if (children === null) return null;
+  return children
+    .filter((child) => child.childClass === "hook" || child.shell || basename(child.path) !== "git")
+    .map(({ name, path, exitCode }) => ({ name, path, exitCode }));
 }
 
 /**
@@ -657,21 +721,50 @@ export class GitBroker {
     // The VALUE is deliberately not redacted: for these two lists the value IS the command git would
     // run, and hiding it would remove the only thing that makes the disclosure worth reading. That
     // asymmetry is a residual risk and is written down as one, not as a claim that nothing leaks.
+    //
+    // ## Why these three lists still read the listing, after amendment (W-1)
+    //
+    // (W-1) says: when a key is being read by parsing another program's configuration, either ask
+    // that program or say why not. Enumerated, per key family rather than left to be assumed:
+    //
+    //  - `merge.*.driver` and `filter.*.clean|smudge|process` — both consumers treat a NON-EMPTY
+    //    list as a reason to tighten (`untrustedProgramsRan`) or to refuse outright
+    //    (`MAIN_HAS_CONTENT_FILTERS`). `--list` prints every occurrence, so what this produces is a
+    //    SUPERSET of what git would use: extra entries can only add refusals, never remove one.
+    //    Neither value is path-typed, so the `~`/`%(prefix)/` expansion that broke `core.hooksPath`
+    //    has no analogue here. Measured that `--list` sees worktree-scoped config
+    //    (`extensions.worktreeConfig`) and keys pulled in through `include.path`, so those two
+    //    scopes are not a gap in the superset either.
+    //  - `programs` — disclosure only, and `CONFIG_NAMES_A_PROGRAM` is documented as NOT the whole
+    //    set. A superset of occurrences is again the harmless direction for a list whose only job is
+    //    to be shown.
+    //
+    // The keys that are read for their MEANING rather than their presence do ask git, each in the
+    // one way git answers it: `core.hooksPath` via `rev-parse --git-path hooks` (just below),
+    // `core.attributesFile` via `config --get --path` (`#attributesFiles`), `core.sparseCheckout`
+    // via `config --type=bool --get` (`#sparseCheckoutBlockers`), and whether any filter applies at
+    // all via `check-attr` (`#attributesFilterDeclared`). `configDigest` parses nothing.
     const configured = (test: RegExp): string[] =>
       entries.filter((entry) => test.test(entry.key))
         .map((entry) => `${redactConfigSubsection(entry.key)}=${entry.value}`).sort();
-    const hooksPathEntry = entries.find((entry) => entry.key === "core.hookspath");
-    const hooksPath = hooksPathEntry?.value ?? "";
-    const directory = hooksPath === ""
-      ? await this.#gitPath(workspace, "hooks", promotionEnv)
-      : (isAbsolute(hooksPath) ? hooksPath : join(workspace, hooksPath));
+    // Amendment (W-1): git is asked where its hooks are, in the environment the merge will use.
+    // Deriving it from the listing was wrong in two independent ways at once (duplicate keys, `~`),
+    // and the general lesson is that "which occurrence wins" and "what expands" are git's semantics,
+    // not this file's. `#gitPath` throws when git could not answer, and an unanswered question is
+    // recorded as an unreadable inventory rather than as an empty one.
+    let directory: string | null = null;
+    try {
+      directory = await this.#gitPath(workspace, "hooks", promotionEnv);
+    } catch { directory = null; }
+    const hooksPath = directory ?? "";
     // git treats a hooks path it cannot read as "no hooks" and proceeds. So does this, but it says
     // so: `/dev/null` and a deleted directory are both "nothing will run", and both are reported as
     // an explicit empty inventory rather than as an unreadable one.
-    const absent = await stat(directory).then((info) => !info.isDirectory()).catch(() => true);
+    const absent = directory === null
+      || await stat(directory).then((info) => !info.isDirectory()).catch(() => true);
     const hooks: HookEnvironment["hooks"] = [];
-    let unreadable = false;
-    if (!absent) try {
+    let unreadable = directory === null;
+    if (!absent && directory !== null) try {
       const names = (await readdir(directory)).filter((name) => !name.endsWith(".sample")).sort();
       if (names.length > MAX_HOOK_FILES) throw new Error("TOO_MANY_HOOKS");
       for (const name of names) {
@@ -732,10 +825,8 @@ export class GitBroker {
    * already refused by `MAIN_STATUS_NOT_EMPTY` before this matters.
    *
    * `core.attributesFile` is read from the repository's own config, which is writable by any linked
-   * worktree sharing this common `.git` — the same surface the hook binding exists for. git expands
-   * a leading `~` in that value with `expand_user_path`; joining it under the workspace instead
-   * produced `<main>/~/attrs`, an ENOENT, and a silently empty gate. `~user/` cannot be resolved
-   * here without a passwd lookup, so it is refused rather than guessed at.
+   * worktree sharing this common `.git` — the same surface the hook binding exists for. Its
+   * expansion is git's, asked of git; see `#configuredPath` for what that replaced and why.
    */
   async #attributesFiles(workspace: string, ignoredPaths: readonly string[]): Promise<string[]> {
     const found = new Set<string>();
@@ -747,10 +838,43 @@ export class GitBroker {
     }
     // `--git-path info` answers the git directory's `info/`, honouring linked worktrees.
     found.add(join(await this.#gitPath(workspace, "info"), "attributes"));
-    const configured = (await this.#git(workspace, ["config", "--get", "core.attributesFile"], 8_192)
-      .catch(() => "")).trim();
-    if (configured) found.add(expandUserPath(configured, workspace));
+    const configured = await this.#configuredPath(workspace, "core.attributesFile");
+    if (configured !== null) {
+      found.add(isAbsolute(configured) ? configured : join(workspace, configured));
+    }
     return [...found].sort();
+  }
+
+  /**
+   * One path-typed configuration value, expanded by git, or `null` when git says it is not set.
+   *
+   * Amendment (W-1), applied to the sibling of the key that broke: `core.attributesFile` was read
+   * with a plain `--get` and expanded by hand. The hand-written expansion covered `~` — because a
+   * previous round was caught by exactly that — and did not cover `%(prefix)/`, which git also
+   * expands in a path-typed value (measured: `%(prefix)/attrs` reads back as a path under git's own
+   * exec prefix). `--path` is git doing all of it, including the `~user/` lookup this process
+   * cannot do.
+   *
+   * The three exits are distinguished rather than collapsed, which is the half the previous code got
+   * wrong in a different way: it ended in `.catch(() => "")`, so a value git REFUSED to expand
+   * turned the enumeration half of the filter gate silently empty. Exit 1 is git answering that the
+   * key is unset; anything else throws, and `#attributesBlockers` turns that into
+   * `MAIN_ATTRIBUTES_UNREADABLE`.
+   */
+  async #configuredPath(workspace: string, key: string): Promise<string | null> {
+    const result = await runProcess({
+      executable: await resolveExecutable("git"),
+      args: ["config", "--get", "--path", "--", key],
+      cwd: workspace,
+      timeoutMs: 30_000,
+      outputLimitBytes: 8_192,
+      env: minimalGitEnvironment(),
+    });
+    if (result.terminationReason) throw new Error("GIT_COMMAND_FAILED");
+    if (result.exitCode === 1) return null;
+    if (result.exitCode !== 0) throw new Error("GIT_COMMAND_FAILED");
+    const value = result.stdout.trim();
+    return value === "" ? null : value;
   }
 
   /**

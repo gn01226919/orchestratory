@@ -6,7 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { StringDecoder } from "node:string_decoder";
 import { canonicalWorkspace } from "../security/workspace.ts";
 import {
-  GitBroker, MERGE_TIMEOUT_MS, readExecutedHooks,
+  GitBroker, MERGE_TIMEOUT_MS, readExecutedHooks, readExecutedRepositoryPrograms,
   type GitInspection, type GitRestorePoint,
 } from "./git-broker.ts";
 import { minimalGitEnvironment, resolveExecutable, runProcess } from "./process-runner.ts";
@@ -1746,15 +1746,6 @@ interface MergeIdentityReading {
   /** Which source said what, so a disagreement can be shown rather than resolved silently. */
   sources: readonly MergeIdentitySource[];
   /**
-   * True when NO source inside the row named a group and one outside it did.
-   *
-   * Such a number is still probed — that can only add a reason to refuse — but on its own it never
-   * makes the record answered: a group only the outside source names, still answering "alive", is a
-   * record that has not said what is writing to main. That test needs a probe, so it is made where
-   * the probing happens ([[PITFALLS]] #120, VERIFICATION amendment (M)).
-   */
-  outsideRowOnly: boolean;
-  /**
    * True when a source INSIDE the promotion row named a group.
    *
    * Amendment (O) and (Q). Probing a number is the only way this code ever learns anything about a
@@ -1941,7 +1932,6 @@ function durableMergeIdentity(
   const outside = traceNamed ?? spawnRecordNamed;
   const common = {
     candidates, sources,
-    outsideRowOnly: inRow === null && outside !== null,
     namedInRow: inRow !== null && !contested,
   };
   if (contested) return { identity: null, readable: false, ...common };
@@ -3345,8 +3335,12 @@ function mergeApprovalPrompt(
       `這次 merge 會覆蓋 main 上這些被忽略的檔案（git 會靜默覆蓋、回傳成功、事後仍回報工作樹乾淨）：`
         + `${overwrite.ignored.join("、")}。`,
     ]),
+    // 這一句刻意只描述「讀到什麼」而不宣稱「將會發生什麼」：hook 目錄是核准當下讀的，而 merge 是
+    // 之後才 spawn 的，中間的窗口實測可被同 uid 的程序寫入（第十四輪 (W-2)）。實際執行了什麼由
+    // `hooksExecuted` 事後從 git 自己的 trace 讀回。
     hooks.hooks.length === 0
-      ? `本次 promotion 不會執行任何 repo hook（hooksPath ${hooks.hooksPath || "預設"}）。`
+      ? `核准當下讀到 main 的 hook 目錄 ${hooks.hooksPath || "（git 未回答）"} 內沒有可執行的 hook；`
+        + `這是讀數不是保證，實際執行了什麼以促進紀錄事後從 git trace 讀回的清單為準。`
       : `本次 promotion 會以你的身分、無沙箱執行下列 repo hook：`
         + `${hooks.hooks.map((hook) => `${hook.name}（sha256 ${hook.sha256.slice(0, 12)}）`).join("、")}。`,
     `即將要求核准的動作：把 candidate ${task.candidatePath} 的這個精確 snapshot merge 進 canonical main ${task.mainPath}`
@@ -4614,11 +4608,22 @@ export class CandidateRegistry {
     // observed thing which process to look for. Silencing all three left `survivors` empty over a
     // live group and produced `git reset --hard`.
     let firstHandGroup: MergeProcessGroupIdentity | null = null;
-    // Amendment (V-3). Read once, from the live inventory this promotion just re-verified against the
-    // approval binding, before anything runs. `unreadable` counts as "yes": an inventory this code
-    // could not read is not an inventory of nothing (F26, and the same rule as every other gate here).
-    const untrustedProgramsRan = restore.hooks.unreadable
-      || restore.hooks.hooks.length > 0 || restore.hooks.drivers.length > 0;
+    // Amendment (V-3), narrowed to what it can actually claim by amendment (W-2). This is the BEFORE
+    // half: the live inventory this promotion just re-verified against the approval binding, read
+    // before anything runs. It is a snapshot, so it can only ever be one half of the answer — the
+    // merge is spawned several writes later, and the AFTER half is read from git's own trace in
+    // `#settlePromotion`.
+    //
+    // `restore.hooks.unreadable` was a third disjunct here and has been removed rather than kept as
+    // decoration (amendments (V-5)/(W-3)). It could not fire: `restorePoint()` pushes
+    // `MAIN_HOOK_DIRECTORY_UNREADABLE` for exactly that condition and `#authorizeMainMerge` throws
+    // on any blocker, so an unreadable inventory refuses the promotion outright — one gate earlier
+    // and strictly stronger than tightening this one. The situation it named is now genuinely
+    // covered there, including the case that used to slip past it entirely: a `core.hooksPath` this
+    // code resolved differently from git produced `unreadable: false` over a directory full of
+    // hooks (amendment (W-1)).
+    const untrustedProgramsSnapshot =
+      restore.hooks.hooks.length > 0 || restore.hooks.drivers.length > 0;
     try {
       // Step three, and the first thing that writes: the merge. Its process group is persisted the
       // instant it is spawned, because the subprocess is detached and outlives this process — a
@@ -4661,7 +4666,7 @@ export class CandidateRegistry {
       } catch { /* the observation below decides what actually happened, not this call's success */ }
     }
     const settled = await this.#settlePromotion(promotion, attempt, {
-      leaderExitObserved, gitSpawnObserved, firstHandGroup, untrustedProgramsRan,
+      leaderExitObserved, gitSpawnObserved, firstHandGroup, untrustedProgramsSnapshot,
     });
     promotion = settled.row;
     return {
@@ -6499,14 +6504,30 @@ export class CandidateRegistry {
       gitSpawnObserved: boolean;
       /** Amendment (V-1): the group the spawn callback handed over, never re-read from anywhere. */
       firstHandGroup: MergeProcessGroupIdentity | null;
-      /** Amendment (V-3): whether this promotion could have executed repository code at all. */
-      untrustedProgramsRan: boolean;
+      /**
+       * Amendment (V-3), before half: whether the inventory read just before the merge named any
+       * repository program. Amendment (W-2) is that this is a SNAPSHOT and is unioned below with
+       * what git says it actually started.
+       */
+      untrustedProgramsSnapshot: boolean;
     },
   ): Promise<{ row: PromotionRow; mainMutated: boolean }> {
+    // Amendment (W-2). The after half, read from git's own trace of THIS promotion, before the
+    // conclusion is computed rather than inside the observation that follows it — `readExecutedHooks`
+    // was already being called one function later, so the fact was in the record and nothing read it
+    // ([[PITFALLS]] #128/#130).
+    //
+    // Union, and the direction is the whole point (amendment (O)): a trace that could not be read
+    // (`null`) and a trace that names nothing both contribute `false`, so ABSENCE never loosens,
+    // while a trace naming one program tightens even if the pre-merge snapshot saw nothing. Neither
+    // half may be weakened by the other being false.
+    const observedPrograms = await readExecutedRepositoryPrograms(this.#promotionTracePath(row.id));
+    const untrustedProgramsRan = options.untrustedProgramsSnapshot
+      || (observedPrograms !== null && observedPrograms.length > 0);
     const conclusion = this.#promotionConclusion(row, {
       leaderExitObserved: options.leaderExitObserved,
       firstHandGroup: options.firstHandGroup,
-      untrustedProgramsRan: options.untrustedProgramsRan,
+      untrustedProgramsRan,
     });
     const observed = await this.#observeMain(row, conclusion, attempt);
     // Amendment (V-4). Read BEFORE the two gates below can rewrite the state, because it is what the
