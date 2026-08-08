@@ -1827,6 +1827,101 @@ driver 會把 git 自己的 `.merge_file_*` 與 `.git/index.lock` **`mv` 到旁�
 其收緊已被 `unreadableReleaseRequirement` 內更嚴格的區域判準完全涵蓋，**沒有保護消失**）。
 依 (T-2)「算出來的判準必須有讀取端」，**這一輪之後不得再留著**。
 
+### 第十三輪：(V-1)~(V-5) 的實作與實測（2026-08-08）
+
+本輪**不動任何一條規則**，只把實作對齊 (V-1)~(V-5)。五項全部在既有規則之內。
+
+**一、(V-1)：第一手路徑改用第一手的號碼。**
+`promoteMainMerge` 的 spawn callback 現在先把
+`{ pgid, bootAtSec, spawnedAt }` 存進**本呼叫的區域變數** `firstHandGroup`（在任何可能拋出的動作之前），
+再交給 `#recordMergePgid` 去寫資料庫；`#settlePromotion` 把它一路傳到
+`mergeIdentityStanding`，與 `reading.candidates` 一起探測（**不經過 disown 過濾**——
+第一手號碼不是這一列的主張，紀錄不得把本程序親眼看著被建立的群組從探測清單裡拿掉）。
+`#observeMain` 也優先用它當 `identity`，所以四個來源全被弄靜音的那一列，
+現在**說得出號碼**（`mergeGroupSurvivors` 與 `mergePgid` 都是它）。
+- 實測（`z2 hostile`）：三步全做——`faultPoint("merge-pgid-record")` 讓 pgid 那次寫入拋出、
+  hook 清空 `$GIT_TRACE2_EVENT` 與 `*.spawn-record.json`、hook 留一個**不用 `setsid`** 的背景程序——
+  修正前 `state: rolled-back`＋`reset --hard`＋第二次促進 ALLOWED，修正後
+  `state: applying`、`MERGE_GROUP_SURVIVORS_STILL_ALIVE`、無 `recovery`、第二次促進
+  `MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY`。
+- **覆蓋缺口 (#107) 已補**：新測試 `a first-hand settlement probes the group it was handed, not the
+  one storage still names` 就是「**第一手 × 刪除來源**」那一格——32＋6 條子集測試全部先 SIGKILL
+  orchestrator（量的是崩潰讀者），兩條第一手測試都不刪來源，所以這一格先前沒有任何測試。
+
+**二、(V-2)/(V-3)：不再嘗試證明「沒有殘存程序」。**
+新增判準 `untrustedProgramsRan`＝這次促進的 live hook 清單非空 ∨ `merge.*.driver` 非空 ∨
+**清單讀不到**（讀不到不是「沒有」，與 F26 其他閘門同一方向）。它由 `promoteMainMerge` 從
+`#authorizeMainMerge` 剛剛重新驗過的 `restore.hooks` 讀出、留在記憶體，
+只餵給 `#settlePromotion` 這一條第一手路徑（其他讀者本來就沒有 `leaderExitObserved` 可以擋）。
+`mergeWriteConclusion` 在 owner 宣告**之後**、`leaderClosedFirstHand` **之前**：
+執行過不可信程式 → `open("MERGE_UNTRUSTED_PROGRAMS_RAN_LEADER_EXIT_INSUFFICIENT")`，
+不下結論、不遞任何指令、不離開 `applying`；出路是紀錄自己印出的具名等待與唯讀指令。
+- 實測（`z3 hostile`，`perl -e 'use POSIX; setsid; exec @ARGV'`）：修正前
+  `rolled-back`＋`reset --hard`＋第二次促進 ALLOWED；修正後 `applying`＋
+  `MERGE_UNTRUSTED_PROGRAMS_RAN_LEADER_EXIT_INSUFFICIENT`＋無 `recovery`＋第二次促進被拒。
+- **反方向也有測試**：`a promotion that ran no repository code at all is still settled by its
+  leader's exit`——沒有 hook、沒有 driver 的 repo（**多數 repo 的常態**）以唯讀工作樹讓 merge
+  失敗，`MERGE_LEADER_EXIT_OBSERVED` 與 `reset-to-pre-promotion` **維持原行為**。
+- **明寫的代價**（列入殘餘風險表）：在有 hook 或 merge driver 的 repo 上，
+  **每一次沒有成功的促進都需要 Owner 結束等待**——`pre-merge-commit` 非零退出、
+  merge driver 失敗、hook 逾時三條既有測試因此各多一步；本程序仍活著時那一步是
+  `OWNER_PROCESS_STILL_RUNNING`＋`MERGE_END_NOT_OBSERVED` **兩段**宣告。
+  成功的促進不受影響（`authorizedMergeCommit` 是對 main 本身的第一手觀察，仍自行收斂）。
+
+**三、(V-4)：`applied` 那一格關上了，而且沒有付出該列宣稱的代價。**
+`mainMutated` 與 `#markCandidateMerged` 改為取自 `observed.state === "applied"` 的**觀察結果**
+（即 `authorizedMergeCommit === true`）並在 survivors 閘門**之前**取值；
+`#holdMarkerOverSurvivors()` 接著把該列改記為 `applying` ＋
+`AUTHORIZED_MERGE_COMMIT_OBSERVED_WITH_MERGE_GROUP_SURVIVORS`（保留 `main_head_after`），
+兩條路徑（`#settlePromotion` 與 `#resolvePromotion`）各接一次。
+`#emitPromotion` 的 `mainMutated` 同樣改為
+`state === "applied" || observation.authorizedMergeCommit === true`，
+否則 audit 鏈與公開帳本會為一次真的寫入 main 的促進記下 `mainMutation: false`。
+- 實測（`z1`）：修正前 `applied`／`mainMutated: true`／第二次促進 ALLOWED 且真的寫了 main；
+  修正後 `applying`／`mainMutated` **仍為 true**／candidate 仍為 `merged`／第二次促進被拒／
+  無破壞性 `recovery`。
+- `src/main.ts` 那句「The reason it can no longer say both is the amendment (U) gate」**已標為假並更正**
+  （#77 形狀）：(U) 的閘門從來不涵蓋 `applied`，同一列同時印出那兩行的正是 `z1`。
+
+**四、(V-5)：`MergeIdentityStanding.answered` 已移除。**
+`unreadableReleaseRequirement` 內較嚴格的區域判準原本就完全涵蓋它，移除後
+`grep -rn "standing.answered" src test` 為零，該處註解已改寫為說明「這個共用欄位為什麼被拿掉」。
+
+**五、突變測試（先跑完突變，再單獨跑 gate）。**
+本輪新接的每一條線各有一支「把它改回舊行為」的突變，**對照組 `C-BASE` 先跑且全綠（12/12）**，
+否則那些紅綠數據量的可能是未突變的程式碼本來就會失敗：
+
+| 突變 | 改回什麼 | 結果 |
+| --- | --- | --- |
+| `C-BASE` | 不改（對照組） | **12/12 綠** |
+| `V1GROUP` | `#settlePromotion` 傳 `firstHandGroup: null` | 紅（第一手 × 刪除來源那條測試） |
+| `V1PROBE` | standing 收到第一手號碼但不探測它 | 紅（同上） |
+| `V1NAME` | 拿掉 `#keepNamingWhatItWaitsOn` | 紅（紀錄說不出要引用哪個號碼） |
+| `V3GATE` | 拿掉 (V-3) 閘門 | 紅 ×5（含 hook 非零退出、driver 失敗、audit 兩條路徑） |
+| `V3ALWAYS` | `untrustedProgramsRan` 永遠為真 | 紅 ×2（沒有 hook 的 repo 不該被收緊） |
+| `V3DRIVER` | 清單只算 hook、不算 merge driver | 紅（driver 失敗那條） |
+| `V4HOLD` | 拿掉 `#holdMarkerOverSurvivors` | 紅 ×3 |
+| `V4RESOLVE` | 只在 `#settlePromotion` 接、`#resolvePromotion` 不接 | 紅 |
+| `V4MUTATED` | `mainMutated` 改回讀 state | 紅 ×5 |
+| `V4AUDIT` | `#emitPromotion` 的 `mainMutation` 改回讀 state | 紅 |
+
+**一支存活過，處理方式是移除而不是宣稱等價（[[PITFALLS]] #129 → #106 → #107）**：
+`V1IDENT`（`#observeMain` 內 `identity` 優先取第一手號碼）第一次跑 12/0 全綠。
+依 #129 先確認攻擊有沒有抵達那道閘——在該突變樹內就地加一行 stderr 印出兩個值，跑同一條測試，
+得到 `REACHED-GATE mutated=null original=1055`：**突變後的運算式確實在該情境下算出不同的值**
+（1055 是那次 merge 真正的 pgid），所以**不是第十一輪 `SPENTCONC` 那種「探針沒走到閘門」**。
+它之所以量不到，是因為差異在幾行之後被 `#settlePromotion` 內同一份第一手號碼覆寫回去——
+兩處對測試建構得出的每一個狀態都是冗餘的。依 #106 的處理是**拿掉測試看不見的那一份**：
+`#observeMain` 改回 `conclusion.standing.reading.identity`（**與該突變的替換文字逐字相同，所以這支突變已無錨點**），
+只留 `#keepNamingWhatItWaitsOn` 這一條，而它由 `V1NAME` 量到、由 (V-1) 測試逐項斷言號碼。
+
+**回歸：第十一／十二輪的 21 支突變全部重跑**（不是抽驗），對照組同樣先跑：
+`A-BASE` 17/17 綠、`B-BASE` 8/8 綠；A 組 12 支中 11 支紅，
+`A-STOREDDECL` 綠——**第十二輪交付時它就是綠的**（`r12/mut-A-STOREDDECL.log` 為 17/0），
+其等價理由由既有測試 `a hook that rewrites the promotion row mid-merge cannot make this process settle on it`
+的註解記錄，本輪沒有改變它；B 組 9 支全紅。
+`A-RESOLVEGATE` 的錨點被本輪的 (V-4) 插入切斷（`PATCH FAILED`），已重新錨定後單獨補跑一次，結果為紅。
+
 ### 可接受的殘餘風險（連同「何時失效」一起列，未列出的不得事後補認）
 
 | 殘餘風險 | 為什麼此階段可接受 | 何時失效 |
@@ -1836,7 +1931,9 @@ driver 會把 git 自己的 `.merge_file_*` 與 `.git/index.lock` **`mv` 到旁�
 | **⚠️ 第十一輪新增：hook 仍然可以偽造「Owner 宣告」與「先前那次第一手結論」的位元組，讓一列停止等待。** `mergeAccountAbandoned`／`mergeGroupDisowned`／`mergeConclusion` 都住在 `observation_json` 裡，`row_hash` 是無金鑰 SHA-256——(T) 對這三個欄位一樣成立，本輪**沒有**也**不可能**用同一個資料庫關掉它 | 關掉它等於拿掉唯一的出路：能結束等待的只有 Owner 的宣告，而宣告只能記在這個 owner-writable 的地方。所以本輪改為**限制它換得到什麼**：偽造宣告換到「這一列少等一次、排他標記交還」，**換不到任何破壞性指令**，因為那需要 `firstHand`，而 `firstHand` 只存在於呼叫堆疊裡、沒有持久化途徑（`#recoveryHint` 的三道閘有測試，且 (T-2) 那一格是實測補上的）。同時它也換不到「這個 task 可以再促進」——那仍取決於下一次重新觀察到的指紋 | **若未來出現一個 merge hook 碰不到的宣告儲存（OS keychain、外部程序、或對 merge 子程序的真正身分驗證）即可整格關閉**；在那之前不得宣稱「偽造的紀錄不能影響任何結論」——只能宣稱「不能影響破壞性指令」 |
 | ~~**⚠️ 第十一輪新增：`rolled-back` 是一個快照，所以一個「已經啟動但還沒寫入任何東西」的 `git merge` 原則上可能被讀成它。**~~ **第十二輪已關閉，而且這一列自己的三句裁決理由全部被實測推翻**（保留原文以留下更正痕跡） | ~~要走到這一格需要四個來源在同一批毫秒內同時沉默（pgid 那次寫入失敗 ∧ trace 不在 ∧ marker 不在），**而且不能有敵意 hook 參與**——git 在寫入工作樹**之前**不執行任何 hook，所以任何 hook 正在執行的促進，main 早就動了、讀不成 `rolled-back`。這一格的最壞後果是排他標記提早交還，不是遞出破壞性指令~~ **三句皆假，逐句更正：**(1)「不能有敵意 hook 參與」——`merge.<name>.driver` 不是 hook，git 在寫入工作樹**之前**執行它（實測：driver 執行當下 HEAD 未動、`diff-index HEAD` 為空、無 `MERGE_HEAD`、無 `AUTO_MERGE`），而 `THREAT_MODEL.md` F26 已為 merge driver 做過**六次**更正、明列為同一條信任邊界；(2)「四個來源同時沉默」不需要巧合——driver 一行 shell 就做得到，`GIT_TRACE2_EVENT` 是產品親手交給它的；(3)「最壞後果是排他標記提早交還」——實測最壞後果是**第二次促進真的寫進 main 並被記成 `applied`**（`y2-selfevid hostile`：`SECOND promotion … ALLOWED -> state applied, mainMutated true`，同時 `ps -g` 列著第一個 `git merge`）。**根因是違反 (O)**：判準 `observed.state === "rolled-back" && !trace.spawned` 的後半是**缺席** | **已失效並修復（第十二輪）**：`!trace.spawned` 換成正向事實 `gitNeverSpawnedFirstHand`——只有「本程序親自向 OS 要一個 merge 程序、而且從未拿到 pid」時為真，來自呼叫堆疊、無持久化途徑。代價見下一列 |
 | **⚠️ 第十二輪新增（這是上一列修法明寫的代價）：orchestrator 死在 merge 開始之前、main 一個位元都沒動的情況，紀錄也不再自行收斂成 `rolled-back`。** 第十一輪的代價是「每一次崩潰多一步」，第十二輪把它擴大成「**每一次崩潰，包含什麼都還沒發生的崩潰**」。實測：`a kill inside the approval-consuming write` 這條既有測試由 `rolled-back` 變成 `applying` ＋ `MERGE_IDENTITY_UNACCOUNTED` | 在 (T) 的對手模型下，崩潰後的讀者手上**沒有任何正向事實**可以區分「merge 從未開始」與「merge 正停在 driver 裡準備寫」——兩者在檔案系統上是同一組位元組，因為所有能區分的檔案（trace、marker、`index.lock`、`.merge_file_*`）都在那個 merge 自己的手上（實測 driver 用 `mv` 把 `.merge_file_*` 與 `index.lock` 移走）。標準第八處補正允許的兩條路是「給正向判準」或「明確接受不收斂」；正向判準只在**本程序**內存在（已實作），跨程序這一格**明確接受不收斂**。方向是 fail-closed 且**有出路**：一句 `MERGE_UNACCOUNTED_ABANDON_CONFIRMATION`，紀錄下一次讀取即收斂（已改測試斷言整條路徑，並斷言結束等待沒有寫任何位元組到 repository） | **若未來能對 merge 子程序做真正的身分驗證（pidfd／程序啟動時刻）即可放寬**；或若出現一個 merge 碰不到的儲存可以記下「這次促進到底有沒有 spawn 過 git」，這一格可以整個關閉 |
-| **⚠️ 第十二輪新增：`mergeGroupSurvivors` 擋下所有結論與破壞性指令，但**不**擋 `applied`（`authorizedMergeCommit === true`）。** 所以一次成功的 merge 若被 hook 留下背景程序，紀錄仍會進入終局 `applied`、交還排他標記，而那個殘存程序仍能繼續寫 main | 這是刻意的取捨，理由是反過來更糟：`applied` 是**對 main 本身的第一手觀察**（HEAD 就是那個被授權的雙親 commit），擋掉它會讓 `promoteMainMerge` 回傳 `mainMutated: false` ——那是一句**假話**，因為 main 真的被寫了——並且不會 `#markCandidateMerged`。用一個誠實的終局換一個說謊的非終局是負的。被擋下的是另外三種：`rolled-back`、`needs-manual-review`、以及任何 `recovery` | **若 promotion 開始對「授權的 merge commit 已存在」以外的理由發出終局，或若 `applied` 之後仍有寫入 main 的產品路徑即失效**；屆時 survivors 必須連 `applied` 一起擋，並改為在 `applied` 之外另記一個「這次促進留下了活著的程序」的可見狀態 |
+| ~~**⚠️ 第十二輪新增：`mergeGroupSurvivors` 擋下所有結論與破壞性指令，但**不**擋 `applied`（`authorizedMergeCommit === true`）。**~~ **第十三輪已關閉，而且這一列的裁決理由是假兩難**（保留原文以留下更正痕跡）：~~所以一次成功的 merge 若被 hook 留下背景程序，紀錄仍會進入終局 `applied`、交還排他標記，而那個殘存程序仍能繼續寫 main~~ | ~~這是刻意的取捨，理由是反過來更糟：擋掉它會讓 `promoteMainMerge` 回傳 `mainMutated: false`——那是一句假話~~ **假兩難，逐句更正：**(1)`mainMutated` 當時只是 `promotion.state === "applied"` **一個運算式**，而它要說的那件事 `authorizedMergeCommit === true` 是**獨立的第一手觀察**；改成讀那個觀察之後，`mainMutated` 與 `#markCandidateMerged` 都誠實，**而且不必交還排他標記**。(2) 本列的「何時失效」欄自己寫出了正解，而那個失效條件**在寫下的當下就成立**——`applied` 之後仍有寫入 main 的產品路徑，就是下一次 `promoteMainMerge`（實測 `z1`：第二次促進被放行並真的寫進 main）。(3) 原文只寫「殘存程序仍能寫 main」，**低估了觸發成本**：產品自己的第二次促進會被放行，不需要任何額外能力 | **已失效並修復（第十三輪）**：`#holdMarkerOverSurvivors()` 把這種列改記為 `applying` ＋ `AUTHORIZED_MERGE_COMMIT_OBSERVED_WITH_MERGE_GROUP_SURVIVORS`，`main_head_after` 保留，candidate 仍 `merged`；`#settlePromotion`／`#resolvePromotion`／`#emitPromotion` 三處各接一次。代價見下一列 |
+| **⚠️ 第十三輪新增（這是 (V-3) 明寫的代價）：在有 hook 或 merge driver 的 repo 上，任何沒有成功的促進都不再自行收斂。** `pre-merge-commit` 非零退出、merge driver 失敗、hook 逾時三種情形現在都停在 `applying` ＋ `MERGE_UNTRUSTED_PROGRAMS_RAN_LEADER_EXIT_INSUFFICIENT`，Owner 必須依紀錄印出的具名等待結束它；本程序仍活著時是**兩段**宣告（`OWNER_PROCESS_STILL_RUNNING` 之後才輪到 `MERGE_END_NOT_OBSERVED`） | 這是 (V-2) 的直接後果：`setsid(2)` 一行就離開 process group，作業系統不提供「列出逃脫的子孫」的機制，所以「group 空了」證明不了「沒有殘存程序」。能問而且問得準的只有「這次促進到底有沒有執行過 repo 裡的程式」，而 F26 為了核准畫面本來就枚舉並雜湊了那份清單。**方向與代價對齊**：沒有 hook 也沒有 driver 的 repo（多數）完全不受影響，成功的促進也不受影響（`authorizedMergeCommit` 是對 main 的第一手觀察）。出路是具名的（第 11 項要求「有出路」，不是「不用花力氣」），且整段路徑上都沒有破壞性指令 | **若未來能對 merge 子程序做真正的身分驗證（pidfd／程序啟動時刻），或出現一個能列舉「這次促進啟動過的所有後代」的機制即可放寬**；**若促進在有 hook 的 repo 上變成高頻操作，這道摩擦會先於安全性失效**，屆時正確的方向是把等待做成可批次結束，不是把判準放寬 |
+| **⚠️ 第十三輪新增：`untrustedProgramsRan` 只在**本程序**存在，跨程序讀回一律沒有。** 所以一列由崩潰讀者讀到的促進，不會因為「跑過 hook」而多一層收緊——它本來就拿不到 `leaderClosedFirstHand`，也拿不到任何破壞性指令 | 這道閘門要擋的正向事實只有第一手路徑才有（(T-1)：`leaderClosedFirstHand` 沒有持久化途徑），沒有它可擋的地方就沒有它可放寬的地方。把它持久化才會出問題：那會變成一個 hook 寫得到的位元組，而 (T) 的結論是 owner uid 寫得到的持久化儲存沒有一個是可信來源 | **若未來有任何路徑開始從紀錄讀回「這次促進跑過什麼」並用它放寬判準即失效** |
 | **⚠️ 第十一輪新增（這是 (T) 明寫的代價）：orchestrator 在 merge 中途死亡之後，紀錄不再自行收斂到 `needs-manual-review`，也不再遞出 `reset --hard`。** Owner 必須先結束等待（引用紀錄印出的號碼＋短語，或在沒有號碼時用 `MERGE_UNACCOUNTED_ABANDON_CONFIRMATION`），紀錄才會離開 `applying`。這比第十輪多花一步的**不是罕見情境，是每一次崩潰** | 這正是 (T)：崩潰之後所有「merge 結束了」的說法都來自 merge 自己的 hook 寫得到的檔案。**兩個例外仍自動收斂**，因為它們是對 repository 本身的第一手觀察：main 的 HEAD 就是被授權的雙親 commit（含 MERGE_HEAD 殘留那一格），或 main 逐位元回到促進前。差異、hook 清單與唯讀查看指令在 Owner 動作**之前**就已經逐項列出（觀察是唯讀的，需要證據的是下結論），所以這一步是「確認」不是「摸黑」 | **若未來能對 merge 子程序做真正的身分驗證（pidfd／程序啟動時刻）即可放寬**；或若 5-6 提供 rollback 介面，屆時「結束等待」與「決定結果」仍必須是兩個各自有 approval 的動作 |
 | **⚠️ 第十一輪新增：`previewMainMerge` 是唯一「讀 main 卻不問促進是否未結」的入口**，它會對一棵正在被 merge 改寫的工作樹跑完整指紋串流（撕裂讀），`previewDigest` 因此綁在一個撕裂快照上 | **這是取捨不是缺陷，但它的無害是被擋出來的、不是碰巧**：`requestMainMerge` 與 `grantMainMerge` 都過 `#assertNoUnresolvedPromotion`／`#assertMainNotBusy`，所以那個 digest 到不了任何寫入路徑，而 promotion 前的重驗會再擋一次。已加測試 `a preview taken over a live merge is a torn read that no write path will accept` 把「擋」釘住——它同時斷言 preview **成功回傳**（撕裂讀確實發生）與 `approvable:false` ＋具名 blockers ＋ request 被拒 | **若 preview 之後新增任何不經那兩道閘的寫入路徑即失效**；也若 preview 開始被快取並在促進時重用即失效 |
 | 不支援 merge 進行中的互動式衝突解決；有衝突就拒絕 | 有衝突時 Owner 本來就該自己看 | 若要支援 rebase／squash 等策略，需重訂 |
@@ -2110,6 +2207,9 @@ git 子程序（各 30 秒逾時），慢回應會堆疊。
 
 ## 目前自動證據
 
+- 687/687 deterministic tests＋1/1 fuzz smoke（2026-08-08，Phase 5-5 **第十三輪**對抗式審查修正後，(V-1)~(V-5) 的實作）。`npm run check` 在**靜止的工作樹**與**乾淨的 detached clone**（由 `c9b7b1f` 檢出後套用交付 patch，`node_modules` 用複製不是 symlink）上**各跑一次，兩次都 exit 0**；靜止樹量到 all-files line 96.13／branch 87.91／functions 97.28，clone 量到 96.15／87.90／97.38，gate 為 90／85／90。
+  **被主張的只有 exit code 與門檻**：這幾個數字每次跑都會抖動（[[PITFALLS]] #34），而本檔案本身不在覆蓋計算內，這一列是跑完之後才寫進來的。
+  突變測試在 gate 之前跑完、與 gate 不併發（併發會量到假覆蓋率，本專案已三次紀錄）。
 - 594/594 deterministic tests＋1/1 fuzz smoke（2026-08-07，Phase 5-5 **第五輪**對抗式審查修正後，
   在靜止的工作樹上 `npm run check` **跑了三次，三次都 exit 0**；line 95.53／95.52／95.53、
   branch 87.52／87.50／87.51、functions 97.18／97.10／97.18，gate 為 90／85／90。

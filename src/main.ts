@@ -372,9 +372,17 @@ export function describePromotions(input: {
     }
     // P2 of the eleventh round's review: this fact was already in the payload and the listing did not
     // print it. The record named a live process group in `mergeGroupSurvivors` on the same pass that
-    // printed "no process this record names is still being waited on" and a `reset --hard`. The
-    // reason it can no longer say both is the amendment (U) gate in the registry; printing it is so
-    // the owner can see the thing that gate is about, and so the two lines can be read together.
+    // printed "no process this record names is still being waited on" and a `reset --hard`.
+    //
+    // ⛔ This comment used to continue: "the reason it can no longer say both is the amendment (U)
+    // gate in the registry". That was false when it was written, and the counter-example was the very
+    // next probe: a promotion whose merge SUCCEEDED went terminal `applied`, so `promotionPending`
+    // returned `undefined` and this listing printed "no process this record names is still being
+    // waited on" directly above the survivors line naming the live pgid ([[PITFALLS]] #77 again, in a
+    // comment about a previous #77). The (U) gate never covered `applied`; amendment (V-4) is what
+    // closed that cell, in the registry, by keeping such a record visibly unsettled. What is true of
+    // THIS function either way is narrower and is all it should have claimed: it prints what the
+    // record names, so the owner can read the two lines together.
     if (promotion.observation.mergeGroupSurvivors !== undefined) {
       // Attributed to the probe that produced it rather than asserted as a fact about the machine,
       // the way every other line here is: this says what was asked and what came back, and hands
