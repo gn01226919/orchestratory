@@ -2034,25 +2034,42 @@ interface MergeIdentityStanding {
   survivors: ReadonlyArray<{ identity: MergeProcessGroupIdentity; state: MergeGroupState }>;
   /** The one to report, a leader answering "alive" ahead of one nobody can decide about. */
   blocking: { identity: MergeProcessGroupIdentity; state: MergeGroupState } | undefined;
-  /**
-   * False when the record's answer about the merge is missing, contested, or contradicted by a
-   * probe. Never means "no merge": it means this record did not answer the question.
-   */
-  answered: boolean;
 }
 
 function mergeIdentityStanding(
-  row: PromotionRow, trace: TraceMergeReading, options: { recordTrusted: boolean },
+  row: PromotionRow,
+  trace: TraceMergeReading,
+  options: {
+    recordTrusted: boolean;
+    /**
+     * The group THIS process was handed when it spawned the merge, held in memory since, or `null`.
+     *
+     * Amendment (V-1). Everything else here is read back out of persistent storage, and the callers
+     * that are allowed to conclude first-hand were reaching those readers to find out which group to
+     * probe: `#settlePromotion` holds the child handle and took the number from `#recordMergePgid`'s
+     * row instead. So a hook that silenced git's trace and the spawn-record marker — two paths this
+     * product hands it in `GIT_TRACE2_EVENT` — while an ordinary SQLite contention cost the one write
+     * that records the number ([[PITFALLS]] #65) left `survivors` empty over a group that was alive,
+     * and the record went terminal with `git reset --hard` on offer.
+     *
+     * It is deliberately NOT filtered through the row's disown list: a first-hand number is not a
+     * claim the row makes, and a record must not be able to drop the group this process watched being
+     * created. It can only add a probe, so it can only tighten.
+     */
+    firstHandGroup?: MergeProcessGroupIdentity | null;
+  },
 ): MergeIdentityStanding {
   const reading = durableMergeIdentity(row, trace, {
     disowned: options.recordTrusted ? disownedMergeGroup(row) : null,
   });
   const alive: Array<{ identity: MergeProcessGroupIdentity; state: MergeGroupState }> = [];
   const survivors: Array<{ identity: MergeProcessGroupIdentity; state: MergeGroupState }> = [];
+  const probed = options.firstHandGroup == null
+    ? reading.candidates : [options.firstHandGroup, ...reading.candidates];
   // Every candidate is probed, not just the one a preference order would have picked. "unknown"
   // counts as alive on purpose: an undecidable probe is not evidence the merge is over, and this is
   // the one decision where being wrong means concluding over a live write.
-  for (const candidate of reading.candidates) {
+  for (const candidate of probed) {
     const state = mergeGroupState(candidate);
     // Amendment (U). The third answer that is not "gone": the leader has exited and the group has
     // not. It is collected here rather than folded into `alive` so the record can say which of the
@@ -2072,11 +2089,6 @@ function mergeIdentityStanding(
     alive,
     survivors,
     blocking: alive.find((entry) => entry.state === "merge-running") ?? alive[0],
-    // A group that only a source OUTSIDE the row named, still answering "alive", against a record
-    // whose own sources did not name it: the record has not answered the question, whatever it says.
-    // This is the probe that turns "the payload's `null` is a later observation" into "the payload's
-    // `null` is contradicted by something that is running right now".
-    answered: reading.readable && !(reading.outsideRowOnly && alive.length > 0),
   };
 }
 
@@ -2140,6 +2152,24 @@ export type MergeConclusionReason =
    * product had already offered `git reset --hard`.
    */
   | "MERGE_GROUP_SURVIVORS_STILL_ALIVE"
+  /**
+   * This promotion executed code out of the repository — a hook, a merge driver, or an inventory of
+   * them this process could not read — so the leader's exit does not answer the question.
+   *
+   * Amendment (V-2)/(V-3). The check above this one asks the operating system which of the merge's
+   * process group is left, and that question cannot be asked completely: one line of `perl -e 'use
+   * POSIX; setsid; exec @ARGV'` — shipped with macOS — puts a process the merge started into a new
+   * session, where no `-pgid` probe can find it. Measured: the leader closed, the group probed empty,
+   * this product handed over `git reset --hard`, and the escaped process appended to a tracked file
+   * in main six seconds later. Enumerating the ways out of a process group is not a thing an
+   * unsandboxed product can finish, so this stops trying to prove "nothing survived" and asks instead
+   * the question it already knows the answer to: was any untrusted program run at all. F26 already
+   * enumerates and hashes exactly that inventory, for the approval screen.
+   *
+   * A promotion in a repository with no hooks and no merge drivers — the ordinary case — is
+   * unaffected: the leader's exit still concludes and still authorizes a rollback command.
+   */
+  | "MERGE_UNTRUSTED_PROGRAMS_RAN_LEADER_EXIT_INSUFFICIENT"
   /** A group this record names cannot be decided about, which is not evidence it is over. */
   | "MERGE_GROUP_UNDECIDABLE"
   /**
@@ -2268,6 +2298,15 @@ interface MergeWriteConclusion {
    * `standing.survivors`, which blocks before this is ever consulted.
    */
   leaderClosedFirstHand: boolean;
+  /**
+   * The merge group THIS process was handed at spawn time, or `null` for every reader that was not
+   * the one holding the child handle.
+   *
+   * Amendment (V-1). Carried on the conclusion so the observation written from it can name the number
+   * this process saw with its own eyes, rather than re-deriving it from the row and the two files a
+   * repository hook can reach.
+   */
+  firstHandGroup: MergeProcessGroupIdentity | null;
   standing: MergeIdentityStanding;
   /** The two outside sources exactly as they were read, carried so no caller re-reads them. */
   trace: TraceMergeReading;
@@ -2276,14 +2315,36 @@ interface MergeWriteConclusion {
 function mergeWriteConclusion(
   row: PromotionRow,
   trace: TraceMergeReading,
-  options: { approvalSpent: boolean; recordTrusted: boolean; leaderExitObserved?: boolean },
+  options: {
+    approvalSpent: boolean;
+    recordTrusted: boolean;
+    leaderExitObserved?: boolean;
+    firstHandGroup?: MergeProcessGroupIdentity | null;
+    /**
+     * Whether this promotion could have executed any program out of the repository: a hook, a merge
+     * driver, or an inventory of them that could not be read. Amendment (V-3); see
+     * `MERGE_UNTRUSTED_PROGRAMS_RAN_LEADER_EXIT_INSUFFICIENT`. Only the caller that ran the merge
+     * knows it first-hand, so it defaults to the value that changes nothing for every other reader —
+     * they have no `leaderExitObserved` to gate in the first place.
+     */
+    untrustedProgramsRan?: boolean;
+  },
 ): MergeWriteConclusion {
-  const standing = mergeIdentityStanding(row, trace, { recordTrusted: options.recordTrusted });
+  const firstHandGroup = options.firstHandGroup ?? null;
+  const standing = mergeIdentityStanding(row, trace, {
+    recordTrusted: options.recordTrusted, firstHandGroup,
+  });
   const leaderClosedFirstHand = options.leaderExitObserved === true;
   const open = (reason: MergeConclusionReason): MergeWriteConclusion =>
-    ({ concluded: false, reason, byOwnerDeclaration: false, leaderClosedFirstHand, standing, trace });
+    ({
+      concluded: false, reason, byOwnerDeclaration: false, leaderClosedFirstHand, firstHandGroup,
+      standing, trace,
+    });
   const settled = (reason: MergeConclusionReason, byOwnerDeclaration = false): MergeWriteConclusion =>
-    ({ concluded: true, reason, byOwnerDeclaration, leaderClosedFirstHand, standing, trace });
+    ({
+      concluded: true, reason, byOwnerDeclaration, leaderClosedFirstHand, firstHandGroup,
+      standing, trace,
+    });
   // A group that is answering, or that cannot be asked about, comes first: no declaration and no
   // first-hand observation may talk over a probe that is still saying something.
   if (standing.blocking !== undefined) {
@@ -2324,11 +2385,24 @@ function mergeWriteConclusion(
       return settled(recorded, recorded !== "MERGE_LEADER_EXIT_OBSERVED");
     }
   }
+  // Amendment (V-3). The survivor check above asks the operating system what is left of the merge's
+  // process group, and amendment (V-2) is that the question cannot be asked completely: `setsid(2)`
+  // is one line of `perl` on this platform and it takes a process out of every group this code can
+  // name. So a promotion that ran a hook or a merge driver does not get to end on the leader's exit,
+  // whoever watched it. What it gets instead is a named wait and the read-only search
+  // `promotionPending` hands over, and the owner decides.
+  //
+  // Placed after the declarations on purpose: this is the state the owner has to be able to leave,
+  // and their declaration is the way out of it. Placed before `leaderClosedFirstHand` because that is
+  // precisely the evidence it is saying is not sufficient here.
+  if (leaderClosedFirstHand && options.untrustedProgramsRan === true) {
+    return open("MERGE_UNTRUSTED_PROGRAMS_RAN_LEADER_EXIT_INSUFFICIENT");
+  }
   // First-hand, and the only fact here that is not read out of a file: this process held the child
   // handle and `ProcessRunner` resolved, which it does not do before the child's `close` has fired.
   // It does not survive this process, deliberately. Its endpoint is the LEADER and nothing more —
   // the rest of that group is the check above, which has already returned by the time this is
-  // reached (amendment (U)).
+  // reached (amendment (U)), and what escaped the group entirely is the check just above.
   if (leaderClosedFirstHand) return settled("MERGE_LEADER_EXIT_OBSERVED");
   // Everything below is a HINT, reported by name so the record can say WHY it cannot conclude, and
   // concluding nothing.
@@ -2905,10 +2979,14 @@ function unreadableReleaseRequirement(
     // An unreadable group is the same answer as a live one, because it is the same amount of
     // evidence that main is not being written: none. The difference between them is reported in
     // `probeReadable` rather than resolved in favour of the convenient reading.
-    // Amendment (O): the short phrase is available only on positive evidence. `standing.answered`
-    // was not that — a row whose four sources all fell silent answered `true`, because a payload
-    // with no `mergePgid` in it counted as having said "there is no group". Silence is now a reason
-    // to ask for the longer phrase, and no combination of deletions can produce the shorter one.
+    // Amendment (O): the short phrase is available only on positive evidence. The shared
+    // `MergeIdentityStanding` reading this used to consult was not that — a row whose four sources
+    // all fell silent answered `true`, because a payload with no `mergePgid` in it counted as having
+    // said "there is no group". Silence is now a reason to ask for the longer phrase, and no
+    // combination of deletions can produce the shorter one. (Amendment (V-5): that shared field is
+    // gone. It had no reader left once this local, stricter one replaced it, and a computed judgement
+    // with no reader is the shape (T-2) forbids — so it was removed rather than left to look like a
+    // protection.)
     confirmation: alive.length > 0 || !answered
       ? MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION
       : MERGE_UNREADABLE_ABANDON_CONFIRMATION,
@@ -4529,6 +4607,18 @@ export class CandidateRegistry {
     // is not: a fact about the merge that reaches storage becomes a fact a repository hook can
     // write, and one was measured doing exactly that to the file this used to be read from.
     let gitSpawnObserved = false;
+    // Amendment (V-1). The group this process is handed, kept HERE, in memory, for the settlement to
+    // probe. It used to be re-derived from `#recordMergePgid`'s row plus git's trace plus the
+    // spawn-record marker — a database and two files, all three writable by the hooks this merge is
+    // about to run — which meant the one path this product still calls first-hand was asking the
+    // observed thing which process to look for. Silencing all three left `survivors` empty over a
+    // live group and produced `git reset --hard`.
+    let firstHandGroup: MergeProcessGroupIdentity | null = null;
+    // Amendment (V-3). Read once, from the live inventory this promotion just re-verified against the
+    // approval binding, before anything runs. `unreadable` counts as "yes": an inventory this code
+    // could not read is not an inventory of nothing (F26, and the same rule as every other gate here).
+    const untrustedProgramsRan = restore.hooks.unreadable
+      || restore.hooks.hooks.length > 0 || restore.hooks.drivers.length > 0;
     try {
       // Step three, and the first thing that writes: the merge. Its process group is persisted the
       // instant it is spawned, because the subprocess is detached and outlives this process — a
@@ -4544,7 +4634,12 @@ export class CandidateRegistry {
         row.main_path, row.candidate_head, mergeTimeoutMs,
         (pgid) => {
           gitSpawnObserved = true;
-          promotion = this.#recordMergePgid(promotion, pgid);
+          // Built here rather than inside `#recordMergePgid` so that the write failing — the ordinary
+          // SQLite contention of [[PITFALLS]] #65 — cannot also lose the identity itself.
+          firstHandGroup = {
+            pgid, bootAtSec: bootAtSec(), spawnedAt: new Date(this.#now()).toISOString(),
+          };
+          promotion = this.#recordMergePgid(promotion, firstHandGroup);
         },
         trace,
       );
@@ -4565,13 +4660,19 @@ export class CandidateRegistry {
         if (await this.#git.mergeInProgress(row.main_path)) await this.#git.abortMerge(row.main_path);
       } catch { /* the observation below decides what actually happened, not this call's success */ }
     }
-    promotion = await this.#settlePromotion(promotion, attempt, {
-      leaderExitObserved, gitSpawnObserved,
+    const settled = await this.#settlePromotion(promotion, attempt, {
+      leaderExitObserved, gitSpawnObserved, firstHandGroup, untrustedProgramsRan,
     });
+    promotion = settled.row;
     return {
       promotion: this.#publicPromotion(promotion),
       authorization,
-      mainMutated: promotion.state === "applied",
+      // Amendment (V-4). Taken from the observation of main's HEAD rather than from the record's
+      // state, because they are two different facts: "the authorized merge commit is in main" is a
+      // first-hand reading of the repository, and the state also carries whether this record is still
+      // waiting on a process. Reading the write off the state is what made "block the survivor" look
+      // like it would cost a lie.
+      mainMutated: settled.mainMutated,
     };
   }
 
@@ -6393,12 +6494,26 @@ export class CandidateRegistry {
   async #settlePromotion(
     row: PromotionRow,
     attempt: { exitCode: number; timedOut: boolean },
-    options: { leaderExitObserved: boolean; gitSpawnObserved: boolean },
-  ): Promise<PromotionRow> {
+    options: {
+      leaderExitObserved: boolean;
+      gitSpawnObserved: boolean;
+      /** Amendment (V-1): the group the spawn callback handed over, never re-read from anywhere. */
+      firstHandGroup: MergeProcessGroupIdentity | null;
+      /** Amendment (V-3): whether this promotion could have executed repository code at all. */
+      untrustedProgramsRan: boolean;
+    },
+  ): Promise<{ row: PromotionRow; mainMutated: boolean }> {
     const conclusion = this.#promotionConclusion(row, {
       leaderExitObserved: options.leaderExitObserved,
+      firstHandGroup: options.firstHandGroup,
+      untrustedProgramsRan: options.untrustedProgramsRan,
     });
     const observed = await this.#observeMain(row, conclusion, attempt);
+    // Amendment (V-4). Read BEFORE the two gates below can rewrite the state, because it is what the
+    // caller is answering with and what marks the candidate merged, and neither of those has anything
+    // to do with the exclusive marker. `#observeMain` reaches `applied` only on
+    // `authorizedMergeCommit === true`, which is this pass's own first-hand reading of main's HEAD.
+    const mainMutated = observed.state === "applied";
     // Amendment (O). A terminal state is a conclusion too — it hands the project's exclusive marker
     // back to every other task — so it needs the same evidence the recovery command needs. The two
     // self-evidencing outcomes are exempt for the reason `selfEvidencingOutcome` gives.
@@ -6409,6 +6524,8 @@ export class CandidateRegistry {
       observed.state = "applying";
       observed.headAfter = null;
     }
+    this.#holdMarkerOverSurvivors(observed, conclusion);
+    this.#keepNamingWhatItWaitsOn(observed, conclusion);
     if (observed.state !== "applied") this.#recoveryHint(row, observed.observation, conclusion);
     this.#faultPoint?.("promotion-outcome-write");
     const next = this.#writePromotion(row, {
@@ -6417,9 +6534,66 @@ export class CandidateRegistry {
       observation_json: JSON.stringify(observed.observation),
       updated_at_ms: Math.max(row.started_at_ms, this.#now()),
     });
-    if (observed.state === "applied") this.#markCandidateMerged(row.task_id);
+    if (mainMutated) this.#markCandidateMerged(row.task_id);
     this.#emitPromotion(next, "settled");
-    return next;
+    return { row: next, mainMutated };
+  }
+
+  /**
+   * Amendment (V-4). `applied` used to be the one conclusion a live survivor did not block.
+   *
+   * The reason given was that blocking it "would make `mainMutated: false` a lie", and that is a
+   * false dilemma: `mainMutated` was `promotion.state === "applied"`, one expression, while the fact
+   * it is about — `authorizedMergeCommit === true` — is an independent first-hand reading of main's
+   * HEAD. Both it and `#markCandidateMerged` are now taken from that reading, so telling the truth
+   * about the write no longer requires handing the project's exclusive marker back over a process
+   * group that is still running out of this merge, with the owner's uid, inside the owner's project.
+   *
+   * Measured before this: the record went terminal `applied`, a second promotion over the same main
+   * was allowed and wrote it, and the survivor then appended to a tracked file.
+   *
+   * What is recorded instead is a visible state — `applying` with a code that names both halves —
+   * exactly as the residual-risk row for this cell said it should be. The way out is the one the
+   * record prints: quote the pgid it names, plus the phrase that says main may still be being
+   * written. Nothing here changes what happened to main, and nothing here writes to main.
+   */
+  /**
+   * A record that is still waiting has to go on naming what it is waiting on.
+   *
+   * `#observeMain` drops the group id whenever it reaches `applied` or `rolled-back`, because a
+   * record that has STOPPED waiting must not go on naming a pid the operating system will hand to
+   * somebody else ([[PITFALLS]] #105). Amendments (V-3) and (V-4) both put records back into
+   * `applying` after that decision was made, and without this the very next read would say "no
+   * source names a process for this merge" about a number this same pass had just erased — or, when
+   * the one write that records the group failed and a hook emptied both outside sources, about a
+   * number only this process ever held.
+   *
+   * ONLY what this process saw first-hand. Not the folded reading: writing a number that only git's
+   * trace or the spawn-record marker named into the row would promote it from "a number worth
+   * probing" to "the record's own answer", which is the laundering amendment (Q) forbids — and both
+   * of those files are ones the merge's own hooks can write. There is nothing else to fall back to
+   * on this path anyway: the caller is the one that held the child handle, so a group the row itself
+   * names is a group this callback also saw.
+   */
+  #keepNamingWhatItWaitsOn(
+    observed: { observation: MergePromotionObservation; state: MergePromotionState },
+    conclusion: MergeWriteConclusion,
+  ): void {
+    if (observed.state !== "applying" || conclusion.firstHandGroup === null) return;
+    observed.observation.mergePgid = conclusion.firstHandGroup.pgid;
+    observed.observation.mergeGroup = conclusion.firstHandGroup;
+  }
+
+  #holdMarkerOverSurvivors(
+    observed: { observation: MergePromotionObservation; state: MergePromotionState; headAfter: string | null },
+    conclusion: MergeWriteConclusion,
+  ): void {
+    if (observed.state !== "applied" || conclusion.standing.survivors.length === 0) return;
+    observed.observation.code = "AUTHORIZED_MERGE_COMMIT_OBSERVED_WITH_MERGE_GROUP_SURVIVORS";
+    observed.state = "applying";
+    // `headAfter` is kept. The merge commit IS in main and the listing prints it as "<before> before,
+    // <after> now"; withholding it would be this record hiding the write it just made because it is
+    // also still waiting on a process.
   }
 
   /**
@@ -6488,6 +6662,12 @@ export class CandidateRegistry {
       observed.state = "applying";
       observed.headAfter = null;
     }
+    // Amendment (V-4), on this path for the same reason it is on the other one: a reader that arrives
+    // later and finds the merge commit in main plus a process group the merge left behind must not
+    // hand the project's exclusive marker back either. The candidate is still marked merged, because
+    // that is about main's HEAD and not about the marker.
+    const mainMutated = observed.state === "applied";
+    this.#holdMarkerOverSurvivors(observed, conclusion);
     if (observed.state !== "applied") this.#recoveryHint(row, observed.observation, conclusion);
     try {
       const next = this.#writePromotion(row, {
@@ -6496,7 +6676,7 @@ export class CandidateRegistry {
         observation_json: JSON.stringify(observed.observation),
         updated_at_ms: Math.max(row.started_at_ms, this.#now()),
       });
-      if (observed.state === "applied") this.#markCandidateMerged(row.task_id);
+      if (mainMutated) this.#markCandidateMerged(row.task_id);
       // Only a transition is worth a ledger entry: re-observation runs on every read, and an entry
       // per read would bury the ones that mean something.
       if (next.state !== row.state) this.#emitPromotion(next, "re-observed");
@@ -6517,12 +6697,8 @@ export class CandidateRegistry {
    * waiting on. Losing the group id degrades this promotion to the previous behaviour — the crash
    * reader falls back to re-observation, which is what actually converges the answer.
    */
-  #recordMergePgid(row: PromotionRow, pgid: number): PromotionRow {
-    const identity: MergeProcessGroupIdentity = {
-      pgid,
-      bootAtSec: bootAtSec(),
-      spawnedAt: new Date(this.#now()).toISOString(),
-    };
+  #recordMergePgid(row: PromotionRow, identity: MergeProcessGroupIdentity): PromotionRow {
+    const pgid = identity.pgid;
     try {
       this.#faultPoint?.("merge-pgid-record");
       const observation = JSON.parse(row.observation_json) as MergePromotionObservation;
@@ -6798,13 +6974,23 @@ export class CandidateRegistry {
 
   /** Everything a path needs to decide whether this promotion may be concluded about. */
   #promotionConclusion(
-    row: PromotionRow, options: { leaderExitObserved?: boolean } = {},
+    row: PromotionRow,
+    options: {
+      leaderExitObserved?: boolean;
+      /** Amendment (V-1): held in memory by the one caller that spawned the merge. */
+      firstHandGroup?: MergeProcessGroupIdentity | null;
+      /** Amendment (V-3): read from the live hook inventory by that same caller. */
+      untrustedProgramsRan?: boolean;
+    } = {},
   ): MergeWriteConclusion {
     return mergeWriteConclusion(row, this.#promotionTrace(row), {
       approvalSpent: this.#promotionApprovalSpent(row),
       recordTrusted: true,
       ...(options.leaderExitObserved === undefined
         ? {} : { leaderExitObserved: options.leaderExitObserved }),
+      ...(options.firstHandGroup === undefined ? {} : { firstHandGroup: options.firstHandGroup }),
+      ...(options.untrustedProgramsRan === undefined
+        ? {} : { untrustedProgramsRan: options.untrustedProgramsRan }),
     });
   }
 
@@ -7340,7 +7526,12 @@ export class CandidateRegistry {
         mainHeadUnchanged: headAfter === null ? null : headAfter === row.main_head_before,
         state: row.state,
         observation,
-        mainMutated: row.state === "applied",
+        // Amendment (V-4). The trail says whether main was written, and that is the observation of
+        // main's HEAD — not the record's state, which also carries whether this record is still
+        // waiting on a process. A promotion whose merge landed and whose hook left a live process
+        // now stays visibly unsettled, and recording `mainMutation: false` for it would put an
+        // untrue statement about the owner's repository into the audit chain and the public ledger.
+        mainMutated: row.state === "applied" || observation.authorizedMergeCommit === true,
         decidedBy: approval?.decided_by ?? null,
         previewDigest: approval?.preview_digest ?? null,
         approvalState: approval?.state ?? null,
