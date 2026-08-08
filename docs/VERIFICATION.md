@@ -2191,6 +2191,56 @@ git 2.50.1 實測，五種語意一次全部由 git 回答：重複鍵取**最�
 而 gate 跑完之後**只改過 `docs/`**（`git diff --stat` 可核對），沒有再動過任何被量測的檔案；
 讀 `docs/VERIFICATION.md` 的那兩條測試（digest 綁定與「已驗收行為的具名檢查」）在最終樹上另外重跑過，仍為綠。
 
+### v2 的第十一處補正（2026-08-09，第十四輪審查後）—— **揭露的雜湊描述的是「執行前」，而執行前正是本次操作改變它的時刻**
+
+(W-1) 讓產品問對了「hook 在**哪個目錄**」，但沒有問「git 讀那個目錄的**那一刻**裡面是什麼」。
+
+`core.hooksPath = .githooks` 是**合法且常見的 plain-git 慣例**，那個目錄落在工作樹內。
+`git merge --no-ff` 會**先把 candidate 的 tracked 內容寫進去，再從那裡執行 hook**。
+實測（純 git 2.50.1 與產品各一次）：
+核准畫面逐項列出的 `sha256 d5d982fc…`，git 實際執行的是 `e7cd2c42…`；
+candidate **只改檔案內容、沒有 chmod**（exec bit 由 index 的 `100755` 繼承），
+不需要寫 `.git/config`、不需要賽時序，`promotion state: applied`、`mainMutated: true`。
+
+**綁定為什麼沒擋住**：`previewDigest` 與消耗前重驗**兩次都在 merge 之前**，
+而改變 hook 的是 merge 本身。**通過標準第 3 項「在核准畫面上逐項列出本次會執行的
+hook 檔名與雜湊」因此不成立。**
+
+**(X-1) 核准畫面上的任何雜湊，若它描述的東西可能被本次操作改變，那個雜湊就是假的。**
+規則：對每一個上畫面的指紋，問一句「**本次操作會不會改變它描述的東西**」。
+會的話，只綁定「操作前」等於什麼都沒綁。
+可行的判準本輪剛做出來卻沒有接：**`git rev-parse --git-path hooks` 回答的目錄
+是否落在工作樹內、且本次 merge 是否寫入它**——兩個問題都已經有現成答案（[[PITFALLS]] #140 同形）。
+
+**(X-2) 允許執行不可信程式的開關，其載重理由必須有 probe，不得是推理。**
+`process-runner.ts:203` 逐字寫著
+「…which is **not tracked content, so a merge cannot install the hook that runs during it**
+— the code that runs here is code the owner already had on disk before the promotion started」。
+**實測為假。** `candidate-registry.ts:4434` 的
+「The hook inventory the owner approved must still be the hook inventory **that is about to run**」同樣為假。
+這是 #77／#127／#139 的同一族，而且落在本產品最危險的那個開關上。
+規則：**任何「因為 X 所以可以執行不可信程式」的註解，X 必須有一支 probe**；
+沒有 probe 的 X 一律視為未驗證，該開關不得以它為據。
+
+**(X-3) 敏感路徑用名單釘了兄弟、漏了同一家族。**
+`workspace-server.ts:35` 的註解自己寫著要擋
+「**write-then-auto-execute** configuration … CI workflows, **git/husky/claude hooks**」，
+而實測 regex：`.husky/pre-merge-commit` → `true`；
+**`.githooks/pre-merge-commit`／`githooks/…`／`hooks/…`／`tools/hooks/…` 全部 `false`**。
+**Writer 走正常 MCP 就寫得進去。**
+這是 #103／#108 的第 N 次：**釘了兄弟、漏了家族**。
+規則：**敏感路徑不得用檔名清單判定**，要問「這個路徑是不是 git／工具鏈**會自動執行**的位置」——
+而 hook 目錄的正確答案就是 `git rev-parse --git-path hooks`。
+
+**(X-4) 殘餘風險必須把「代價」寫到終局狀態，不是寫到第一個症狀。**
+本輪殘餘風險 (a) 只寫「仍會下結論並遞出 `reset --hard`」。
+審查員在 (a) 之上多加一行「hook 把自己搬走」，得到
+**第二次促進被放行、寫了 main、記成 `applied`，而第一次促進逃脫的程序仍在寫**
+——那正是 (V-2)／(V-3) 整套要防的終局狀態。
+k2 之所以還被擋，只是因為留在 `.git/hooks` 的檔案讓 `previewDigest` 漂移，
+**那是偶然的保護，不是設計**。
+規則：寫殘餘風險時，**在自己列的攻擊上再多加一步**，看代價會不會質變。
+
 ### 可接受的殘餘風險（連同「何時失效」一起列，未列出的不得事後補認）
 
 | 殘餘風險 | 為什麼此階段可接受 | 何時失效 |
