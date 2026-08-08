@@ -1922,6 +1922,57 @@ driver 會把 git 自己的 `.merge_file_*` 與 `.git/index.lock` **`mv` 到旁�
 的註解記錄，本輪沒有改變它；B 組 9 支全紅。
 `A-RESOLVEGATE` 的錨點被本輪的 (V-4) 插入切斷（`PATCH FAILED`），已重新錨定後單獨補跑一次，結果為紅。
 
+### v2 的第十處補正（2026-08-09，第十三輪審查後）—— **(V-3) 的前提被證偽**
+
+第九處補正 (V-3) 整條建立在一句話上：
+> 產品已經知道答案——它為了核准畫面本來就枚舉並雜湊了會執行哪些 hook。
+
+**那句話是假的，而且我寫下它之前沒有驗證。**
+
+`GitBroker.hookEnvironment()`（`git-broker.ts:663-667`）用
+`git config --list` ＋ `.find(entry => entry.key === "core.hookspath")`。
+但 **`--list` 會印出每一次出現，git 生效的是最後一個**，`find` 取的是**第一個**；
+而且它**不展開 `~`**，git 會。
+
+實測：`.git/config` 寫兩行 `hooksPath`（先 `/dev/null` 後真實目錄），
+產品回報 `{"hooksPath":"/dev/null","hooks":[],"unreadable":false}` →
+`untrustedProgramsRan = false` → 核准畫面印
+「**本次 promotion 不會執行任何 repo hook（hooksPath /dev/null）**」
+——**而 git 執行了那個 hook**，`setsid` 逃脫程序寫了 main，第二次促進被放行。
+綁定也同時失效：`approved.hooks.fingerprint` 與 `restore.hooks.fingerprint` 比的是兩份都空的清單。
+
+**(W-1) 不得自行解析另一個程式的設定語意——要問那個程式本身。**
+「同一個鍵出現兩次誰贏」「`~` 誰展開」「哪些檔案會被讀」都是 git 的語意，不是我們的。
+**這個教訓本專案已經學過一次**：`core.attributesFile` 的同一個 bug 已經修掉，
+改成 `git check-attr` 直接問 git，理由逐字寫在 `git-broker.ts:735-738`。
+**隔壁的鍵沒有套用。**
+規則：**修好一個「自己解析別人的設定」的 bug 時，
+必須列出同一個檔案裡還有哪些鍵是用同樣方式解析的，並逐一處理。**
+
+**(W-2) 「跑過不可信程式」必須以「事後觀察到的在場」為準，事前快照只能收緊。**
+`untrustedProgramsRan` 目前是 `#authorizeMainMerge`（`:4436`）取的快照，
+而 merge 在 `:4633` 才 spawn。中間隔著意圖紀錄交易、audit／ledger 寫入、核准消耗寫入，
+而且產品自己 `mkdirSync(promotion-traces)`（`:4631`）就是發令槍——攻擊者不需要賭時序。
+實測：另一個程序輪詢到 `promotion-traces` 出現才寫 `pre-merge-commit`，
+同一份 payload 裡 `hooksExecuted` 具名列著剛跑過的 hook，**隔壁一行是 `reset --hard`**。
+
+**`readExecutedHooks()` 已經在 `#observeMain`（`:6300`）裡被呼叫了。**
+依 (O)：**缺席不能放寬，在場可以收緊**——所以「trace 說跑過 hook」是完全合法的正向事實。
+規則：`untrustedProgramsRan` 必須是**事前快照 ∪ 事後觀察**的聯集；
+兩者任一為真即收緊，**都不得因為對方為假而放寬**。
+
+**(W-3) (V-5) 的「移除死碼」要遞移。**
+本輪依 (V-5) 移除了 `standing.answered`，
+卻把**只餵給它**的 `MergeIdentityReading.outsideRowOnly` 留在原地
+（`grep` 只剩定義與賦值兩處，零讀取端）——**同一個 commit 裡，剛立的規則就被自己違反**（#131 形狀）。
+另有 `restore.hooks.unreadable` 是**不可達的死碼**：
+`restorePoint()` 在該情況下已 push `MAIN_HOOK_DIRECTORY_UNREADABLE`，
+而 `#authorizeMainMerge:4438` 在 `blockers.length > 0` 時就 throw，
+所以 `:4620` 讀到的 `unreadable` 恆為 false——
+它被 commit message 與本文件當成 fail-closed 的三分之一，實際上一次都不會觸發。
+**而真正「清單讀不到」的情況（解析錯 hooksPath）反而不設 `unreadable`。**
+規則：移除一個無讀取端的判準時，**必須同時檢查「只餵給它的東西」與「它宣稱涵蓋的情況是否真的可達」**。
+
 ### 可接受的殘餘風險（連同「何時失效」一起列，未列出的不得事後補認）
 
 | 殘餘風險 | 為什麼此階段可接受 | 何時失效 |
