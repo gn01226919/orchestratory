@@ -2504,6 +2504,63 @@ GATE2-EXIT=0
 ⚠️ 與第九／十三／十四輪同一個做法：**本節與上面幾節是在兩次 gate 都跑完之後才寫進本檔的**，
 gate 量的是 `src/`／`test/` 的內容，之後只改過 `docs/`，沒有再動過任何被量測的檔案。
 
+### v2 的第十二處補正（2026-08-09，第十五輪審查後）—— **自己寫出來的缺口沒有補，就是攻擊面**
+
+#### (Y-1) 註解說 UNION，程式碼做 first-match——而未被 fixture 覆蓋的那一臂正是可利用的那一臂
+
+`git-broker.ts:432` `workingTreePosition()` 的註解逐字寫著兩種拼法
+「**are UNIONED**」，實作卻是**第一個命中就 `return`**：
+```ts
+for (const spelling of spellings) {   // [lexical, realpath]
+  ...
+  return path.split(sep).join("/");   // ← realpath 那一臂永遠不被諮詢
+}
+```
+`insideWorkingTree` 是**單一字串**，而 **merge 寫的是 realpath 那一個**。
+所以 hook 目錄是 symlink 時整道閘被繞過——實測兩種形狀都讓
+`approvable: true`、`blockers: []`、**攻擊者程式碼以 Owner 身分執行**、`applied`：
+- `.githooks -> tools/hooks`（tracked symlink）＋ `core.hooksPath=.githooks`
+- **連 `core.hooksPath` 都不需要**：`ln -s ../tools/hooks .git/hooks`（常見的共用 hook 做法）
+
+**而第十五輪自己在本文件裡寫了**：「明確**沒有**對應突變……`workingTreePosition()` 的
+`realpath` 那一臂（union 的第二個拼法，**沒有 symlink fixture**）」。
+**寫出來了，然後沒補。** 新的 X 落在它自己點名的那一臂上——與 (X-2) 要治的病完全同形。
+
+**規則**：
+1. **一個判斷若有多條「拼法／來源／分支」，每一條都要有 fixture**；
+   在文件裡寫下「這一臂沒有測試」**不構成緩解**，那是**把攻擊面寫下來然後留著**。
+2. **註解宣稱的語意（union／集合／全部）必須有一個突變去打「只做了第一個」**。
+3. 修法方向：`insideWorkingTree` 必須是**位置的集合**（lexical ∪ realpath 全部保留），
+   `underHookDirectory` 對集合中**任一**成立即擋。
+
+#### (Y-2) 不要枚舉竄改方式——用第一手事實去比對
+
+(X-4) 修的是「hook 把 trace **清空**」。攻擊者改用**過濾**：
+保留 leader **真正的** `start`，只刪掉 `child_*` 事件。
+```sh
+grep -E '"event":"(version|start|def_repo|cmd_name|…)"' "$T" > "$T.k"; mv "$T.k" "$T"
+```
+`readLeaderSessionOpened` → `true`（那個 `start` 是真的）、
+`readTraceChildren` → `[]`（`child_exit` 沒有配對的 `child_start`，被 `order` 丟掉）、
+事前快照 → false（晚到的 hook）。**三個 disjunct 全滅**，`k3` 的終局狀態逐項復現。
+
+**sid 形狀救不了**，因為它只擋「巢狀 session 冒充 leader」，
+**從來沒有把 trace 裡的 sid 跟產品第一手知道的號碼比對過**
+——**產品握著那個 pid，而 `readLeaderSessionOpened` 沒有把它當參數收**。
+
+**規則**：這是 (V-1) 的直接應用，也是 [[PITFALLS]] #140 的第三次
+（**答案在手上，沒有人接**）。
+**凡是要判斷「一份外部紀錄有沒有被動過」，判準必須錨在本程序記憶體裡的第一手事實上**，
+不得只檢查那份紀錄的內部一致性——後者永遠可以用「刪一部分、留一部分」繞過。
+枚舉竄改手法（清空／過濾／偽造／截斷）注定漏掉第 N+1 種。
+
+#### (Y-3) 文件對 `.git/hooks` 落在哪一側的敘述與實測不符
+本文件寫「`.git/hooks`（絕大多數 repo）落在『merge 寫不到的位置』那一側」。
+實測 `insideWorkingTree` 是 **`".git/hooks"`**，也就是落在**裡面**那一側；
+擋不到只是因為 git 拒絕 track `.git/*`。
+這不是措辭問題——**它就是 BLOCKER-1 復現 B 成立的原因**，
+也是每一個截斷的 preview 都會多吐一條 `HOOK_DIRECTORY_EXPOSURE_UNVERIFIABLE` 的原因。
+
 ### 可接受的殘餘風險（連同「何時失效」一起列，未列出的不得事後補認）
 
 | 殘餘風險 | 為什麼此階段可接受 | 何時失效 |
