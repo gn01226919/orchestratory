@@ -459,9 +459,16 @@ test("a truncated preview is not approvable, whichever list was truncated", asyn
     // A truncated file list also makes the overwrite scan unrunnable, and that is reported as its
     // own blocker rather than as an empty overwrite result: the scan looks for exactly the paths the
     // truncated list is missing, so "nothing would be overwritten" is not an answer it can give.
-    assert.deepEqual(
-      preview.blockers, ["PREVIEW_FILES_TRUNCATED", "OVERWRITE_SCAN_FILE_LIST_TRUNCATED"],
-    );
+    //
+    // Amendment (X-1) adds a third name for the same reason and deliberately does not lean on the
+    // other two: the same file list is the evidence that this merge does not write the directory git
+    // runs its hooks out of, and a list that is missing entries cannot be that evidence. Three names
+    // for one truncation is not redundancy — each says which question went unanswered, and the
+    // structural rule ([[PITFALLS]] #74) is that a gate states its own condition rather than relying
+    // on a neighbour happening to fire on the same input.
+    assert.deepEqual(preview.blockers, [
+      "PREVIEW_FILES_TRUNCATED", "OVERWRITE_SCAN_FILE_LIST_TRUNCATED", "HOOK_DIRECTORY_EXPOSURE_UNVERIFIABLE",
+    ]);
     assert.equal(preview.overwrites.checked, false);
     await assert.rejects(
       fixture.registry.requestMainMerge({

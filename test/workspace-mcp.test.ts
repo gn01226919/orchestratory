@@ -12,14 +12,26 @@ import { CollaborationService } from "../src/core/collaboration-service.ts";
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * A throwaway workspace that is a real git working tree.
+ *
+ * Amendment (X-3): a WRITE broker now asks git where hooks come from and refuses to exist when git
+ * cannot be asked, because a broker that cannot say where the auto-executed directory is cannot say
+ * a write is outside it. Every write-mode fixture here is therefore a real repository — which is
+ * also what a Writer always gets in this product: a task-bound worktree.
+ */
+async function gitWorkspace(prefix: string): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), prefix));
+  await execFileAsync("git", ["init", "-b", "main"], { cwd: root });
+  return root;
+}
+
 test("workspace MCP broker exposes only bounded canonical text operations", async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "orchestratory-mcp-workspace-"));
+  const root = await gitWorkspace("orchestratory-mcp-workspace-");
   t.after(async () => await rm(root, { recursive: true, force: true }));
   await writeFile(join(root, "source.ts"), "export const value = 1;\n", "utf8");
   await writeFile(join(root, ".env.local"), "SYNTHETIC=value\n", "utf8");
   await writeFile(join(root, ".git-shadow"), "not sensitive\n", "utf8");
-  await mkdir(join(root, ".git"));
-  await writeFile(join(root, ".git", "config"), "[synthetic]\n", "utf8");
   await mkdir(join(root, ".orchestratory"));
   await writeFile(join(root, ".orchestratory", "state.json"), "{}\n", "utf8");
   const broker = await WorkspaceToolBroker.create(root, "write", { authorizeWrite: () => {} });
@@ -87,7 +99,7 @@ test("workspace MCP broker denies writes in read-only mode and link traversal", 
 });
 
 test("workspace MCP broker fails closed on malformed, binary and oversized operations", async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "orchestratory-mcp-invalid-"));
+  const root = await gitWorkspace("orchestratory-mcp-invalid-");
   t.after(async () => await rm(root, { recursive: true, force: true }));
   await writeFile(join(root, "binary.bin"), Buffer.from([1, 0, 2]));
   await writeFile(join(root, "invalid-utf8.txt"), Buffer.from([0xff, 0xfe]));
@@ -224,7 +236,7 @@ test("workspace broker blocks write-then-auto-execute config paths for every wri
 });
 
 test("workspace broker rechecks Writer authorization immediately before mutation and records operations", async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "orchestratory-mcp-fence-"));
+  const root = await gitWorkspace("orchestratory-mcp-fence-");
   t.after(async () => await rm(root, { recursive: true, force: true }));
   await writeFile(join(root, "source.ts"), "old\n", "utf8");
   await assert.rejects(WorkspaceToolBroker.create(root, "write"), /WORKSPACE_WRITE_AUTHORIZER_REQUIRED/u);
@@ -397,4 +409,86 @@ test("delegated child MCP enforces same-provider write and cross-provider read-o
   const [staleCode] = await once(stale, "close") as [number];
   assert.equal(staleCode, 1);
   assert.match(Buffer.concat(staleError).toString("utf8"), /DELEGATION_NOT_ACTIVE/u);
+});
+
+/**
+ * AMENDMENT (X-3). The hook directory is whatever `core.hooksPath` says it is, so the guard asks git.
+ *
+ * `WORKSPACE_SENSITIVE_PATH`'s own comment says it blocks "write-then-auto-execute … git/husky/claude
+ * hooks", and the measurement behind this test is that it blocked exactly one spelling: `.husky/…`
+ * matched, while `.githooks/pre-merge-commit`, `githooks/…`, `hooks/…` and `tools/hooks/…` did not —
+ * a Writer could install a hook through the ordinary MCP write tool. The family cannot be closed by
+ * adding names, so each case below CONFIGURES the directory and then asserts that the regular
+ * expression alone still does not match it while the broker refuses anyway.
+ */
+test("a Writer cannot write into whatever directory git says it runs hooks from", async (t) => {
+  const { WORKSPACE_SENSITIVE_PATH } = await import("../src/mcp/workspace-server.ts");
+  for (const hooksPath of [".githooks", "githooks", "hooks", "tools/hooks"]) {
+    const root = await gitWorkspace("orchestratory-mcp-hookdir-");
+    t.after(async () => await rm(root, { recursive: true, force: true }));
+    await execFileAsync("git", ["config", "core.hooksPath", hooksPath], { cwd: root });
+    const target = `${hooksPath}/pre-merge-commit`;
+    // Precondition ([[PITFALLS]] #106/#129): the name list would let this through, so a refusal below
+    // can only come from the git-derived half.
+    assert.equal(WORKSPACE_SENSITIVE_PATH.test(target), false,
+      `${target} is already on the name list, so this case measures the list and not the fix`);
+
+    const broker = await WorkspaceToolBroker.create(root, "write", { authorizeWrite: () => {} });
+    await assert.rejects(
+      broker.call("write_file", { path: target, content: "#!/bin/sh\nexit 0\n", expectedSha256: null }),
+      /SENSITIVE_WORKSPACE_PATH_DENIED/u,
+      `a Writer installed a hook at ${target}`,
+    );
+    await assert.rejects(
+      broker.call("create_directory", { path: hooksPath }),
+      /SENSITIVE_WORKSPACE_PATH_DENIED/u,
+    );
+    await assert.rejects(broker.call("read_file", { path: target }), /SENSITIVE_WORKSPACE_PATH_DENIED/u);
+  }
+});
+
+/**
+ * AMENDMENT (X-3), the other direction ([[PITFALLS]] #107), twice.
+ *
+ * The guard is a question about THIS repository, not a new set of forbidden names: a directory
+ * called `.githooks` in a repository that has not configured it is not auto-executed by anything,
+ * and a sibling whose name merely starts with the same characters is not inside it either. Reading
+ * either as denied would be a name list again, just a longer one.
+ */
+test("a directory git does not run hooks from stays writable, and so does a same-prefix sibling", async (t) => {
+  const plain = await gitWorkspace("orchestratory-mcp-nohook-");
+  t.after(async () => await rm(plain, { recursive: true, force: true }));
+  const plainBroker = await WorkspaceToolBroker.create(plain, "write", { authorizeWrite: () => {} });
+  await plainBroker.call("create_directory", { path: ".githooks" });
+  await plainBroker.call("write_file", {
+    path: ".githooks/pre-merge-commit", content: "#!/bin/sh\nexit 0\n", expectedSha256: null,
+  });
+  assert.equal(await readFile(join(plain, ".githooks", "pre-merge-commit"), "utf8"), "#!/bin/sh\nexit 0\n");
+
+  const configured = await gitWorkspace("orchestratory-mcp-sibling-");
+  t.after(async () => await rm(configured, { recursive: true, force: true }));
+  await execFileAsync("git", ["config", "core.hooksPath", ".githooks"], { cwd: configured });
+  const broker = await WorkspaceToolBroker.create(configured, "write", { authorizeWrite: () => {} });
+  await broker.call("create_directory", { path: ".githooks-notes" });
+  await broker.call("write_file", { path: ".githooks-notes/x.md", content: "notes\n", expectedSha256: null });
+  assert.equal(await readFile(join(configured, ".githooks-notes", "x.md"), "utf8"), "notes\n");
+});
+
+/**
+ * AMENDMENT (X-3), the fail-closed direction: a write broker that cannot ask git does not exist.
+ *
+ * A Writer's workspace is always a task-bound git worktree here, so "git could not answer" is an
+ * anomaly, and the anomaly costs a refusal rather than an unguarded write surface. Read-only brokers
+ * are unaffected — nothing they do can install a program anywhere.
+ */
+test("a write broker refuses to exist over a workspace git cannot answer for", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "orchestratory-mcp-notrepo-"));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, "source.ts"), "safe\n", "utf8");
+  await assert.rejects(
+    WorkspaceToolBroker.create(root, "write", { authorizeWrite: () => {} }),
+    /WORKSPACE_HOOK_DIRECTORY_UNRESOLVED/u,
+  );
+  const readOnly = await WorkspaceToolBroker.create(root, "read-only");
+  assert.equal(await readOnly.call("list_files", {}), "source.ts");
 });

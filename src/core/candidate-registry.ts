@@ -7,6 +7,7 @@ import { StringDecoder } from "node:string_decoder";
 import { canonicalWorkspace } from "../security/workspace.ts";
 import {
   GitBroker, MERGE_TIMEOUT_MS, readExecutedHooks, readExecutedRepositoryPrograms,
+  readLeaderSessionOpened,
   type GitInspection, type GitRestorePoint,
 } from "./git-broker.ts";
 import { minimalGitEnvironment, resolveExecutable, runProcess } from "./process-runner.ts";
@@ -119,6 +120,12 @@ export interface PromotionFacts {
   mainIgnored: { files: number; fingerprint: string };
   hooks: {
     hooksPath: string;
+    /**
+     * Where that directory sits inside the working tree, or `null` for outside it; see
+     * `HookEnvironment.insideWorkingTree`. Absent on a snapshot taken before amendment (X-1), and
+     * `promotionFacts` refuses such a snapshot by name rather than reading the absence as "outside".
+     */
+    insideWorkingTree?: string | null;
     hooks: Array<{ name: string; sha256: string; bytes: number }>;
     drivers: string[];
     filters: string[];
@@ -3183,7 +3190,9 @@ interface OverwriteScan {
  * working tree main is checked out in can receive that merge, and Phase 5-4 recorded exactly that
  * gap as failing at 5-5.
  */
-function promotionBlockers(restore: GitRestorePoint, overwrite: OverwriteScan): string[] {
+function promotionBlockers(
+  restore: GitRestorePoint, overwrite: OverwriteScan, preview: CandidateCompletionPreview,
+): string[] {
   return [
     // Every named condition the working tree itself fails, straight from the one place "clean" is
     // defined. Summarising them into a single "not clean" would hide which of them the owner has to
@@ -3192,7 +3201,80 @@ function promotionBlockers(restore: GitRestorePoint, overwrite: OverwriteScan): 
     ...(overwrite.checked ? [] : [overwrite.unavailable ?? "OVERWRITE_SCAN_UNAVAILABLE"]),
     ...(overwrite.ignored.length > 0 ? ["IGNORED_FILES_WOULD_BE_OVERWRITTEN"] : []),
     ...(overwrite.untracked.length > 0 ? ["UNTRACKED_FILES_WOULD_BE_OVERWRITTEN"] : []),
+    ...hookDirectoryBlockers(restore.hooks, preview),
   ];
+}
+
+/** The merge would write the directory git runs its hooks out of. Amendment (X-1). */
+const MERGE_WOULD_INSTALL_THE_HOOKS_IT_RUNS = "MERGE_WOULD_INSTALL_THE_HOOKS_IT_RUNS";
+/** The hook directory is inside the working tree and the file list cannot say whether it is written. */
+const HOOK_DIRECTORY_EXPOSURE_UNVERIFIABLE = "HOOK_DIRECTORY_EXPOSURE_UNVERIFIABLE";
+
+/**
+ * Refuses a promotion whose own merge would install the code it is about to execute.
+ *
+ * ## Why a hash could not have caught this
+ *
+ * The approval screen itemises hook file names with SHA-256, the binding carries them, and the
+ * binding is re-verified immediately before the approval is spent. All three of those happen BEFORE
+ * the merge — and the merge is what changes the file. `core.hooksPath = .githooks` is an ordinary
+ * plain-git convention that puts the hook directory inside tracked content, so `git merge --no-ff`
+ * writes the candidate's version of `.githooks/pre-merge-commit` and then runs it. Measured on git
+ * 2.50.1 and on this product: disclosed `f64801cf…`, executed `af872625…`, `attacker code ran as
+ * owner: true`, `state: applied`. No `chmod` (the executable bit came from main's index entry), no
+ * `.git/config` write, no race.
+ *
+ * ## The two questions this asks, and why they are not a list of names
+ *
+ * Both answers already existed and nothing read them ([[PITFALLS]] #140):
+ *
+ *  1. WHERE git runs hooks from — `git rev-parse --git-path hooks`, asked under the promotion
+ *     environment, carried as `insideWorkingTree` (amendment (W-1) made git the one answering);
+ *  2. WHAT this merge writes — the same `preview.files` the ignored/untracked overwrite scan is
+ *     already built on.
+ *
+ * There is no `.githooks` in here, and there deliberately is not: a name list would have to grow a
+ * row for `githooks/`, `hooks/`, `tools/hooks/` and whatever the next repository calls it
+ * ([[PITFALLS]] #103/#108, amendment (X-3)). A repository that names its hook directory `build/` is
+ * covered by the same two questions, and so is the degenerate `core.hooksPath = ""`: git answers
+ * `./` to `--git-path hooks`, this product joins that onto the workspace, so the working tree ROOT
+ * becomes the hook directory, `insideWorkingTree` is `""`, and every path this merge writes is
+ * inside it.
+ *
+ * That last case refuses more than git itself would, and the difference is measured rather than
+ * assumed (git 2.50.1, Apple Git-155): with `core.hooksPath = ""` git answers `./` to
+ * `--git-path hooks` but `git hook run pre-merge-commit` says `cannot find a hook named
+ * pre-merge-commit` and a real merge runs nothing; with `core.hooksPath = .` git DOES try and fails
+ * with `cannot run pre-merge-commit: No such file or directory`. Refusing both is a deliberate
+ * trade: a configuration where "where are the hooks" and "which hook will you run" disagree is not
+ * one to promote through. It is not a claim about what git does.
+ *
+ * Deletes and rename sources count. A merge that REMOVES the hook the owner approved also changes
+ * what runs, and a rename out of the directory is the same move under another name.
+ *
+ * A hook directory that is not inside the working tree — the ordinary `.git/hooks`, or an absolute
+ * path elsewhere — is not reachable by a merge writing tracked content, so this is silent for it.
+ * That is the whole population of ordinary repositories.
+ */
+function hookDirectoryBlockers(
+  hooks: PromotionFacts["hooks"], preview: CandidateCompletionPreview,
+): string[] {
+  const inside = hooks.insideWorkingTree;
+  // Not inside the working tree — including a snapshot taken before this field existed, which is
+  // refused by name at `promotionFacts` rather than defaulted to safe here.
+  if (typeof inside !== "string") return [];
+  // The file list is the evidence. Without a complete one there is no way to say the merge leaves
+  // that directory alone, and "I could not look" is not "nothing there" (PITFALLS #85).
+  if (preview.filesTruncated) return [HOOK_DIRECTORY_EXPOSURE_UNVERIFIABLE];
+  const written = preview.files.some((file) =>
+    underHookDirectory(inside, file.path)
+    || (typeof file.previousPath === "string" && underHookDirectory(inside, file.previousPath)));
+  return written ? [MERGE_WOULD_INSTALL_THE_HOOKS_IT_RUNS] : [];
+}
+
+/** Segment-wise containment, so `.githooks-backup/x` is not read as being inside `.githooks`. */
+function underHookDirectory(directory: string, path: string): boolean {
+  return directory === "" || path === directory || path.startsWith(`${directory}/`);
 }
 
 /**
@@ -3229,7 +3311,12 @@ export class MergePromotionRefusedError extends Error {
 function promotionFacts(preview: CandidateCompletionPreview): PromotionFacts | undefined {
   const facts = preview.promotion;
   if (facts === undefined) return undefined;
-  return typeof facts.hooks?.configDigest === "string" && Array.isArray(facts.hooks.programs)
+  // Amendment (X-1) adds a third field for the same reason the second one was added: a snapshot that
+  // predates it was never checked against "does this merge write the directory its hooks run from",
+  // and a missing field must not be read as the answer that lets the promotion through.
+  const positioned = facts.hooks !== undefined
+    && (facts.hooks.insideWorkingTree === null || typeof facts.hooks.insideWorkingTree === "string");
+  return typeof facts.hooks?.configDigest === "string" && Array.isArray(facts.hooks.programs) && positioned
     ? facts
     : undefined;
 }
@@ -4429,11 +4516,19 @@ export class CandidateRegistry {
     // tree will execute while it happens.
     const restore = await this.#git.restorePoint(row.main_path);
     const overwrite = await this.#overwriteScan(row.main_path, preview);
-    const blockers = promotionBlockers(restore, overwrite);
+    const blockers = promotionBlockers(restore, overwrite, preview);
     if (blockers.length > 0) throw new MergePromotionRefusedError(blockers, overwrite);
-    // The hook inventory the owner approved must still be the hook inventory that is about to run.
-    // A linked candidate worktree shares main's common `.git`, so a terminal agent can rewrite both
+    // ~~The hook inventory the owner approved must still be the hook inventory that is about to run.~~
+    // FALSE AS WRITTEN, and measured false (amendment (X-2)). This comparison runs before the merge,
+    // and when the hook directory is inside the working tree the merge itself replaces the inventory
+    // between this line and the moment git reads it. What this comparison actually establishes is
+    // narrower and still worth having: the inventory has not been swapped by SOMETHING ELSE — a
+    // linked candidate worktree shares main's common `.git`, so a terminal agent can rewrite both
     // `core.hooksPath` and the hook itself between the preview and this moment.
+    //
+    // The case it cannot see is refused above instead of compared here, by
+    // `MERGE_WOULD_INSTALL_THE_HOOKS_IT_RUNS` — a question about this operation rather than a hash
+    // of the state before it.
     const approved = promotionFacts(preview);
     // A snapshot recorded before Phase 5-5 carries none of these, which is not "nothing changed":
     // it was never checked against any of them, and it is refused by name rather than defaulted.
@@ -6051,7 +6146,7 @@ export class CandidateRegistry {
     const overwrite = await this.#overwriteScan(mainPath, preview);
     try {
       const restore = await this.#git.restorePoint(mainPath);
-      return { blockers: promotionBlockers(restore, overwrite), overwrite, hooks: restore.hooks };
+      return { blockers: promotionBlockers(restore, overwrite, preview), overwrite, hooks: restore.hooks };
     } catch {
       // Unread is a closed gate, never an open one.
       //
@@ -6071,8 +6166,8 @@ export class CandidateRegistry {
         blockers: ["MAIN_WORKING_TREE_UNREADABLE"],
         overwrite,
         hooks: {
-          hooksPath: "", hooks: [], drivers: [], filters: [], programs: [], configDigest: "",
-          unreadable: true, fingerprint: "",
+          hooksPath: "", insideWorkingTree: null, hooks: [], drivers: [], filters: [], programs: [],
+          configDigest: "", unreadable: true, fingerprint: "",
         },
       };
     }
@@ -6522,8 +6617,26 @@ export class CandidateRegistry {
     // while a trace naming one program tightens even if the pre-merge snapshot saw nothing. Neither
     // half may be weakened by the other being false.
     const observedPrograms = await readExecutedRepositoryPrograms(this.#promotionTracePath(row.id));
+    // Amendment (X-4). The third disjunct, and the one that closes the hole the other two left: a
+    // hook can EMPTY the trace before it exits, and an empty trace names no program, so the two
+    // halves above both answered `false` about a promotion that had just run attacker code. Measured
+    // (`k3-selferasing`): the hook emptied the trace, moved ITSELF out of `.git/hooks` so the
+    // hook-environment comparison would find nothing changed, left a `setsid` survivor behind and
+    // exited 1 — the record settled `rolled-back` with `git … reset --hard`, the project's exclusive
+    // marker was handed back, a SECOND promotion over the same main was allowed and wrote it, and the
+    // survivor was still appending to a tracked file. The reason `k2` was refused in the same shape
+    // was that its hook stayed on disk and drifted `previewDigest`: accidental, not designed.
+    //
+    // What makes this a positive fact rather than another absence: this process spawned git and holds
+    // the pid, git writes `version`/`start` before it does anything else, so "a git process started"
+    // and "its own opening events are not in the trace" cannot both be true unless something inside
+    // that merge removed them. `gitSpawnObserved` is first-hand and never persisted, so no reader
+    // that did not run the merge can be talked into this branch by a file.
+    const leaderSessionOpened = await readLeaderSessionOpened(this.#promotionTracePath(row.id));
+    const traceTampered = options.gitSpawnObserved && !leaderSessionOpened;
     const untrustedProgramsRan = options.untrustedProgramsSnapshot
-      || (observedPrograms !== null && observedPrograms.length > 0);
+      || (observedPrograms !== null && observedPrograms.length > 0)
+      || traceTampered;
     const conclusion = this.#promotionConclusion(row, {
       leaderExitObserved: options.leaderExitObserved,
       firstHandGroup: options.firstHandGroup,

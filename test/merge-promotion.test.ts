@@ -72,6 +72,12 @@ async function fixture(t: TestContext, options: {
   ignore?: string;
   /** Extra files committed into the INITIAL commit, so both sides share them from the merge base. */
   initial?: Record<string, string>;
+  /**
+   * Runs after `git init` and BEFORE the initial commit, so anything it creates is tracked content
+   * both sides inherit from the merge base — which is the only way to build the amendment (X-1)
+   * scenario, where the hook the merge runs is a file the merge itself writes.
+   */
+  beforeInitialCommit?: (source: string) => Promise<void>;
   /** Runs after the candidate exists and BEFORE it is completed, so its head stays the one bound. */
   beforeComplete?: (context: { source: string; candidatePath: string }) => Promise<void>;
 } = {}): Promise<Fixture> {
@@ -86,6 +92,7 @@ async function fixture(t: TestContext, options: {
   for (const [name, contents] of Object.entries(options.initial ?? {})) {
     await writeFile(join(source, name), contents, "utf8");
   }
+  await options.beforeInitialCommit?.(source);
   await execFileAsync("git", ["add", "-A"], { cwd: source });
   await execFileAsync("git", [...author, "commit", "-m", "initial"], { cwd: source });
   t.after(async () => await rm(root, { recursive: true, force: true }));
@@ -3561,7 +3568,10 @@ test("one unreadable promotion row is named, and does not retire the whole proje
  * written by the previous commit of this branch looks like.
  */
 test("a v5 snapshot taken before the configuration fields existed is terminal, not usable", async (t) => {
-  for (const drop of ["configDigest", "programs"] as const) {
+  // `insideWorkingTree` is the third field, added by amendment (X-1) and refused for the same
+  // reason: a snapshot that predates it was never checked against "does this merge write the
+  // directory its hooks run from", and a missing field must not be read as the permissive answer.
+  for (const drop of ["configDigest", "programs", "insideWorkingTree"] as const) {
     const f = await fixture(t);
     const approval = await raise(f);
     f.registry.close();
@@ -8479,4 +8489,412 @@ test("a promotion whose merge driver never got to run is judged by the inventory
   assert.equal(result.promotion.observation.recovery, undefined);
   assert.equal(result.mainMutated, false);
   assert.equal(await head(f.source), beforeHead);
+});
+
+/*
+ * ============================================================================================
+ * AMENDMENT (X-1)/(X-2)/(X-4) — the fifteenth round.
+ *
+ * (X-1): a hash on the approval screen describes the moment it was taken, and the merge is what
+ * changes what it describes. `core.hooksPath = .githooks` is an ordinary plain-git convention that
+ * puts the hook directory inside TRACKED CONTENT, so `git merge --no-ff` writes the candidate's
+ * version of the hook and then runs it, as the owner, unsandboxed. Binding could not see it: both
+ * the digest and the re-verification before the approval is spent happen before the merge.
+ *
+ * (X-4): a hook can empty git's own trace before it exits, so "the trace names no repository
+ * program" is producible by the program it is supposed to name.
+ * ============================================================================================
+ */
+
+/** A repository whose hooks live in tracked content, the way `core.hooksPath = .githooks` does. */
+async function trackedHookFixture(t: TestContext, options: {
+  hooksPath: string;
+  /** Where the hook lives inside the working tree, or undefined for "main has no hook file yet". */
+  hookFile?: string;
+  ownerRan: string;
+  /** What the candidate does to the working tree. */
+  candidate: (candidatePath: string) => Promise<void>;
+}): Promise<Fixture> {
+  return await fixture(t, {
+    beforeInitialCommit: async (source) => {
+      await execFileAsync("git", ["config", "core.hooksPath", options.hooksPath], { cwd: source });
+      if (options.hookFile === undefined) return;
+      await mkdir(join(source, options.hookFile, ".."), { recursive: true });
+      await writeFile(join(source, options.hookFile),
+        `#!/bin/sh\ntouch ${JSON.stringify(options.ownerRan)}\nexit 0\n`,
+        { encoding: "utf8", mode: 0o755 });
+    },
+    beforeComplete: async ({ candidatePath }) => await options.candidate(candidatePath),
+  });
+}
+
+/**
+ * AMENDMENT (X-1), the blocker itself, in the shape the reviewer measured (`k1 replace`).
+ *
+ * Main tracks `.githooks/pre-merge-commit` and names it with `core.hooksPath`. The candidate changes
+ * only that file's CONTENT — no `chmod`, no `.git/config` write, no race to win: the executable bit
+ * comes from main's own index entry. Before this amendment the approval screen itemised one sha256,
+ * git executed another, `attacker code ran as owner` was true and the promotion recorded `applied`.
+ */
+test("a merge that would write the directory git runs its hooks out of is refused, unspent", async (t) => {
+  const attacker = join(await mkdtemp(join(tmpdir(), "orchestratory-x1-")), "attacker-ran");
+  const ownerRan = join(await mkdtemp(join(tmpdir(), "orchestratory-x1-")), "owner-hook-ran");
+  const f = await trackedHookFixture(t, {
+    hooksPath: ".githooks",
+    hookFile: ".githooks/pre-merge-commit",
+    ownerRan,
+    candidate: async (candidatePath) => {
+      await writeFile(join(candidatePath, ".githooks", "pre-merge-commit"),
+        `#!/bin/sh\ntouch ${JSON.stringify(attacker)}\nexit 0\n`, "utf8");
+      await execFileAsync("git", ["add", "--", ".githooks/pre-merge-commit"], { cwd: candidatePath });
+      await execFileAsync("git", [...author, "commit", "-m", "swap the hook"], { cwd: candidatePath });
+    },
+  });
+  const beforeHead = await head(f.source);
+
+  const preview = await f.registry.previewMainMerge({
+    taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+  });
+  // Precondition ([[PITFALLS]] #106/#129): git really is resolving hooks into tracked content, and
+  // the merge really does write that path. Without both, the refusal below proves nothing.
+  assert.equal(preview.hooks.hooksPath, join(await realpath(f.source), ".githooks"));
+  assert.deepEqual(preview.hooks.hooks.map((entry) => entry.name), ["pre-merge-commit"]);
+  assert.ok(preview.preview.files.some((file) => file.path === ".githooks/pre-merge-commit"),
+    "this merge does not write the hook directory, so the scenario is not the one");
+
+  assert.equal(preview.approvable, false, "the owner is still being offered this to sign");
+  assert.ok(preview.blockers.includes("MERGE_WOULD_INSTALL_THE_HOOKS_IT_RUNS"),
+    `blockers: ${preview.blockers.join(",")}`);
+  await assert.rejects(
+    f.registry.requestMainMerge({
+      actor: "codex1", clientRequestId: key(), taskId: f.task.taskId, roomId: "demo",
+      mainPath: f.source, completionId: preview.completionId, previewDigest: preview.previewDigest,
+    }),
+    /MERGE_WOULD_INSTALL_THE_HOOKS_IT_RUNS/u,
+  );
+  assert.equal(await exists(attacker), false, "the candidate's hook ran as the owner");
+  assert.equal(await exists(ownerRan), false, "no merge should have happened at all");
+  assert.equal(await head(f.source), beforeHead);
+});
+
+/**
+ * AMENDMENT (X-1), the same refusal when main has no hook file yet (`k1 create`).
+ *
+ * The inventory is honestly EMPTY at approval time — there is nothing to hash and nothing to drift —
+ * and the merge creates the directory and the file. A gate built on comparing hashes has nothing to
+ * compare here, which is exactly why the gate is a question about the operation instead.
+ */
+test("a merge that would create the hook directory git will run from is refused as well", async (t) => {
+  const attacker = join(await mkdtemp(join(tmpdir(), "orchestratory-x1c-")), "attacker-ran");
+  const f = await trackedHookFixture(t, {
+    hooksPath: ".githooks",
+    ownerRan: join(tmpdir(), "unused"),
+    candidate: async (candidatePath) => {
+      await mkdir(join(candidatePath, ".githooks"), { recursive: true });
+      await writeFile(join(candidatePath, ".githooks", "pre-merge-commit"),
+        `#!/bin/sh\ntouch ${JSON.stringify(attacker)}\nexit 0\n`, { encoding: "utf8", mode: 0o755 });
+      await execFileAsync("git", ["add", "-A"], { cwd: candidatePath });
+      await execFileAsync("git", [...author, "commit", "-m", "ship a hook"], { cwd: candidatePath });
+    },
+  });
+  const preview = await f.registry.previewMainMerge({
+    taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+  });
+  assert.deepEqual(preview.hooks.hooks, [], "main already has a hook; the empty-inventory case is the subject");
+  assert.equal(preview.hooks.unreadable, false, "an unreadable inventory would refuse for another reason");
+  assert.equal(preview.approvable, false);
+  assert.ok(preview.blockers.includes("MERGE_WOULD_INSTALL_THE_HOOKS_IT_RUNS"),
+    `blockers: ${preview.blockers.join(",")}`);
+  assert.equal(await exists(attacker), false);
+});
+
+/**
+ * AMENDMENT (X-1), the other direction ([[PITFALLS]] #107).
+ *
+ * A hook directory inside the working tree is not by itself a refusal — if it were, this gate would
+ * be "no repository may use the `.githooks` convention", and the owner's own hook would stop running
+ * for every promotion. The merge here writes an unrelated file, so the inventory on the screen is
+ * still the inventory that runs, and the promotion succeeds with the OWNER's hook executed.
+ */
+test("a hook directory inside the working tree that this merge does not write is left alone", async (t) => {
+  const ownerRan = join(await mkdtemp(join(tmpdir(), "orchestratory-x1ok-")), "owner-hook-ran");
+  const f = await trackedHookFixture(t, {
+    hooksPath: ".githooks",
+    hookFile: ".githooks/pre-merge-commit",
+    ownerRan,
+    candidate: async (candidatePath) => {
+      // A sibling whose NAME starts with the hook directory's. Containment is segment-wise, so this
+      // is outside it; a prefix comparison would read it as inside and refuse an ordinary merge.
+      await mkdir(join(candidatePath, ".githooks-notes"), { recursive: true });
+      await writeFile(join(candidatePath, ".githooks-notes", "note.md"), "notes\n", "utf8");
+      await execFileAsync("git", ["add", "-A"], { cwd: candidatePath });
+      await execFileAsync("git", [...author, "commit", "-m", "notes beside the hooks"], { cwd: candidatePath });
+    },
+  });
+  const preview = await f.registry.previewMainMerge({
+    taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+  });
+  assert.equal(preview.hooks.hooksPath, join(await realpath(f.source), ".githooks"),
+    "the hook directory is not inside the working tree, so this control proves nothing");
+  assert.ok(!preview.preview.files.some((file) => file.path.startsWith(".githooks/")));
+  assert.ok(preview.preview.files.some((file) => file.path === ".githooks-notes/note.md"),
+    "the same-prefix sibling is not in this merge, so that half of the control is not exercised");
+  assert.equal(preview.approvable, true, preview.blockers.join(","));
+
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const result = await promote(f, approval, token);
+  assert.equal(result.mainMutated, true, "an ordinary `.githooks` repository can no longer be promoted");
+  assert.equal(await exists(ownerRan), true, "the owner's own hook did not run");
+});
+
+/**
+ * AMENDMENT (X-1): a merge that REMOVES the approved hook changes what runs just as much.
+ *
+ * Rename sources count for the same reason, and are covered by the same expression.
+ */
+test("a merge that only deletes a file out of the hook directory is refused too", async (t) => {
+  const f = await trackedHookFixture(t, {
+    hooksPath: ".githooks",
+    hookFile: ".githooks/pre-merge-commit",
+    ownerRan: join(tmpdir(), "unused"),
+    candidate: async (candidatePath) => {
+      await execFileAsync("git", ["rm", "-q", "--", ".githooks/pre-merge-commit"], { cwd: candidatePath });
+      await execFileAsync("git", [...author, "commit", "-m", "drop the hook"], { cwd: candidatePath });
+    },
+  });
+  const preview = await f.registry.previewMainMerge({
+    taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+  });
+  assert.deepEqual(
+    preview.preview.files.filter((file) => file.path.startsWith(".githooks/")).map((file) => file.operation),
+    ["delete"], "the merge does not delete out of the hook directory; not the case");
+  assert.equal(preview.approvable, false);
+  assert.ok(preview.blockers.includes("MERGE_WOULD_INSTALL_THE_HOOKS_IT_RUNS"),
+    `blockers: ${preview.blockers.join(",")}`);
+});
+
+/**
+ * AMENDMENT (X-1), the degenerate spelling — the P2 item the reviewer named.
+ *
+ * `core.hooksPath = ""` makes `git rev-parse --git-path hooks` answer `./`, so the product's own
+ * `join(workspace, "./")` turns the WORKING TREE ROOT into the hook directory and every path this
+ * merge writes is inside it. Two things measured on git 2.50.1 (Apple Git-155) rather than assumed,
+ * because the reviewer's note and this measurement disagree and the disagreement is worth recording:
+ * with `core.hooksPath = ""` git answers `./` to `--git-path hooks` but `git hook run
+ * pre-merge-commit` says `cannot find a hook named pre-merge-commit` and a real merge runs nothing;
+ * with `core.hooksPath = .` git DOES try, and fails with `cannot run pre-merge-commit: No such file
+ * or directory`. So this refusal is STRICTER than git's own behaviour here, deliberately: the
+ * product's reading of git's answer is the degenerate form of the blocker above, and a configuration
+ * whose meaning differs between "where are the hooks" and "which hook will you run" is not one to
+ * promote through.
+ */
+test("core.hooksPath set to the empty string makes the working tree root the hook directory", async (t) => {
+  const f = await trackedHookFixture(t, {
+    hooksPath: "",
+    ownerRan: join(tmpdir(), "unused"),
+    candidate: async () => { /* only `candidate.txt`, and that is at the root */ },
+  });
+  const gitAnswer = (await execFileAsync("git", ["rev-parse", "--git-path", "hooks"], { cwd: f.source }))
+    .stdout.trim();
+  assert.equal(gitAnswer, "./", "git no longer answers `./` here, so this case has changed shape");
+  const preview = await f.registry.previewMainMerge({
+    taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+  });
+  // `join(workspace, "./")` keeps the trailing separator, which is why the position is computed with
+  // `relative()` rather than by comparing these strings.
+  assert.equal(preview.hooks.hooksPath, `${await realpath(f.source)}/`);
+  assert.equal(preview.approvable, false);
+  assert.ok(preview.blockers.includes("MERGE_WOULD_INSTALL_THE_HOOKS_IT_RUNS"),
+    `blockers: ${preview.blockers.join(",")}`);
+});
+
+/**
+ * AMENDMENT (X-4). A hook that empties git's own trace before it exits.
+ *
+ * Both halves of `untrustedProgramsRan` answered `false` about a promotion that had just run
+ * attacker code: the BEFORE snapshot because the hook was installed after it was read, and the AFTER
+ * observation because the hook emptied the trace it would have been read from. The reviewer's `k3`
+ * added one line to that — the hook moves ITSELF out of `.git/hooks`, so even the hook-environment
+ * comparison finds nothing changed — and got `rolled-back`, `git … reset --hard`, the project's
+ * exclusive marker handed back, a SECOND promotion allowed over the same main, and a `setsid`
+ * survivor still appending to a tracked file.
+ *
+ * The positive fact that closes it: this process spawned git and holds the pid, and git writes its
+ * own `version`/`start` events before it does anything else. A trace that afterwards has no
+ * top-level `start` was emptied from inside the merge.
+ *
+ * The window is the product's own fault point rather than a race, exactly as the (W-2) test above.
+ */
+test("a hook that empties git's own trace cannot leave the record settling on the leader's exit", async (t) => {
+  const f = await fixture(t);
+  const started = join(f.root, "hook-entered");
+  const hookPath = join(f.source, ".git", "hooks", "pre-merge-commit");
+  const other = await secondApprovedTask(f);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const beforeHead = await head(f.source);
+
+  const preview = await f.registry.previewMainMerge({
+    taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+  });
+  assert.deepEqual(preview.hooks.hooks, [], "the BEFORE snapshot already sees a hook; not the cell");
+  assert.deepEqual(preview.hooks.drivers, []);
+
+  const promoter = new CandidateRegistry(f.data, {
+    faultPoint: (point) => {
+      if (point !== "approval-consume-write") return;
+      // Empties the trace and then removes itself, so neither the observed programs nor the hook
+      // environment can answer afterwards — the `k3` shape exactly.
+      writeFileSync(hookPath, [
+        "#!/bin/sh",
+        `touch ${JSON.stringify(started)}`,
+        ': > "$GIT_TRACE2_EVENT"',
+        // And then runs a git of its own, which writes a FRESH `version`/`start` pair into the same
+        // file. That is what makes the sid-shape half of the check load-bearing: a nested session's
+        // opening events must not be able to stand in for the leader's ([[PITFALLS]] #107).
+        "git --no-pager log -1 --oneline >/dev/null 2>&1",
+        `mv "$0" ${JSON.stringify(join(f.root, "removed-hook"))}`,
+        "exit 1",
+        "",
+      ].join("\n"), "utf8");
+      chmodSync(hookPath, 0o700);
+    },
+  });
+  t.after(() => promoter.close());
+  const result = await promoter.promoteMainMerge({
+    approvalId: approval.id, token, action: MERGE_APPROVAL_GRANT,
+    taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+  });
+
+  // Preconditions ([[PITFALLS]] #106/#129): the hook ran, it really did blind BOTH existing halves,
+  // and it really did remove itself. Without all three this test would pass on the old code.
+  assert.equal(await exists(started), true, "the hook never ran, so this measures nothing");
+  assert.deepEqual(result.promotion.observation.hooksExecuted ?? [], [],
+    "git's trace still names the hook, so the AFTER half answers and the new one is not on trial");
+  assert.equal(await exists(hookPath), false, "the hook is still on disk, so hookEnvironment drifts instead");
+  const trace = await readFile(join(f.data, "promotion-traces", `${result.promotion.id}.jsonl`), "utf8");
+  const sessions = trace.split("\n").filter(Boolean)
+    .map((line) => { try { return JSON.parse(line) as { event?: unknown; sid?: unknown }; } catch { return {}; } })
+    .filter((event) => event.event === "start")
+    .map((event) => (typeof event.sid === "string" ? event.sid : ""));
+  assert.equal(sessions.some((sid) => !sid.includes("/")), false,
+    "the leader's own `start` survived, so nothing was actually erased");
+  assert.equal(sessions.some((sid) => sid.includes("/")), true,
+    "no nested session wrote a `start`, so the sid-shape half of the check is not exercised");
+
+  assert.equal(result.promotion.state, "applying",
+    "a promotion whose trace was emptied from inside it settled on the leader's exit");
+  assert.equal(result.promotion.observation.mergeConclusion,
+    "MERGE_UNTRUSTED_PROGRAMS_RAN_LEADER_EXIT_INSUFFICIENT");
+  assert.equal(result.promotion.observation.recovery, undefined,
+    `a destructive command was offered: ${result.promotion.observation.recovery}`);
+  assert.equal(result.promotion.observation.recoveryKind, undefined);
+  assert.equal(result.mainMutated, false);
+  assert.equal(await head(f.source), beforeHead);
+  await assert.rejects(
+    promoter.promoteMainMerge({
+      approvalId: other.approval.id, token: other.token, action: MERGE_APPROVAL_GRANT,
+      taskId: other.taskId, roomId: "demo", mainPath: f.source,
+    }),
+    /MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY/u,
+  );
+});
+
+/**
+ * AMENDMENT (X-4), the other direction ([[PITFALLS]] #107).
+ *
+ * An intact trace must not tighten anything. A repository with no hooks and no drivers, promoted
+ * normally, has to reach `applied` — otherwise the new disjunct would be "every promotion is
+ * unaccounted for", which no mutation could distinguish from a working gate.
+ */
+test("an intact trace leaves an ordinary promotion able to reach a terminal applied", async (t) => {
+  const f = await fixture(t);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const result = await promote(f, approval, token);
+  assert.equal(result.promotion.state, "applied");
+  assert.equal(result.mainMutated, true);
+  assert.equal(result.promotion.observation.mergeConclusion, "MERGE_LEADER_EXIT_OBSERVED");
+});
+
+/**
+ * AMENDMENT (X-1), the MIRROR the reviewer asked to be measured rather than reasoned about:
+ * `merge.<name>.driver = ./tools/m.sh`, where the driver SCRIPT is itself tracked content.
+ *
+ * Two separate measurements came out of this cell, and they point in opposite directions.
+ *
+ * **1. The promotion itself is NOT the mirror of BLOCKER-1.** git resolves content merges before it
+ * updates the working tree, so the script `git merge --no-ff` executes is MAIN's version;
+ * `tools/m.sh` only becomes the candidate's afterwards. Measured with pure git 2.50.1 (Apple
+ * Git-155): the marker's LAST line is `MAIN DRIVER`, while `tools/m.sh` on disk after the merge is
+ * the candidate's. So `hookDirectoryBlockers` does not need a second door for the promotion, and
+ * this test exists so that a future git which reorders those two steps turns that red instead of
+ * leaving an unwritten assumption true ([[PITFALLS]] #81, #103).
+ *
+ * **2. ⛔ But the PREVIEW runs the candidate's script, and that is an open finding, not a fixed one.**
+ * `#mergePreview` runs `git merge-tree --write-tree` with cwd in the CANDIDATE worktree, and
+ * `merge-tree` honours merge drivers (measured directly: one `merge-tree` invocation, one driver
+ * execution). The candidate worktree holds the candidate's `tools/m.sh`, so the marker's EARLIER
+ * lines are `CANDIDATE DRIVER RAN AS OWNER`. `THREAT_MODEL.md` F23 already records that preview
+ * executes repository-configured drivers and names the remedy (`-c merge.<name>.driver=`); what F23
+ * does NOT say, and what is measured here, is that the executed FILE can be candidate content —
+ * which the ordinary Workspace MCP write path allows, because it is not `.git` and not the hook
+ * directory. Measured separately (`m1-preview-driver.mjs`): the first execution happens inside
+ * `complete()`, before any preview is requested and with no owner involvement at all.
+ *
+ * This test asserts the measured reality of BOTH, so neither can be lost quietly. It is deliberately
+ * NOT an assertion that the behaviour is acceptable.
+ */
+test("a merge driver script this merge rewrites runs as main's during promotion and as the candidate's during preview", async (t) => {
+  const marker = join(await mkdtemp(join(tmpdir(), "orchestratory-x1drv-")), "which-driver.txt");
+  const f = await fixture(t, {
+    beforeInitialCommit: async (source) => {
+      await mkdir(join(source, "tools"), { recursive: true });
+      await writeFile(join(source, "tools", "m.sh"),
+        `#!/bin/sh\necho "MAIN DRIVER" >> ${JSON.stringify(marker)}\nexit 0\n`,
+        { encoding: "utf8", mode: 0o755 });
+      await writeFile(join(source, ".gitattributes"), "*.conf merge=x\n", "utf8");
+      await writeFile(join(source, "shared.conf"), "base\n", "utf8");
+      await execFileAsync("git", ["config", "merge.x.name", "x"], { cwd: source });
+      await execFileAsync("git", ["config", "merge.x.driver", "./tools/m.sh %O %A %B"], { cwd: source });
+    },
+    beforeComplete: async ({ candidatePath }) => {
+      await writeFile(join(candidatePath, "tools", "m.sh"),
+        `#!/bin/sh\necho "CANDIDATE DRIVER" >> ${JSON.stringify(marker)}\nexit 0\n`, "utf8");
+      await writeFile(join(candidatePath, "shared.conf"), "candidate side\n", "utf8");
+      await execFileAsync("git", ["add", "-A"], { cwd: candidatePath });
+      await execFileAsync("git", [...author, "commit", "-m", "rewrite the driver"], { cwd: candidatePath });
+    },
+  });
+  // Main edits the same attributed file, so git really has to run a content merge for it.
+  await commit(f.source, "shared.conf", "main side\n", "main edits the attributed file");
+
+  const preview = await f.registry.previewMainMerge({
+    taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+  });
+  // Preconditions ([[PITFALLS]] #106/#129): the driver is configured, and this merge really does
+  // rewrite the script it points at.
+  assert.equal(preview.hooks.drivers.length, 1, `drivers: ${JSON.stringify(preview.hooks.drivers)}`);
+  assert.ok(preview.preview.files.some((file) => file.path === "tools/m.sh"),
+    "this merge does not rewrite the driver script, so the mirror is not being tested");
+  assert.equal(preview.approvable, true, preview.blockers.join(","));
+  // ⛔ Finding 2, asserted as the measured reality: the simulation already ran the CANDIDATE's file.
+  assert.ok((await readFile(marker, "utf8")).includes("CANDIDATE DRIVER"),
+    "the preview no longer executes the candidate's merge driver — if this is now fixed, delete this "
+    + "assertion and the residual-risk row that goes with it");
+
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  await promote(f, approval, token);
+
+  // Finding 1: whatever the preview did, the PROMOTION ran main's script, because git merges content
+  // before it writes the working tree.
+  const lines = (await readFile(marker, "utf8")).trim().split("\n");
+  assert.equal(lines.at(-1), "MAIN DRIVER",
+    "the promotion ran a driver script this merge supplied — `hookDirectoryBlockers` must be "
+    + "extended to the driver's own path");
+  assert.equal(await readFile(join(f.source, "tools", "m.sh"), "utf8"),
+    `#!/bin/sh\necho "CANDIDATE DRIVER" >> ${JSON.stringify(marker)}\nexit 0\n`,
+    "the merge did not install the candidate's script after all, so the ordering is untested");
 });

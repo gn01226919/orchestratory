@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { open, readdir, readFile, stat, type FileHandle } from "node:fs/promises";
-import { basename, isAbsolute, join } from "node:path";
+import { open, readdir, readFile, realpath, stat, type FileHandle } from "node:fs/promises";
+import { basename, isAbsolute, join, relative, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { canonicalWorkspace, resolveExistingInside } from "../security/workspace.ts";
 import {
@@ -38,6 +38,29 @@ export interface HookEnvironment {
    * only when git could not be asked at all, and that case sets `unreadable`.
    */
   hooksPath: string;
+  /**
+   * Where that directory sits RELATIVE TO THE WORKING TREE, as a git-style path, or `null` when it is
+   * not inside it at all. `""` means the hook directory IS the working tree root.
+   *
+   * Amendment (X-1). Every hash on the approval screen describes the moment it was taken, and the
+   * question nobody asked was whether this operation is the thing that changes what it describes.
+   * `core.hooksPath = .githooks` is an ordinary plain-git convention and it puts the hook directory
+   * inside TRACKED CONTENT: `git merge --no-ff` writes the candidate's version of those files and
+   * then runs the hook out of the directory it just rewrote. Measured on git 2.50.1 and on this
+   * product — the screen itemised `sha256 f64801cf…`, git executed `af872625…`, the candidate only
+   * changed the file's CONTENT (the executable bit came from main's index entry, no `chmod`, no
+   * `.git/config` write, no race), and the promotion recorded `applied`.
+   *
+   * Binding could not see it, and could not have: `previewDigest` and the re-verification before the
+   * approval is spent both happen BEFORE the merge, and the merge is what changes the file. So the
+   * answer is not another fingerprint, it is this question — asked of git for the directory, and of
+   * the merge's own file list for whether it writes there (`hookDirectoryBlockers`).
+   *
+   * The lexical answer and the `realpath` answer are UNIONED, taking the first that lands inside:
+   * a hook directory configured by an absolute path that is a symlink into the working tree is a
+   * hook directory the merge can rewrite, and the direction that adds a refusal is the safe one.
+   */
+  insideWorkingTree: string | null;
   /** Executable hooks present there, name and content hash, sorted. */
   hooks: Array<{ name: string; sha256: string; bytes: number }>;
   /**
@@ -373,6 +396,14 @@ async function readTraceChildren(traceFile: string): Promise<ObservedChild[] | n
  * This is NOT claimed to enumerate the ways a repository can get code executed during a merge; it is
  * claimed to report children git said it started. Returns null when the trace could not be read at
  * all — null is "not observed", and the caller may not read it as "nothing ran".
+ *
+ * Two named limits, so the claim is the narrow one rather than the comfortable one:
+ *  - the trace parser reads `child_start`/`child_exit` and NOTHING ELSE, so git's `exec` event — the
+ *    one it writes when it replaces itself rather than forking, as an alias does — is not looked at
+ *    here or anywhere in this file;
+ *  - the third leg is `basename(argv[0]) !== "git"`, which is a statement about a file NAME.
+ * Neither is a measured bypass; both are the shape of what this cannot see, written down so the
+ * residual-risk row can say it (amendment (X-4), the P2 half).
  */
 export async function readExecutedRepositoryPrograms(
   traceFile: string,
@@ -382,6 +413,74 @@ export async function readExecutedRepositoryPrograms(
   return children
     .filter((child) => child.childClass === "hook" || child.shell || basename(child.path) !== "git")
     .map(({ name, path, exitCode }) => ({ name, path, exitCode }));
+}
+
+/**
+ * Where `directory` sits relative to `workspace`, git-style, or `null` when it is outside it.
+ *
+ * `""` is a real answer and means "this IS the working tree root" — the degenerate spelling of
+ * amendment (X-1)'s blocker. Measured on git 2.50.1: `core.hooksPath = ""` makes
+ * `git rev-parse --git-path hooks` answer `./`, so joining it onto the workspace makes the root of
+ * the working tree the hook directory. Reporting `null` for it would be a different answer from the
+ * one git just gave. What git then DOES with that directory is a separate measurement and is written
+ * down where it is acted on (`hookDirectoryBlockers`); this function only reports position.
+ *
+ * Both spellings of the path are tried and the first that lands inside wins, because a configured
+ * absolute path may be a symlink into the working tree, and the union is the direction that can only
+ * add a refusal.
+ */
+async function workingTreePosition(workspace: string, directory: string): Promise<string | null> {
+  const spellings = [directory];
+  try {
+    const real = await realpath(directory);
+    if (real !== directory) spellings.push(real);
+  } catch { /* a directory that does not exist yet is judged by the name git gave */ }
+  for (const spelling of spellings) {
+    const path = relative(workspace, spelling);
+    if (isAbsolute(path) || path === ".." || path.startsWith(`..${sep}`)) continue;
+    return path.split(sep).join("/");
+  }
+  return null;
+}
+
+/**
+ * Whether git's own session-opening events for the MERGE LEADER are present in this promotion's
+ * trace — the tamper check amendment (X-4) turned on.
+ *
+ * Every git process writes `version` and `start` to `GIT_TRACE2_EVENT` before it does anything else,
+ * long before any hook can run (measured on git 2.50.1). This product spawns the merge itself and
+ * holds the pid, so when it knows a git process started, that process HAS written those two events.
+ * A trace that afterwards does not contain them was emptied by something running inside the merge —
+ * measured: a `pre-merge-commit` hook that runs `: > "$GIT_TRACE2_EVENT"` leaves a 1 154-byte trace
+ * whose first surviving event is the hook's own `child_exit`.
+ *
+ * The leader is identified by the SHAPE of the session id, not by matching a value: git gives a
+ * child git process an sid of `<parent-sid>/<own-sid>`, so the top-level session is the one with no
+ * `/` in it (measured: one merge whose hook ran `git log` produced three distinct nested ids beside
+ * the one flat id, and every nested one carried its own `version`/`start` pair). Without that,
+ * any git the repository chose to run after emptying the file would supply a fresh `start` and put
+ * the answer back.
+ *
+ * Returns TRUE only on positive evidence. A missing, unreadable, oversized or unparsable trace all
+ * answer `false`, and the single caller may only use `false` to TIGHTEN — absence never loosens
+ * anything (amendment (O)).
+ */
+export async function readLeaderSessionOpened(traceFile: string): Promise<boolean> {
+  let contents: string;
+  try {
+    const info = await stat(traceFile);
+    if (!info.isFile() || info.size > MAX_HOOK_TRACE_BYTES) return false;
+    contents = await readFile(traceFile, "utf8");
+  } catch { return false; }
+  for (const line of contents.split("\n")) {
+    if (line.length === 0) continue;
+    let event: Record<string, unknown>;
+    try { event = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
+    if (event.event !== "start") continue;
+    const sid = typeof event.sid === "string" ? event.sid : "";
+    if (sid.length > 0 && !sid.includes("/")) return true;
+  }
+  return false;
 }
 
 /**
@@ -757,6 +856,7 @@ export class GitBroker {
       directory = await this.#gitPath(workspace, "hooks", promotionEnv);
     } catch { directory = null; }
     const hooksPath = directory ?? "";
+    const insideWorkingTree = directory === null ? null : await workingTreePosition(workspace, directory);
     // git treats a hooks path it cannot read as "no hooks" and proceeds. So does this, but it says
     // so: `/dev/null` and a deleted directory are both "nothing will run", and both are reported as
     // an explicit empty inventory rather than as an unreadable one.
@@ -801,6 +901,7 @@ export class GitBroker {
     const configDigest = createHash("sha256").update(config, "utf8").digest("hex");
     return {
       hooksPath,
+      insideWorkingTree,
       hooks,
       drivers,
       filters,
@@ -808,9 +909,34 @@ export class GitBroker {
       configDigest,
       unreadable,
       fingerprint: createHash("sha256")
-        .update(JSON.stringify([hooksPath, hooks, drivers, filters, programs, configDigest, unreadable]), "utf8")
+        .update(JSON.stringify(
+          [hooksPath, insideWorkingTree, hooks, drivers, filters, programs, configDigest, unreadable],
+        ), "utf8")
         .digest("hex"),
     };
+  }
+
+  /**
+   * Where git would run this working tree's hooks from, RELATIVE to the working tree, or `null` when
+   * that directory is not inside it. Throws when git could not be asked at all.
+   *
+   * Amendment (X-3). The narrow question, for callers that need the location and not the inventory:
+   * "is this path one git or the toolchain AUTO-EXECUTES". A regular expression over file names
+   * cannot answer it — measured, and measured as the same pitfall for the third time
+   * ([[PITFALLS]] #103/#108): `WORKSPACE_SENSITIVE_PATH` matched `.husky/pre-merge-commit` and let
+   * `.githooks/`, `githooks/`, `hooks/` and `tools/hooks/` through, while its own comment said it
+   * blocked "git/husky/claude hooks". Git is the only thing that knows, so git is asked, in the
+   * environment a promotion would use — `minimalGitEnvironment` pins `core.hooksPath=/dev/null` and
+   * would answer with this product's own guard instead of the repository's configuration.
+   *
+   * A THROW is a real answer here and callers are expected to treat it as one: not knowing where the
+   * auto-executed directory is means not being able to say a write is outside it.
+   */
+  async hookDirectoryPosition(workspaceInput: string): Promise<string | null> {
+    const workspace = await canonicalWorkspace(workspaceInput);
+    return workingTreePosition(
+      workspace, await this.#gitPath(workspace, "hooks", promotionGitEnvironment()),
+    );
   }
 
   /**

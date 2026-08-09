@@ -199,9 +199,26 @@ export function minimalGitEnvironment(
  * repository must never execute code that repository carries. A promotion is not an inspection: the
  * owner asked for their candidate to be merged into their own project, and a merge that skipped the
  * pre-merge-commit and commit-msg hooks the owner installed would be a merge their project's own
- * rules never saw. Hooks live in `.git/hooks` (or a `core.hooksPath` in repository config), which is
- * not tracked content, so a merge cannot install the hook that runs during it — the code that runs
- * here is code the owner already had on disk before the promotion started.
+ * rules never saw.
+ *
+ * ~~Hooks live in `.git/hooks` (or a `core.hooksPath` in repository config), which is not tracked
+ * content, so a merge cannot install the hook that runs during it — the code that runs here is code
+ * the owner already had on disk before the promotion started.~~
+ *
+ * **That was the load-bearing justification for this switch and it was FALSE, measured false, and
+ * never had a probe behind it** (amendment (X-2); [[PITFALLS]] #77/#127/#139 are the same family).
+ * `core.hooksPath = .githooks` is an ordinary plain-git convention and it puts the hook directory
+ * INSIDE tracked content, so `git merge --no-ff` writes the candidate's version of the hook and then
+ * executes it as the owner. Measured on git 2.50.1 and on this product end to end: the approval
+ * screen itemised one sha256 and git ran a different one, with no `chmod`, no `.git/config` write
+ * and no race to win.
+ *
+ * What actually carries this switch now is a REFUSAL rather than a claim:
+ * `hookDirectoryBlockers()` in `candidate-registry.ts` asks git where hooks come from
+ * (`rev-parse --git-path hooks`) and asks the merge's own file list whether it writes there, and a
+ * promotion that would install the code it is about to run is refused before anything is spent. The
+ * statement that survives is the narrow one: **the code that runs here is code this promotion is
+ * proven not to be writing.**
  *
  * The committer identity is pinned rather than inherited. `GIT_CONFIG_GLOBAL=/dev/null` means the
  * owner's global `user.email` is not visible, so without this a repository with no local identity
