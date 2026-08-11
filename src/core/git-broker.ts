@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { fstatSync, readSync } from "node:fs";
 import { open, readdir, readFile, realpath, stat, type FileHandle } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -56,11 +57,23 @@ export interface HookEnvironment {
    * answer is not another fingerprint, it is this question — asked of git for the directory, and of
    * the merge's own file list for whether it writes there (`hookDirectoryBlockers`).
    *
-   * The lexical answer and the `realpath` answer are UNIONED, taking the first that lands inside:
-   * a hook directory configured by an absolute path that is a symlink into the working tree is a
-   * hook directory the merge can rewrite, and the direction that adds a refusal is the safe one.
+   * EVERY spelling that lands inside is kept — the lexical one and the `realpath` one are a genuine
+   * union, not a first match.
+   *
+   * Amendment (Y-1). The sentence above this one used to say "UNIONED" while the code returned on
+   * the first spelling that landed inside, and the field was a single string. That is not a wording
+   * slip: a merge writes the REALPATH, so a hook directory reached through a symlink was judged at
+   * one spelling and rewritten at the other. Measured on git 2.50.1 and on this product, twice:
+   * `.githooks -> tools/hooks` as tracked content with `core.hooksPath=.githooks`, and the ordinary
+   * shared-hooks spelling `ln -s ../tools/hooks .git/hooks` which needs no config at all. Both gave
+   * `insideWorkingTree: ".githooks"` / `".git/hooks"`, `blockers: []`, `approvable: true`, attacker
+   * code executed as the owner, `state: applied` — the disclosed sha256 was not the sha256 that ran.
+   *
+   * `null` means git could not be asked at all (and that case sets `unreadable`); `[]` means git
+   * answered and the directory is outside this working tree. The two are different answers and are
+   * kept different, for the reason `readExecutedHooks` gives about null versus `[]`.
    */
-  insideWorkingTree: string | null;
+  insideWorkingTree: string[] | null;
   /** Executable hooks present there, name and content hash, sorted. */
   hooks: Array<{ name: string; sha256: string; bytes: number }>;
   /**
@@ -293,6 +306,42 @@ const PROMOTION_STATE_FILES: ReadonlyArray<readonly [string, string]> = [
 ];
 const SENSITIVE_UNTRACKED_PATH = /(?:^|\/)(?:\.env(?:\.[^/]*)?|[^/]+\.(?:pem|key|p12|pfx))$/iu;
 
+/**
+ * Where one promotion's trace is read from — and the difference is a security property, not plumbing.
+ *
+ * Amendment (Y-2). A promotion's trace lives at a path that is handed to every hook the merge runs
+ * (`GIT_TRACE2_EVENT`), so anything reached BY PATH is a record the observed thing can replace. A
+ * `fd` is a descriptor THIS process opened before the merge was spawned and has held in memory ever
+ * since: `rename(2)` over the path does not move it, so the bytes git wrote are still the bytes read.
+ * Measured on git 2.50.1 — a `pre-merge-commit` hook that filtered the file and `mv`-ed the copy
+ * back left the path holding a laundered trace with no children at all, while the retained
+ * descriptor still named `.git/hooks/pre-merge-commit` in a `child_start`.
+ *
+ * A `path` source is the fallback for readers that did not run the merge (a crash reader has no
+ * descriptor and never will). It is not first-hand and its callers may only use it to TIGHTEN.
+ */
+export type PromotionTraceSource = { readonly fd: number } | { readonly path: string };
+
+/** The whole trace as text, or null when it could not be read or is over the size limit. */
+async function readTraceText(source: PromotionTraceSource): Promise<string | null> {
+  if ("path" in source) {
+    try {
+      const info = await stat(source.path);
+      if (!info.isFile() || info.size > MAX_HOOK_TRACE_BYTES) return null;
+      return await readFile(source.path, "utf8");
+    } catch { return null; }
+  }
+  try {
+    const info = fstatSync(source.fd);
+    if (!info.isFile() || info.size > MAX_HOOK_TRACE_BYTES) return null;
+    // From offset 0 explicitly: this descriptor is shared with nothing, but reading it positionally
+    // keeps it re-readable, and both callers below read it in the same settlement.
+    const buffer = Buffer.allocUnsafe(info.size);
+    const read = readSync(source.fd, buffer, 0, info.size, 0);
+    return buffer.toString("utf8", 0, read);
+  } catch { return null; }
+}
+
 /** One hook git actually ran during a promotion, as reported by git's own trace stream. */
 export interface ObservedHookRun {
   /** The hook name git reports, e.g. `pre-merge-commit`. */
@@ -315,8 +364,10 @@ export interface ObservedHookRun {
  * Returns null when the trace could not be read at all. Null and `[]` mean different things — "not
  * observed" and "observed that none ran" — and collapsing them is how a record starts lying.
  */
-export async function readExecutedHooks(traceFile: string): Promise<ObservedHookRun[] | null> {
-  const children = await readTraceChildren(traceFile);
+export async function readExecutedHooks(
+  source: PromotionTraceSource,
+): Promise<ObservedHookRun[] | null> {
+  const children = await readTraceChildren(source);
   return children === null
     ? null
     : children.filter((child) => child.childClass === "hook")
@@ -331,15 +382,28 @@ interface ObservedChild extends ObservedHookRun {
   shell: boolean;
 }
 
-/** Every child in one promotion's trace, in start order, or null when the trace could not be read. */
-async function readTraceChildren(traceFile: string): Promise<ObservedChild[] | null> {
-  let contents: string;
-  try {
-    const info = await stat(traceFile);
-    if (!info.isFile() || info.size > MAX_HOOK_TRACE_BYTES) return null;
-    contents = await readFile(traceFile, "utf8");
-  } catch { return null; }
-  const started = new Map<string, ObservedChild>();
+/**
+ * Every child in one promotion's trace, in observation order, or null when it could not be read.
+ *
+ * A `child_exit` with no `child_start` is a child TOO. Amendment (Y-2): this used to build its
+ * result from `child_start` alone, so an exit whose start was gone was dropped on the floor — and
+ * that is exactly the residue a trace-laundering hook leaves, because the exit is written after the
+ * hook has already finished editing the file. Measured on git 2.50.1: a hook that rewrote the trace
+ * in place, keeping git's genuine opening events and deleting every child event, produced a file
+ * whose only remaining evidence was one orphan `child_exit` — and this function reported that as
+ * "no child ran". An observed exit is an observation; discarding it is how a record starts lying
+ * ([[PITFALLS]] #140, the answer was in hand and nobody took it).
+ *
+ * An orphan is reported with the fields the trace does not have left blank, which puts it on the
+ * fail-closed side of every consumer: `childClass` is not `"hook"` so it is not claimed to be one,
+ * and an empty `path` is not `git`, so `readExecutedRepositoryPrograms` counts it as untrusted.
+ */
+async function readTraceChildren(
+  source: PromotionTraceSource,
+): Promise<ObservedChild[] | null> {
+  const contents = await readTraceText(source);
+  if (contents === null) return null;
+  const observed = new Map<string, ObservedChild>();
   const order: string[] = [];
   for (const line of contents.split("\n")) {
     if (line.length === 0) continue;
@@ -351,23 +415,31 @@ async function readTraceChildren(traceFile: string): Promise<ObservedChild[] | n
     const id = `${sid}#${childId}`;
     if (event.event === "child_start") {
       const argv = Array.isArray(event.argv) ? event.argv : [];
+      const previous = observed.get(id);
       const run: ObservedChild = {
         name: typeof event.hook_name === "string" ? event.hook_name : "",
         path: typeof argv[0] === "string" ? argv[0] : "",
-        exitCode: null,
+        // An exit seen before its start is still this child's exit code.
+        exitCode: previous?.exitCode ?? null,
         childClass: typeof event.child_class === "string" ? event.child_class : "",
         shell: event.use_shell === true,
       };
-      if (!started.has(id)) order.push(id);
-      started.set(id, run);
+      if (previous === undefined) order.push(id);
+      observed.set(id, run);
       continue;
     }
     if (event.event === "child_exit") {
-      const run = started.get(id);
-      if (run && typeof event.code === "number") run.exitCode = event.code;
+      const previous = observed.get(id);
+      const exitCode = typeof event.code === "number" ? event.code : null;
+      if (previous === undefined) {
+        order.push(id);
+        observed.set(id, { name: "", path: "", exitCode, childClass: "", shell: false });
+        continue;
+      }
+      if (exitCode !== null) previous.exitCode = exitCode;
     }
   }
-  return order.map((id) => started.get(id)).filter((run): run is ObservedChild => run !== undefined);
+  return order.map((id) => observed.get(id)).filter((run): run is ObservedChild => run !== undefined);
 }
 
 /**
@@ -406,9 +478,9 @@ async function readTraceChildren(traceFile: string): Promise<ObservedChild[] | n
  * residual-risk row can say it (amendment (X-4), the P2 half).
  */
 export async function readExecutedRepositoryPrograms(
-  traceFile: string,
+  source: PromotionTraceSource,
 ): Promise<ObservedHookRun[] | null> {
-  const children = await readTraceChildren(traceFile);
+  const children = await readTraceChildren(source);
   if (children === null) return null;
   return children
     .filter((child) => child.childClass === "hook" || child.shell || basename(child.path) !== "git")
@@ -416,31 +488,42 @@ export async function readExecutedRepositoryPrograms(
 }
 
 /**
- * Where `directory` sits relative to `workspace`, git-style, or `null` when it is outside it.
+ * EVERY position `directory` occupies relative to `workspace`, git-style. `[]` means no spelling of
+ * it lands inside the working tree.
  *
  * `""` is a real answer and means "this IS the working tree root" — the degenerate spelling of
  * amendment (X-1)'s blocker. Measured on git 2.50.1: `core.hooksPath = ""` makes
  * `git rev-parse --git-path hooks` answer `./`, so joining it onto the workspace makes the root of
- * the working tree the hook directory. Reporting `null` for it would be a different answer from the
+ * the working tree the hook directory. Reporting nothing for it would be a different answer from the
  * one git just gave. What git then DOES with that directory is a separate measurement and is written
  * down where it is acted on (`hookDirectoryBlockers`); this function only reports position.
  *
- * Both spellings of the path are tried and the first that lands inside wins, because a configured
- * absolute path may be a symlink into the working tree, and the union is the direction that can only
- * add a refusal.
+ * ## Why this returns a set (amendment (Y-1))
+ *
+ * A path has two spellings that matter here — the one git named and the one `realpath` resolves it
+ * to — and a merge writes the SECOND while a name-based judgement reads the FIRST. The previous
+ * shape returned the first spelling that landed inside and its own comment called that a union; the
+ * consequence was that `.githooks -> tools/hooks` was judged at `.githooks`, the merge wrote
+ * `tools/hooks/pre-merge-commit`, and the gate saw no overlap. Measured end to end on this product:
+ * `approvable: true`, `blockers: []`, attacker code executed as the owner, `state: applied`.
+ *
+ * So both are kept, deduplicated, and the caller must refuse if ANY of them is written. Extra
+ * positions can only add a refusal, which is the direction this whole gate is allowed to move in.
  */
-async function workingTreePosition(workspace: string, directory: string): Promise<string | null> {
+async function workingTreePositions(workspace: string, directory: string): Promise<string[]> {
   const spellings = [directory];
   try {
     const real = await realpath(directory);
     if (real !== directory) spellings.push(real);
   } catch { /* a directory that does not exist yet is judged by the name git gave */ }
+  const positions: string[] = [];
   for (const spelling of spellings) {
     const path = relative(workspace, spelling);
     if (isAbsolute(path) || path === ".." || path.startsWith(`..${sep}`)) continue;
-    return path.split(sep).join("/");
+    const position = path.split(sep).join("/");
+    if (!positions.includes(position)) positions.push(position);
   }
-  return null;
+  return positions;
 }
 
 /**
@@ -461,27 +544,51 @@ async function workingTreePosition(workspace: string, directory: string): Promis
  * any git the repository chose to run after emptying the file would supply a fresh `start` and put
  * the answer back.
  *
+ * ## Why the pid is a parameter (amendment (Y-2))
+ *
+ * Session SHAPE alone answers "is this a top-level git", not "is this THE git this process started".
+ * The product spawns the merge and is handed the pid; nothing was comparing that number against the
+ * one in the trace, so a forged flat session id put the answer back — measured (`k4-forgedstart`):
+ * a hook writing one synthetic `start` with an invented `P<hex>` made `untrustedProgramsRan` false.
+ * That was the whole of [[PITFALLS]] #140 again: the answer was already in this process's memory and
+ * no one had passed it in.
+ *
+ * `leaderPid` is that number, read from the spawn callback and never persisted anywhere, so no file
+ * can supply it and no later reader can be talked into this branch. Measured on git 2.50.1: a
+ * session id ends `-P<pid-in-hex>` and the pid is the one `child.pid` reported, zero-padded.
+ * `null` — no pid in hand — answers `false`, which tightens.
+ *
  * Returns TRUE only on positive evidence. A missing, unreadable, oversized or unparsable trace all
  * answer `false`, and the single caller may only use `false` to TIGHTEN — absence never loosens
  * anything (amendment (O)).
  */
-export async function readLeaderSessionOpened(traceFile: string): Promise<boolean> {
-  let contents: string;
-  try {
-    const info = await stat(traceFile);
-    if (!info.isFile() || info.size > MAX_HOOK_TRACE_BYTES) return false;
-    contents = await readFile(traceFile, "utf8");
-  } catch { return false; }
+export async function readLeaderSessionOpened(
+  source: PromotionTraceSource, leaderPid: number | null,
+): Promise<boolean> {
+  if (leaderPid === null || !Number.isInteger(leaderPid) || leaderPid <= 0) return false;
+  const contents = await readTraceText(source);
+  if (contents === null) return false;
   for (const line of contents.split("\n")) {
     if (line.length === 0) continue;
     let event: Record<string, unknown>;
     try { event = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
     if (event.event !== "start") continue;
     const sid = typeof event.sid === "string" ? event.sid : "";
-    if (sid.length > 0 && !sid.includes("/")) return true;
+    if (sid.length === 0 || sid.includes("/")) continue;
+    const match = TRACE_SESSION_PID.exec(sid);
+    if (match !== null && Number.parseInt(match[1] as string, 16) === leaderPid) return true;
   }
   return false;
 }
+
+/**
+ * Trace2 session ids end in the emitting git process's own pid, in hex: `<time>-H<host>-P<pid>`.
+ *
+ * Kept beside the one caller that compares it against a FIRST-HAND number. `candidate-registry.ts`
+ * has its own copy for the crash-reader path, where there is no first-hand number to compare with
+ * and the parsed value may only ever tighten.
+ */
+const TRACE_SESSION_PID = /-P([0-9a-fA-F]{1,12})$/u;
 
 /**
  * The promotion environment with its command-line config entries removed, so that `git config
@@ -856,7 +963,7 @@ export class GitBroker {
       directory = await this.#gitPath(workspace, "hooks", promotionEnv);
     } catch { directory = null; }
     const hooksPath = directory ?? "";
-    const insideWorkingTree = directory === null ? null : await workingTreePosition(workspace, directory);
+    const insideWorkingTree = directory === null ? null : await workingTreePositions(workspace, directory);
     // git treats a hooks path it cannot read as "no hooks" and proceeds. So does this, but it says
     // so: `/dev/null` and a deleted directory are both "nothing will run", and both are reported as
     // an explicit empty inventory rather than as an unreadable one.
@@ -917,8 +1024,12 @@ export class GitBroker {
   }
 
   /**
-   * Where git would run this working tree's hooks from, RELATIVE to the working tree, or `null` when
-   * that directory is not inside it. Throws when git could not be asked at all.
+   * EVERY position git would run this working tree's hooks from, RELATIVE to the working tree; `[]`
+   * when no spelling of that directory is inside it. Throws when git could not be asked at all.
+   *
+   * Amendment (Y-1): a set rather than one answer, for the reason `workingTreePositions` gives — a
+   * hook directory reached through a symlink occupies two positions and a write to either one of
+   * them installs a program git runs on its own.
    *
    * Amendment (X-3). The narrow question, for callers that need the location and not the inventory:
    * "is this path one git or the toolchain AUTO-EXECUTES". A regular expression over file names
@@ -932,9 +1043,9 @@ export class GitBroker {
    * A THROW is a real answer here and callers are expected to treat it as one: not knowing where the
    * auto-executed directory is means not being able to say a write is outside it.
    */
-  async hookDirectoryPosition(workspaceInput: string): Promise<string | null> {
+  async hookDirectoryPositions(workspaceInput: string): Promise<string[]> {
     const workspace = await canonicalWorkspace(workspaceInput);
-    return workingTreePosition(
+    return workingTreePositions(
       workspace, await this.#gitPath(workspace, "hooks", promotionGitEnvironment()),
     );
   }

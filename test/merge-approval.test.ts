@@ -466,6 +466,13 @@ test("a truncated preview is not approvable, whichever list was truncated", asyn
     // for one truncation is not redundancy — each says which question went unanswered, and the
     // structural rule ([[PITFALLS]] #74) is that a gate states its own condition rather than relying
     // on a neighbour happening to fire on the same input.
+    //
+    // Amendment (Y-3) records WHY this fires on an ordinary repository, because the documentation
+    // used to say it should not: `.git/hooks` is INSIDE the working tree — `insideWorkingTree` is
+    // measured as `[".git/hooks"]`, not `[]` — and the only reason an ordinary merge never trips the
+    // blocker is that git refuses to track anything under `.git/`, so the path never appears in the
+    // file list. With the list truncated there is no file list to say that with, so the third name
+    // is the honest answer and not an over-refusal.
     assert.deepEqual(preview.blockers, [
       "PREVIEW_FILES_TRUNCATED", "OVERWRITE_SCAN_FILE_LIST_TRUNCATED", "HOOK_DIRECTORY_EXPOSURE_UNVERIFIABLE",
     ]);

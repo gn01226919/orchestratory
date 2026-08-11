@@ -475,6 +475,44 @@ test("a directory git does not run hooks from stays writable, and so does a same
 });
 
 /**
+ * AMENDMENT (Y-1)/P2-1: the answer is asked again, because the question is about RIGHT NOW.
+ *
+ * `core.hooksPath` lives in a config file that outlives any one broker, and a broker created before
+ * the repository was reconfigured used to go on answering with the directory that was auto-executed
+ * then. Measured (`w2-stale`): the same write a freshly-built broker refused was admitted by the
+ * older one, which is a stale answer to a mutable question ([[PITFALLS]] #103).
+ */
+test("a broker built before the repository was reconfigured does not use its old answer", async (t) => {
+  const root = await gitWorkspace("orchestratory-mcp-stale-");
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const broker = await WorkspaceToolBroker.create(root, "write", { authorizeWrite: () => {} });
+  // Precondition ([[PITFALLS]] #106/#129): before the reconfiguration this path is genuinely
+  // writable, so the refusal afterwards is the reconfiguration being noticed and nothing else.
+  await broker.call("create_directory", { path: "tools" });
+  await broker.call("write_file", {
+    path: "tools/hooks-probe", content: "probe\n", expectedSha256: null,
+  });
+
+  await execFileAsync("git", ["config", "core.hooksPath", "tools"], { cwd: root });
+  await assert.rejects(
+    broker.call("write_file", {
+      path: "tools/pre-merge-commit", content: "#!/bin/sh\nexit 0\n", expectedSha256: null,
+    }),
+    /SENSITIVE_WORKSPACE_PATH_DENIED/u,
+    "the broker admitted a write into the directory git now runs hooks from",
+  );
+  await assert.rejects(broker.call("create_directory", { path: "tools/nested" }),
+    /SENSITIVE_WORKSPACE_PATH_DENIED/u);
+
+  // And back again, in the direction that would be a permanent refusal if this were a one-way latch.
+  await execFileAsync("git", ["config", "--unset", "core.hooksPath"], { cwd: root });
+  await broker.call("write_file", {
+    path: "tools/ordinary.txt", content: "ordinary\n", expectedSha256: null,
+  });
+  assert.equal(await readFile(join(root, "tools", "ordinary.txt"), "utf8"), "ordinary\n");
+});
+
+/**
  * AMENDMENT (X-3), the fail-closed direction: a write broker that cannot ask git does not exist.
  *
  * A Writer's workspace is always a task-bound git worktree here, so "git could not answer" is an

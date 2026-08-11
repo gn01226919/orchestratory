@@ -8,7 +8,7 @@ import { canonicalWorkspace } from "../security/workspace.ts";
 import {
   GitBroker, MERGE_TIMEOUT_MS, readExecutedHooks, readExecutedRepositoryPrograms,
   readLeaderSessionOpened,
-  type GitInspection, type GitRestorePoint,
+  type GitInspection, type GitRestorePoint, type PromotionTraceSource,
 } from "./git-broker.ts";
 import { minimalGitEnvironment, resolveExecutable, runProcess } from "./process-runner.ts";
 import { openOwnerDatabase, verifyOwnerDatabaseFiles } from "./sqlite-security.ts";
@@ -121,11 +121,12 @@ export interface PromotionFacts {
   hooks: {
     hooksPath: string;
     /**
-     * Where that directory sits inside the working tree, or `null` for outside it; see
-     * `HookEnvironment.insideWorkingTree`. Absent on a snapshot taken before amendment (X-1), and
-     * `promotionFacts` refuses such a snapshot by name rather than reading the absence as "outside".
+     * EVERY position that directory occupies inside the working tree, `[]` for outside it and `null`
+     * when git could not be asked; see `HookEnvironment.insideWorkingTree`. Absent on a snapshot
+     * taken before amendment (X-1) and a single string on one taken before amendment (Y-1);
+     * `promotionFacts` refuses both by name rather than reading either as "outside".
      */
-    insideWorkingTree?: string | null;
+    insideWorkingTree?: string[] | null;
     hooks: Array<{ name: string; sha256: string; bytes: number }>;
     drivers: string[];
     filters: string[];
@@ -3260,16 +3261,29 @@ function hookDirectoryBlockers(
   hooks: PromotionFacts["hooks"], preview: CandidateCompletionPreview,
 ): string[] {
   const inside = hooks.insideWorkingTree;
-  // Not inside the working tree — including a snapshot taken before this field existed, which is
-  // refused by name at `promotionFacts` rather than defaulted to safe here.
-  if (typeof inside !== "string") return [];
+  // Not inside the working tree at any spelling — including a snapshot taken before this field
+  // existed or carrying its pre-(Y-1) single-string shape, both of which are refused by name at
+  // `promotionFacts` rather than defaulted to safe here.
+  if (!Array.isArray(inside) || inside.length === 0) return [];
   // The file list is the evidence. Without a complete one there is no way to say the merge leaves
   // that directory alone, and "I could not look" is not "nothing there" (PITFALLS #85).
   if (preview.filesTruncated) return [HOOK_DIRECTORY_EXPOSURE_UNVERIFIABLE];
   const written = preview.files.some((file) =>
-    underHookDirectory(inside, file.path)
-    || (typeof file.previousPath === "string" && underHookDirectory(inside, file.previousPath)));
+    underAnyHookDirectory(inside, file.path)
+    || (typeof file.previousPath === "string" && underAnyHookDirectory(inside, file.previousPath)));
   return written ? [MERGE_WOULD_INSTALL_THE_HOOKS_IT_RUNS] : [];
+}
+
+/**
+ * Whether a path this merge writes lands in ANY position the hook directory occupies.
+ *
+ * Amendment (Y-1). One position was never enough: a hook directory reached through a symlink is at
+ * two of them, and the merge writes the one a name-based check does not look at. Any is the only
+ * correct quantifier here — the question is "can this merge install a program git runs", and one
+ * spelling landing inside is enough for the answer to be yes.
+ */
+function underAnyHookDirectory(directories: readonly string[], path: string): boolean {
+  return directories.some((directory) => underHookDirectory(directory, path));
 }
 
 /** Segment-wise containment, so `.githooks-backup/x` is not read as being inside `.githooks`. */
@@ -3314,8 +3328,16 @@ function promotionFacts(preview: CandidateCompletionPreview): PromotionFacts | u
   // Amendment (X-1) adds a third field for the same reason the second one was added: a snapshot that
   // predates it was never checked against "does this merge write the directory its hooks run from",
   // and a missing field must not be read as the answer that lets the promotion through.
+  //
+  // Amendment (Y-1) narrows what counts as that field. A snapshot carrying the old SINGLE-STRING
+  // shape is refused here too, and deliberately: it was judged against one spelling of the hook
+  // directory while the merge writes another, so it is a snapshot that was checked against a
+  // question this code no longer believes the answer to. "Older than this feature" already has a
+  // terminal state that releases the task's slot; this is the same situation one field down.
+  const inside = facts.hooks?.insideWorkingTree;
   const positioned = facts.hooks !== undefined
-    && (facts.hooks.insideWorkingTree === null || typeof facts.hooks.insideWorkingTree === "string");
+    && (inside === null
+      || (Array.isArray(inside) && inside.every((position) => typeof position === "string")));
   return typeof facts.hooks?.configDigest === "string" && Array.isArray(facts.hooks.programs) && positioned
     ? facts
     : undefined;
@@ -4703,6 +4725,14 @@ export class CandidateRegistry {
     // observed thing which process to look for. Silencing all three left `survivors` empty over a
     // live group and produced `git reset --hard`.
     let firstHandGroup: MergeProcessGroupIdentity | null = null;
+    // Amendment (Y-2). The merge LEADER's pid, kept here in memory and never persisted, for the one
+    // question that has to be anchored on a number the observed thing cannot supply: is the session
+    // git opened in this trace the session THIS process started. `runProcess` spawns the merge
+    // detached, so the pid it reports is also the group id — one number, two meanings, and this name
+    // is the one that says which meaning the trace check uses.
+    let leaderPid: number | null = null;
+    // The descriptor this process opened for the trace before the merge existed; see below.
+    let traceFd: number | null = null;
     // Amendment (V-3), narrowed to what it can actually claim by amendment (W-2). This is the BEFORE
     // half: the live inventory this promotion just re-verified against the approval binding, read
     // before anything runs. It is a snapshot, so it can only ever be one half of the answer — the
@@ -4730,10 +4760,23 @@ export class CandidateRegistry {
       const trace = this.#promotionTracePath(promotion.id);
       try { mkdirSync(join(this.#dataDirectory, "promotion-traces"), { recursive: true, mode: 0o700 }); }
       catch { /* a trace that cannot be written costs an observation, never the merge */ }
+      // Amendment (Y-2). The file is created HERE, by this process, before git is spawned, and the
+      // descriptor is kept for the settlement to read through. `wx+` is the whole point: exclusive
+      // creation means a file already sitting at this path is somebody else's, and a descriptor
+      // survives a `rename(2)` over the path, which is how the measured laundering attack worked —
+      // the hook filtered the trace and moved the copy back, leaving the PATH clean while git and
+      // this descriptor both went on pointing at the original inode. Measured on git 2.50.1: read
+      // through this descriptor, the same run still names `.git/hooks/pre-merge-commit`.
+      //
+      // A failure to create it is not a reason to refuse the merge — it is a reason not to claim
+      // anything the trace would have said, and `#settlePromotion` treats a promotion with no
+      // first-hand trace as one whose programs it cannot account for.
+      try { traceFd = openSync(trace, "wx+", 0o600); } catch { traceFd = null; }
       attempt = await this.#git.mergeIntoHead(
         row.main_path, row.candidate_head, mergeTimeoutMs,
         (pgid) => {
           gitSpawnObserved = true;
+          leaderPid = pgid;
           // Built here rather than inside `#recordMergePgid` so that the write failing — the ordinary
           // SQLite contention of [[PITFALLS]] #65 — cannot also lose the identity itself.
           firstHandGroup = {
@@ -4760,9 +4803,17 @@ export class CandidateRegistry {
         if (await this.#git.mergeInProgress(row.main_path)) await this.#git.abortMerge(row.main_path);
       } catch { /* the observation below decides what actually happened, not this call's success */ }
     }
-    const settled = await this.#settlePromotion(promotion, attempt, {
-      leaderExitObserved, gitSpawnObserved, firstHandGroup, untrustedProgramsSnapshot,
-    });
+    let settled: { row: PromotionRow; mainMutated: boolean };
+    try {
+      settled = await this.#settlePromotion(promotion, attempt, {
+        leaderExitObserved, gitSpawnObserved, firstHandGroup, untrustedProgramsSnapshot,
+        leaderPid, traceFd,
+      });
+    } finally {
+      // The descriptor's whole job is over once the settlement has read it. Closing it here rather
+      // than earlier is what keeps it valid across the merge, which is the reason it exists.
+      if (traceFd !== null) try { closeSync(traceFd); } catch { /* this descriptor is ours alone */ }
+    }
     promotion = settled.row;
     return {
       promotion: this.#publicPromotion(promotion),
@@ -6308,6 +6359,8 @@ export class CandidateRegistry {
     row: PromotionRow,
     conclusion: MergeWriteConclusion,
     attempt?: { exitCode: number; timedOut: boolean },
+    /** Amendment (Y-2): the first-hand trace descriptor, when this pass is the one that ran the merge. */
+    traceSource?: PromotionTraceSource,
   ): Promise<{
     observation: MergePromotionObservation;
     state: MergePromotionState;
@@ -6397,7 +6450,10 @@ export class CandidateRegistry {
       observation.mergePgid = null;
       observation.mergeGroup = null;
     };
-    const hooks = await readExecutedHooks(this.#promotionTracePath(row.id));
+    // Amendment (Y-2): read through the descriptor when this pass has one, so that the DISCLOSURE
+    // and the gate are looking at the same bytes. A reader that did not run the merge has only the
+    // path, and the path is a record the merge could have replaced.
+    const hooks = await readExecutedHooks(traceSource ?? { path: this.#promotionTracePath(row.id) });
     if (hooks !== null) observation.hooksExecuted = hooks;
     try {
       observation.mergeInProgress = await this.#git.mergeInProgress(row.main_path);
@@ -6605,6 +6661,17 @@ export class CandidateRegistry {
        * what git says it actually started.
        */
       untrustedProgramsSnapshot: boolean;
+      /**
+       * Amendment (Y-2): the merge leader's pid as the spawn callback handed it over, from this
+       * process's memory and from nowhere else. `null` when no pid was ever received.
+       */
+      leaderPid: number | null;
+      /**
+       * Amendment (Y-2): the descriptor this process opened for the trace BEFORE the merge existed,
+       * or `null` when it could not create one. A path can be replaced under a reader; a descriptor
+       * cannot.
+       */
+      traceFd: number | null;
     },
   ): Promise<{ row: PromotionRow; mainMutated: boolean }> {
     // Amendment (W-2). The after half, read from git's own trace of THIS promotion, before the
@@ -6616,7 +6683,18 @@ export class CandidateRegistry {
     // (`null`) and a trace that names nothing both contribute `false`, so ABSENCE never loosens,
     // while a trace naming one program tightens even if the pre-merge snapshot saw nothing. Neither
     // half may be weakened by the other being false.
-    const observedPrograms = await readExecutedRepositoryPrograms(this.#promotionTracePath(row.id));
+    //
+    // Amendment (Y-2) changes WHERE this is read from. The trace's path is handed to every hook the
+    // merge runs, so a path-based read is a read of a file the observed thing may replace: measured
+    // (`k5-launder`), a hook filtered the trace and `mv`-ed the copy back, and the path then held a
+    // genuine leader `start` and no children at all. The descriptor opened before the merge started
+    // still points at what git actually wrote.
+    // `-1` when there is no descriptor, and deliberately not a fallback to the path: a promotion
+    // whose trace this process did not create has no first-hand record to consult, and an
+    // unreadable source is the answer that tightens. Falling back would put the gate back on a file
+    // the merge can rewrite, which is the whole finding.
+    const firstHandTrace: PromotionTraceSource = { fd: options.traceFd ?? -1 };
+    const observedPrograms = await readExecutedRepositoryPrograms(firstHandTrace);
     // Amendment (X-4). The third disjunct, and the one that closes the hole the other two left: a
     // hook can EMPTY the trace before it exits, and an empty trace names no program, so the two
     // halves above both answered `false` about a promotion that had just run attacker code. Measured
@@ -6632,7 +6710,9 @@ export class CandidateRegistry {
     // and "its own opening events are not in the trace" cannot both be true unless something inside
     // that merge removed them. `gitSpawnObserved` is first-hand and never persisted, so no reader
     // that did not run the merge can be talked into this branch by a file.
-    const leaderSessionOpened = await readLeaderSessionOpened(this.#promotionTracePath(row.id));
+    //
+    // Amendment (Y-2) gives it the pid and the descriptor. Both only ever tighten.
+    const leaderSessionOpened = await readLeaderSessionOpened(firstHandTrace, options.leaderPid);
     const traceTampered = options.gitSpawnObserved && !leaderSessionOpened;
     const untrustedProgramsRan = options.untrustedProgramsSnapshot
       || (observedPrograms !== null && observedPrograms.length > 0)
@@ -6642,7 +6722,10 @@ export class CandidateRegistry {
       firstHandGroup: options.firstHandGroup,
       untrustedProgramsRan,
     });
-    const observed = await this.#observeMain(row, conclusion, attempt);
+    // The DISCLOSURE gets the descriptor when there is one and the path otherwise: `hooksExecuted`
+    // is a list shown to the owner, not a gate, so a path read there can only add a name.
+    const observed = await this.#observeMain(
+      row, conclusion, attempt, options.traceFd === null ? undefined : firstHandTrace);
     // Amendment (V-4). Read BEFORE the two gates below can rewrite the state, because it is what the
     // caller is answering with and what marks the candidate merged, and neither of those has anything
     // to do with the exclusive marker. `#observeMain` reaches `applied` only on

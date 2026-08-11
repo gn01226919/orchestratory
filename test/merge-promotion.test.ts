@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import {
-  chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rm, stat, writeFile,
+  chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rm, stat, symlink, writeFile,
 } from "node:fs/promises";
 import { chmodSync, writeFileSync } from "node:fs";
 import { tmpdir, uptime } from "node:os";
@@ -31,7 +31,7 @@ import {
   type UnreadableMergePromotion,
 } from "../src/core/candidate-registry.ts";
 import { CollaborationService } from "../src/core/collaboration-service.ts";
-import { GitBroker, readExecutedHooks } from "../src/core/git-broker.ts";
+import { GitBroker, readExecutedHooks, readLeaderSessionOpened } from "../src/core/git-broker.ts";
 import { runCandidatePromotionsCommand } from "../src/main.ts";
 import { helpText } from "../src/help.ts";
 
@@ -2890,15 +2890,15 @@ test("a hook trace that could not be read is absent, not an empty list of hooks"
   const root = await mkdtemp(join(tmpdir(), "orchestratory-trace-"));
   t.after(async () => await rm(root, { recursive: true, force: true }));
 
-  assert.equal(await readExecutedHooks(join(root, "does-not-exist.jsonl")), null,
+  assert.equal(await readExecutedHooks({ path: join(root, "does-not-exist.jsonl") }), null,
     "a trace that does not exist must not read as 'no hooks ran'");
   await mkdir(join(root, "a-directory.jsonl"));
-  assert.equal(await readExecutedHooks(join(root, "a-directory.jsonl")), null);
+  assert.equal(await readExecutedHooks({ path: join(root, "a-directory.jsonl") }), null);
 
   // Read, and genuinely empty of hooks: git wrote a trace, no `child_class:"hook"` event is in it.
   const empty = join(root, "empty.jsonl");
   await writeFile(empty, `${JSON.stringify({ event: "version", sid: "s" })}\n`, "utf8");
-  assert.deepEqual(await readExecutedHooks(empty), []);
+  assert.deepEqual(await readExecutedHooks({ path: empty }), []);
 
   // And one that did record a hook, so the empty answer above is not simply what this always says.
   const one = join(root, "one.jsonl");
@@ -2907,8 +2907,67 @@ test("a hook trace that could not be read is absent, not an empty list of hooks"
     JSON.stringify({ event: "child_exit", sid: "s", child_id: 0, code: 3 }),
     "",
   ].join("\n"), "utf8");
-  assert.deepEqual(await readExecutedHooks(one),
+  assert.deepEqual(await readExecutedHooks({ path: one }),
     [{ name: "pre-merge-commit", path: "/x/pre-merge-commit", exitCode: 3 }]);
+});
+
+/*
+ * AMENDMENT (Y-2), at the function boundary, because that is the only place this leg is reachable.
+ *
+ * Through the product, every hook-based doctoring of a trace is caught one leg earlier — the hook is
+ * a child git started, so either its `child_start` is still on the inode the descriptor holds, or
+ * git's own later `child_exit` is left as an orphan. Asserting the pid comparison through
+ * `promoteMainMerge` therefore measures the other legs ([[PITFALLS]] #129: the attack must actually
+ * reach the gate under test). What the pid is FOR is a trace doctored by something that is not a
+ * child of this merge at all — a process the merge left behind, editing the file after the merge has
+ * exited — and the honest way to test that is to hand this function the two traces directly.
+ */
+test("a top-level session is only the leader's when it carries the pid this process spawned", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "orchestratory-leadersid-"));
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const trace = async (name: string, sid: string): Promise<string> => {
+    const path = join(root, name);
+    await writeFile(path, `${JSON.stringify({ event: "start", sid, argv: ["git", "merge"] })}\n`, "utf8");
+    return path;
+  };
+  // Measured on git 2.50.1: the pid is the last field of the session id, in hex, zero-padded.
+  const leader = await trace("leader.jsonl", "20260809T000000.000000Z-Habcdef01-P000131a4");
+  assert.equal(await readLeaderSessionOpened({ path: leader }, 0x131a4), true);
+  assert.equal(await readLeaderSessionOpened({ path: leader }, 0x131a5), false,
+    "a top-level session belonging to another git answered for this promotion");
+  assert.equal(await readLeaderSessionOpened({ path: leader }, null), false,
+    "no pid in hand is not the same as a matching pid");
+
+  // A forged flat session id with an invented pid — the `k4` shape, with nothing else in the file.
+  const forged = await trace("forged.jsonl", "20260809T000000.000000Z-Hdeadbeef-P0000f4b7");
+  assert.equal(await readLeaderSessionOpened({ path: forged }, 0x131a4), false,
+    "a forged top-level session id stood in for the session this process started");
+
+  // And a session id git no longer spells this way is an unanswered question, never a yes.
+  const unshaped = await trace("unshaped.jsonl", "20260809T000000.000000Z-Habcdef01");
+  assert.equal(await readLeaderSessionOpened({ path: unshaped }, 0x131a4), false);
+  const nested = await trace("nested.jsonl",
+    "20260809T000000.000000Z-Habcdef01-P000131a4/20260809T000001.000000Z-Habcdef01-P000131a4");
+  assert.equal(await readLeaderSessionOpened({ path: nested }, 0x131a4), false,
+    "a nested session stood in for the top-level one");
+
+  // Seventeenth round. Only a `start` OPENS a session, and that restriction had no assertion of its
+  // own. git writes `atexit` — and, once a hook has emptied the file, the `child_exit` for that very
+  // hook — under the leader's own flat session id carrying the leader's own pid. A reader that
+  // accepted any event would therefore let git's own CLOSING events stand in for the opening ones
+  // that were just erased, and the pid comparison would agree with it, because the pid genuinely is
+  // the leader's. This is asserted here rather than through `promoteMainMerge` for the reason the
+  // comment above this test gives: through the product that shape is caught one leg earlier.
+  const closingOnly = join(root, "closing-only.jsonl");
+  await writeFile(closingOnly, [
+    JSON.stringify({ event: "atexit", sid: "20260809T000000.000000Z-Habcdef01-P000131a4", code: 0 }),
+    JSON.stringify({
+      event: "child_exit", sid: "20260809T000000.000000Z-Habcdef01-P000131a4", child_id: 0, code: 1,
+    }),
+    "",
+  ].join("\n"), "utf8");
+  assert.equal(await readLeaderSessionOpened({ path: closingOnly }, 0x131a4), false,
+    "git's own closing events stood in for the `start` a hook had erased");
 });
 
 /*
@@ -3571,7 +3630,23 @@ test("a v5 snapshot taken before the configuration fields existed is terminal, n
   // `insideWorkingTree` is the third field, added by amendment (X-1) and refused for the same
   // reason: a snapshot that predates it was never checked against "does this merge write the
   // directory its hooks run from", and a missing field must not be read as the permissive answer.
-  for (const drop of ["configDigest", "programs", "insideWorkingTree"] as const) {
+  //
+  // The fourth case is amendment (Y-1) and is NOT a missing field: it is the field in its previous
+  // SHAPE, a single string. That snapshot was checked — against one spelling of the hook directory,
+  // while the merge writes another — so it is refused for the same reason a missing one is. Without
+  // this case the shape check is unreachable and a mutation that accepts the old shape stays green
+  // ([[PITFALLS]] #106).
+  const downgrades: Array<[string, (hooks: Record<string, unknown>) => void]> = [
+    ["configDigest", (hooks) => { delete hooks.configDigest; }],
+    ["programs", (hooks) => { delete hooks.programs; }],
+    ["insideWorkingTree", (hooks) => { delete hooks.insideWorkingTree; }],
+    ["insideWorkingTree as a pre-(Y-1) string", (hooks) => {
+      const positions = hooks.insideWorkingTree;
+      assert.ok(Array.isArray(positions), "the field is no longer a set, so this downgrade is not one");
+      hooks.insideWorkingTree = positions[0] ?? "";
+    }],
+  ];
+  for (const [drop, downgrade] of downgrades) {
     const f = await fixture(t);
     const approval = await raise(f);
     f.registry.close();
@@ -3579,8 +3654,7 @@ test("a v5 snapshot taken before the configuration fields existed is terminal, n
     // `promotion` itself stays. Only the two fields that round added are absent, exactly as the
     // commit before it wrote them.
     rewindPreview(f.path, f.task.taskId, (preview) => {
-      const hooks = (preview.promotion as { hooks: Record<string, unknown> }).hooks;
-      delete hooks[drop];
+      downgrade((preview.promotion as { hooks: Record<string, unknown> }).hooks);
     });
     assert.equal(schemaVersion(f.path), 6, "the fixture stopped being a current-schema database");
 
@@ -8709,6 +8783,168 @@ test("core.hooksPath set to the empty string makes the working tree root the hoo
     `blockers: ${preview.blockers.join(",")}`);
 });
 
+/*
+ * ============================================================================================
+ * AMENDMENT (Y-1) — the `realpath` arm of the union, which the previous round WROTE DOWN as
+ * untested and then left there.
+ *
+ * `workingTreePosition()`'s comment said the two spellings "are UNIONED"; the code returned on the
+ * first one that landed inside and the field was a single string. A merge writes the REALPATH, so a
+ * hook directory reached through a symlink was judged at one spelling and rewritten at the other.
+ * Both shapes below were measured end to end on this product before the fix: `approvable: true`,
+ * `blockers: []`, `insideWorkingTree` naming the symlink, attacker code executed as the owner,
+ * `state: applied`, and the sha256 on the approval screen not the sha256 that ran.
+ *
+ * There is one test per spelling — that is the rule the amendment states, and the reason it states
+ * it is that the arm with no fixture was the arm that was exploitable. The mutation that goes with
+ * them is "stop after the first spelling", i.e. the code as it was.
+ * ============================================================================================
+ */
+
+/**
+ * (Y-1), shape A: `core.hooksPath` names a TRACKED SYMLINK pointing into tracked content.
+ *
+ * `.githooks -> tools/hooks` is an ordinary way to share hooks across worktrees. git answers
+ * `--git-path hooks` with `.githooks`, and every write the merge makes is spelled `tools/hooks/…`,
+ * so the lexical position and the written position never meet.
+ */
+test("a hook directory reached through a tracked symlink is judged at both spellings", async (t) => {
+  const attacker = join(await mkdtemp(join(tmpdir(), "orchestratory-y1a-")), "attacker-ran");
+  const f = await fixture(t, {
+    beforeInitialCommit: async (source) => {
+      await mkdir(join(source, "tools", "hooks"), { recursive: true });
+      await writeFile(join(source, "tools", "hooks", "pre-merge-commit"),
+        "#!/bin/sh\nexit 0\n", { encoding: "utf8", mode: 0o755 });
+      await symlink("tools/hooks", join(source, ".githooks"));
+      await execFileAsync("git", ["config", "core.hooksPath", ".githooks"], { cwd: source });
+    },
+    beforeComplete: async ({ candidatePath }) => {
+      await writeFile(join(candidatePath, "tools", "hooks", "pre-merge-commit"),
+        `#!/bin/sh\ntouch ${JSON.stringify(attacker)}\nexit 0\n`, "utf8");
+      await execFileAsync("git", ["add", "--", "tools/hooks/pre-merge-commit"], { cwd: candidatePath });
+      await execFileAsync("git", [...author, "commit", "-m", "swap the hook"], { cwd: candidatePath });
+    },
+  });
+  const beforeHead = await head(f.source);
+  const real = await realpath(f.source);
+
+  const preview = await f.registry.previewMainMerge({
+    taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+  });
+  // Preconditions ([[PITFALLS]] #106/#129), all four, because without them a refusal below could be
+  // coming from something else entirely.
+  assert.equal(preview.hooks.hooksPath, join(real, ".githooks"),
+    "git no longer resolves the hook directory to the symlink, so this is not the case any more");
+  assert.deepEqual(preview.hooks.hooks.map((entry) => entry.name), ["pre-merge-commit"],
+    "the hook is not reachable through the link; the scenario is not the one");
+  assert.ok(preview.preview.files.some((file) => file.path === "tools/hooks/pre-merge-commit"),
+    "this merge does not write the hook through its real path, so nothing is being tested");
+  assert.ok(!preview.preview.files.some((file) => file.path.startsWith(".githooks/")),
+    "the merge writes the LEXICAL spelling too, so the union is not what is being exercised");
+  // The union itself, as a value: one directory, two positions, both kept.
+  assert.deepEqual([...preview.hooks.insideWorkingTree ?? []].sort(), [".githooks", "tools/hooks"]);
+
+  assert.equal(preview.approvable, false, "the owner is still being offered this to sign");
+  assert.ok(preview.blockers.includes("MERGE_WOULD_INSTALL_THE_HOOKS_IT_RUNS"),
+    `blockers: ${preview.blockers.join(",")}`);
+  await assert.rejects(
+    f.registry.requestMainMerge({
+      actor: "codex1", clientRequestId: key(), taskId: f.task.taskId, roomId: "demo",
+      mainPath: f.source, completionId: preview.completionId, previewDigest: preview.previewDigest,
+    }),
+    /MERGE_WOULD_INSTALL_THE_HOOKS_IT_RUNS/u,
+  );
+  assert.equal(await exists(attacker), false, "the candidate's hook ran as the owner");
+  assert.equal(await head(f.source), beforeHead);
+});
+
+/**
+ * (Y-1), shape B: no `core.hooksPath` at all — `.git/hooks` is itself a symlink into the tree.
+ *
+ * `ln -s ../tools/hooks .git/hooks` is the other common way to share hooks, and it needs no
+ * configuration, so nothing on the approval screen looks unusual. git answers `.git/hooks`, which
+ * amendment (Y-3) records as being INSIDE the working tree (the reason it is ordinarily harmless is
+ * that git refuses to track `.git/*`, not that it is outside) — and the realpath is `tools/hooks`,
+ * which the merge writes.
+ */
+test("a .git/hooks symlink into tracked content is judged at both spellings too", async (t) => {
+  const attacker = join(await mkdtemp(join(tmpdir(), "orchestratory-y1b-")), "attacker-ran");
+  const f = await fixture(t, {
+    beforeInitialCommit: async (source) => {
+      await mkdir(join(source, "tools", "hooks"), { recursive: true });
+      await writeFile(join(source, "tools", "hooks", "pre-merge-commit"),
+        "#!/bin/sh\nexit 0\n", { encoding: "utf8", mode: 0o755 });
+      await rm(join(source, ".git", "hooks"), { recursive: true, force: true });
+      await symlink("../tools/hooks", join(source, ".git", "hooks"));
+    },
+    beforeComplete: async ({ candidatePath }) => {
+      await writeFile(join(candidatePath, "tools", "hooks", "pre-merge-commit"),
+        `#!/bin/sh\ntouch ${JSON.stringify(attacker)}\nexit 0\n`, "utf8");
+      await execFileAsync("git", ["add", "--", "tools/hooks/pre-merge-commit"], { cwd: candidatePath });
+      await execFileAsync("git", [...author, "commit", "-m", "swap the hook"], { cwd: candidatePath });
+    },
+  });
+  const beforeHead = await head(f.source);
+
+  const preview = await f.registry.previewMainMerge({
+    taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+  });
+  assert.equal(preview.hooks.hooksPath, join(await realpath(f.source), ".git", "hooks"),
+    "git no longer answers `.git/hooks` here, so this case has changed shape");
+  assert.deepEqual(preview.hooks.hooks.map((entry) => entry.name), ["pre-merge-commit"]);
+  assert.ok(preview.preview.files.some((file) => file.path === "tools/hooks/pre-merge-commit"),
+    "this merge does not write the hook through its real path, so nothing is being tested");
+  assert.deepEqual([...preview.hooks.insideWorkingTree ?? []].sort(),
+    [".git/hooks", "tools/hooks"]);
+
+  assert.equal(preview.approvable, false);
+  assert.ok(preview.blockers.includes("MERGE_WOULD_INSTALL_THE_HOOKS_IT_RUNS"),
+    `blockers: ${preview.blockers.join(",")}`);
+  assert.equal(await exists(attacker), false);
+  assert.equal(await head(f.source), beforeHead);
+});
+
+/**
+ * (Y-1), the other direction ([[PITFALLS]] #107): the union must not refuse an ordinary merge.
+ *
+ * Same symlinked hook directory, same two positions — and a merge that writes NEITHER of them. If
+ * keeping both spellings had turned into "any repository that symlinks its hooks is unpromotable",
+ * the two tests above would prove nothing about the gate and everything about a blanket refusal.
+ */
+test("a symlinked hook directory this merge does not write is still promotable", async (t) => {
+  const ownerRan = join(await mkdtemp(join(tmpdir(), "orchestratory-y1ok-")), "owner-hook-ran");
+  const f = await fixture(t, {
+    beforeInitialCommit: async (source) => {
+      await mkdir(join(source, "tools", "hooks"), { recursive: true });
+      await writeFile(join(source, "tools", "hooks", "pre-merge-commit"),
+        `#!/bin/sh\ntouch ${JSON.stringify(ownerRan)}\nexit 0\n`, { encoding: "utf8", mode: 0o755 });
+      await symlink("tools/hooks", join(source, ".githooks"));
+      await execFileAsync("git", ["config", "core.hooksPath", ".githooks"], { cwd: source });
+    },
+    beforeComplete: async ({ candidatePath }) => {
+      // A sibling of the REAL position whose name starts with it, so segment-wise containment is
+      // exercised on the spelling the union added rather than only on the lexical one.
+      await mkdir(join(candidatePath, "tools", "hooks-notes"), { recursive: true });
+      await writeFile(join(candidatePath, "tools", "hooks-notes", "note.md"), "notes\n", "utf8");
+      await execFileAsync("git", ["add", "-A"], { cwd: candidatePath });
+      await execFileAsync("git", [...author, "commit", "-m", "notes beside the hooks"], { cwd: candidatePath });
+    },
+  });
+  const preview = await f.registry.previewMainMerge({
+    taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+  });
+  assert.deepEqual([...preview.hooks.insideWorkingTree ?? []].sort(), [".githooks", "tools/hooks"],
+    "the hook directory is not at two positions, so this control proves nothing");
+  assert.ok(preview.preview.files.some((file) => file.path === "tools/hooks-notes/note.md"),
+    "the same-prefix sibling is not in this merge, so that half of the control is not exercised");
+  assert.equal(preview.approvable, true, preview.blockers.join(","));
+
+  const approval = await raise(f);
+  const result = await promote(f, approval, await grant(f, approval));
+  assert.equal(result.mainMutated, true, "a repository that symlinks its hooks can no longer promote");
+  assert.equal(await exists(ownerRan), true, "the owner's own hook did not run");
+});
+
 /**
  * AMENDMENT (X-4). A hook that empties git's own trace before it exits.
  *
@@ -8816,6 +9052,302 @@ test("an intact trace leaves an ordinary promotion able to reach a terminal appl
   assert.equal(result.promotion.state, "applied");
   assert.equal(result.mainMutated, true);
   assert.equal(result.promotion.observation.mergeConclusion, "MERGE_LEADER_EXIT_OBSERVED");
+});
+
+/**
+ * SEVENTEENTH ROUND. The third disjunct on its own, which is the thing the sixteenth round argued
+ * about instead of measuring.
+ *
+ * Deleting `|| traceTampered` outright (`TRACEGATE`) left the whole suite green. Half of the round's
+ * answer to that was measured and correct — the doctoring fixtures really do reach this leg, and
+ * blinding two legs at once really does turn three tests red. The other half was not: "redundant, not
+ * a hole" needs the leg to be NECESSARY somewhere, and what the all-green cell actually measured is
+ * that it could be deleted and nothing would notice. By amendment (R) that is indistinguishable from
+ * a gate with no test at all.
+ *
+ * Why the corpus could not produce the shape: every doctoring fixture works through a hook, and a
+ * hook is a child git started, so git appends a `child_exit` for it once it exits. Emptying the trace
+ * leaves that exit an orphan and filtering it in place leaves the same orphan, and an orphan is
+ * something the SECOND leg counts. As long as the trace is readable at all, the second leg gets there
+ * first — which is exactly what the sixteenth round measured and then over-read.
+ *
+ * The shape that reaches this leg alone is the one `candidate-registry.ts` already documents and
+ * never measured: the trace could not be created. `openSync(trace, "wx+")` fails whenever the data
+ * directory is not writable or something already occupies the path, `traceFd` is then null, the
+ * first-hand source is `{ fd: -1 }`, and it reads as NOTHING — so a hook that ran leaves no orphan
+ * for the second leg to count, because there is no trace to count it in. The comment beside that
+ * `openSync` states the intended consequence in as many words: "a failure to create it is not a
+ * reason to refuse the merge — it is a reason not to claim anything the trace would have said."
+ * Nothing asserted that sentence, and the third disjunct is the only thing implementing it.
+ *
+ * What is at stake if it is deleted is not bookkeeping. Under `TRACEGATE` this same promotion
+ * concludes on the leader's exit, hands the project's exclusive marker back and offers the owner a
+ * destructive recovery command — over a merge that ran an attacker's hook which nothing observed.
+ * That is the `k3` terminal state again, reached through a different door.
+ */
+test("a promotion whose first-hand trace could not be created cannot settle on the leader's exit", async (t) => {
+  const f = await fixture(t);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const beforeHead = await head(f.source);
+  const entered = join(f.root, "hook-entered");
+
+  // Precondition ([[PITFALLS]] #106/#129): the BEFORE snapshot must see nothing, or the FIRST leg
+  // answers and this measures the wrong disjunct.
+  const preview = await f.registry.previewMainMerge({
+    taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+  });
+  assert.deepEqual(preview.hooks.hooks, [], "the pre-merge snapshot already sees a hook; not the cell");
+  assert.deepEqual(preview.hooks.drivers, []);
+  assert.deepEqual(preview.hooks.filters, []);
+
+  // The directory is taken away BEFORE the promotion, so the product's own exclusive create fails.
+  // `mkdir` with `recursive` does not reset the mode of a directory that is already there, so the
+  // product's own call to it cannot undo this.
+  const traces = join(f.data, "promotion-traces");
+  await mkdir(traces, { recursive: true, mode: 0o700 });
+  await chmod(traces, 0o500);
+  t.after(async () => { try { await chmod(traces, 0o700); } catch { /* already gone */ } });
+
+  // An ordinary hook, installed in the product's own fault-point window. It does not doctor anything
+  // and does not need to: there is no trace for it to doctor.
+  const hookPath = join(f.source, ".git", "hooks", "pre-merge-commit");
+  const promoter = new CandidateRegistry(f.data, {
+    faultPoint: (point) => {
+      if (point !== "approval-consume-write") return;
+      writeFileSync(hookPath, [
+        "#!/bin/sh", `touch ${JSON.stringify(entered)}`, "exit 1", "",
+      ].join("\n"), "utf8");
+      chmodSync(hookPath, 0o700);
+    },
+  });
+  t.after(() => promoter.close());
+  const result = await promoter.promoteMainMerge({
+    approvalId: approval.id, token, action: MERGE_APPROVAL_GRANT,
+    taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+  });
+
+  // The remaining preconditions. Without all three a green here would be measuring something else.
+  assert.equal(await exists(entered), true, "the hook never ran, so this measures nothing");
+  assert.equal(await exists(join(traces, `${result.promotion.id}.jsonl`)), false,
+    "a trace file exists after all, so `{ fd: -1 }` is not the source under test");
+  assert.equal(result.promotion.observation.hooksExecuted, undefined,
+    "a trace was read back, so the second leg is answering and not the third");
+
+  // And the sentence itself: a hook ran, nothing observed it, and the record will not conclude.
+  assert.equal(result.promotion.state, "applying",
+    "a promotion with no first-hand trace settled on the leader's exit anyway");
+  assert.equal(result.promotion.observation.mergeConclusion,
+    "MERGE_UNTRUSTED_PROGRAMS_RAN_LEADER_EXIT_INSUFFICIENT");
+  assert.equal(result.promotion.observation.recovery, undefined,
+    `a destructive command was offered: ${result.promotion.observation.recovery}`);
+  assert.equal(result.promotion.observation.recoveryKind, undefined);
+  assert.equal(result.mainMutated, false);
+  assert.equal(await head(f.source), beforeHead);
+});
+
+/*
+ * ============================================================================================
+ * AMENDMENT (Y-2) — stop enumerating ways a record can be doctored; anchor on facts this process
+ * holds in memory.
+ *
+ * (X-4) closed "the hook EMPTIED the trace". The next attack did not empty it, forge it or truncate
+ * it: it FILTERED it, keeping git's genuine `version`/`start` (flat sid, real pid) and dropping the
+ * child events. All three disjuncts answered "nothing ran" about a promotion that had just run
+ * attacker code, and the terminal state matched `k3`'s exactly — `rolled-back`, `git … reset --hard`,
+ * the exclusive marker handed back, a second promotion allowed and written, a `setsid` survivor
+ * still appending to main.
+ *
+ * The answer is not a fourth pattern. It is that the trace was being read BY PATH — a path handed to
+ * every hook the merge runs — and compared only against itself. Two first-hand facts were in this
+ * process's memory the whole time and neither was passed in: the descriptor this process opened for
+ * that file before git existed, and the pid it spawned.
+ * ============================================================================================
+ */
+
+/** The three shapes of trace doctoring, as hook bodies, so each has its own named fixture. */
+const TRACE_DOCTORING = {
+  /** (Y-2) `k5-launder`: keep git's real opening events, drop the children, `mv` the copy back. */
+  launder: [
+    'T="$GIT_TRACE2_EVENT"',
+    `grep -E '"event":"(version|start|def_repo|cmd_name|cmd_mode|cmd_path|cmd_ancestry)"' "$T" > "$T.k" 2>/dev/null`,
+    'mv "$T.k" "$T"',
+  ].join("\n"),
+  /** The same filter applied IN PLACE, so the inode is never replaced and the descriptor sees it. */
+  launderInPlace: [
+    'T="$GIT_TRACE2_EVENT"',
+    `grep -E '"event":"(version|start|def_repo|cmd_name|cmd_mode|cmd_path|cmd_ancestry)"' "$T" > "$T.k" 2>/dev/null`,
+    'cat "$T.k" > "$T"',
+  ].join("\n"),
+  /** (Y-2) `k4-forgedstart`: empty it, then write one flat-sid `start` with an invented pid. */
+  forge: [
+    'T="$GIT_TRACE2_EVENT"',
+    ': > "$T"',
+    `printf '%s\\n' '{"event":"start","sid":"20260809T000000.000000Z-Hdeadbeef-P0000f4b7","time":"2026-08-09T00:00:00.000000Z","argv":["git","merge"]}' > "$T"`,
+  ].join("\n"),
+} as const;
+
+/**
+ * Installs one of the doctoring bodies as `pre-merge-commit` at the product's own fault point, and
+ * promotes. The window is the fault point rather than a race, exactly as the (W-2)/(X-4) tests.
+ */
+async function promoteUnderDoctoredTrace(
+  t: TestContext, f: Fixture, approval: { id: string }, token: string, body: string,
+): Promise<{ result: Awaited<ReturnType<CandidateRegistry["promoteMainMerge"]>>; entered: string }> {
+  const entered = join(f.root, `hook-entered-${randomUUID()}`);
+  const hookPath = join(f.source, ".git", "hooks", "pre-merge-commit");
+  const promoter = new CandidateRegistry(f.data, {
+    faultPoint: (point) => {
+      if (point !== "approval-consume-write") return;
+      writeFileSync(hookPath, [
+        "#!/bin/sh", `touch ${JSON.stringify(entered)}`, body,
+        `mv "$0" ${JSON.stringify(join(f.root, `removed-hook-${randomUUID()}`))}`,
+        "exit 1", "",
+      ].join("\n"), "utf8");
+      chmodSync(hookPath, 0o700);
+    },
+  });
+  t.after(() => promoter.close());
+  const result = await promoter.promoteMainMerge({
+    approvalId: approval.id, token, action: MERGE_APPROVAL_GRANT,
+    taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+  });
+  return { result, entered };
+}
+
+/** The `start` session ids in a trace read BY PATH, which is what an attacker gets to shape. */
+async function pathTraceSessions(f: Fixture, promotionId: string): Promise<string[]> {
+  const text = await readFile(join(f.data, "promotion-traces", `${promotionId}.jsonl`), "utf8");
+  return text.split("\n").filter(Boolean)
+    .map((line) => { try { return JSON.parse(line) as { event?: unknown; sid?: unknown }; } catch { return {}; } })
+    .filter((event) => event.event === "start")
+    .map((event) => (typeof event.sid === "string" ? event.sid : ""));
+}
+
+/**
+ * (Y-2), the measured attack: a laundered trace, `mv`-ed back over the path.
+ *
+ * The preconditions are the whole point of this test. Read BY PATH the trace is a clean merge that
+ * ran nothing — a genuine leader `start` and no child events at all — so every check the previous
+ * round shipped answers "nothing ran". The record must still refuse to conclude.
+ */
+test("a hook that filters git's trace instead of emptying it cannot settle the record either", async (t) => {
+  const f = await fixture(t);
+  const other = await secondApprovedTask(f);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const beforeHead = await head(f.source);
+
+  const preview = await f.registry.previewMainMerge({
+    taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+  });
+  assert.deepEqual(preview.hooks.hooks, [], "the BEFORE snapshot already sees a hook; not the cell");
+  assert.deepEqual(preview.hooks.drivers, []);
+
+  const { result, entered } = await promoteUnderDoctoredTrace(
+    t, f, approval, token, TRACE_DOCTORING.launder);
+
+  // Preconditions ([[PITFALLS]] #106/#129). Each one is a check that used to answer "nothing ran".
+  assert.equal(await exists(entered), true, "the hook never ran, so this measures nothing");
+  const path = join(f.data, "promotion-traces", `${result.promotion.id}.jsonl`);
+  const sessions = await pathTraceSessions(f, result.promotion.id);
+  assert.equal(sessions.some((sid) => !sid.includes("/")), true,
+    "the leader's genuine `start` did not survive the filter, so this is the (X-4) case again");
+  assert.deepEqual(await readExecutedHooks({ path }), [],
+    "the trace AT THE PATH still names a child, so the filter did not do its job");
+
+  assert.equal(result.promotion.state, "applying",
+    "a promotion whose trace was laundered from inside it settled on the leader's exit");
+  assert.equal(result.promotion.observation.mergeConclusion,
+    "MERGE_UNTRUSTED_PROGRAMS_RAN_LEADER_EXIT_INSUFFICIENT");
+  assert.equal(result.promotion.observation.recovery, undefined,
+    `a destructive command was offered: ${result.promotion.observation.recovery}`);
+  assert.equal(result.promotion.observation.recoveryKind, undefined);
+  assert.equal(result.mainMutated, false);
+  assert.equal(await head(f.source), beforeHead);
+  // And the disclosure is read through the same descriptor, so it names the hook the path forgot.
+  assert.deepEqual(
+    (result.promotion.observation.hooksExecuted ?? []).map((hook) => hook.name), ["pre-merge-commit"],
+    "the descriptor read did not recover what git actually wrote");
+  await assert.rejects(
+    f.registry.promoteMainMerge({
+      approvalId: other.approval.id, token: other.token, action: MERGE_APPROVAL_GRANT,
+      taskId: other.taskId, roomId: "demo", mainPath: f.source,
+    }),
+    /MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY/u,
+  );
+});
+
+/**
+ * (Y-2), the same filter applied IN PLACE, which the descriptor cannot see through.
+ *
+ * `cat` into the existing file keeps the inode, so the retained descriptor and the path are the same
+ * bytes and the first-hand read recovers nothing. What is left is git's own appended `child_exit`
+ * for the hook, written after the hook had finished editing — an exit with no start. The parser used
+ * to drop exactly that, which is how "no child ran" was produced about a hook that had just run.
+ */
+test("an exit with no start is still a child that ran", async (t) => {
+  const f = await fixture(t);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const beforeHead = await head(f.source);
+
+  const { result, entered } = await promoteUnderDoctoredTrace(
+    t, f, approval, token, TRACE_DOCTORING.launderInPlace);
+
+  assert.equal(await exists(entered), true, "the hook never ran, so this measures nothing");
+  const path = join(f.data, "promotion-traces", `${result.promotion.id}.jsonl`);
+  const text = await readFile(path, "utf8");
+  const events = text.split("\n").filter(Boolean)
+    .map((line) => { try { return JSON.parse(line) as Record<string, unknown>; } catch { return {}; } });
+  assert.equal(events.some((event) => event.event === "child_start"), false,
+    "a `child_start` survived in place, so the orphan case is not what is being exercised");
+  assert.equal(events.some((event) => event.event === "child_exit"), true,
+    "git appended no `child_exit` after the hook, so there is no orphan to notice");
+  assert.equal(
+    events.some((event) => event.event === "start" && typeof event.sid === "string" && !event.sid.includes("/")),
+    true, "the leader's genuine `start` did not survive, so this is the (X-4) case again");
+
+  assert.equal(result.promotion.state, "applying");
+  assert.equal(result.promotion.observation.mergeConclusion,
+    "MERGE_UNTRUSTED_PROGRAMS_RAN_LEADER_EXIT_INSUFFICIENT");
+  assert.equal(result.promotion.observation.recovery, undefined);
+  assert.equal(result.mainMutated, false);
+  assert.equal(await head(f.source), beforeHead);
+});
+
+/**
+ * (Y-2), the forged flat session id — `k4-forgedstart`.
+ *
+ * The previous round identified the leader by the SHAPE of the session id, which answers "is this a
+ * top-level git" and not "is this the git THIS process started". One synthetic `start` with an
+ * invented `P<hex>` put the answer back. The reviewer measured that this particular forgery ALSO
+ * poisoned the pgid source and was caught by a different gate; the pid comparison is what catches it
+ * for the right reason, so the assertion here is on the conclusion, and the precondition below
+ * proves the shape check alone would have passed.
+ */
+test("a forged top-level session id is not the session this process started", async (t) => {
+  const f = await fixture(t);
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const beforeHead = await head(f.source);
+
+  const { result, entered } = await promoteUnderDoctoredTrace(
+    t, f, approval, token, TRACE_DOCTORING.forge);
+
+  assert.equal(await exists(entered), true, "the hook never ran, so this measures nothing");
+  const sessions = await pathTraceSessions(f, result.promotion.id);
+  assert.deepEqual(sessions, ["20260809T000000.000000Z-Hdeadbeef-P0000f4b7"],
+    "the forged `start` is not the only one at the path, so the shape check was not defeated");
+  assert.equal(sessions[0]?.includes("/"), false,
+    "the forgery is nested, so the sid-shape check would have refused it without any pid");
+
+  assert.equal(result.promotion.state, "applying");
+  assert.equal(result.promotion.observation.mergeConclusion,
+    "MERGE_UNTRUSTED_PROGRAMS_RAN_LEADER_EXIT_INSUFFICIENT");
+  assert.equal(result.promotion.observation.recovery, undefined);
+  assert.equal(result.mainMutated, false);
+  assert.equal(await head(f.source), beforeHead);
 });
 
 /**

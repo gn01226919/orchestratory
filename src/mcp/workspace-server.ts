@@ -38,8 +38,8 @@ const MAX_DIRECTORY_CALLS = 32;
 // `.husky/pre-merge-commit` → true, while `.githooks/pre-merge-commit`, `githooks/…`, `hooks/…` and
 // `tools/hooks/…` were all false — the sibling was pinned and the family was not, for the third time
 // ([[PITFALLS]] #103/#108). The family cannot be closed by adding rows, because the name of a hook
-// directory is whatever `core.hooksPath` says it is. The other half is `#autoExecutedDirectory`,
-// which asks git.
+// directory is whatever `core.hooksPath` says it is. The other half is `#autoExecutedDirectories`,
+// which asks git — and asks it again on every write, because that configuration outlives a broker.
 export const WORKSPACE_SENSITIVE_PATH =
   /(?:^|\/)(?:\.git|\.orchestratory|\.husky|\.claude|\.circleci)(?:\/|$)|(?:^|\/)\.github\/workflows(?:\/|$)|(?:^|\/)(?:\.env(?:\.[^/]*)?|\.gitlab-ci\.yml|[^/]+\.(?:pem|key|p12|pfx))$/iu;
 const SENSITIVE_PATH = WORKSPACE_SENSITIVE_PATH;
@@ -62,6 +62,18 @@ function relativeFilePath(value: unknown): string {
   return normalized;
 }
 
+/**
+ * Whether `path` is inside ANY position the auto-executed directory occupies.
+ *
+ * Segment-wise, so a sibling whose name merely starts with the same characters is not caught, and
+ * `""` — the working tree root — catches everything. Amendment (Y-1) makes the first argument a set:
+ * one directory can be at two positions at once when it is reached through a symlink.
+ */
+function autoExecuted(directories: readonly string[], path: string): boolean {
+  return directories.some((directory) =>
+    directory === "" || path === directory || path.startsWith(`${directory}/`));
+}
+
 function asObject(value: unknown): JsonObject {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error("INVALID_TOOL_ARGUMENTS");
@@ -73,49 +85,49 @@ export class WorkspaceToolBroker {
   readonly #root: string;
   readonly #mode: WorkspaceMode;
   readonly #hooks: WorkspaceBrokerHooks;
-  /**
-   * The directory git auto-executes out of, relative to this root: a path (`""` meaning the root
-   * itself), `null` when git placed it outside this tree, or `undefined` when git could not be asked.
-   *
-   * Amendment (X-3). Asked of git rather than matched against names, because the name is
-   * configurable and the behaviour is not. `undefined` is the fail-closed value for a write broker:
-   * a broker that cannot say where the auto-executed directory is cannot say a write is outside it,
-   * so `create()` refuses rather than falling back to the regular expression that was measured
-   * missing four spellings of the same directory.
-   */
-  readonly #autoExecutedDirectory: string | null | undefined;
   #toolCalls = 0;
   #writeCalls = 0;
   #directoryCalls = 0;
 
-  private constructor(
-    root: string, mode: WorkspaceMode, hooks: WorkspaceBrokerHooks,
-    autoExecutedDirectory: string | null | undefined,
-  ) {
+  private constructor(root: string, mode: WorkspaceMode, hooks: WorkspaceBrokerHooks) {
     this.#root = root;
     this.#mode = mode;
     this.#hooks = hooks;
-    this.#autoExecutedDirectory = autoExecutedDirectory;
+  }
+
+  /**
+   * Every position git auto-executes out of, relative to this root: `[]` when git placed that
+   * directory outside this tree, or `undefined` when git could not be asked at all.
+   *
+   * Amendment (X-3). Asked of git rather than matched against names, because the name is
+   * configurable and the behaviour is not. `undefined` is the fail-closed value for a write broker:
+   * a broker that cannot say where the auto-executed directory is cannot say a write is outside it,
+   * so it refuses rather than falling back to the regular expression that was measured missing four
+   * spellings of the same directory.
+   *
+   * Amendment (Y-1) makes it a SET — a hook directory reached through a symlink occupies two
+   * positions and a write to either installs a program git runs.
+   */
+  static async #autoExecutedDirectories(root: string): Promise<string[] | undefined> {
+    try {
+      return await new GitBroker().hookDirectoryPositions(root);
+    } catch {
+      return undefined;
+    }
   }
 
   static async create(root: string, mode: WorkspaceMode, hooks: WorkspaceBrokerHooks = {}): Promise<WorkspaceToolBroker> {
     if (mode !== "read-only" && mode !== "write") throw new Error("INVALID_WORKSPACE_BROKER_MODE");
     if (mode === "write" && !hooks.authorizeWrite) throw new Error("WORKSPACE_WRITE_AUTHORIZER_REQUIRED");
     const canonical = await canonicalWorkspace(root);
-    let autoExecutedDirectory: string | null | undefined;
-    try {
-      autoExecutedDirectory = await new GitBroker().hookDirectoryPosition(canonical);
-    } catch {
-      autoExecutedDirectory = undefined;
-    }
     // A Writer's workspace is always a task-bound git worktree in this product, so "git could not
     // answer" is an anomaly rather than a supported shape, and the anomaly costs a refusal instead of
     // an unguarded write surface. Read-only brokers are unaffected: nothing they do can install a
     // program anywhere.
-    if (mode === "write" && autoExecutedDirectory === undefined) {
+    if (mode === "write" && await WorkspaceToolBroker.#autoExecutedDirectories(canonical) === undefined) {
       throw new Error("WORKSPACE_HOOK_DIRECTORY_UNRESOLVED");
     }
-    return new WorkspaceToolBroker(canonical, mode, hooks, autoExecutedDirectory);
+    return new WorkspaceToolBroker(canonical, mode, hooks);
   }
 
   /**
@@ -125,15 +137,29 @@ export class WorkspaceToolBroker {
    * caught. `""` — the working tree root, which is what `--git-path hooks` resolves to when
    * `core.hooksPath` is empty — catches everything, which is the fail-closed reading of an answer
    * whose meaning is ambiguous; see `hookDirectoryBlockers` for what git was measured doing there.
+   *
+   * ## Why this asks git again on every write, instead of once at `create()`
+   *
+   * The question is "where does git run programs from RIGHT NOW", and the answer is `core.hooksPath`,
+   * which lives in a config file that outlives any one broker. Measured (`w2-stale`): a broker built
+   * before the repository was reconfigured went on answering with the old directory and admitted a
+   * write a broker built one moment later refused. A cached answer to a mutable question is not the
+   * answer to the question — it is the answer to an older one ([[PITFALLS]] #103, the same shape as
+   * parsing another program's configuration instead of asking it).
+   *
+   * An unanswerable question refuses for a WRITE broker, exactly as it does at `create()`: not being
+   * able to say where the auto-executed directory is means not being able to say this write is
+   * outside it. For a read-only broker it refuses nothing, which is the pre-existing behaviour and
+   * the honest one — nothing a read-only broker does can install a program, and a workspace whose
+   * git is momentarily unreachable would otherwise stop being readable at all.
    */
-  #autoExecutedPath(path: string): boolean {
-    const directory = this.#autoExecutedDirectory;
-    if (typeof directory !== "string") return false;
-    return directory === "" || path === directory || path.startsWith(`${directory}/`);
-  }
-
-  #assertNotAutoExecuted(path: string): void {
-    if (this.#autoExecutedPath(path)) throw new Error("SENSITIVE_WORKSPACE_PATH_DENIED");
+  async #assertNotAutoExecuted(path: string): Promise<void> {
+    const directories = await WorkspaceToolBroker.#autoExecutedDirectories(this.#root);
+    if (directories === undefined) {
+      if (this.#mode === "write") throw new Error("WORKSPACE_HOOK_DIRECTORY_UNRESOLVED");
+      return;
+    }
+    if (autoExecuted(directories, path)) throw new Error("SENSITIVE_WORKSPACE_PATH_DENIED");
   }
 
   tools(): JsonObject[] {
@@ -233,6 +259,13 @@ export class WorkspaceToolBroker {
   async #listFiles(input: JsonObject): Promise<string> {
     if (Object.keys(input).length > 0) throw new Error("UNKNOWN_LIST_FILES_ARGUMENT");
     const paths: string[] = [];
+    // Resolved once per listing rather than once per broker (amendment (Y-1)/P2-1) and rather than
+    // once per entry: a listing is one point in time, so one answer is the right granularity. An
+    // unanswerable question omits nothing here — this is a read-only enumeration and hiding files
+    // from it cannot stop a program being installed, while refusing would break `list_files` on a
+    // workspace whose git is momentarily unreachable.
+    const autoExecutedDirectories =
+      await WorkspaceToolBroker.#autoExecutedDirectories(this.#root) ?? [];
     const queue = [this.#root];
     while (queue.length > 0) {
       const directory = queue.shift();
@@ -243,7 +276,7 @@ export class WorkspaceToolBroker {
         const absolute = resolve(directory, entry.name);
         const path = relative(this.#root, absolute).split(sep).join("/");
         if (SENSITIVE_PATH.test(path)) continue;
-        if (this.#autoExecutedPath(path)) continue;
+        if (autoExecuted(autoExecutedDirectories, path)) continue;
         if (entry.isSymbolicLink()) throw new Error("WORKSPACE_SYMLINK_DENIED");
         if (entry.isDirectory()) queue.push(absolute);
         else if (entry.isFile()) paths.push(path);
@@ -259,7 +292,7 @@ export class WorkspaceToolBroker {
   async #readFile(input: JsonObject): Promise<string> {
     if (Object.keys(input).some((key) => key !== "path")) throw new Error("UNKNOWN_READ_FILE_ARGUMENT");
     const path = relativeFilePath(input.path);
-    this.#assertNotAutoExecuted(path);
+    await this.#assertNotAutoExecuted(path);
     const candidate = await realpath(resolve(this.#root, path));
     if (!inside(this.#root, candidate)) throw new Error("WORKSPACE_PATH_ESCAPE_DENIED");
     const info = await lstat(candidate);
@@ -287,7 +320,7 @@ export class WorkspaceToolBroker {
       throw new Error("UNKNOWN_CREATE_DIRECTORY_ARGUMENT");
     }
     const path = relativeFilePath(input.path);
-    this.#assertNotAutoExecuted(path);
+    await this.#assertNotAutoExecuted(path);
     const candidate = resolve(this.#root, path);
     if (!inside(this.#root, candidate) || candidate === this.#root) {
       throw new Error("WORKSPACE_PATH_ESCAPE_DENIED");
@@ -307,7 +340,7 @@ export class WorkspaceToolBroker {
       throw new Error("UNKNOWN_WRITE_FILE_ARGUMENT");
     }
     const path = relativeFilePath(input.path);
-    this.#assertNotAutoExecuted(path);
+    await this.#assertNotAutoExecuted(path);
     if (typeof input.content !== "string" || Buffer.byteLength(input.content) > MAX_FILE_BYTES) {
       throw new Error("WORKSPACE_WRITE_CONTENT_TOO_LARGE");
     }
