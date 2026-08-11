@@ -8,7 +8,7 @@ import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { createAppContext } from "../src/app.ts";
-import { startWebServer } from "../src/ui/web.ts";
+import { APPLY_BACK_CONFIRMATION, startWebServer } from "../src/ui/web.ts";
 import { GitBroker } from "../src/core/git-broker.ts";
 import { isNoCostProvider } from "../src/providers/billing.ts";
 import { ALL_PROVIDER_IDS } from "../src/providers/selection.ts";
@@ -1181,11 +1181,18 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   });
   const completeWriterBody = (await completeWriter.json()) as {
     preview?: { id: string; files: number; risk: { level: string } };
+    confirmationPhrase?: string;
     error?: string;
   };
   assert.equal(completeWriter.status, 200, JSON.stringify(completeWriterBody));
   assert.equal(completeWriterBody.preview?.files, 0);
   assert.equal(completeWriterBody.preview?.risk.level, "low");
+  /*
+   * P0-2: the phrase the owner is shown has to be the phrase this endpoint accepts.
+   * It travels with the preview instead of being spelled out a second time in the browser,
+   * so there is no second copy that can drift away from the comparison below.
+   */
+  assert.equal(completeWriterBody.confirmationPhrase, APPLY_BACK_CONFIRMATION);
   const reviewReadyWriters = await fetch(`${server.url}/api/rooms/writers?room=presence-demo`, {
     headers: { Cookie: cookie },
   });
@@ -1200,6 +1207,23 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
     }),
   });
   assert.equal(wrongWriterApply.status, 400);
+  /*
+   * The identifier-shaped phrase this path used to demand is now refused. It only ever proved
+   * that the request body agreed with itself: the taskId inside the phrase was compared against
+   * the taskId in the same body, which an owner never had to read anything to satisfy.
+   */
+  const retiredWriterPhrase = await fetch(`${server.url}/api/rooms/writers/apply-back/apply`, {
+    method: "POST", headers: csrfHeaders,
+    body: JSON.stringify({
+      room: "presence-demo", taskId: "web-task", previewId: completeWriterBody.preview?.id,
+      confirmation: "APPLY WRITER web-task TO PROJECT",
+    }),
+  });
+  assert.equal(retiredWriterPhrase.status, 400);
+  assert.equal(
+    ((await retiredWriterPhrase.json()) as { error?: string }).error,
+    "APPLY_BACK_CONFIRMATION_MISMATCH",
+  );
   const originalAppendSystem = RoomLedger.prototype.appendSystem;
   RoomLedger.prototype.appendSystem = function () {
     throw new Error("ROOM_LEDGER_LIMIT_REACHED");
@@ -1210,7 +1234,8 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
       method: "POST", headers: csrfHeaders,
       body: JSON.stringify({
         room: "presence-demo", taskId: "web-task", previewId: completeWriterBody.preview?.id,
-        confirmation: "APPLY WRITER web-task TO PROJECT",
+        /* Exactly what the endpoint handed the browser a few lines above — no second spelling. */
+        confirmation: completeWriterBody.confirmationPhrase,
       }),
     });
   } finally {
@@ -1390,7 +1415,62 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomScript, /writerCompleteConfirm/u);
   assert.match(roomScript, /階段 1／2（結束 Writer）失敗/u);
   assert.match(roomScript, /階段 2／2（回寫主專案）失敗/u);
-  assert.match(roomScript, /筆變更未列出/u);
+
+  // ── P0-2: the Writer apply-back approval is an in-page dialog, not window.prompt ──
+  // A native prompt can be silenced for good (it then returns null and the approval UI fails
+  // silently), it truncates the phrase printed under a long change list, and it freezes the page
+  // while a 120s preview TTL runs out underneath it. One dialog answers all three.
+  const writerDialogStart = roomScript.indexOf("writer apply-back approval dialog");
+  const writerDialogEnd = roomScript.indexOf("merge-into-main approval dialog");
+  assert.ok(writerDialogStart > 0, "room.js must carry the writer apply-back approval dialog");
+  assert.ok(writerDialogEnd > writerDialogStart, "the writer dialog must precede the merge dialog");
+  // Bounded on both sides: the merge dialog below legitimately spells out its own phrase, and
+  // an unbounded slice would let the writer dialog hide its own hard-coded copy behind it.
+  const writerDialogScript = roomScript.slice(writerDialogStart, writerDialogEnd);
+  assert.doesNotMatch(writerDialogScript, /window\.(?:alert|confirm|prompt)\s*\(/u);
+  assert.doesNotMatch(writerDialogScript, /(?<![.\w])(?:alert|confirm|prompt)\s*\(/u);
+  // Ceiling, not a spot check: the one remaining native dialog in room.js is the chat-consent
+  // confirm, a separate finding. A second one anywhere in this file must fail this test.
+  assert.equal((roomScript.match(/window\.(?:alert|confirm|prompt)\s*\(/gu) ?? []).length, 1);
+  // The phrase is never spelled out in the browser: it arrives with the preview and is printed,
+  // compared and sent back unchanged, so no second copy exists to drift from the endpoint.
+  assert.doesNotMatch(writerDialogScript, /"APPLY WRITER|APPLY BACK TO SOURCE|MERGE INTO MAIN/u);
+  assert.match(writerDialogScript, /typeof prepared\.confirmationPhrase === "string" \? prepared\.confirmationPhrase : ""/u);
+  assert.match(writerDialogScript, /byId\("writer-apply-back-phrase"\)\.textContent = view\.phrase;/u);
+  assert.match(writerDialogScript, /if \(!view\.phrase \|\| input\.value !== view\.phrase\) return;/u);
+  assert.match(writerDialogScript, /const confirmation = input\.value;/u);
+  assert.match(roomScript, /phrase = typeof value\.confirmationPhrase === "string" \? value\.confirmationPhrase : "";/u);
+  // Scroll-gate wired to both scroll and details toggle, plus the type-to-enable input.
+  assert.match(writerDialogScript, /byId\("writer-apply-back-diff"\)\.addEventListener\("scroll"/u);
+  assert.match(writerDialogScript, /byId\("writer-apply-back-diff"\)\.addEventListener\("toggle"/u);
+  assert.match(writerDialogScript, /if \(input\.value !== gate\.inputValue\) input\.value = gate\.inputValue;/u);
+  assert.match(writerDialogScript, /input\.disabled = gate\.inputDisabled;/u);
+  assert.match(writerDialogScript, /confirmButton\.disabled = gate\.confirmDisabled;/u);
+  // The countdown a native prompt could never show, and the blocking section above the content.
+  assert.match(writerDialogScript, /setInterval\(tickWriterApplyBackTtl, 1000\)/u);
+  assert.match(writerDialogScript, /已逾時 · expired/u);
+  assert.match(writerDialogScript, /blocking\.hidden = view\.blockers\.length === 0;/u);
+  assert.match(writerDialogScript, /byId\("writer-apply-back-cancel"\)\.focus\(\);/u);
+  // Risk reasons one by one, the change content itself, and every change listed rather than 24.
+  assert.match(writerDialogScript, /preview\.risk\.reasons/u);
+  assert.match(writerDialogScript, /kind=diff/u);
+  assert.match(writerDialogScript, /看不到要寫回什麼就不可核准/u);
+  assert.doesNotMatch(roomScript, /筆變更未列出/u);
+  assert.doesNotMatch(roomScript, /allChanges\.slice\(0, 24\)/u);
+  // A refused apply-back discards the preview so the whole gate has to be passed again.
+  assert.match(writerDialogScript, /view\.preview = null;\n {4}view\.diffState = "idle";/u);
+  // Recovery is read-only here: after a crash the product has no first-hand observation, so the
+  // command it hands over must not be able to destroy more than the failure already did. Bounded to
+  // the function that builds that command — the prose elsewhere names the verbs it is avoiding, and
+  // an unbounded search would be answered by the comment rather than by the command.
+  const recoveryBody = /^function renderWriterApplyBackRecovery\([\s\S]*?^\}$/mu.exec(writerDialogScript);
+  assert.ok(recoveryBody, "the writer dialog must build its own recovery command");
+  assert.doesNotMatch(recoveryBody[0], /reset --hard|clean|stash|checkout|\brm\b|--force|-f\b/u);
+  assert.match(recoveryBody[0], /git -C \$\{target\} status --short/u);
+  assert.match(recoveryBody[0], /ls \$\{WRITER_APPLY_BACK_TRASH_ROOT\}/u);
+  // It reuses the existing .workspace-onboarding / .merge-approval component, not a new one.
+  assert.match(writerDialogScript, /"workspace-onboarding merge-approval"/u);
+  assert.match(writerDialogScript, /"workspace-onboarding-card merge-approval-card"/u);
   // Join and standby render as one progressive card with the approve button in place.
   assert.match(roomScript, /presence-stages/u);
   assert.match(roomScript, /① 已加入房間/u);
@@ -1428,7 +1508,22 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.doesNotMatch(applyBackScript, /(?<![.\w])(?:alert|confirm|prompt)\s*\(/u);
   // Same semantic phrase as room.js, bilingual, carrying no identifier to transcribe.
   assert.match(applyBackScript, /const APPLY_BACK_CONFIRMATION_PHRASE = "MERGE INTO MAIN";/u);
-  assert.match(applyBackScript, /const APPLY_BACK_API_CONFIRMATION = "APPLY BACK TO SOURCE";/u);
+  // P0-2: the sentence the owner types is the sentence that goes on the wire. The dialog used to
+  // ask for one phrase and send a different constant, so the phrase the endpoint compared against
+  // was one nobody had ever typed. There is no wire-only constant left to declare or substitute —
+  // checked at the declaration and inside the function that sends, because the comment explaining
+  // the removal names the constant and would otherwise answer an unbounded search for it.
+  assert.doesNotMatch(appScript, /const APPLY_BACK_API_CONFIRMATION\s*=/u);
+  const confirmApplyBackBody = /^async function confirmApplyBack\([\s\S]*?^\}$/mu.exec(applyBackScript);
+  assert.ok(confirmApplyBackBody, "app.js must still carry confirmApplyBack()");
+  assert.doesNotMatch(confirmApplyBackBody[0], /APPLY_BACK_API_CONFIRMATION|APPLY BACK TO SOURCE|MERGE INTO MAIN/u);
+  assert.match(confirmApplyBackBody[0], /if \(!view\.phrase \|\| input\.value !== view\.phrase\) return;/u);
+  assert.match(confirmApplyBackBody[0], /body: JSON\.stringify\(\{ previewId, confirmation \}\)/u);
+  assert.match(applyBackScript, /view\.phrase = typeof prepared\.confirmationPhrase === "string" \? prepared\.confirmationPhrase : "";/u);
+  assert.match(applyBackScript, /byId\("apply-back-phrase"\)\.textContent = view\.phrase \|\| "";/u);
+  // The phrase going missing is a blocking item, not a silent fall back to the copy still sitting
+  // in applyBackGate()'s signature — that fallback is unreachable only because this line exists.
+  assert.match(applyBackScript, /view\.blockers\.push\("後端沒有給這次回寫的確認短語/u);
   // Risk reasons are listed one by one; a bare level would hide a 200-file overwrite.
   assert.match(applyBackScript, /preview\.risk\.reasons/u);
   assert.match(applyBackScript, /風險原因 · Risk reason/u);
@@ -1862,9 +1957,12 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.equal(preparedApply.status, 201);
   const preparedApplyBody = (await preparedApply.json()) as {
     preview: { id: string; files: number; changes: Array<{ path: string }> };
+    confirmationPhrase?: string;
   };
   assert.equal(preparedApplyBody.preview.files, 1);
   assert.equal(preparedApplyBody.preview.changes[0]?.path, "README.md");
+  /* The phrase the dialog will print comes from here, so the dialog cannot print a different one. */
+  assert.equal(preparedApplyBody.confirmationPhrase, APPLY_BACK_CONFIRMATION);
   const rejectedApply = await fetch(`${server.url}/api/apply-back/apply`, {
     method: "POST",
     headers: {
@@ -1876,7 +1974,12 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
     body: JSON.stringify({ previewId: preparedApplyBody.preview.id, confirmation: "wrong" }),
   });
   assert.equal(rejectedApply.status, 400);
-  const applied = await fetch(`${server.url}/api/apply-back/apply`, {
+  /*
+   * The wire-only constant this path used to require is refused now. It was never shown to
+   * anyone: the dialog asked for one sentence and the browser substituted another on send,
+   * so the sentence the endpoint checked was one the owner had never typed.
+   */
+  const retiredWireConstant = await fetch(`${server.url}/api/apply-back/apply`, {
     method: "POST",
     headers: {
       Cookie: cookie,
@@ -1887,6 +1990,25 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
     body: JSON.stringify({
       previewId: preparedApplyBody.preview.id,
       confirmation: "APPLY BACK TO SOURCE",
+    }),
+  });
+  assert.equal(retiredWireConstant.status, 400);
+  assert.equal(
+    ((await retiredWireConstant.json()) as { error?: string }).error,
+    "APPLY_BACK_CONFIRMATION_MISMATCH",
+  );
+  const applied = await fetch(`${server.url}/api/apply-back/apply`, {
+    method: "POST",
+    headers: {
+      Cookie: cookie,
+      Origin: server.url,
+      "X-CSRF-Token": bootstrapBody.csrf,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      previewId: preparedApplyBody.preview.id,
+      /* Exactly what prepare handed back, which is exactly what the owner is shown. */
+      confirmation: preparedApplyBody.confirmationPhrase,
     }),
   });
   assert.equal(applied.status, 200);
@@ -2167,6 +2289,165 @@ test("Main-workspace apply-back gate behaves correctly when executed", async () 
   assert.equal(gate.formatApplyBackBytes(512), "512 B");
   assert.equal(gate.formatApplyBackBytes(2_048), "2.0 KB");
   assert.equal(gate.formatApplyBackBytes("nope"), "—");
+});
+
+/*
+ * P0-2. The Writer apply-back approval used to be a window.prompt, which fails three separate
+ * ways: a browser can silence it for good (it then returns null and the approval UI dies without
+ * saying so), it truncates the phrase printed beneath a long change list, and it freezes the page
+ * while the 120s preview TTL expires underneath it. The replacement dialog's gate is written as a
+ * DOM-free block so this test can execute it rather than grep for it (PITFALLS #83). The DOM
+ * wiring around it still needs manual browser acceptance (D-006).
+ */
+test("Room Writer apply-back gate behaves correctly when executed", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const start = source.indexOf("/* @pure-start writer-apply-back-gate");
+  const end = source.indexOf("/* @pure-end writer-apply-back-gate */");
+  assert.ok(start > 0 && end > start, "public/room.js must expose the DOM-free writer apply-back gate block");
+  const block = source.slice(start, end);
+  // Executing a slice only proves behaviour if the slice really is free of DOM, network and timers.
+  assert.doesNotMatch(
+    block,
+    /(?:\b(?:document|window|navigator|localStorage|state)\s*\.|\b(?:fetch|byId|api|setInterval|setTimeout|require|import)\s*\()/u,
+  );
+
+  const gate = runInNewContext(
+    `${block}\n({ writerApplyBackGate, writerApplyBackBlockers, writerApplyBackScrolledToBottom,`
+    + " writerApplyBackRisk, formatWriterApplyBackCountdown, formatWriterApplyBackBytes });",
+    Object.create(null) as object,
+    { timeout: 2_000 },
+  ) as {
+    writerApplyBackGate: (view: unknown) => {
+      ready: boolean;
+      phrase: string;
+      inputDisabled: boolean;
+      inputValue: string;
+      confirmDisabled: boolean;
+      hint: string;
+    };
+    writerApplyBackBlockers: (view: unknown) => string[];
+    writerApplyBackScrolledToBottom: (metrics: unknown) => boolean;
+    writerApplyBackRisk: (preview: unknown, blockerCount: number) => { key: string; text: string };
+    formatWriterApplyBackCountdown: (ms: number) => string;
+    formatWriterApplyBackBytes: (bytes: unknown) => string;
+  };
+
+  // No phrase is spelled out in this block at all: there is nothing here to drift from the endpoint.
+  assert.doesNotMatch(block, /APPLY WRITER|APPLY BACK TO SOURCE|MERGE INTO MAIN/u);
+
+  const passing = {
+    blockers: [],
+    scrolled: true,
+    decided: false,
+    phrase: APPLY_BACK_CONFIRMATION,
+    typed: APPLY_BACK_CONFIRMATION,
+  };
+  const open = gate.writerApplyBackGate(passing);
+  assert.equal(open.ready, true);
+  assert.equal(open.inputDisabled, false);
+  assert.equal(open.confirmDisabled, false);
+  assert.equal(open.phrase, APPLY_BACK_CONFIRMATION);
+
+  /*
+   * The phrase is whatever the backend said, not a copy kept here. Change the value and the gate
+   * follows it in both directions: the new sentence opens the gate, and the sentence that used to
+   * open it no longer does. A hard-coded fallback would fail the second half.
+   */
+  const relabelled = { ...passing, phrase: "WRITE INTO THE PROJECT", typed: "WRITE INTO THE PROJECT" };
+  assert.equal(gate.writerApplyBackGate(relabelled).confirmDisabled, false);
+  assert.equal(gate.writerApplyBackGate(relabelled).phrase, "WRITE INTO THE PROJECT");
+  assert.equal(
+    gate.writerApplyBackGate({ ...relabelled, typed: APPLY_BACK_CONFIRMATION }).confirmDisabled,
+    true,
+  );
+
+  // A missing phrase fails towards "cannot approve", never towards a default sentence.
+  for (const phrase of ["", undefined, null, 42, {}]) {
+    const missing = gate.writerApplyBackGate({ ...passing, phrase });
+    assert.equal(missing.ready, false, String(phrase));
+    assert.equal(missing.inputDisabled, true, String(phrase));
+    assert.equal(missing.inputValue, "", String(phrase));
+    assert.equal(missing.confirmDisabled, true, String(phrase));
+    assert.equal(missing.phrase, "", String(phrase));
+  }
+  assert.match(gate.writerApplyBackGate({ ...passing, phrase: "" }).hint, /沒有給確認短語/u);
+
+  // Scroll-gate: without having reached the bottom the input is disabled and its value is wiped.
+  const unread = gate.writerApplyBackGate({ ...passing, scrolled: false });
+  assert.equal(unread.ready, false);
+  assert.equal(unread.inputDisabled, true);
+  assert.equal(unread.inputValue, "");
+  assert.equal(unread.confirmDisabled, true);
+  assert.match(unread.hint, /捲到底/u);
+
+  const blocked = gate.writerApplyBackGate({ ...passing, blockers: ["衝突"] });
+  assert.equal(blocked.inputDisabled, true);
+  assert.equal(blocked.inputValue, "");
+  assert.equal(blocked.confirmDisabled, true);
+  assert.match(blocked.hint, /阻擋區/u);
+
+  const decided = gate.writerApplyBackGate({ ...passing, decided: true });
+  assert.equal(decided.confirmDisabled, true);
+  assert.equal(decided.inputDisabled, true);
+  assert.match(decided.hint, /已經有結果/u);
+
+  // Near misses must not open the gate.
+  for (const typed of ["", "merge into main", "MERGE INTO MAIN ", " MERGE INTO MAIN", "MERGE  INTO MAIN", "MERGE INTO MAI"]) {
+    assert.equal(gate.writerApplyBackGate({ ...passing, typed }).confirmDisabled, true, typed);
+  }
+  assert.equal(gate.writerApplyBackGate(undefined).confirmDisabled, true);
+  assert.equal(gate.writerApplyBackGate({}).confirmDisabled, true);
+
+  assert.equal(gate.writerApplyBackScrolledToBottom({ scrollTop: 0, clientHeight: 100, scrollHeight: 400 }), false);
+  assert.equal(gate.writerApplyBackScrolledToBottom({ scrollTop: 297, clientHeight: 100, scrollHeight: 400 }), true);
+  assert.equal(gate.writerApplyBackScrolledToBottom({ scrollTop: 0, clientHeight: 400, scrollHeight: 120 }), true);
+  assert.equal(gate.writerApplyBackScrolledToBottom(null), false);
+  assert.equal(gate.writerApplyBackScrolledToBottom({}), false);
+
+  const now = Date.parse("2026-01-01T00:00:00.000Z");
+  const preview = {
+    id: "preview",
+    expiresAt: new Date(now + 60_000).toISOString(),
+    files: 2,
+    changes: [{ path: "a" }, { path: "b" }],
+    risk: { level: "medium", reasons: ["1 個既有檔案內容將被覆寫"] },
+  };
+  const clean = { preview, phrase: APPLY_BACK_CONFIRMATION, diffState: "loaded", applying: false, now };
+  assert.equal(gate.writerApplyBackBlockers(clean).length, 0);
+  // Every one of these is a blocker, and each one alone keeps the gate shut.
+  const cases: Array<[string, unknown]> = [
+    ["no preview", { ...clean, preview: null }],
+    ["no phrase from the backend", { ...clean, phrase: "" }],
+    ["non-string phrase", { ...clean, phrase: 7 }],
+    ["expired preview", { ...clean, preview: { ...preview, expiresAt: new Date(now - 1).toISOString() } }],
+    ["unparsable expiry", { ...clean, preview: { ...preview, expiresAt: "not-a-date" } }],
+    ["change content failed", { ...clean, diffState: "failed" }],
+    ["change content still loading", { ...clean, diffState: "loading" }],
+    ["truncated change list", { ...clean, preview: { ...preview, files: 5 } }],
+    ["already applying", { ...clean, applying: true }],
+  ];
+  for (const [name, view] of cases) {
+    const blockers = gate.writerApplyBackBlockers(view);
+    assert.ok(blockers.length > 0, name);
+    assert.equal(gate.writerApplyBackGate({ ...passing, blockers }).confirmDisabled, true, name);
+    assert.equal(gate.writerApplyBackGate({ ...passing, blockers }).inputDisabled, true, name);
+  }
+
+  // Risk level: any blocker forces HIGH, and an unknown or missing level fails closed to HIGH.
+  assert.equal(gate.writerApplyBackRisk({ risk: { level: "low" } }, 0).key, "low");
+  assert.equal(gate.writerApplyBackRisk({ risk: { level: "high" } }, 0).key, "high");
+  assert.equal(gate.writerApplyBackRisk({ risk: { level: "low" } }, 1).key, "high");
+  assert.equal(gate.writerApplyBackRisk({ risk: { level: "toString" } }, 0).key, "high");
+  assert.equal(gate.writerApplyBackRisk({ risk: {} }, 0).key, "high");
+  assert.equal(gate.writerApplyBackRisk(null, 0).key, "high");
+
+  // The countdown window.prompt could never show, because it froze the page while it ran.
+  assert.equal(gate.formatWriterApplyBackCountdown(125_000), "02:05");
+  assert.equal(gate.formatWriterApplyBackCountdown(0), "00:00");
+  assert.equal(gate.formatWriterApplyBackCountdown(-5_000), "00:00");
+  assert.equal(gate.formatWriterApplyBackBytes(512), "512 B");
+  assert.equal(gate.formatWriterApplyBackBytes(2_048), "2.0 KB");
+  assert.equal(gate.formatWriterApplyBackBytes("nope"), "—");
 });
 
 /*

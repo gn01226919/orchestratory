@@ -3334,6 +3334,58 @@ MCP 側 `hookDirectoryPosition()` 同步改為 `hookDirectoryPositions()`。
 **仍未關閉的第三條路徑**：`public/room.js:2561` 的 Writer apply-back（P0-2）**仍是 `window.prompt`**，
 短語仍是識別碼化的 `APPLY WRITER <taskId> TO PROJECT`。P0-3 修完後落差從 2:1 變成 1:2，並未消滅。
 
+> **2026-08-11 後續**：上面兩段（「短語是 UI gate 不是協定 token」、「第三條路徑仍是 `window.prompt`」）
+> 描述的是 2026-08-06 的樹，已被下面的「P0-2」一節取代。**那兩段留著是紀錄，不是現況。**
+
+## P0-2 · Writer apply-back 換掉 `window.prompt`，並讓短語只有一份（2026-08-11）
+
+**背景**：`UX_FINDINGS.md` P0-2 標題逐字是「`window.prompt` 作為最高風險核准的機制」，
+列出三個各自獨立的破壞方式：瀏覽器可永久靜音它（之後回傳 `null`，核准 UI 無聲失效）、
+短語印在訊息底部會被裁掉、prompt 期間整頁凍結而預覽 TTL 只有 120 秒。
+D-009 裁決同時要改 `public/room.js` 與 `src/ui/web.ts` 的比對字串。
+
+**做了什麼**
+
+| 位置 | 之前 | 之後 |
+| --- | --- | --- |
+| `public/room.js` W1 核准 | `window.prompt`，最多列 24 筆檔名，無 diff／無倒數／無阻擋項／無 scroll-gate | in-page `.workspace-onboarding merge-approval` 對話框：逐條風險原因、**全部**變更逐檔列出、bounded 逐行 diff、scroll-gate、TTL 每秒倒數、阻擋區壓住輸入與主要按鈕、取消為預設焦點 |
+| W1 短語 | 前端自組 `APPLY WRITER <taskId> TO PROJECT`，後端 `src/ui/web.ts` 另組同一句比對 | 由 `APPLY_BACK_CONFIRMATION` 隨 preview 送到畫面，畫面印它、比對它、送回它 |
+| W2 短語 | 畫面要 Owner 打 `MERGE INTO MAIN`，送出時換成常數 `APPLY BACK TO SOURCE`——**後端比對的那句話 Owner 從來沒有打過** | 同上；`APPLY_BACK_API_CONFIRMATION` 這個 wire 常數已刪除，送出的是輸入框裡的字 |
+| 後端兩個端點 | 兩句各自寫死（`web.ts:1485`、`web.ts:1806`） | 同一個 `APPLY_BACK_CONFIRMATION`：**送給畫面的與拿來比對的是同一個符號** |
+
+**自動化涵蓋（Node 測試，不是原始碼 regex）**
+- `test/web.test.ts` · `Room Writer apply-back gate behaves correctly when executed`：
+  用 `node:vm` 執行 `room.js` 抽出的 DOM-free 區塊。含**短語改值的雙向斷言**——
+  換一句短語，新句子解鎖、舊句子不再解鎖（前端若留一份常數備援，後半會紅）；
+  短語缺席（`""`／`undefined`／`null`／數字／物件）一律倒向不可核准。
+- `test/web.test.ts` · Room presence 那條端到端測試：`complete` 與 `apply-back/prepare` 回傳的
+  `confirmationPhrase` **原樣送回 apply 才成功**；舊的 `APPLY WRITER <taskId> TO PROJECT` 現在 400。
+- 主工作區端點同形：舊的 `APPLY BACK TO SOURCE` 現在 400，prepare 回傳的那句才 200。
+
+**這一節沒有涵蓋的（必須先寫下來，不得靠測試全綠掩蓋）**
+- **W1 對話框的 DOM 佈線沒有做過真實瀏覽器驗收。** 上面那些是邏輯與端點的斷言；
+  「scroll 事件真的綁上了」「`disabled` 真的寫回 DOM」「倒數真的在動」這三件事**沒有任何自動測試看得到**（D-006）。
+  因此本節**刻意不寫 digest、也不把它加進 `test/merge-dialog-acceptance.ts` 的 `ACCEPTED_GATES`**——
+  加一個 digest 等於記下一次沒有發生過的驗收，而那正是那支測試存在要防止的事。
+  **待辦**：對 `public/room.js` 的 `writerApplyBackRisk` / `writerApplyBackScrolledToBottom` /
+  `writerApplyBackBlockers` / `writerApplyBackGate` / `formatWriterApplyBackCountdown` 做一次
+  與「主工作區 apply-back dialog 瀏覽器驗收」同形的瀏覽器驗收（含幾何溢出前置斷言），
+  再補 digest 與第三個 `ACCEPTED_GATES` 項目。
+- **`public/app.js` 的 `applyBackGate()` 仍留著 `APPLY_BACK_CONFIRMATION_PHRASE` 這個 fallback。**
+  它現在走不到（`renderApplyBackApproval()` 對缺短語加了阻擋項，`confirmApplyBack()` 另有一道），
+  但它仍是前端的一份文案。**沒有在本輪拿掉，理由是動它會改到已綁 digest 的函式本體，
+  而本輪沒有做瀏覽器驗收**——所以它跟著上面那筆待辦一起清。
+- **W1 的 `diffState = diff ? "loaded" : "failed"` 沿用 `app.js` 的判定**，
+  因此「>64 KiB 新檔讓變更內容退化成一句英文、而 scroll-gate 仍放行」這個既有缺陷
+  現在**多了一個呼叫點**。這一項屬另立的安全項目（apply-back 可見性缺口），本輪刻意不修。
+- 短語字面 `MERGE INTO MAIN` 同時是 candidate→main 的短語。兩者**不是同一個符號**（改一句不會連動另一句），
+  但字面相同：同一句話對應兩種破壞範圍。這是給 Owner 的未決問題，實作端不自行改字。
+- **`docs/orchestrator-interactive-guide.html` 因為這次變更而變成不實**：
+  它在 `:1131`、`:1137`、`:1155`、`:1162`、`:1454`、`:1514`、`:1521`、`:1528` 仍教使用者輸入
+  `APPLY WRITER <taskId> TO PROJECT`，而那句話現在會被端點拒絕。
+  該檔內含一份**複製了舊流程的互動 demo**，改它等於重做那個 demo，超出 D-009 的範圍。
+  **明確待辦**：與上面的瀏覽器驗收一起處理；在那之前這份指南的 Writer apply-back 段落是過期的。
+
 ## Merge approval reject 路徑瀏覽器驗收（2026-08-06）＋ digest guard 自身的缺陷修復
 
 **發現經過**：Phase 5-5 的實作代理改掉了 `rejectMergeIntoMain()` 印出的那句謊話

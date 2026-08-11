@@ -44,6 +44,22 @@ import {
   type ApprovalAction,
 } from "../security/approval.ts";
 
+/*
+ * 一個定義，兩個用途：送到畫面上讓 Owner 抄的那句話，與端點比對的那句話，是同一個值。
+ *
+ * 在這之前 apply-back 家族有三句：room.js 自己組出識別碼化的
+ * `APPLY WRITER <taskId> TO PROJECT`；app.js 讓 Owner 打 `MERGE INTO MAIN`，
+ * 卻在送出時換成常數 `APPLY BACK TO SOURCE`——後端比對的那句話，Owner 從來沒有打過。
+ * 「Owner 打過這句話」因此不是後端收得到的事實，只是前端自己相信的事。
+ * 現在兩條路徑都由這個常數供給畫面、也由它比對；前端不得自帶一份文案（[[PITFALLS]] #86）。
+ *
+ * 這句話與 candidate→main 的 MERGE_APPROVAL_CONFIRMATION 目前字面相同（D-001 選定的語意化短語），
+ * 但**刻意不是同一個符號**：兩者的破壞範圍不同（直接寫入主專案工作目錄 vs 合併進 main 分支），
+ * 改動其中一句不應該連動另一句。字面相同是否會讓 Owner 分不清，是給 Owner 的未決問題，
+ * 不由實作端自行改字。
+ */
+export const APPLY_BACK_CONFIRMATION = "MERGE INTO MAIN";
+
 const publicRoot = fileURLToPath(new URL("../../public/", import.meta.url));
 const staticFiles: Record<string, { file: string; type: string }> = {
   "/": { file: "index.html", type: "text/html; charset=utf-8" },
@@ -1454,7 +1470,7 @@ export async function startWebServer(
             value.room,
             `${completed.writer.displayName} 已完成寫作；變更尚未回到主專案，等待 Owner 檢視風險並批准`,
           );
-          json(response, 200, { lease: completed, preview });
+          json(response, 200, { lease: completed, preview, confirmationPhrase: APPLY_BACK_CONFIRMATION });
           return;
         }
         if (url.pathname === "/api/rooms/writers/apply-back/prepare") {
@@ -1471,7 +1487,10 @@ export async function startWebServer(
           }
           const workspace = await app.workspaces.assertAllowed(info.workspace);
           if (scope.workspace !== workspace) throw new Error("WRITER_NOT_REVIEW_READY");
-          json(response, 201, { preview: await app.applyBack.prepare(basename(scope.worktree)) });
+          json(response, 201, {
+            preview: await app.applyBack.prepare(basename(scope.worktree)),
+            confirmationPhrase: APPLY_BACK_CONFIRMATION,
+          });
           return;
         }
         if (url.pathname === "/api/rooms/writers/apply-back/apply") {
@@ -1482,8 +1501,11 @@ export async function startWebServer(
             || typeof value.previewId !== "string" || typeof value.confirmation !== "string") {
             throw new Error("INVALID_WRITER_APPLY_BACK_REQUEST");
           }
-          const expectedConfirmation = `APPLY WRITER ${value.taskId} TO PROJECT`;
-          if (value.confirmation !== expectedConfirmation) throw new Error("APPLY_BACK_CONFIRMATION_MISMATCH");
+          /*
+           * 比對的是這條路徑自己送給畫面的那句話，不是另外組一句。舊版把 taskId 編進短語，
+           * 而 taskId 又來自同一個請求本體：那句話只證明請求自己與自己一致，不證明 Owner 讀過什麼。
+           */
+          if (value.confirmation !== APPLY_BACK_CONFIRMATION) throw new Error("APPLY_BACK_CONFIRMATION_MISMATCH");
           const info = ledger.getRoom(value.room);
           const scope = collaboration.writerLeases.taskScope(value.taskId);
           if (!info || !scope || scope.roomId !== value.room || scope.active || scope.applying || scope.applied) {
@@ -1791,7 +1813,10 @@ export async function startWebServer(
           }
           const runId = typeof value.runId === "string" ? value.runId : "";
           if (!/^[0-9a-f-]{36}$/u.test(runId)) throw new Error("INVALID_RUN_ID");
-          json(response, 201, { preview: await app.applyBack.prepare(runId) });
+          json(response, 201, {
+            preview: await app.applyBack.prepare(runId),
+            confirmationPhrase: APPLY_BACK_CONFIRMATION,
+          });
           return;
         }
         if (url.pathname === "/api/apply-back/apply") {
@@ -1803,7 +1828,8 @@ export async function startWebServer(
             throw new Error("INVALID_APPLY_BACK_REQUEST");
           }
           const previewId = typeof value.previewId === "string" ? value.previewId : "";
-          if (value.confirmation !== "APPLY BACK TO SOURCE") {
+          /* 與 prepare 送出的 confirmationPhrase 同一個值：Owner 打的那句話才是這裡收到的那句話。 */
+          if (value.confirmation !== APPLY_BACK_CONFIRMATION) {
             throw new Error("APPLY_BACK_CONFIRMATION_MISMATCH");
           }
           const issued = app.applyBack.issueApproval(previewId, "local-web");

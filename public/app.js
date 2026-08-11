@@ -14,6 +14,8 @@ const state = {
   applyBack: {
     runId: "",
     preview: null,
+    /* 確認短語只能來自後端；留白啟動，拿不到就不可核准。 */
+    phrase: "",
     diffText: "",
     diffState: "idle",
     diffError: "",
@@ -1083,9 +1085,12 @@ function formatApplyBackCountdown(ms) {
 }
 /* @pure-end apply-back-gate */
 
-/* 後端 /api/apply-back/apply 要求的協定字串。使用者輸入的是上面那句語意化短語；
- * 這個常數只是把協定值原樣送回去，不是要人手抄的東西。 */
-const APPLY_BACK_API_CONFIRMATION = "APPLY BACK TO SOURCE";
+/*
+ * 這裡以前有一個 APPLY_BACK_API_CONFIRMATION = "APPLY BACK TO SOURCE"：畫面要 Owner 打
+ * MERGE INTO MAIN，送出去的卻是另一句常數，於是後端比對的那句話 Owner 從來沒有打過，
+ * 「Owner 打過這句話」不是後端收得到的事實。現在短語由 /api/apply-back/prepare 隨預覽送來
+ * （state.applyBack.phrase），畫面印它、比對它、送出的也是 Owner 實際打進輸入框的那一份。
+ */
 const APPLY_BACK_TRASH_ROOT = "~/trash-pending/orchestratory";
 const APPLY_BACK_OPERATION_LABELS = {
   write: "寫入 · Write",
@@ -1178,7 +1183,8 @@ function buildApplyBackDialog() {
   label.htmlFor = "apply-back-confirmation";
   label.append(
     document.createTextNode("輸入 "),
-    applyBackNode("code", "", "apply-back-phrase", APPLY_BACK_CONFIRMATION_PHRASE),
+    /* 空字串起始：這句話由後端隨預覽送來，前端沒有一份自己的文案可以先印上去。 */
+    applyBackNode("code", "", "apply-back-phrase", ""),
     document.createTextNode(" 確認把變更寫回主專案 · type the phrase to confirm"),
   );
   const input = applyBackNode("input", "", "apply-back-confirmation");
@@ -1258,7 +1264,8 @@ function updateApplyBackGate() {
     scrolled: view.scrolled,
     decided: view.decided,
     typed: input.value,
-    phrase: APPLY_BACK_CONFIRMATION_PHRASE,
+    /* 後端送來的那一句；沒有就是空字串，而空字串由阻擋項壓住整個 gate。 */
+    phrase: view.phrase,
   });
   if (input.value !== gate.inputValue) input.value = gate.inputValue;
   input.disabled = gate.inputDisabled;
@@ -1413,11 +1420,20 @@ function renderApplyBackApproval() {
     applying: view.applying,
     now: Date.now(),
   });
+  /*
+   * 短語只能來自後端。拿不到就不可核准——不得退回前端自帶的一份文案，
+   * 那份文案會讓畫面看起來可以按，而後端要的其實是別的字（[[PITFALLS]] #86）。
+   */
+  if (typeof view.phrase !== "string" || view.phrase.length === 0) {
+    view.blockers.push("後端沒有給這次回寫的確認短語，無法確認你要簽的是哪一句。 · The backend supplied no confirmation phrase for this apply-back.");
+  }
   const risk = applyBackRisk(view.preview, view.blockers.length);
   const badge = byId("apply-back-risk");
   badge.textContent = risk.text;
   badge.className = `merge-approval-risk is-${risk.key}`;
   byId("apply-back-run").textContent = view.runId ? `run ${view.runId}` : "—";
+  /* 短語直接印後端給的值：改掉後端那個值，這一行就跟著變。 */
+  byId("apply-back-phrase").textContent = view.phrase || "";
   byId("apply-back-route").textContent = view.preview
     ? `安全分支 worktree → 主工作區 · safe-branch worktree → main workspace：${view.preview.sourceWorkspace}`
     : "安全分支 worktree → 主工作區 · safe-branch worktree → main workspace";
@@ -1440,6 +1456,7 @@ async function loadApplyBackPreview() {
   const view = state.applyBack;
   const status = byId("apply-back-status");
   view.preview = null;
+  view.phrase = "";
   view.diffText = "";
   view.diffError = "";
   view.diffState = "loading";
@@ -1453,6 +1470,8 @@ async function loadApplyBackPreview() {
       body: JSON.stringify({ runId: view.runId }),
     });
     view.preview = prepared.preview;
+    /* 短語跟著預覽一起來，而且只跟著它來。 */
+    view.phrase = typeof prepared.confirmationPhrase === "string" ? prepared.confirmationPhrase : "";
   } catch (error) {
     view.diffState = "failed";
     view.diffError = humanError(error);
@@ -1503,6 +1522,7 @@ function closeApplyBackApproval() {
   if (view.ticker) clearInterval(view.ticker);
   view.ticker = null;
   view.preview = null;
+  view.phrase = "";
   view.diffText = "";
   view.diffState = "idle";
   view.scrolled = false;
@@ -1519,7 +1539,9 @@ async function confirmApplyBack() {
   const status = byId("apply-back-status");
   const input = byId("apply-back-confirmation");
   if (!view.preview || view.blockers.length > 0 || !view.scrolled || view.decided) return;
-  if (input.value !== APPLY_BACK_CONFIRMATION_PHRASE) return;
+  /* 送出去的就是 Owner 打的那一句，不是另外一個常數。 */
+  if (!view.phrase || input.value !== view.phrase) return;
+  const confirmation = input.value;
   const previewId = view.preview.id;
   view.applying = true;
   renderApplyBackApproval();
@@ -1527,7 +1549,7 @@ async function confirmApplyBack() {
   try {
     const applied = await api("/api/apply-back/apply", {
       method: "POST",
-      body: JSON.stringify({ previewId, confirmation: APPLY_BACK_API_CONFIRMATION }),
+      body: JSON.stringify({ previewId, confirmation }),
     });
     const result = applied.result || {};
     view.applying = false;
@@ -1545,6 +1567,7 @@ async function confirmApplyBack() {
     view.preview = null;
     view.diffState = "idle";
     view.scrolled = false;
+    view.phrase = "";
     renderApplyBackApproval();
     status.textContent = `回寫被拒絕，主專案沒有被部分寫入 · Apply-back refused：${humanError(error)}`;
   }

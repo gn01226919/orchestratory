@@ -2241,22 +2241,22 @@ body.workspace-modal-open { overflow: hidden; }
 .merge-approval-recovery-facts span { display: grid; grid-template-columns: minmax(120px, .34fr) minmax(0, 1fr); gap: 8px; align-items: baseline; }
 .merge-approval-recovery-facts small { color: var(--faint); font-size: 9px; }
 .merge-approval-recovery-facts code { color: #bfe4d0; font: 10px/1.5 var(--font-mono); overflow-wrap: anywhere; }
-#merge-approval-restore, #apply-back-restore { display: block; padding: 9px 10px; border: 1px solid var(--border); border-radius: 6px; color: #d3d8dd; background: #101216; font: 10px/1.7 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+#merge-approval-restore, #apply-back-restore, #writer-apply-back-restore { display: block; padding: 9px 10px; border: 1px solid var(--border); border-radius: 6px; color: #d3d8dd; background: #101216; font: 10px/1.7 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .merge-approval-ttl { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 9px; padding: 9px 11px; border: 1px solid var(--border-strong); border-radius: 8px; background: #181a1f; }
 .merge-approval-ttl span { display: grid; gap: 2px; }
 .merge-approval-ttl small { color: var(--faint); font-size: 8px; }
 .merge-approval-ttl b { color: #d3d8dd; font: 700 13px/1.2 var(--font-mono); }
 .merge-approval-ttl b.is-urgent { color: var(--warn); }
 .merge-approval-ttl b.is-expired { color: var(--danger); }
-#merge-approval-confirm-area, #apply-back-confirm-area { display: grid; gap: 6px; padding: 10px; border: 1px solid #3a4145; border-radius: 8px; background: #151a19; }
-#merge-approval-confirm-area label, #apply-back-confirm-area label { color: var(--muted); font-size: 10px; line-height: 1.6; }
-#merge-approval-confirm-area code, #apply-back-confirm-area code { color: #86dfad; font-family: var(--font-mono); }
-#merge-approval-confirmation, #apply-back-confirmation { font-family: var(--font-mono); font-size: 11px; }
+#merge-approval-confirm-area, #apply-back-confirm-area, #writer-apply-back-confirm-area { display: grid; gap: 6px; padding: 10px; border: 1px solid #3a4145; border-radius: 8px; background: #151a19; }
+#merge-approval-confirm-area label, #apply-back-confirm-area label, #writer-apply-back-confirm-area label { color: var(--muted); font-size: 10px; line-height: 1.6; }
+#merge-approval-confirm-area code, #apply-back-confirm-area code, #writer-apply-back-confirm-area code { color: #86dfad; font-family: var(--font-mono); }
+#merge-approval-confirmation, #apply-back-confirmation, #writer-apply-back-confirmation { font-family: var(--font-mono); font-size: 11px; }
 .merge-approval-actions { flex-wrap: wrap; }
 .merge-approval-actions #merge-approval-reject { margin-right: auto; }
-#merge-approval .workspace-onboarding-status, #apply-back-approval .workspace-onboarding-status { color: #9aa1a9; text-align: left; }
+#merge-approval .workspace-onboarding-status, #apply-back-approval .workspace-onboarding-status, #writer-apply-back .workspace-onboarding-status { color: #9aa1a9; text-align: left; }
 
-/* 主工作區 apply-back 沿用上面的 .merge-approval 元件；只有逐行 diff 需要自己的區塊樣式。 */
+/* 主工作區 apply-back 與 Room 的 Writer apply-back 都沿用上面的 .merge-approval 元件；只有逐行 diff 需要自己的區塊樣式。 */
 .apply-back-diff-text { padding: 8px 9px; border: 1px solid #2c3036; border-radius: 6px; color: #c3c9d0; background: #16181c; font: 9px/1.6 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 
 @media (max-width: 620px) {
