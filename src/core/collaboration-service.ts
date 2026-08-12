@@ -1,5 +1,6 @@
 import type { RoomMessage } from "./room-ledger.ts";
 import { RoomLedger } from "./room-ledger.ts";
+import { recordTelemetryCounter } from "./telemetry.ts";
 import {
   managedAgentDisplayName,
   ManagedRoomAgentStore,
@@ -105,12 +106,14 @@ export class CollaborationService {
   readonly candidates: CandidateRegistry;
   readonly #worktrees: WorktreeBroker;
   readonly #writerWorktrees: WriterWorktreeLifecycle | undefined;
+  readonly #dataDirectory: string;
   #closed = false;
 
   constructor(dataDirectory: string, options: {
     writerWorktrees?: WriterWorktreeLifecycle;
     maxCandidateFiles?: number;
   } = {}) {
+    this.#dataDirectory = dataDirectory;
     this.ledger = new RoomLedger(dataDirectory);
     this.presence = new RoomPresenceStore(dataDirectory);
     this.inbox = new RoomInboxStore(dataDirectory);
@@ -1370,6 +1373,11 @@ export class CollaborationService {
         outcome, detail,
       });
     } catch { audited = false; }
+    // Counted once, at the single moment a live promotion settles as applied. A re-observation
+    // of the same record reports `applied` again and must not add a second count.
+    if (event.phase === "settled" && event.state === "applied") {
+      void recordTelemetryCounter("promotion", this.#dataDirectory);
+    }
     const head = (value: string | null): string => value === null ? "未讀到" : value.slice(0, 12);
     const hookText = hooks === undefined
       ? "本次未讀到 git 的 hook 追蹤"

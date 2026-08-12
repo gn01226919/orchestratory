@@ -10,6 +10,7 @@ import type { RunEvents } from "./events.ts";
 import { DirtySnapshotBroker, type DirtySnapshot } from "./dirty-snapshot-broker.ts";
 import { GitBroker } from "./git-broker.ts";
 import type { LocalStore } from "./store.ts";
+import { recordTelemetryCounter } from "./telemetry.ts";
 import { WorktreeBroker } from "./worktree-broker.ts";
 
 const MAX_PENDING_APPLY_BACKS = 4;
@@ -408,6 +409,10 @@ export class ApplyBackService {
         summary: "Approved worktree changes were applied back; deletions were moved to trash-pending.",
         metadata: { writes, deletesMovedToTrash, previewHash: preview.previewHash },
       });
+      // Coarse count only, and only into today's local rollup. It is deliberately not
+      // awaited into the result and cannot throw: an apply-back that reached this line has
+      // succeeded, and telemetry bookkeeping must not be able to change that.
+      void recordTelemetryCounter("apply-back", this.#store.dataDirectory);
       return { writes, deletesMovedToTrash, ...(trashSession ? { trashSession } : {}) };
     } catch (error) {
       const rollbackFailed = !await this.#rollback(

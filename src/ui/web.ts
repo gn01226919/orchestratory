@@ -34,6 +34,7 @@ import {
 } from "../core/candidate-registry.ts";
 import type { WriterLease } from "../core/writer-lease.ts";
 import type { WriterDelegation } from "../core/writer-delegation.ts";
+import { setTelemetryConsent, telemetryStatus } from "../core/telemetry.ts";
 import { CollabToolBroker } from "../mcp/collab-server.ts";
 import { WorkspaceOnboardingService } from "../core/workspace-onboarding.ts";
 import { minimalSubscriptionEnvironment, runProcess } from "../core/process-runner.ts";
@@ -612,6 +613,9 @@ export async function startWebServer(
           activeRuns: app.workflows.listActive(),
           workspaceRoots: app.workspaces.roots(),
           providerCallUsage: app.providerCalls.status(),
+          // Read from disk on every bootstrap rather than from a value captured at process
+          // start, so this and the TUI cannot end up printing different answers.
+          telemetry: await telemetryStatus(app.store.dataDirectory),
         });
         return;
       }
@@ -665,6 +669,24 @@ export async function startWebServer(
           return;
         }
         const body = await readJson(request);
+        if (url.pathname === "/api/telemetry") {
+          // Same writer the TUI and the CLI use. The GUI cannot express a third state:
+          // only an explicit yes or no is accepted, and "unanswered" is not settable here.
+          if (typeof body !== "object" || body === null || Array.isArray(body)) {
+            throw new Error("INVALID_TELEMETRY_REQUEST");
+          }
+          const input = body as Record<string, unknown>;
+          if (Object.keys(input).some((key) => key !== "consent")) {
+            throw new Error("UNKNOWN_TELEMETRY_REQUEST_FIELD");
+          }
+          if (input.consent !== "yes" && input.consent !== "no") {
+            throw new Error("INVALID_TELEMETRY_CONSENT");
+          }
+          json(response, 200, {
+            telemetry: await setTelemetryConsent(input.consent, app.store.dataDirectory),
+          });
+          return;
+        }
         if (url.pathname === "/api/chat") {
           if (chatBusy) {
             json(response, 409, { error: "CHAT_TURN_ALREADY_RUNNING" });

@@ -27,6 +27,7 @@ import { sanitizeTerminal } from "../security/redact.ts";
 import { checkpointApprovalScope, workflowApprovalScope } from "../security/approval.ts";
 import { NaturalLanguageSession, sessionTools } from "../core/session.ts";
 import { SessionContextBroker } from "../core/session-context.ts";
+import { setTelemetryConsent, telemetryStatus } from "../core/telemetry.ts";
 import { RoomLedger, type RoomInfo } from "../core/room-ledger.ts";
 import { recordTuiDecision, selectTuiRoom } from "../core/tui-room-bridge.ts";
 import {
@@ -591,6 +592,12 @@ export interface ConversationCommandOutcome {
    * the owner must then confirm at the TTY.
    */
   localEndpointRequest?: string;
+  /**
+   * A `/telemetry …` application. Like `/local`, the dispatcher stays synchronous and
+   * decides nothing: the loop performs the read or the write against the same on-disk
+   * state the GUI uses, so the two surfaces cannot report different answers.
+   */
+  telemetryRequest?: "status" | "on" | "off" | "log";
 }
 
 /**
@@ -638,6 +645,13 @@ export function runConversationCommand(
     lines.push("已清除 RAM 中的對話內容；模型呼叫計數不會重設。");
   } else if (command === "/local") {
     return localCommandOutcome(input, options.localEndpointRegistered === true);
+  } else if (command === "/telemetry") {
+    const parts = input.split(/\s+/u).slice(1);
+    const sub = parts.length === 0 ? "status" : parts[0];
+    if (sub === "status" || sub === "on" || sub === "off" || sub === "log") {
+      return { exit: false, openAdvanced: false, lines, telemetryRequest: sub };
+    }
+    lines.push("用法：/telemetry status|on|off|log");
   } else if (command === "/gui") {
     lines.push(options.guiUrl ? `GUI：${options.guiUrl}` : "此模式沒有啟動 GUI。");
   } else if (command === "/advanced") {
@@ -686,6 +700,7 @@ function conversationHelpLines(): string[] {
     "  /new       清除目前的暫存對話內容",
     "  /gui       顯示本機 GUI 位址",
     "  /local     申請把地端模型（loopback endpoint）加入這次啟動，例如 /local http://127.0.0.1:11434",
+    "  /telemetry 查看或切換匿名每日摘要（/telemetry status|on|off|log）",
     "  /advanced  開啟完整 workflow 設定精靈",
     "  /exit      結束 Orchestrator",
     "訊息開頭用 @codex、@claude、@grok 可單輪指定模型直答（唯讀）；多個 @ 會並排比稿。",
@@ -791,6 +806,44 @@ async function runDefaultCodingTeam(
 }
 
 /**
+ * The TUI half of the telemetry switch. It calls exactly the functions the GUI route calls,
+ * and prints exactly the sentence `describeTelemetryConsent` produces, so "the same statement
+ * disagrees in two places" cannot recur here: there is one statement and one writer.
+ */
+async function applyTelemetryCommand(
+  app: AppContext,
+  request: "status" | "on" | "off" | "log",
+): Promise<void> {
+  try {
+    const directory = app.store.dataDirectory;
+    if (request === "log") {
+      const status = await telemetryStatus(directory);
+      if (status.sent.length === 0) {
+        stdout.write("\n目前沒有送出過任何回報。\n");
+        return;
+      }
+      stdout.write("\n已送出的回報（本機紀錄）：\n");
+      for (const record of status.sent) {
+        stdout.write(
+          `  ${sanitizeTerminal(record.day)} · ${sanitizeTerminal(record.outcome)}` +
+            `${record.payload ? ` · ${sanitizeTerminal(JSON.stringify(record.payload))}` : ""}\n`,
+        );
+      }
+      return;
+    }
+    const status = request === "status"
+      ? await telemetryStatus(directory)
+      : await setTelemetryConsent(request === "on" ? "yes" : "no", directory);
+    stdout.write(`\n${sanitizeTerminal(status.description)}\n`);
+    if (!status.readable) stdout.write("設定檔目前讀不到，因此一律不送。\n");
+  } catch (error) {
+    stdout.write(
+      `\n無法變更遙測設定：${sanitizeTerminal(error instanceof Error ? error.message : "UNKNOWN_ERROR")}\n`,
+    );
+  }
+}
+
+/**
  * Owner approval for the loopback model endpoint, at the TTY the owner is already
  * typing into. The candidate URL is echoed back exactly as it will be used — the
  * canonical origin after validation, not the raw input — so a confusable host or
@@ -884,6 +937,10 @@ export async function runTui(app: AppContext, options: { guiUrl?: string } = {})
         if (outcome.exit) break;
         if (outcome.localEndpointRequest !== undefined) {
           await approveLocalEndpoint(app, rl, outcome.localEndpointRequest);
+          continue;
+        }
+        if (outcome.telemetryRequest !== undefined) {
+          await applyTelemetryCommand(app, outcome.telemetryRequest);
           continue;
         }
         if (outcome.openAdvanced) {

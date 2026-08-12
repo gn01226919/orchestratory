@@ -21,6 +21,7 @@ import {
   providerExecutionModel,
 } from "../providers/billing.ts";
 import type { LocalStore } from "./store.ts";
+import { recordTelemetryCounter } from "./telemetry.ts";
 import { RunEvents } from "./events.ts";
 import { GitBroker, MAX_CHANGED_BYTES } from "./git-broker.ts";
 import { WorktreeBroker } from "./worktree-broker.ts";
@@ -431,6 +432,9 @@ export class WorkflowService {
         profile: request.profile,
         workspaceMode: request.workspaceMode,
       });
+      // `ran_today`: this is the line that distinguishes "opened the product" from "used it".
+      // Nothing about the workflow itself is recorded — only that one started today.
+      void recordTelemetryCounter("run", this.#store.dataDirectory);
       if (worktree) {
         this.#event(
           record.id,

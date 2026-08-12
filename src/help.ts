@@ -24,6 +24,7 @@ export function helpText(): string {
     "                                                    # stops this record waiting; kills nothing, never writes main",
     "  orchestrator data inventory|integrity|purge [--execute]",
     "  orchestrator data retention show|set [--terminal-days N] [--max-runs N]",
+    "  orchestrator telemetry status|on|off|log   # anonymous daily summary; off until you answer",
     "  orchestrator config show",
     "  orchestrator audit",
     "",

@@ -1573,6 +1573,45 @@ async function confirmApplyBack() {
   }
 }
 
+/* ---------- telemetry ---------- */
+
+/**
+ * Renders the sentence the server produced, verbatim. The GUI does not compose its own
+ * wording: `describeTelemetryConsent` on the server is the only place the sentence exists,
+ * so this surface and the TUI cannot end up saying different things about the same state.
+ */
+function renderTelemetry(telemetry) {
+  const label = byId("telemetry-state");
+  const dot = byId("telemetry-dot");
+  if (!label || !dot) return;
+  if (!telemetry) {
+    label.textContent = "無法讀取設定，因此不會送出。";
+    dot.className = "dot";
+    return;
+  }
+  label.textContent = telemetry.readable
+    ? telemetry.description
+    : "設定讀不到，因此一律不送。";
+  dot.className = telemetry.consent === "yes" && telemetry.readable ? "dot on" : "dot";
+  const on = byId("telemetry-on");
+  const off = byId("telemetry-off");
+  if (on) on.disabled = telemetry.consent === "yes";
+  if (off) off.disabled = telemetry.consent === "no";
+}
+
+async function setTelemetry(consent) {
+  try {
+    const value = await api("/api/telemetry", {
+      method: "POST",
+      body: JSON.stringify({ consent }),
+    });
+    renderTelemetry(value.telemetry);
+  } catch (error) {
+    const label = byId("telemetry-state");
+    if (label) label.textContent = `無法變更：${error.message}`;
+  }
+}
+
 /* ---------- bootstrap ---------- */
 
 function renderWorkspaceRoots(roots, selectedPath = "") {
@@ -1600,6 +1639,7 @@ async function bootstrap() {
   state.workspaceRoots = value.workspaceRoots || [];
   state.hardLimits = value.hardLimits;
   state.pendingWorkflowRequests = value.pendingWorkflowRequests || [];
+  renderTelemetry(value.telemetry);
 
   renderWorkspaceRoots(state.workspaceRoots);
   if (state.workspaceRoots.length === 0) {
@@ -1743,6 +1783,8 @@ async function previewWorkspacePath(path) {
   }
 }
 
+byId("telemetry-on").addEventListener("click", () => setTelemetry("yes"));
+byId("telemetry-off").addEventListener("click", () => setTelemetry("no"));
 byId("request-workspace").addEventListener("click", openWorkspaceOnboarding);
 byId("workspace-onboarding-close").addEventListener("click", closeWorkspaceOnboarding);
 byId("workspace-success-done").addEventListener("click", closeWorkspaceOnboarding);

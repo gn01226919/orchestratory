@@ -464,6 +464,37 @@ export async function runCandidatePromotionsCommand(input: {
   })}Released as ${input.decidedBy}. Nothing was killed and main was not written.\n`;
 }
 
+/**
+ * First-run consent, then at most one report of yesterday.
+ *
+ * Interactivity is decided here, once, from the real streams. With no terminal there is nobody
+ * to answer, so the question is not asked, nothing is written, nothing is sent, and the state
+ * stays `unanswered` — a headless start (the MCP server, a launchd daemon, a piped `run`) must
+ * not be able to permanently answer on the owner's behalf, and must not block.
+ *
+ * Nothing in here is allowed to fail the command the owner actually typed.
+ */
+export async function telemetryStartup(dataDirectory: string): Promise<void> {
+  try {
+    const { ensureTelemetryConsent, reportTelemetryOnStartup } = await import("./core/telemetry.ts");
+    const interactive = Boolean(stdin.isTTY) && Boolean(stdout.isTTY);
+    const ask = async (question: string): Promise<string> => {
+      const rl = createInterface({ input: stdin, output: stdout, terminal: true });
+      try {
+        return await rl.question(question);
+      } finally {
+        rl.close();
+      }
+    };
+    await ensureTelemetryConsent(
+      interactive ? { dataDirectory, interactive, ask } : { dataDirectory, interactive },
+    );
+    await reportTelemetryOnStartup({ dataDirectory });
+  } catch {
+    // Telemetry never gates the product.
+  }
+}
+
 export async function main(args = process.argv.slice(2)): Promise<void> {
   const command = args[0] ?? "hybrid";
   if (command === "--help" || command === "-h" || command === "help") {
@@ -509,6 +540,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
   try {
+    await telemetryStartup(app.store.dataDirectory);
     if (command === "mcp") {
       const { runCollabMcpServer } = await import("./mcp/collab-server.ts");
       const actorIndex = args.indexOf("--actor", 1);
@@ -822,6 +854,35 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       const saved = await saveRetentionPolicy(next, app.store.dataDirectory);
       stdout.write(`${JSON.stringify(saved, null, 2)}\n`);
       return;
+    }
+    if (command === "telemetry") {
+      const sub = args[1] ?? "status";
+      const {
+        telemetryStatus, setTelemetryConsent,
+      } = await import("./core/telemetry.ts");
+      if (sub === "status") {
+        const status = await telemetryStatus(app.store.dataDirectory);
+        stdout.write(`${status.description}\n`);
+        stdout.write(`${JSON.stringify({
+          consent: status.consent,
+          readable: status.readable,
+          reason: status.reason,
+          endpointProvisioned: status.endpointProvisioned,
+          installId: status.installId,
+        }, null, 2)}\n`);
+        return;
+      }
+      if (sub === "log") {
+        const status = await telemetryStatus(app.store.dataDirectory);
+        stdout.write(`${JSON.stringify(status.sent, null, 2)}\n`);
+        return;
+      }
+      if (sub === "on" || sub === "off") {
+        const status = await setTelemetryConsent(sub === "on" ? "yes" : "no", app.store.dataDirectory);
+        stdout.write(`${status.description}\n`);
+        return;
+      }
+      throw new Error("UNKNOWN_TELEMETRY_COMMAND");
     }
     if (command === "data" && args[1] === "purge") {
       const preview = await app.maintenance.previewPurge(app.retention);

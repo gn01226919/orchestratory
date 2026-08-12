@@ -179,7 +179,12 @@ async function ensureOwnerDataDirectory(dataDirectory: string): Promise<void> {
   }
 }
 
-async function readOwnerOnlyText(path: string): Promise<string> {
+/**
+ * Exported so that owner-only state added later (telemetry consent, for one) reuses these
+ * exact checks instead of growing a second, weaker reader. ENOENT is re-thrown unchanged so
+ * callers can tell "not there yet" from "there but not safe to read".
+ */
+export async function readOwnerOnlyText(path: string): Promise<string> {
   let handle;
   try {
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -514,7 +519,7 @@ async function canonicalizeWorkspaceRootPolicies(
   return output;
 }
 
-async function atomicOwnerOnlyJson(path: string, value: unknown): Promise<void> {
+export async function atomicOwnerOnlyJson(path: string, value: unknown): Promise<void> {
   await ensureOwnerDataDirectory(dirname(path));
   try {
     await readOwnerOnlyText(path);
