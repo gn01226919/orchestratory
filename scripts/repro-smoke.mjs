@@ -100,7 +100,16 @@ try {
     if (sourceStatus.stdout.trim()) throw new Error("RELEASE_SOURCE_NOT_CLEAN");
   }
   await run("npm", ["ci", "--offline", "--ignore-scripts"], clone, 180_000);
-  await run("npm", ["run", "check"], clone, 240_000);
+  // Four minutes was the budget when the suite was small enough to finish inside it. It has not
+  // been for some time: the gate now takes about eighteen minutes on an idle machine, so this
+  // step was being killed by SIGTERM every time and `check:release` could not pass at all —
+  // silently, because `repro:smoke` is not part of `npm run check` and nothing else runs it.
+  // The release checklist meanwhile records this reproduction as verified.
+  //
+  // The timeout is here to stop a hang, not to hold the suite to a schedule. Forty minutes is
+  // roughly twice the current run on an idle machine, which leaves room for a loaded one without
+  // letting a genuine hang sit forever.
+  await run("npm", ["run", "check"], clone, 2_400_000);
 
   const sourcePublish = await run("npm", ["publish", "--dry-run"], clone);
   const sourcePublishOutput = `${sourcePublish.stdout}\n${sourcePublish.stderr}`;
