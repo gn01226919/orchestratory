@@ -117,6 +117,9 @@ Orchestratory 在單一使用者的 Mac 上協調一或多個原生 TUI Agent。
 - Provider host 在加入 MCP 前後保持相同的原生能力與批准模型。
 - Exact-seat identity 無法由 tool payload 覆寫。
 - Main merge approval 能綁定實際 candidate/main snapshot，且 drift 會使其失效。
+- Clean/smudge filter 的 attributes 判定仍是 promotion 的安全閘門：除了既有 main 路徑與代表性 probe，
+  live gate 也把完整 preview 的每個非刪除目標路徑交給 Git 解析，涵蓋只在 candidate 新出現的路徑；
+  preview 不完整或 Git 不可讀時拒絕。這仍不宣稱能防止同帳號 Full-Trust 程序繞過產品直接寫 main。
 - Recovery point 可在宣稱成功前實際讀回與驗證。
 - Loopback GUI 的 session、Origin、Host 與 CSRF 防護有效。
 - Runtime／GUI／文件能透過版本或 capability negotiation 誠實顯示已實作功能。

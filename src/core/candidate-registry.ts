@@ -4536,7 +4536,7 @@ export class CandidateRegistry {
     // true` says the CONTENTS do not conflict; that is a statement about two trees and says nothing
     // about the working tree the merge is about to be written into, or about which code that working
     // tree will execute while it happens.
-    const restore = await this.#git.restorePoint(row.main_path);
+    const restore = await this.#git.restorePoint(row.main_path, this.#promotionAttributePaths(preview));
     const overwrite = await this.#overwriteScan(row.main_path, preview);
     const blockers = promotionBlockers(restore, overwrite, preview);
     if (blockers.length > 0) throw new MergePromotionRefusedError(blockers, overwrite);
@@ -6196,7 +6196,7 @@ export class CandidateRegistry {
   }> {
     const overwrite = await this.#overwriteScan(mainPath, preview);
     try {
-      const restore = await this.#git.restorePoint(mainPath);
+      const restore = await this.#git.restorePoint(mainPath, this.#promotionAttributePaths(preview));
       return { blockers: promotionBlockers(restore, overwrite, preview), overwrite, hooks: restore.hooks };
     } catch {
       // Unread is a closed gate, never an open one.
@@ -6245,6 +6245,22 @@ export class CandidateRegistry {
       // The scan not running is not evidence that nothing would be overwritten.
       return { checked: false, ignored: [], untracked: [], unavailable: "OVERWRITE_SCAN_UNAVAILABLE" };
     }
+  }
+
+  /**
+   * Exact candidate paths that the promotion can write, supplied to Git's attributes resolver.
+   *
+   * The representative/provenance paths in GitBroker cover filters that are already visible in
+   * main. A new candidate extension can be the only path matching a global attributes rule, so the
+   * live gate must ask Git about the complete preview it is about to apply. A truncated preview is
+   * deliberately an empty list here: its existing merge blocker already refuses approval, and this
+   * helper must never turn an incomplete file list into an apparently complete attributes answer.
+   */
+  #promotionAttributePaths(preview: CandidateCompletionPreview): string[] {
+    if (preview.filesTruncated) return [];
+    return [...new Set(preview.files
+      .filter((file) => file.operation !== "delete")
+      .map((file) => file.path))];
   }
 
   /**

@@ -2029,6 +2029,51 @@ for (const attributes of [
   });
 }
 
+test("main is refused when a global filter matches only a new candidate path", async (t) => {
+  const f = await fixture(t, {
+    beforeComplete: async ({ candidatePath }) => {
+      await commit(candidatePath, "latent.zed", "candidate secret\n", "candidate secret");
+    },
+  });
+  const home = join(f.root, "home");
+  await mkdir(join(home, ".config", "git"), { recursive: true });
+  await writeFile(join(home, ".config", "git", "attributes"), "latent.zed filter=lfs\n", "utf8");
+  const previousHome = process.env.HOME;
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+  });
+  process.env.HOME = home;
+
+  const gitEnv = {
+    PATH: process.env.PATH ?? "",
+    HOME: home,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_TERMINAL_PROMPT: "0",
+  };
+  const probe = await execFileAsync("git", ["check-attr", "filter", "--", "probe.zed"], {
+    cwd: f.source, env: gitEnv,
+  });
+  assert.match(probe.stdout, /unspecified/u,
+    "the representative probes must not already match this global rule");
+  const exact = await execFileAsync("git", ["check-attr", "filter", "--", "latent.zed"], {
+    cwd: f.source, env: gitEnv,
+  });
+  assert.match(exact.stdout, /filter: lfs/u,
+    "git must apply the filter to the candidate-only path");
+
+  const preview = await f.registry.previewMainMerge({
+    taskId: f.task.taskId, roomId: "demo", mainPath: f.source,
+  });
+  assert.equal(preview.approvable, false);
+  assert.ok(
+    preview.blockers.includes("MAIN_ATTRIBUTES_DECLARE_FILTER")
+    || preview.blockers.includes("MAIN_ATTRIBUTES_UNREADABLE"),
+    `expected an exact-path attributes refusal, got ${JSON.stringify(preview.blockers)}`,
+  );
+});
+
 /*
  * FINDING 3. `promoteMainMerge` wrote no audit event and no room ledger line at all, on either path.
  * `runProcess` also only ever saw the merge's overall exit code, so nothing could say WHICH hooks
@@ -2471,9 +2516,11 @@ test("an unauthenticated caller cannot make the unresolved-promotion gate re-rea
 /** A GitBroker that counts the expensive read, so a cost claim can be asserted instead of timed. */
 class CountingGitBroker extends GitBroker {
   restorePoints = 0;
-  override async restorePoint(workspace: string): ReturnType<GitBroker["restorePoint"]> {
+  override async restorePoint(
+    workspace: string, additionalAttributePaths?: readonly string[],
+  ): ReturnType<GitBroker["restorePoint"]> {
     this.restorePoints += 1;
-    return await super.restorePoint(workspace);
+    return await super.restorePoint(workspace, additionalAttributePaths);
   }
 }
 
@@ -5163,10 +5210,12 @@ test("a restore point that fails only on the second read is a closed gate, not a
   class FlakyRestorePoint extends GitBroker {
     calls = 0;
     failOn = 0;
-    override async restorePoint(workspace: string): ReturnType<GitBroker["restorePoint"]> {
+    override async restorePoint(
+      workspace: string, additionalAttributePaths?: readonly string[],
+    ): ReturnType<GitBroker["restorePoint"]> {
       this.calls += 1;
       if (this.calls === this.failOn) throw new Error("GIT_COMMAND_FAILED");
-      return await super.restorePoint(workspace);
+      return await super.restorePoint(workspace, additionalAttributePaths);
     }
   }
   const broker = new FlakyRestorePoint();

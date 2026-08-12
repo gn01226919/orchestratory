@@ -94,6 +94,10 @@ checkpoint，彙整：
 - Owner 拒絕或暫緩時，candidate 預設保留，不刪除、不 merge。
 - 成功後驗證實際 main HEAD、工作樹與變更清單，並保存 audit/recovery record。
 
+Promotion 的 live safety gate 必須在 promotion 環境下用 Git 自己解析 clean/smudge attributes；除
+main 目前的 tracked／ignored／代表性 probe 路徑外，還必須逐一詢問完整 preview 中候選 merge 將寫入的
+非刪除路徑。若 preview 路徑不完整或 attributes 無法判定，必須 fail closed，不得把未知當成沒有 filter。
+
 ### 5.4 Agent 直接越界
 
 Agent 準備自行在 shell 中修改 canonical main 時，也必須先主動提及將離開 candidate 修改邊界、說明

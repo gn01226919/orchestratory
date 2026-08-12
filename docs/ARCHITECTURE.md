@@ -155,6 +155,10 @@ Approval 只授權 `merge-candidate-into-main`，消耗時帶其他 action 一�
 5. 驗證最終 main HEAD／tree／diff；
 6. 保存結果，不自動 push 或 cleanup。
 
+Promotion live gate 的 attributes 檢查由 `GitBroker.restorePoint(main, candidatePaths)` 執行。它把完整
+preview 中所有非刪除目標路徑傳給 `git check-attr`，因此候選新增的、main 尚不存在的副檔名也會被全域
+attributes 規則涵蓋；preview 截斷時仍由既有 blocker 拒絕，不以不完整路徑清單放行。
+
 ### 3.7 Main Drift Monitor
 
 監測 HEAD、refs、working tree、hooks、mode 與重大刪除變化。未經 promotion 的變動會警示、保存證據
