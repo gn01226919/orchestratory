@@ -37,6 +37,19 @@ test("Git inspection fingerprints and exposes bounded untracked text", async (t)
   assert.notEqual(second.fingerprint, first.fingerprint);
 });
 
+test("differencesFrom reports effective .git/config drift through hookEnvironment", async (t) => {
+  const root = await repository();
+  t.after(async () => await rm(root, { recursive: true, force: true }));
+  const broker = new GitBroker();
+  const baseline = await broker.restorePoint(root);
+
+  // The setting is benign and does not name an executable. It still belongs to git's effective
+  // configuration, so the configDigest-backed hookEnvironment fingerprint must move.
+  await execFileAsync("git", ["config", "--local", "orchestratory.synthetic-drift", "one"], { cwd: root });
+
+  assert.deepEqual(await broker.differencesFrom(root, baseline), ["hookEnvironment"]);
+});
+
 test("tracked same-size content changes alter the review fingerprint", async (t) => {
   const root = await repository();
   t.after(async () => await rm(root, { recursive: true, force: true }));
