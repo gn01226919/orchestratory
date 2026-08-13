@@ -2039,15 +2039,20 @@ test("main is refused when a global filter matches only a new candidate path", a
   await mkdir(join(home, ".config", "git"), { recursive: true });
   await writeFile(join(home, ".config", "git", "attributes"), "latent.zed filter=lfs\n", "utf8");
   const previousHome = process.env.HOME;
+  const previousXdg = process.env.XDG_CONFIG_HOME;
   t.after(() => {
     if (previousHome === undefined) delete process.env.HOME;
     else process.env.HOME = previousHome;
+    if (previousXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = previousXdg;
   });
   process.env.HOME = home;
+  process.env.XDG_CONFIG_HOME = join(home, ".config");
 
   const gitEnv = {
     PATH: process.env.PATH ?? "",
     HOME: home,
+    XDG_CONFIG_HOME: join(home, ".config"),
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_TERMINAL_PROMPT: "0",
