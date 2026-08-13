@@ -7,6 +7,15 @@
 > host 驗收。下表其餘舊測試保留作為 GUI Managed 回歸證據，不得拿來冒充 Native Full-Trust、
 > 已安裝 runtime 或 main merge decision 已完成。
 
+## 2026-08-13 · Phase 5-6 evidence closure candidate
+
+- [x] `GitBroker.differencesFrom()` 對 `.git/config` 的有效設定漂移有 focused regression test：寫入無害的
+  `orchestratory.synthetic-drift` 後，結果精確為 `["hookEnvironment"]`。
+- [x] 這項測試驗證的是現有 `HookEnvironment.configDigest`／fingerprint 邊界；沒有新增 runtime 行為，
+  也沒有寫入 canonical main。
+- [ ] 本項仍需 candidate 的 Claude 審查、checkpoint／completion 與 Owner-bound merge approval；測試通過
+  不等於已 merge 或已上線。
+
 ## Phase 5-2 通過標準（開工前先訂，2026-08-05）
 
 Phase 5-1 在**沒有通過標準**的情況下跑了十輪對抗式審查，十輪皆 No；收斂的槓桿不是審得更兇，而是
