@@ -223,9 +223,9 @@ const ATTRIBUTES_DECLARE_FILTER = /(?:^|\s)filter=/mu;
  * be outrun by the next git release or the next configuration key; asking git cannot.
  *
  * The list is representative rather than exhaustive, and that limit is stated instead of papered
- * over: it is combined with (not replaced by) the repository's own tracked and ignored paths, so an
- * attributes file whose pattern matches nothing in this repository AND none of these names is the
- * one shape neither half sees.
+ * over: it is combined with (not replaced by) the repository's own tracked and ignored paths and,
+ * at the live promotion gate, the exact candidate paths that will be written. A filter whose pattern
+ * matches none of those names is still not claimed to be seen.
  */
 const ATTRIBUTES_PROBE_PATHS: readonly string[] = [
   "probe", "probe.txt", "probe.md", "probe.json", "probe.xml", "probe.csv",
@@ -1178,11 +1178,19 @@ export class GitBroker {
    * attributes file were both invisible to the enumeration and both visible to git.
    */
   async #attributesBlockers(
-    workspace: string, ignoredPaths: readonly string[], trackedPaths: readonly string[],
+    workspace: string,
+    ignoredPaths: readonly string[],
+    trackedPaths: readonly string[],
+    additionalAttributePaths: readonly string[] = [],
   ): Promise<string[]> {
     try {
       if (await this.#attributesFilterDeclared(
-        workspace, [...ATTRIBUTES_PROBE_PATHS, ...trackedPaths, ...ignoredPaths],
+        workspace, [
+          ...ATTRIBUTES_PROBE_PATHS,
+          ...trackedPaths,
+          ...ignoredPaths,
+          ...additionalAttributePaths,
+        ],
       )) return ["MAIN_ATTRIBUTES_DECLARE_FILTER"];
     } catch {
       return ["MAIN_ATTRIBUTES_UNREADABLE"];
@@ -1243,7 +1251,10 @@ export class GitBroker {
    * environment and it succeeds" can never become true. So the gate is a list of named conditions,
    * each of which is a refusal before anything is spent.
    */
-  async restorePoint(workspaceInput: string): Promise<GitRestorePoint> {
+  async restorePoint(
+    workspaceInput: string,
+    additionalAttributePaths: readonly string[] = [],
+  ): Promise<GitRestorePoint> {
     const workspace = await canonicalWorkspace(workspaceInput);
     const inspection = await this.inspect(workspace);
     const deadline = Date.now() + CONTENT_FINGERPRINT_TIMEOUT_MS;
@@ -1289,7 +1300,9 @@ export class GitBroker {
     const trackedPaths = indexStage.split("\0").filter(Boolean)
       .map((entry) => entry.slice(entry.indexOf("\t") + 1))
       .filter((path) => path.length > 0);
-    blockers.push(...await this.#attributesBlockers(workspace, ignored.paths, trackedPaths));
+    blockers.push(...await this.#attributesBlockers(
+      workspace, ignored.paths, trackedPaths, additionalAttributePaths,
+    ));
     const reflogEntries = reflog.split("\n").filter(Boolean);
     return {
       head,

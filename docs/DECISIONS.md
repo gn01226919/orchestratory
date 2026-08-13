@@ -738,6 +738,9 @@ hook 清單真正把關的地方是 approval 綁定，在 merge 前一刻對 liv
   （`git check-attr -z --stdin filter`，在 merge 會用的那個環境下），列舉保留為第二半，
   因為它能答出「規則指向此刻不存在的路徑」這種 check-attr 答不出的形狀。**兩半合起來仍不宣稱完備**，
   未覆蓋的形狀列入殘餘風險表。
+  **2026-08-13 補上第三個輸入：** live promotion gate 會把完整 candidate preview 的每個非刪除
+  目標路徑一併餵給 `git check-attr`。這關閉了「全域 attributes pattern 只匹配 candidate 新增路徑」的
+  已知 PLAUSIBLE 缺口；preview 若截斷或無法讀取仍拒絕，不把不完整清單當成安全證據。
 - **`hooks: ok` 之外的唯一誠實選項是去讀 git 自己的紀錄。** 標準第 5 項要求記錄實際執行過的 hook 檔名
   與退出碼，而 `runProcess` 只拿得到 `git merge` 的整體退出碼。決定：merge 以 `GIT_TRACE2_EVENT` 寫出
   git 的 trace（檔案在 owner-only data directory，**不在 repo 內**——寫在 repo 內它自己就會變成

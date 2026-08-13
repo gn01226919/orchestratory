@@ -365,6 +365,10 @@ gates（工作樹乾淨、hook 指紋、會被覆蓋的 ignored 檔案），然�
 （push／publish／deploy／delete-candidate／delete-recovery-ref／cleanup-worktree…）皆為明文。
 帶其他 `action` 消耗一律 `MAIN_MERGE_APPROVAL_ACTION_NOT_GRANTED`。
 
+Promotion live gate 的 attributes 契約是：在 promotion 環境以 `git check-attr` 檢查 main 目前可見的
+tracked／ignored／probe 路徑，以及完整 preview 中每個非刪除、候選 merge 將寫入的確切路徑。候選新增
+路徑因此不得避開 clean/smudge filter 拒絕；preview 截斷或 Git 無法回答時必須 fail closed。
+
 **目前仍無 MCP／HTTP 出口**：`promoteMainMerge` 只有測試會呼叫，第二輪才接線。
 
 **它本身不修改 canonical main**，目前也刻意沒有任何 MCP 或 HTTP 出口——實際寫入 main 屬 5-5。

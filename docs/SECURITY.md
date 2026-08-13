@@ -58,6 +58,8 @@ Orchestratory 承諾：
   逾時不執行任何 Git 指令，candidate、checkpoint 與 recovery ref 完整保留。
 - Promotion 前建立 recovery point；建立或驗證失敗時不得宣稱 ready。
 - Main/candidate drift、preview mismatch、scope expansion 或未預期 conflict 均停止並重新詢問。
+- Promotion 對 clean/smudge filter 必須在 live gate 以 promotion 環境的 `git check-attr` 檢查完整
+  preview 將寫入的每一個非刪除候選路徑；新增路徑也必須檢查，路徑截斷或 Git 無法回答時 fail closed。
 - Merge 後不自動 push、publish、deploy 或 cleanup。
 
 ## 5. Room 與 exact-seat
