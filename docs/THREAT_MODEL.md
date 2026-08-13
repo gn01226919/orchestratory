@@ -16,6 +16,12 @@ Orchestratory 在單一使用者的 Mac 上協調一或多個原生 TUI Agent。
 4. 對誤刪、錯誤 merge、main drift 與崩潰提供偵測及復原資料；
 5. 不洩漏 provider secrets 或把外部副作用混入 main merge 授權。
 
+每小時 supervisor 只提供偵測與導正建議。它的失敗行為是以非零 exit code、bounded JSON report
+與 launchd stderr 告警停止，不嘗試自動修復；因此仍需由明確、snapshot-bound 的 candidate/main
+流程處理 drift。launchd 本身若被同一 macOS 使用者停用或繞過，屬於 Native Full-Trust 的同帳號
+繞過風險，不宣稱強制監控。SQLite quick/foreign-key 與 Room hash-chain 稽核不等於 HMAC audit chain
+或各 store 的完整 semantic integrity；後兩者仍由正式 gate 負責，督導不讀密鑰來擴大宣稱。
+
 ## 2. 非安全保證
 
 同一 macOS 帳號下擁有完整能力的 Agent，可以繞過 Orchestratory，直接修改 main、刪除 candidate／

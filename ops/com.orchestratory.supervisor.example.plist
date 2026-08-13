@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.orchestratory.supervisor</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE_EXECUTABLE__</string>
+    <string>__SUPERVISOR_SCRIPT__</string>
+    <string>--workspace</string>
+    <string>__WORKSPACE__</string>
+    <string>--branch</string>
+    <string>__EXPECTED_BRANCH__</string>
+    <string>--room</string>
+    <string>__ROOM__</string>
+    <string>--data-directory</string>
+    <string>__DATA_DIRECTORY__</string>
+    <string>--status-file</string>
+    <string>__STATUS_FILE__</string>
+    <string>--pending-file</string>
+    <string>__PENDING_FILE__</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>3600</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/orchestratory-supervisor.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/orchestratory-supervisor.err</string>
+</dict>
+</plist>

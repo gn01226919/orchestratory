@@ -9,6 +9,14 @@
 本版取代原本「MCP 只提供唯讀 worker、terminal 只能由 GUI 單向交辦」的提案。既有 `ask_*` worker
 可保留，但不得冒充 live terminal-to-terminal collaboration。
 
+## 0A. Supervisor 與 MCP 邊界
+
+每小時督導由本機 `scripts/supervisor-audit.mjs` 執行；Git 使用 bounded read process，Room 與 SQLite
+store 使用 read-only/query-only connection，因此不透過一般 runtime 觸發 migration/recovery。它不是
+MCP seat、不讀 HMAC key、不得偽造 sender identity、不得寫 Room ledger，也不會把模型回答當成 Owner 決策。launchd 範本
+只負責排程；若未來要派遣 Claude/Codex，必須另有明確 provider、quota、identity 與 failure policy，
+因此目前保持停用。
+
 ## 1. 一句話總結
 
 Codex／Claude Code 原生 TUI 是具完整能力的 Supervisor／Worker；Orchestratory MCP 提供 exact-seat

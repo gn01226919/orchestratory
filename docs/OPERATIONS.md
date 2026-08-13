@@ -23,6 +23,20 @@ provider-call governor.
 The GUI emergency stop increments a shared kill epoch: in-flight calls in every process are aborted, and
 already-running workflows cannot continue into their next provider or tester boundary.
 
+## Hourly read-only supervisor
+
+`ops/com.orchestratory.supervisor.example.plist` is intentionally non-runnable source: materialize its placeholders
+into a separate owner-local LaunchAgent using the absolute Node executable, committed supervisor script, canonical
+workspace, expected branch, Room, data directory and Obsidian handoff paths. Never commit the materialized plist.
+Validate it with `plutil`, then bootstrap `com.orchestratory.supervisor`; `StartInterval=3600` and `RunAtLoad` provide
+the hourly cadence and initial audit.
+
+The supervisor uses `git --no-optional-locks` and SQLite `readOnly + query_only`; it does not start normal runtime
+migration/recovery and does not read the HMAC audit key. It atomically writes only the workspace-external bounded
+`last-report.json` (0700 directory, 0600 file) plus a one-line `/tmp` launchd log. A hot WAL that cannot be read
+without recovery fails loud as an alert. SQLite quick/foreign-key checks and the Room SHA-256 chain do not replace
+the release gate's full semantic and HMAC integrity checks.
+
 These read-only diagnostics may run while the GUI daemon is active. Every SQLite store, including the main
 run store, waits up to three seconds for a short concurrent writer before failing closed. A lock that outlives
 that bound is not bypassed: let the active workflow or maintenance command finish, then retry sequentially.

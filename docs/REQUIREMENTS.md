@@ -15,6 +15,16 @@ Orchestratory 是本機多 Agent 協作器：讓多個原生 Codex／Claude Code
 
 產品不是 provider 的替代聊天 host，也不是把 Agent 關進低能力 sandbox 的 policy engine。
 
+## 1A. 每小時督導稽核
+
+產品必須提供 `scripts/supervisor-audit.mjs` 形式的唯讀督導：每次檢查 canonical workspace 的
+branch、HEAD/main/origin-main 關係、工作樹、working/staged diff check、Room hash chain，以及各 SQLite
+store 的 read-only quick/foreign-key integrity
+與 Obsidian handoff marker。檢查失敗只能產生 bounded report 與明確導正建議，不得自動 switch、reset、
+merge、push、publish、deploy、delete 或呼叫 provider。macOS launchd 範本以 `StartInterval=3600`
+提供持續排程；repository 只保存 placeholder example，安裝時才 materialize 本機絕對路徑，不得提交
+username、Node version 或 vault path。模型督導不是必要依賴，預設不得消耗 provider 額度。
+
 ## 2. 執行模式
 
 ### 2.1 Native Full-Trust

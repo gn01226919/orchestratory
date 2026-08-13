@@ -21,6 +21,15 @@
 | ADR-026 | 部分取代 | Room/recording 選擇保留；不得用 join mode 升降 Native capability |
 | ADR-027 | 擴充 | Membership/standby 分離保留；reply-and-wait 不逐回合重批，thread 無固定回合上限 |
 
+## ADR-029 — 每小時唯讀督導（2026-08-13）
+
+採用 deterministic local supervisor 作為進度與完整性偵測面，launchd 每 3600 秒執行一次。它檢查
+canonical branch、main/origin drift、dirty worktree、diff check、Room chain、control-plane
+SQLite quick/foreign-key integrity 與 Obsidian handoff marker；SQLite 僅以 read-only/query-only 開啟，
+不啟動 migration/recovery、不讀 HMAC key。偏離時只 alert-and-stop，不能自動改寫任何成果或呼叫模型。
+Provider/Claude dispatch 保持 optional 且 disabled by default。這不改變 Native Full-Trust、candidate
+邊界或 merge approval，也不提供不可繞過的 OS 級保證。
+
 ## ADR-001：Local-first
 
 **決策：** v1 完全在使用者本機執行，不依賴 Supabase、遠端 orchestrator 或公開 Web service。
