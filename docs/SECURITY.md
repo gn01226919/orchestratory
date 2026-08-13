@@ -16,6 +16,12 @@ Orchestratory 承諾：
 - 日常任務預設使用 candidate，並在任務終點主動詢問是否 merge main；
 - 不把 membership、standby、Room 訊息、commit 或 review PASS 當成 merge approval；
 - Exact-seat 工作不 fallback 到常駐模型；
+
+Supervisor audit 是告警控制，不是安全邊界：它只讀取並報告 branch/main drift、dirty worktree、
+Room chain、SQLite quick/foreign-key integrity 與 handoff 缺口；它不能修復、merge、push、發布或刪除
+資料。它以 read-only SQLite connection 避免 migration/recovery，且不碰 HMAC key。報告只保存必要的
+bounded metadata，固定小於等於 64 KiB，使用 workspace 外的 0700 directory 與原子 0600 report file；provider dispatch 預設關閉，避免把每小時稽核
+誤變成未授權的模型額度或外部副作用。
 - Merge approval 綁定精確快照，main/candidate drift 即失效；
 - 保留可驗證的 recovery metadata，誠實揭露 Full-Trust 不能強制隔離同帳號程序。
 

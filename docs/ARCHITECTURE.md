@@ -7,6 +7,16 @@
 本版取代「所有 provider 必須在唯讀 scratch cwd、只能透過 Workspace MCP 寫入、單一 Writer Lease」
 作為全產品架構的舊設計。這些元件只保留給 GUI Managed 模式。
 
+## 0A. Supervisor audit plane
+
+`scripts/supervisor-audit.mjs` 是獨立的 read-only operational plane。它以 bounded child-process
+讀取 Git，並用 SQLite `readOnly + query_only` 連線驗證 Room chain 與各 store 的 quick/foreign-key
+integrity；它不啟動會 migration/recovery 的一般 runtime，也不讀取或複製 HMAC key。結果寫入
+workspace 外、64 KiB 上限、owner-only 的原子 `last-report.json`；
+它不取得 candidate/main mutation authority，也不執行 provider call。`ops/com.orchestratory.supervisor.example.plist`
+只含可移植 placeholder，是 macOS launchd 每小時入口的範本；實際安裝時才以本機絕對路徑 materialize，
+不把 username、Node version 或 Obsidian vault path 發佈進 source/package。安裝仍是獨立本機作業，不等於 merge 或部署。
+
 ## 1. 系統視圖
 
 ```text
