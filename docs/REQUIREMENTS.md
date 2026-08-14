@@ -106,15 +106,24 @@ checkpoint，彙整：
 - 本機 Owner 在最終按鈕送出後，產品必須於同一次操作內核准並執行 promotion；不得停在只有
   `approved`、卻沒有任何可用 promotion 出口的狀態。只有 durable promotion 為 `applied`、且重新觀察到
   `authorizedMergeCommit=true` 與實際 `mainHeadAfter` 時，GUI 才能顯示「Merge 成功」。
-- 確認短語必須有就地、可存取的即時回饋：非 exact phrase 時欄位保持可修正、主要按鈕保持停用，並明示
+- 確認短語必須有就地、可存取的即時回饋：非 exact phrase 時欄位保持可修正、~~主要按鈕保持停用~~
+  真正提交保持阻擋，並明示
   「尚未送出、尚未 Merge、main 未修改」與正確短語；exact phrase 只能顯示「可送出但尚未 Merge」。因
   ~~scroll gate、re-preview、blocker 或 terminal state 鎖定輸入時，輸入框旁必須具名原因與恢復方式。~~
   pending approval 且 confirmation phrase 可用時，輸入框必須保持可輸入；scroll gate、re-preview 與
-  blocker 只停用最終按鈕並明示尚缺條件。只有 terminal state、已逾時或缺少 phrase 才鎖定並清空輸入；
+  blocker 只阻擋最終提交。按鈕使用 `aria-disabled` 表達尚不可提交但仍接收 intent click：該 click 只聚焦／
+  高亮缺少的 input、內層 diff 或 re-preview，並以 live status 明示未送出／未 Merge，不得發出 HTTP。
+  只有 terminal state、已逾時或缺少 phrase 才 native-disable 並清空輸入；
   逾時 copy 必須明示該 approval 不可復活、需由 candidate 提出新的 snapshot-bound request。
   已輸入文字只可在同一 approval id 的 re-preview／re-render 保留，切換至新 approval 必須清空。
 - 內層變更清單必須可由鍵盤聚焦及捲動，具可見 focus indicator，且以 `aria-describedby` 關聯明示
   「內層清單、不是外層 dialog」的 live scroll hint；不能把滑鼠操作當成唯一通過 scroll gate 的方式。
+- 只有 exact phrase、內層 diff 已捲到底、零 blocker、未逾時且非 terminal 的同一 snapshot 可由 intent
+  handler 進入既有 approval POST；任何未就緒 click 都必須可見有反應但 fail closed。
+- 確認輸入框的 Enter 不得直接執行最高風險動作：未就緒時走相同 intent guidance；已就緒時只把焦點
+  移到 final button 並要求第二次明確 activation。POST 在途時 client 必須鎖住重送並顯示「處理中，不會
+  重複送出」；結束或失敗後可靠 `finally` 釋放。相同 guidance 的重複 activation 必須重新觸發 aria-live，
+  target 改變時移除舊 attention 並重新計算，不得讓 screen reader 或可視焦點停在舊缺口。
 - 核准 POST 被拒絕後，即使重新讀取 live approval 也失敗，GUI 仍必須保留原拒絕原因、具名 refresh
   failure 並明示「這不是 Merge 成功」；nested read error 不得把結果變成沉默或成功。
 - 待核准清單只顯示仍可回答的 `requested` 記錄；promotion 開始後移至 durable Merge 歷史。歷史必須在

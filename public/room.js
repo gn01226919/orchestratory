@@ -96,6 +96,7 @@ const state = {
   mergeApprovalBlockers: [],
   mergeApprovalScrolled: false,
   mergeApprovalDecided: false,
+  mergeApprovalSubmitting: false,
   /* Typed confirmation belongs only to the approval currently loaded in this dialog. */
   mergeApprovalInputApprovalId: "",
   mergeApprovalReturnFocus: null,
@@ -3401,7 +3402,7 @@ function mergeApprovalGate(view) {
     hint = "後端沒有給確認短語，這筆 Merge 不可核准。 · No confirmation phrase was supplied; this merge cannot be approved.";
     feedback = "輸入已鎖定：缺少確認短語；沒有送出、沒有 Merge，main 未修改。 · Input locked because the confirmation phrase is unavailable.";
   } else if (blockers.length > 0) {
-    hint = "阻擋區還有項目：「合併進 main」保持停用；輸入框仍可修改，但不能排除 blocker。 · Blocking items keep the primary button disabled; the phrase remains editable.";
+    hint = "阻擋區還有項目：「合併進 main」不可提交；按它只會帶你到 blocker，不會送出。輸入框仍可修改。 · Blockers prevent submission; pressing Merge only guides you to them and sends nothing.";
     if (typed.length === 0) {
       feedback = `輸入框可用，但阻擋項目尚未排除；尚未送出、尚未 Merge。可先輸入 ${phrase}，仍須重新產生有效預覽。 · The field is editable, but blockers still prevent submission.`;
     } else if (typed !== phrase) {
@@ -3413,7 +3414,7 @@ function mergeApprovalGate(view) {
       tone = "is-waiting";
     }
   } else if (!scrolled) {
-    hint = "輸入框現在可用；仍須在上方深色『變更檔案』方框內捲到底（不是外層視窗），才會解鎖「合併進 main」。 · The field is editable; scroll inside the dark change-list box, not the outer dialog, to enable Merge.";
+    hint = "輸入框現在可用；仍須在上方深色『變更檔案』方框內捲到底（不是外層視窗）才能提交。現在按「合併進 main」只會帶你到內層清單，不會送出。 · Type now; until the inner change list is read, pressing Merge only guides you there and submits nothing.";
     if (typed.length === 0) {
       feedback = `尚未 Merge。你可以先輸入 ${phrase}；最終按鈕會等到內層變更清單捲到底才解鎖。 · Nothing was merged; you may type now, but must still read the inner change list.`;
     } else if (typed !== phrase) {
@@ -3421,7 +3422,7 @@ function mergeApprovalGate(view) {
       tone = "is-invalid";
       ariaInvalid = true;
     } else {
-      feedback = "✓ 確認短語正確，但還沒捲完內層變更清單；「合併進 main」仍停用，尚未 Merge。請在上方深色方框內捲到底，不是捲外層視窗。 · Phrase correct; scroll the inner change-list box before Merge can be enabled.";
+      feedback = "✓ 確認短語正確，但還沒捲完內層變更清單（不是捲外層視窗）；尚未 Merge。可按「合併進 main」讓畫面帶你回未讀處，該次不會送出。 · Phrase correct; press Merge for guidance to the unread inner list, not submission.";
       tone = "is-waiting";
     }
   } else if (typed.length === 0) {
@@ -3456,6 +3457,16 @@ function mergeApprovalInputScope(currentApprovalId, loadedApprovalId, typed) {
     approvalId: loaded,
     value: loaded.length > 0 && current === loaded && typeof typed === "string" ? typed : "",
   };
+}
+
+function mergeApprovalIntentTarget(view) {
+  const phrase = typeof view?.phrase === "string" ? view.phrase : "";
+  const typed = typeof view?.typed === "string" ? view.typed : "";
+  if (!view || view.decided === true || view.expired === true || phrase.length === 0) return "unavailable";
+  if (Array.isArray(view.blockers) && view.blockers.length > 0) return "blockers";
+  if (typed !== phrase) return "input";
+  if (view.scrolled !== true) return "diff";
+  return "submit";
 }
 
 function mergeApprovalFailureStatus(approvalFailure, refreshFailure = "") {
@@ -4043,27 +4054,113 @@ function mergeDiffScrolledToBottom() {
  * Scroll-gate：pending approval 的確認輸入框保持可編輯；diff 未捲到底或仍有 blocker 時，
  * 只有主要按鈕保持 disabled。「我捲完了」仍是提交條件，不再被誤做成輸入條件。
  */
-function updateMergeApprovalGate() {
-  const input = byId("merge-approval-confirmation");
-  const confirm = byId("merge-approval-confirm");
-  const hint = byId("merge-approval-scroll-hint");
-  const feedback = byId("merge-approval-confirmation-feedback");
-  if (!input || !confirm || !hint || !feedback) return;
-  const gate = mergeApprovalGate({
+function currentMergeApprovalGateView() {
+  return {
     blockers: state.mergeApprovalBlockers || [],
     scrolled: state.mergeApprovalScrolled,
     decided: state.mergeApprovalDecided,
     expired: state.mergeApproval?.expired === true,
     phrase: mergeConfirmationPhrase(),
-    typed: input.value,
-  });
+    typed: byId("merge-approval-confirmation")?.value || "",
+  };
+}
+
+function updateMergeApprovalGate() {
+  const input = byId("merge-approval-confirmation");
+  const confirm = byId("merge-approval-confirm");
+  const hint = byId("merge-approval-scroll-hint");
+  const feedback = byId("merge-approval-confirmation-feedback");
+  if (!input || !confirm || !hint || !feedback) return null;
+  const gate = mergeApprovalGate(currentMergeApprovalGateView());
   if (input.value !== gate.inputValue) input.value = gate.inputValue;
   input.disabled = gate.inputDisabled;
   input.setAttribute("aria-invalid", String(gate.ariaInvalid));
-  confirm.disabled = gate.confirmDisabled;
+  /*
+   * Pending 的按鈕不使用 native disabled：disabled 元素吞掉 click，Owner 只會看到「沒反應」。
+   * aria-disabled 保留「尚不可提交」語意；click handler 只做具名導引，ready 才進 POST。
+   * Terminal/expired/missing-phrase 仍 native disabled，因為它們沒有可完成的本地下一步。
+   */
+  confirm.disabled = gate.inputDisabled || state.mergeApprovalSubmitting;
+  confirm.setAttribute("aria-disabled", String(gate.confirmDisabled || state.mergeApprovalSubmitting));
   hint.textContent = gate.hint;
   feedback.textContent = gate.feedback;
   feedback.className = `merge-confirmation-feedback${gate.tone ? ` ${gate.tone}` : ""}`;
+  return gate;
+}
+
+function focusMergeApprovalRequirement(node) {
+  if (!node) return;
+  for (const previous of document.querySelectorAll("#merge-approval-diff.is-attention, #merge-approval-confirmation.is-attention, #merge-approval-repreview.is-attention")) {
+    previous.classList.remove("is-attention");
+  }
+  node.classList.remove("is-attention");
+  void node.offsetWidth;
+  node.classList.add("is-attention");
+  node.focus();
+  node.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function setMergeApprovalIntentGuide(target, text) {
+  const status = byId("merge-approval-status");
+  const sequence = String(Number(status.dataset.intentGuideSequence || "0") + 1);
+  status.dataset.intentGuide = target;
+  status.dataset.intentGuideSequence = sequence;
+  status.textContent = "";
+  requestAnimationFrame(() => {
+    if (status.dataset.intentGuideSequence === sequence && status.dataset.intentGuide === target) {
+      status.textContent = text;
+    }
+  });
+}
+
+function clearMergeApprovalIntentGuide() {
+  const status = byId("merge-approval-status");
+  if (!status?.dataset.intentGuide) return;
+  status.dataset.intentGuideSequence = String(Number(status.dataset.intentGuideSequence || "0") + 1);
+  delete status.dataset.intentGuide;
+  status.textContent = "";
+}
+
+async function handleMergeApprovalPrimaryIntent() {
+  if (state.mergeApprovalSubmitting) {
+    setMergeApprovalIntentGuide("submitting", "Merge 請求正在處理；不會重複送出。請等待 durable 結果。 · The merge request is already in progress and will not be submitted twice.");
+    return;
+  }
+  const view = currentMergeApprovalGateView();
+  const target = mergeApprovalIntentTarget(view);
+  updateMergeApprovalGate();
+  if (target === "submit") {
+    await approveMergeIntoMain();
+    return;
+  }
+  if (target === "diff") {
+    focusMergeApprovalRequirement(byId("merge-approval-diff"));
+    setMergeApprovalIntentGuide("diff", "尚未送出、尚未 Merge。已將焦點移到內層深色變更清單；請在這個方框內捲到底，再按一次合併。 · Nothing was submitted or merged. Focus moved to the inner change list; read it to the end, then press Merge again.");
+    return;
+  }
+  if (target === "input") {
+    focusMergeApprovalRequirement(byId("merge-approval-confirmation"));
+    setMergeApprovalIntentGuide("input", `尚未送出、尚未 Merge。請先完整輸入 ${mergeConfirmationPhrase()}，再按一次合併。 · Nothing was submitted or merged; correct the phrase and try again.`);
+    return;
+  }
+  if (target === "blockers") {
+    focusMergeApprovalRequirement(byId("merge-approval-repreview"));
+    setMergeApprovalIntentGuide("blockers", "尚未送出、尚未 Merge。阻擋項目仍在；已將焦點移到重新產生預覽。 · Nothing was submitted or merged; blockers remain, and focus moved to Re-preview.");
+    return;
+  }
+  setMergeApprovalIntentGuide("unavailable", "這筆核准已逾時、終局或缺少確認短語，不能送出；尚未 Merge。請建立新的 snapshot-bound 核准。 · This approval is unavailable and was not submitted; request a new snapshot-bound approval.");
+}
+
+async function handleMergeApprovalConfirmationKeydown(event) {
+  if (event.key !== "Enter" || event.isComposing || event.keyCode === 229) return;
+  event.preventDefault();
+  const target = mergeApprovalIntentTarget(currentMergeApprovalGateView());
+  if (target !== "submit") {
+    await handleMergeApprovalPrimaryIntent();
+    return;
+  }
+  focusMergeApprovalRequirement(byId("merge-approval-confirm"));
+  setMergeApprovalIntentGuide("confirm", "尚未送出、尚未 Merge。確認短語與閱讀條件已完成；焦點已移到最終按鈕，請再按一次以明確確認。 · Nothing was submitted or merged; focus moved to the final button for explicit confirmation.");
 }
 
 function renderMergeApprovalPicker() {
@@ -4229,6 +4326,7 @@ function closeMergeApprovalDialog() {
   state.mergeApprovalTicker = null;
   state.mergeApprovalPoll = null;
   state.mergeApproval = null;
+  state.mergeApprovalSubmitting = false;
   state.mergeApprovalInputApprovalId = "";
   state.mergeApprovalScrolled = false;
   state.mergeApprovalBlockers = [];
@@ -4252,61 +4350,69 @@ async function approveMergeIntoMain() {
     updateMergeApprovalGate();
     return;
   }
+  if (state.mergeApprovalSubmitting) return;
+  state.mergeApprovalSubmitting = true;
   confirm.disabled = true;
+  clearMergeApprovalIntentGuide();
   status.textContent = "正在核准並執行 single-use promotion；完成前不會顯示 Merge 成功… · Approving and running the single-use promotion; success is shown only after durable verification…";
   try {
-    const value = await api("/api/rooms/merge-approvals/approve", {
-      method: "POST",
-      body: JSON.stringify({
-        room: state.room,
-        approvalId: approval.id,
-        /* 必須是畫面上實際渲染的那一份 digest；後端會拒絕任何不相符。 */
-        previewDigest: approval.previewDigest,
-        confirmation,
-      }),
-    });
-    state.mergeApproval = value.approval;
-    state.mergeApprovalDecided = true;
-    renderMergeApproval();
-    await refreshMergeHistory();
-    const promotion = value.promotion || {};
-    const result = byId("merge-approval-result");
-    result.textContent = "";
-    const title = document.createElement("b");
-    const detail = document.createElement("p");
-    const log = document.createElement("code");
-    if (mergeHistorySucceeded(promotion) && value.mainMutated === true) {
-      title.textContent = "✓ Merge 成功 · Merge succeeded";
-      detail.textContent = `main HEAD ${shortSha(promotion.mainHeadBefore)} → ${shortSha(promotion.mainHeadAfter)}；候選已移出待核准並寫入 Merge 歷史。`;
-      status.textContent = "Merge 已完成並由 durable promotion observation 驗證。沒有自動 push、publish、deploy、delete 或 cleanup。 · Merge completed and durably verified; no external side effects were performed.";
-    } else if (promotion.state === "rolled-back" && value.mainMutated === false) {
-      result.classList.add("is-failed");
-      title.textContent = "Merge 未套用 · Merge not applied";
-      detail.textContent = `promotion 已記錄為 rolled-back（${promotion.observation?.code || "未讀到原因"}）；candidate 與 recovery ref 保留。`;
-      status.textContent = "沒有顯示成功，也不會自動重試；請從 Merge 歷史核對完整紀錄。 · No success was claimed and no automatic retry will run.";
-    } else {
-      result.classList.add("is-uncertain");
-      title.textContent = "尚未能確認 Merge 成功 · Merge requires review";
-      detail.textContent = `promotion=${promotion.state || "unavailable"}；observation=${promotion.observation?.code || "unavailable"}。這不是成功，請從 Merge 歷史與 recovery 紀錄人工確認。`;
-      status.textContent = "系統不會把不確定狀態說成成功，也不會重複 apply。 · An uncertain outcome is not success and will not be applied again automatically.";
-    }
-    log.textContent = `promotion ${promotion.id || "unavailable"} · approval ${approval.id} · recovery ${promotion.recoveryRef || approval.binding?.recoveryRef || "unavailable"}`;
-    result.append(title, detail, log);
-    result.hidden = false;
-  } catch (error) {
-    /* 先重新讀取（會清空狀態列），再寫入失敗原因，否則訊息會被覆蓋掉。 */
-    let refreshError = null;
     try {
-      await loadMergeApproval(approval.id);
-    } catch (caught) {
-      refreshError = caught;
+      const value = await api("/api/rooms/merge-approvals/approve", {
+        method: "POST",
+        body: JSON.stringify({
+          room: state.room,
+          approvalId: approval.id,
+          /* 必須是畫面上實際渲染的那一份 digest；後端會拒絕任何不相符。 */
+          previewDigest: approval.previewDigest,
+          confirmation,
+        }),
+      });
+      state.mergeApproval = value.approval;
+      state.mergeApprovalDecided = true;
+      renderMergeApproval();
+      await refreshMergeHistory();
+      const promotion = value.promotion || {};
+      const result = byId("merge-approval-result");
+      result.textContent = "";
+      const title = document.createElement("b");
+      const detail = document.createElement("p");
+      const log = document.createElement("code");
+      if (mergeHistorySucceeded(promotion) && value.mainMutated === true) {
+        title.textContent = "✓ Merge 成功 · Merge succeeded";
+        detail.textContent = `main HEAD ${shortSha(promotion.mainHeadBefore)} → ${shortSha(promotion.mainHeadAfter)}；候選已移出待核准並寫入 Merge 歷史。`;
+        status.textContent = "Merge 已完成並由 durable promotion observation 驗證。沒有自動 push、publish、deploy、delete 或 cleanup。 · Merge completed and durably verified; no external side effects were performed.";
+      } else if (promotion.state === "rolled-back" && value.mainMutated === false) {
+        result.classList.add("is-failed");
+        title.textContent = "Merge 未套用 · Merge not applied";
+        detail.textContent = `promotion 已記錄為 rolled-back（${promotion.observation?.code || "未讀到原因"}）；candidate 與 recovery ref 保留。`;
+        status.textContent = "沒有顯示成功，也不會自動重試；請從 Merge 歷史核對完整紀錄。 · No success was claimed and no automatic retry will run.";
+      } else {
+        result.classList.add("is-uncertain");
+        title.textContent = "尚未能確認 Merge 成功 · Merge requires review";
+        detail.textContent = `promotion=${promotion.state || "unavailable"}；observation=${promotion.observation?.code || "unavailable"}。這不是成功，請從 Merge 歷史與 recovery 紀錄人工確認。`;
+        status.textContent = "系統不會把不確定狀態說成成功，也不會重複 apply。 · An uncertain outcome is not success and will not be applied again automatically.";
+      }
+      log.textContent = `promotion ${promotion.id || "unavailable"} · approval ${approval.id} · recovery ${promotion.recoveryRef || approval.binding?.recoveryRef || "unavailable"}`;
+      result.append(title, detail, log);
+      result.hidden = false;
+    } catch (error) {
+      /* 先重新讀取（會清空狀態列），再寫入失敗原因，否則訊息會被覆蓋掉。 */
+      let refreshError = null;
+      try {
+        await loadMergeApproval(approval.id);
+      } catch (caught) {
+        refreshError = caught;
+      }
+      status.textContent = mergeApprovalFailureStatus(
+        humanError(error),
+        refreshError ? humanError(refreshError) : "",
+      );
     }
-    status.textContent = mergeApprovalFailureStatus(
-      humanError(error),
-      refreshError ? humanError(refreshError) : "",
-    );
+    await refreshMergeApprovals();
+  } finally {
+    state.mergeApprovalSubmitting = false;
+    if (!state.mergeApprovalDecided) updateMergeApprovalGate();
   }
-  await refreshMergeApprovals();
 }
 
 async function openMergeHistory() {
@@ -4402,7 +4508,10 @@ document.addEventListener("keydown", (event) => {
   else if (!byId("merge-approval").hidden) closeMergeApprovalDialog();
 });
 byId("merge-approval-diff").addEventListener("scroll", () => {
-  if (mergeDiffScrolledToBottom()) state.mergeApprovalScrolled = true;
+  if (mergeDiffScrolledToBottom()) {
+    state.mergeApprovalScrolled = true;
+    clearMergeApprovalIntentGuide();
+  }
   updateMergeApprovalGate();
 });
 /* 展開一個檔案會多出使用者還沒看過的內容，因此重新評估捲動門檻，而不是沿用舊結果。 */
@@ -4411,9 +4520,11 @@ byId("merge-approval-diff").addEventListener("toggle", () => {
   updateMergeApprovalGate();
 }, true);
 byId("merge-approval-confirmation").addEventListener("input", () => {
+  clearMergeApprovalIntentGuide();
   updateMergeApprovalGate();
 });
-byId("merge-approval-confirm").addEventListener("click", () => void approveMergeIntoMain());
+byId("merge-approval-confirmation").addEventListener("keydown", (event) => void handleMergeApprovalConfirmationKeydown(event));
+byId("merge-approval-confirm").addEventListener("click", () => void handleMergeApprovalPrimaryIntent());
 byId("merge-approval-reject").addEventListener("click", () => void rejectMergeIntoMain());
 byId("merge-approval-repreview").addEventListener("click", () => void repreviewMergeApproval());
 byId("merge-approval-refresh").addEventListener("click", () => void repreviewMergeApproval());

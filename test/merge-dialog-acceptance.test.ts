@@ -34,8 +34,11 @@ const ACCEPTED_FUNCTIONS = [
   "mergeDiffScrolledToBottom",
   "mergeApprovalGate",
   "mergeApprovalInputScope",
+  "mergeApprovalIntentTarget",
   "mergeApprovalFailureStatus",
   "updateMergeApprovalGate",
+  "handleMergeApprovalPrimaryIntent",
+  "handleMergeApprovalConfirmationKeydown",
   "mergeApprovalBlockers",
   "mergeRiskLevel",
   "renderMergeApproval",
@@ -63,11 +66,17 @@ const ACCEPTED_ROOM_FRAGMENTS = [
     patterns: [
       /<section id="merge-approval-blocking"[\s\S]*?<\/section>/u,
       /<div id="merge-approval-diff"[^>]*><\/div>/u,
+      /<button id="merge-approval-confirm"[^>]*>.*?<\/button>/u,
+      /<p id="merge-approval-status"[^>]*><\/p>/u,
     ],
   },
   {
     file: "styles.css",
-    patterns: [/^\.merge-approval-diff:focus-visible \{.*\}$/mu],
+    patterns: [
+      /^\.merge-approval-diff:focus-visible \{.*\}$/mu,
+      /^\.merge-approval-actions #merge-approval-confirm\[aria-disabled="true"\]:not\(:disabled\) \{.*\}$/mu,
+      /^#merge-approval-diff\.is-attention,.*\}$/mu,
+    ],
   },
 ] as const;
 

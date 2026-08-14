@@ -852,6 +852,14 @@ ADR-033「不能把核准燒掉但 merge 沒發生」的載重理由，也讓已
    清空。Expired approval 雖可能仍以 `requested` row 被讀到，但在 UI 視為不可復活，input 鎖定並清空，
    只能由 candidate 另提新 request。內層 scroll region 是安全 gate，因此必須以鍵盤可聚焦／捲動、有
    可見焦點且與 live hint 關聯；不能把滑鼠能力當成 Owner 的前提。
+8. 原生 disabled button 會吞掉 click，讓 Owner 無法分辨「安全阻擋」與「產品故障」。Pending 且 phrase
+   存在時，final button 改用 `aria-disabled` 表示不可提交但保留 intent click；未就緒 click 只把焦點／
+   外層 viewport 帶到缺少條件並在 live status 明示未送出，不得發 HTTP。只有 pure gate 回傳 `submit`
+   才進第 1 項 operation；terminal/expired/missing phrase 仍 native-disabled。
+9. Confirmation input 的 Enter 不直接觸發第 1 項 operation：未就緒走 guidance，ready 只 focus final
+   button，Owner 必須再 activation 一次。Client 以 await 前的 `mergeApprovalSubmitting` 與 `finally`
+   防重入，但 exactly-once 仍由 server single-use 保證。Guidance 每次 activation 都 versioned clear/rewrite
+   aria-live，並移除舊 target attention，讓重複與狀態變更都不是沉默或過時回饋。
 
 ### 代價與殘餘風險
 

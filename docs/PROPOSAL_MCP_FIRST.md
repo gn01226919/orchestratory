@@ -356,9 +356,12 @@ ledger 都看不到 raw token，且一離開 `approved` 狀態即清除。若 re
 就緒，畫面仍須明示尚未 Merge、需按最終按鈕。~~re-preview 會清空輸入並重新鎖住 scroll gate。~~
 re-preview 只重置內層 scroll gate，不清空或 disable 同一 approval id 的 pending input；切換到不同
 approval id、逾時、終局或缺 phrase 時必須清空，且逾時不可由 re-preview 復活。內層清單須有鍵盤焦點、
-可見 focus indicator 與關聯 live hint。final button 仍要同時滿足 scroll、零 blocker 與 exact phrase。無論
+可見 focus indicator 與關聯 live hint。final submission 仍要同時滿足 scroll、零 blocker 與 exact phrase；
+未就緒的 button intent 只在 client 聚焦缺少條件並寫「未送出」live status，不新增 HTTP/MCP call。無論
 client 顯示什麼，POST 仍由 server 精確比對 `confirmation` 並重驗 TTL、snapshot binding 與 single-use
 state；任何 client 文字都不能成為核准證據。
+Input Enter 只導引或 focus final button，不直接 POST；client in-flight flag 在 await 前鎖住重送、finally
+釋放，server single-use 仍負責真正 exactly-once。重複 guidance 用 versioned aria-live re-announcement。
 POST 拒絕後 client 可重新讀 live approval 以更新 dialog；該讀取不是成功判準，而且必須有獨立 error
 boundary。若 refresh 也失敗，畫面同時保留原拒絕與 refresh failure，並固定標示「不是 Merge 成功」。
 

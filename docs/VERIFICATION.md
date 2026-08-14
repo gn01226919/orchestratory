@@ -3787,6 +3787,63 @@ expired bit 交給已直接執行的 pure gate，所以正在輸入／捲動中�
 這個轉場前漏掉 tick 而發出 stale POST，server 的 TTL 重驗仍拒絕，既有 nested-failure regression 保證
 拒絕結果不會被 refresh error 吞掉或冒充成功。
 
-最終 served-bytes digest 同時綁定：全部已驗收的 JS gate functions（含 expired branch 與
+~~最終 served-bytes digest同時綁定：全部已驗收的 JS gate functions（含 expired branch 與
 `mergeApprovalInputScope`）、完整 blocking section、`#merge-approval-diff` 的 ARIA/focus markup，以及
-`:focus-visible` CSS rule：`8ee89df10d5430bba2f29cfb32b2c703aa6bc1dd925bd2d5f8ece7a6067ce722`。
+`:focus-visible` CSS rule：`8ee89df10d5430bba2f29cfb32b2c703aa6bc1dd925bd2d5f8ece7a6067ce722`。~~
+此值已由下方「未就緒 click 必須有回饋」重驗取代。
+
+### 2026-08-14 未就緒 Merge click 的可見、安全回饋
+
+Owner 在正式 4320 畫面輸入 exact phrase 後直接按 Merge；因 inner diff 尚未捲完，舊版 button 使用
+native `disabled`，瀏覽器完全不派發 click，因此沒有 HTTP、沒有 Merge，也沒有任何新的回饋。Durable
+查核證明該 approval 仍是 `requested`、canonical main 仍為 `a90a7fe`、沒有 promotion row；這不是 Merge
+失敗，而是 click 被 control 吞掉，但使用者無法從沉默分辨。
+
+修正版以 `mergeApprovalIntentTarget()` 執行同一份 gate 的 DOM-free 分流：`diff`／`input`／`blockers`／
+`unavailable` 絕不呼叫 approve endpoint，只聚焦並高亮缺少條件、調整外層 viewport、在 aria-live status
+明示「尚未送出／尚未 Merge」；只有 `submit` 分支呼叫 `approveMergeIntoMain()`。Pending button 使用
+`aria-disabled` 保留不可提交語意與視覺，terminal／expired／missing phrase 仍使用 native disabled。
+
+以含兩筆 pending approvals 的隔離真實 Git fixture 在 Chrome 重現 Owner 截圖順序，沒有按 ready 後的
+final Merge：
+
+| 行為 | 真實瀏覽器觀察 |
+|---|---|
+| Exact＋未捲 | input=`MERGE INTO MAIN`、inner `scrollTop=0`；button `nativeDisabled=false`、`aria-disabled=true` |
+| 點擊回饋 | click 後 inner region 取得焦點與 `is-attention`，外層畫面被帶回該 region；live status 明示「尚未送出、尚未 Merge」，result 仍 hidden |
+| 沒有副作用 | fixture main HEAD 仍 `b0b1b3608842c0c57866278a01362f3981203ca1`；SQLite approvals=`requested|2`、promotions=`0` |
+| 完成條件 | 內層按 `End` 到底（`37.5/38`）後 phrase 保留，導引 status 清空，`aria-disabled=false`；feedback 仍明示尚未 Merge、需再按 final button |
+
+Executable regression 逐一斷言 exact-ready→`submit`、exact-unread→`diff`、wrong/empty→`input`、
+blocker→`blockers`、expired/terminal/malformed→`unavailable`；source contract 另鎖定只有 `submit` branch
+可呼叫 approve，click listener 不再直接連到 write path。
+
+〜新 served-bytes digest 同時涵蓋上述 JS functions、intent handler、button HTML/ARIA、blocking/diff markup、
+focus/attention/aria-disabled CSS：`911e752c705ab7d210e6637cd5de45f95e0f1f333c754378e4c52bb734431118`。〜
+此值對應第一版 intent handler；加入 Enter 二段確認、in-flight guard、重複 aria-live 播報與
+status markup 後，已由下方重驗取代。
+
+#### 2026-08-14 強制重新整理後的最終 Chrome 重驗
+
+Owner 強制重新整理 4320 後，原 approval 已過 23:23 TTL，因此實際 Room 將待核准按鈕關閉並保留
+durable history；這是 terminal expiry，不是新的 click failure。為了不繞過 TTL 或觸碰 canonical main，
+使用兩筆全新 pending approvals 的隔離 Git／SQLite fixture 重驗最終 served bytes；全程沒有按下
+ready 後的 final Merge：
+
+| 行為 | 真實 Chrome 觀察 |
+|---|---|
+| Empty＋click | button `nativeDisabled=false`、`aria-disabled=true`；點擊後 input 取得焦點與 `is-attention`，live status 明示「尚未送出、尚未 Merge」，result hidden |
+| Exact＋未捲＋click | inner diff 取得焦點與 `is-attention`，live status 指名需在該內層方框讀到底；沒有 submit |
+| 重複點擊 | 相同文字重寫時 `intentGuideSequence` 由 `3` 進到 `4`，可重新觸發 aria-live；焦點仍在當下缺少的 diff |
+| Exact＋未捲＋Enter | input 的 Enter 經同一 intent router 把焦點導到 diff，result hidden，沒有 submit |
+| Exact＋已捲＋Enter | diff `scrollTop=38/scrollHeight=321`、button `aria-disabled=false`；Enter 只將焦點移到 final button，並明示「尚未送出」，仍需第二次明確啟動 |
+| 沒有副作用 | approvals 仍為 `requested|2`、promotions=`0`；fixture main 仍 clean，HEAD=`07d89c2b916745fc3b54a6377d65d98daca500c0` |
+
+直接 regression 另鎖定：physical disabled 只取決於 terminal input-disabled 或 in-flight；semantic
+`aria-disabled` 才反映 not-ready；Enter 包含 IME guards，ready 時不 POST；`mergeApprovalSubmitting`
+在第一個 await 前設定，並在 `finally` 還原；intent guide 以 versioned clear／`requestAnimationFrame`
+重寫，且每次 activation 都重新計算 target。
+
+最終 served-bytes digest 包含上述 gate／intent／Enter／in-flight／failure／render functions、完整
+blocking／diff／final-button／aria-live status HTML，以及 focus／attention／aria-disabled CSS：
+`19e30a27b1eac6dc5002bf28f569dab9e12cad68d2abe6c586ed9de59c70eed8`。
