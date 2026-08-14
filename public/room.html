@@ -231,13 +231,13 @@
         </div>
         <section id="merge-approval-blocking" class="merge-approval-blocking" aria-live="polite" hidden>
           <b>無法核准 · Blocking</b>
-          <p>下列項目存在期間，確認輸入與「合併進 main」保持停用。 · While any of these is present the confirmation input and the primary button stay disabled.</p>
+          <p>下列項目存在期間，「合併進 main」保持停用；一般 blocker 不會鎖住輸入，但逾時／終局核准不能復活。 · Blocking items keep the primary button disabled; ordinary blockers do not lock the field, but expired or terminal approvals cannot be revived.</p>
           <ul id="merge-approval-blockers"></ul>
           <button id="merge-approval-repreview" type="button">↻ 重新產生預覽 · Re-preview</button>
         </section>
         <div id="merge-approval-stats" class="merge-approval-stats"></div>
         <p class="merge-approval-diff-label" id="merge-approval-diff-label">這次促進會執行什麼、覆蓋什麼，以及變更檔案（預設收合，請捲到底） · What this promotion would execute and overwrite, then the changed files (collapsed by default, scroll to the bottom)</p>
-        <div id="merge-approval-diff" class="merge-approval-diff" tabindex="0" role="group" aria-labelledby="merge-approval-diff-label"></div>
+        <div id="merge-approval-diff" class="merge-approval-diff" tabindex="0" role="group" aria-labelledby="merge-approval-diff-label" aria-describedby="merge-approval-scroll-hint"></div>
         <p id="merge-approval-scroll-hint" class="merge-approval-scroll-hint" aria-live="polite"></p>
         <section class="merge-approval-recovery">
           <b>復原點 · Recovery point</b>
@@ -251,7 +251,7 @@
           <button id="merge-approval-refresh" type="button">↻ 重新產生預覽 · Re-preview</button>
         </div>
         <div id="merge-approval-confirm-area">
-          <label for="merge-approval-confirmation">捲完 diff 且沒有阻擋項目後，輸入 <code id="merge-approval-phrase">MERGE INTO MAIN</code> 解鎖 · Once the diff is read to the end and nothing is blocking, type the phrase to enable</label>
+          <label for="merge-approval-confirmation">可先輸入 <code id="merge-approval-phrase">MERGE INTO MAIN</code>；捲完內層 diff 且沒有阻擋項目後，最終按鈕才解鎖 · You may type now; the final button also requires the inner diff to be read to the end</label>
           <input id="merge-approval-confirmation" type="text" maxlength="64" autocomplete="off" spellcheck="false" aria-describedby="merge-approval-confirmation-feedback" disabled>
           <p id="merge-approval-confirmation-feedback" class="merge-confirmation-feedback" aria-live="polite"></p>
         </div>

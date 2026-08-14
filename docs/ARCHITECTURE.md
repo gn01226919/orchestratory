@@ -186,6 +186,11 @@ row 的 terminal approval 另列為「核准未進入 promotion」，不會消�
 確認輸入的 UI gate 由 DOM-free `mergeApprovalGate()` 計算同一份狀態：`blocked`、`not-scrolled`、
 `empty`、`incorrect`、`exact`、`decided` 各自回傳 controls 與 live-region copy。錯字不送 HTTP，欄位保持
 可編輯且 `aria-invalid=true`；re-preview 重新鎖定 scroll gate 時會明說「尚未 Merge」及重新捲到底的出口。
+Scroll gate 只控制 final button：pending row 的 input 不因未捲完或 blocker 被 disable／清空，已輸入短語
+只在同一 approval id 的 re-preview／re-render 保留；載入不同 approval id 時先清空。逾時視為不可復活的
+本地終止條件，input 鎖定並清空，畫面要求 candidate 另提新的 snapshot-bound request，不暗示 re-preview
+能救回舊核准。提示明確區分「內層深色變更清單」與外層 dialog；scroll region 有 `tabindex=0`、
+`aria-describedby` 連到 live hint 與 2px `:focus-visible`，原生 PageDown/End 鍵可完成同一門檻。
 這是使用者回饋層，不改變 server 的 exact phrase、snapshot binding 或 promotion contract。
 核准 POST 的 error path 會 best-effort 重新讀 live approval；該讀取另有獨立 catch，失敗時同時保留原拒絕
 與 refresh failure，並固定標示非成功，避免 nested error 吞掉 Owner 唯一可見的結果。

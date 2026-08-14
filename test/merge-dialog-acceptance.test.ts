@@ -33,6 +33,7 @@ const ACCEPTED_FUNCTIONS = [
   "tickMergeApprovalTtl",
   "mergeDiffScrolledToBottom",
   "mergeApprovalGate",
+  "mergeApprovalInputScope",
   "mergeApprovalFailureStatus",
   "updateMergeApprovalGate",
   "mergeApprovalBlockers",
@@ -56,6 +57,20 @@ const ACCEPTED_FUNCTIONS = [
   "rejectMergeIntoMain",
 ] as const;
 
+const ACCEPTED_ROOM_FRAGMENTS = [
+  {
+    file: "room.html",
+    patterns: [
+      /<section id="merge-approval-blocking"[\s\S]*?<\/section>/u,
+      /<div id="merge-approval-diff"[^>]*><\/div>/u,
+    ],
+  },
+  {
+    file: "styles.css",
+    patterns: [/^\.merge-approval-diff:focus-visible \{.*\}$/mu],
+  },
+] as const;
+
 function acceptedSource(file: string, names: readonly string[]): string {
   const source = readFileSync(join(root, "public", file), "utf8");
   return names.map((name) => {
@@ -74,19 +89,35 @@ function acceptedSource(file: string, names: readonly string[]): string {
   }).join("\n");
 }
 
+function acceptedFragments(groups: readonly { file: string; patterns: readonly RegExp[] }[]): string {
+  return groups.map(({ file, patterns }) => {
+    const source = readFileSync(join(root, "public", file), "utf8");
+    return patterns.map((pattern) => {
+      const found = pattern.exec(source);
+      assert.ok(found, `accepted browser fragment is gone from public/${file}`);
+      return found[0];
+    }).join("\n");
+  }).join("\n");
+}
+
 /*
  * Both write-back paths are covered. They are different endpoints with different
  * previews, and each was accepted in a browser separately, so each carries its own
  * digest — a change to one must not be able to hide behind the other still matching.
  */
 const ACCEPTED_GATES = [
-  { file: "room.js", names: ACCEPTED_FUNCTIONS, label: "candidate → main merge approval" },
+  {
+    file: "room.js", names: ACCEPTED_FUNCTIONS, fragments: ACCEPTED_ROOM_FRAGMENTS,
+    label: "candidate → main merge approval",
+  },
   { file: "app.js", names: ACCEPTED_APPLY_BACK_FUNCTIONS, label: "workspace apply-back" },
 ] as const;
 
 for (const gate of ACCEPTED_GATES) {
   test(`the accepted ${gate.label} gate still matches its recorded browser acceptance`, () => {
-  const digest = createHash("sha256").update(acceptedSource(gate.file, gate.names), "utf8").digest("hex");
+  const accepted = acceptedSource(gate.file, gate.names)
+    + ("fragments" in gate ? `\n${acceptedFragments(gate.fragments)}` : "");
+  const digest = createHash("sha256").update(accepted, "utf8").digest("hex");
   const verification = readFileSync(join(root, "docs", "VERIFICATION.md"), "utf8");
 
   assert.ok(

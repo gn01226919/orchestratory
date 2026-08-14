@@ -96,6 +96,8 @@ const state = {
   mergeApprovalBlockers: [],
   mergeApprovalScrolled: false,
   mergeApprovalDecided: false,
+  /* Typed confirmation belongs only to the approval currently loaded in this dialog. */
+  mergeApprovalInputApprovalId: "",
   mergeApprovalReturnFocus: null,
   mergeApprovalTicker: null,
   mergeApprovalPoll: null,
@@ -3367,7 +3369,7 @@ byId("office-chat-form").addEventListener("submit", async (event) => {
 /*
  * ── 合併進 main 的核准對話框 · merge-into-main approval dialog ─────────────
  * 沿用 .workspace-onboarding 元件（role="dialog" aria-modal、Esc 關閉、背景點擊關閉、焦點返回、
- * 輸入短語才解鎖），只多一個 variant。全程不得使用 window.alert／confirm／prompt：原生對話框
+ * 輸入短語與捲完 diff 才解鎖最終按鈕），只多一個 variant。全程不得使用 window.alert／confirm／prompt：原生對話框
  * 可被瀏覽器永久靜音，而且在它開啟期間頁面凍結，TTL 倒數物理上不可能顯示。
  */
 
@@ -3380,9 +3382,11 @@ function mergeApprovalGate(view) {
   const blockers = Array.isArray(view?.blockers) ? view.blockers : ["unavailable"];
   const scrolled = view?.scrolled === true;
   const decided = view?.decided === true;
+  const expired = view?.expired === true;
   const phrase = typeof view?.phrase === "string" ? view.phrase : "";
   const typed = typeof view?.typed === "string" ? view.typed : "";
-  const ready = blockers.length === 0 && scrolled && !decided && phrase.length > 0;
+  const inputEnabled = !decided && !expired && phrase.length > 0;
+  const ready = inputEnabled && blockers.length === 0 && scrolled;
   let hint;
   let feedback;
   let tone = "";
@@ -3390,15 +3394,36 @@ function mergeApprovalGate(view) {
   if (decided) {
     hint = "這筆核准已經有結果，不能再決定一次。 · This approval has already been decided.";
     feedback = "輸入已鎖定：請從 Merge 歷史核對結果，不要把鎖定狀態當成新的成功。 · Input locked; verify the result in Merge History.";
-  } else if (blockers.length > 0) {
-    hint = "阻擋區還有項目：確認輸入與「合併進 main」保持停用，請先重新產生預覽。 · Blocking items remain; the confirmation input and the primary button stay disabled.";
-    feedback = "輸入已鎖定：阻擋項目尚未排除；沒有送出、沒有 Merge，main 未修改。 · Input locked by blockers; nothing was submitted or merged.";
+  } else if (expired) {
+    hint = "這筆核准已逾時且不能復活；輸入已鎖定。候選端必須提出一筆新的 snapshot-bound 核准。 · This approval expired and cannot be revived; request a new snapshot-bound approval.";
+    feedback = "輸入已鎖定並清空：重新產生預覽不會讓這筆逾時核准恢復，尚未送出、尚未 Merge。 · Input locked and cleared; re-preview cannot revive this expired approval, and nothing was submitted or merged.";
   } else if (phrase.length === 0) {
     hint = "後端沒有給確認短語，這筆 Merge 不可核准。 · No confirmation phrase was supplied; this merge cannot be approved.";
     feedback = "輸入已鎖定：缺少確認短語；沒有送出、沒有 Merge，main 未修改。 · Input locked because the confirmation phrase is unavailable.";
+  } else if (blockers.length > 0) {
+    hint = "阻擋區還有項目：「合併進 main」保持停用；輸入框仍可修改，但不能排除 blocker。 · Blocking items keep the primary button disabled; the phrase remains editable.";
+    if (typed.length === 0) {
+      feedback = `輸入框可用，但阻擋項目尚未排除；尚未送出、尚未 Merge。可先輸入 ${phrase}，仍須重新產生有效預覽。 · The field is editable, but blockers still prevent submission.`;
+    } else if (typed !== phrase) {
+      feedback = `✗ 確認短語不正確，而且阻擋項目尚未排除；輸入框仍可修改，尚未送出、尚未 Merge，main 未修改。請完整輸入 ${phrase}。 · Incorrect phrase and blockers remain; nothing was submitted or merged.`;
+      tone = "is-invalid";
+      ariaInvalid = true;
+    } else {
+      feedback = "✓ 確認短語正確，但阻擋項目尚未排除；「合併進 main」仍停用，尚未 Merge。 · Phrase correct, but blockers still prevent submission.";
+      tone = "is-waiting";
+    }
   } else if (!scrolled) {
-    hint = "請把上面的變更清單捲到底（展開檔案後會重新計算），確認輸入才會解鎖。 · Scroll the change list to the bottom to enable the confirmation input.";
-    feedback = "輸入已鎖定：尚未捲完上方變更清單；這不是 Merge 結果，main 未修改。捲到底後即可再次輸入。 · Input locked until the change list is read to the end; nothing was merged.";
+    hint = "輸入框現在可用；仍須在上方深色『變更檔案』方框內捲到底（不是外層視窗），才會解鎖「合併進 main」。 · The field is editable; scroll inside the dark change-list box, not the outer dialog, to enable Merge.";
+    if (typed.length === 0) {
+      feedback = `尚未 Merge。你可以先輸入 ${phrase}；最終按鈕會等到內層變更清單捲到底才解鎖。 · Nothing was merged; you may type now, but must still read the inner change list.`;
+    } else if (typed !== phrase) {
+      feedback = `✗ 確認短語不正確；輸入框仍可修改。另請在上方深色變更清單方框內捲到底；尚未送出、尚未 Merge，main 未修改。請完整輸入 ${phrase}。 · Incorrect phrase; edit it and scroll the inner change list. Nothing was submitted or merged.`;
+      tone = "is-invalid";
+      ariaInvalid = true;
+    } else {
+      feedback = "✓ 確認短語正確，但還沒捲完內層變更清單；「合併進 main」仍停用，尚未 Merge。請在上方深色方框內捲到底，不是捲外層視窗。 · Phrase correct; scroll the inner change-list box before Merge can be enabled.";
+      tone = "is-waiting";
+    }
   } else if (typed.length === 0) {
     hint = `變更清單已捲到底：輸入 ${phrase} 即可解鎖「合併進 main」。 · Diff read to the end; type the phrase to enable the primary button.`;
     feedback = `尚未輸入確認短語；尚未送出、尚未 Merge。請完整輸入 ${phrase}。 · No phrase entered; nothing has been submitted or merged.`;
@@ -3414,13 +3439,22 @@ function mergeApprovalGate(view) {
   }
   return {
     ready,
-    inputDisabled: !ready,
-    inputValue: ready ? typed : "",
+    inputDisabled: !inputEnabled,
+    inputValue: inputEnabled ? typed : "",
     confirmDisabled: !ready || typed !== phrase,
     hint,
     feedback,
     tone,
     ariaInvalid,
+  };
+}
+
+function mergeApprovalInputScope(currentApprovalId, loadedApprovalId, typed) {
+  const current = typeof currentApprovalId === "string" ? currentApprovalId : "";
+  const loaded = typeof loadedApprovalId === "string" ? loadedApprovalId : "";
+  return {
+    approvalId: loaded,
+    value: loaded.length > 0 && current === loaded && typeof typed === "string" ? typed : "",
   };
 }
 
@@ -4006,8 +4040,8 @@ function mergeDiffScrolledToBottom() {
 }
 
 /*
- * Scroll-gate：diff 未捲到底或阻擋區還有項目時，確認輸入框與主要按鈕都保持 disabled。
- * 「我捲完了」比「我抄完了」更能證明使用者看過內容。
+ * Scroll-gate：pending approval 的確認輸入框保持可編輯；diff 未捲到底或仍有 blocker 時，
+ * 只有主要按鈕保持 disabled。「我捲完了」仍是提交條件，不再被誤做成輸入條件。
  */
 function updateMergeApprovalGate() {
   const input = byId("merge-approval-confirmation");
@@ -4019,6 +4053,7 @@ function updateMergeApprovalGate() {
     blockers: state.mergeApprovalBlockers || [],
     scrolled: state.mergeApprovalScrolled,
     decided: state.mergeApprovalDecided,
+    expired: state.mergeApproval?.expired === true,
     phrase: mergeConfirmationPhrase(),
     typed: input.value,
   });
@@ -4086,6 +4121,14 @@ async function loadMergeApproval(approvalId) {
     const value = await api(
       `/api/rooms/merge-approvals/inspect?room=${encodeURIComponent(state.room)}&approvalId=${encodeURIComponent(approvalId)}`,
     );
+    const input = byId("merge-approval-confirmation");
+    const inputScope = mergeApprovalInputScope(
+      state.mergeApprovalInputApprovalId,
+      value.approval?.id,
+      input.value,
+    );
+    input.value = inputScope.value;
+    state.mergeApprovalInputApprovalId = inputScope.approvalId;
     state.mergeApproval = value.approval;
     state.mergeApprovalBinding = value.binding || { valid: true, changed: [] };
     /* 缺席與空清單不折疊：沒拿到掃描結果是阻擋，拿到而為空不是。 */
@@ -4113,7 +4156,7 @@ function mergeApprovalSignature(approval, binding, overwrites) {
 
 /*
  * 對話框開著時持續重讀 inspect。它是唯讀端點，輪詢不可能讓任何核准落定；
- * 綁定值在期間改變時，阻擋區會立刻出現、確認輸入被清空並停用。
+ * 綁定值在期間改變時，阻擋區會立刻出現、主要按鈕停用；短語仍可修改但不能排除 blocker。
  * 沒有實質變化就不重繪：重繪會重建 diff 並把捲動位置歸零，等於把使用者剛通過的
  * scroll-gate 無聲關掉。
  */
@@ -4142,7 +4185,7 @@ async function repollMergeApproval() {
     if (wasValid && state.mergeApprovalBinding.valid === false) {
       byId("merge-approval-status").textContent =
         `綁定值在你檢視期間改變了（${(state.mergeApprovalBinding.changed || []).map(bindingFieldLabel).join("、")}）；`
-        + "確認輸入已停用並清空，請重新產生預覽再決定。main 沒有被修改。 · Bound values moved while the dialog was open; the confirmation input is disabled again.";
+        + "主要按鈕已停用，請重新產生預覽再決定。短語仍可修改，但不能排除 blocker；main 沒有被修改。 · Bound values moved while the dialog was open; the primary button is disabled.";
     }
   } catch { /* 輪詢失敗不改變畫面上的決定狀態 */ } finally {
     /* `finally`，因為簽章相同時上面會直接 return——在 catch 裡清旗標會讓它永遠卡住。 */
@@ -4186,6 +4229,7 @@ function closeMergeApprovalDialog() {
   state.mergeApprovalTicker = null;
   state.mergeApprovalPoll = null;
   state.mergeApproval = null;
+  state.mergeApprovalInputApprovalId = "";
   state.mergeApprovalScrolled = false;
   state.mergeApprovalBlockers = [];
   byId("merge-approval-confirmation").value = "";
@@ -4329,7 +4373,7 @@ async function repreviewMergeApproval() {
   await loadMergeApproval(approval.id);
   const blockers = state.mergeApprovalBlockers || [];
   status.textContent = blockers.length === 0
-    ? "已依 live state 重新產生預覽，阻擋項目已清空；尚未 Merge。請重新捲完變更清單，輸入框就會解鎖。 · Re-previewed against live state; nothing was merged. Read the refreshed change list to unlock the input."
+    ? "已依 live state 重新產生預覽，阻擋項目已清空；尚未 Merge。輸入框仍可使用；請在內層變更清單方框重新捲到底，最終按鈕才會解鎖。 · Re-previewed against live state; nothing was merged. The field remains editable; read the refreshed inner change list to unlock the final button."
     : "已依 live state 重新產生預覽；阻擋項目仍在。這份 snapshot 已經無法核准，請讓候選端重新提出一次合併要求（main_merge_request）。 · Re-previewed; this snapshot can no longer be approved — the candidate has to request a fresh one.";
 }
 

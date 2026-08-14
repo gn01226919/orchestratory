@@ -108,7 +108,13 @@ checkpoint，彙整：
   `authorizedMergeCommit=true` 與實際 `mainHeadAfter` 時，GUI 才能顯示「Merge 成功」。
 - 確認短語必須有就地、可存取的即時回饋：非 exact phrase 時欄位保持可修正、主要按鈕保持停用，並明示
   「尚未送出、尚未 Merge、main 未修改」與正確短語；exact phrase 只能顯示「可送出但尚未 Merge」。因
-  scroll gate、re-preview、blocker 或 terminal state 鎖定輸入時，輸入框旁必須具名原因與恢復方式。
+  ~~scroll gate、re-preview、blocker 或 terminal state 鎖定輸入時，輸入框旁必須具名原因與恢復方式。~~
+  pending approval 且 confirmation phrase 可用時，輸入框必須保持可輸入；scroll gate、re-preview 與
+  blocker 只停用最終按鈕並明示尚缺條件。只有 terminal state、已逾時或缺少 phrase 才鎖定並清空輸入；
+  逾時 copy 必須明示該 approval 不可復活、需由 candidate 提出新的 snapshot-bound request。
+  已輸入文字只可在同一 approval id 的 re-preview／re-render 保留，切換至新 approval 必須清空。
+- 內層變更清單必須可由鍵盤聚焦及捲動，具可見 focus indicator，且以 `aria-describedby` 關聯明示
+  「內層清單、不是外層 dialog」的 live scroll hint；不能把滑鼠操作當成唯一通過 scroll gate 的方式。
 - 核准 POST 被拒絕後，即使重新讀取 live approval 也失敗，GUI 仍必須保留原拒絕原因、具名 refresh
   failure 並明示「這不是 Merge 成功」；nested read error 不得把結果變成沉默或成功。
 - 待核准清單只顯示仍可回答的 `requested` 記錄；promotion 開始後移至 durable Merge 歷史。歷史必須在

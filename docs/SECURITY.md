@@ -106,6 +106,11 @@ bounded metadata，固定小於等於 64 KiB，使用 workspace 外的 0700 dire
   必須各自具名，不能以 disabled control 讓 Owner 猜測結果。Server 端仍須獨立重驗 confirmation、
   snapshot binding、TTL 與 single-use state，不能信任瀏覽器 gate。server 拒絕後的 live-state refresh 若也
   失敗，client 必須保留兩個具名錯誤並固定標示非成功；nested failure 不得吞掉拒絕結果。
+- Pending approval 的 input 可編輯不等於授權：未捲完內層 diff、存在 blocker 或 phrase 不精確時，final
+  button 必須保持 disabled，click handler 與 server 仍各自 fail closed。只有 terminal、expired 或
+  missing-phrase 才鎖定並清空 input；expired copy 必須說明該 approval 已死且 re-preview 不會復活。
+  confirmation value 以 approval id 為 scope：同一筆 re-preview 可保留，切換新 approval 必須清空，避免
+  舊意圖被誤帶到不同 snapshot。內層 scroll region 必須可由鍵盤聚焦／捲動並有可見焦點。
 - 未完成的 runtime capability 顯示 pending/unsupported，不得只靠文件或按鈕假裝成功。
 
 ## 8. Recovery-first 控制

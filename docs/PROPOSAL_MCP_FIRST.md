@@ -353,7 +353,10 @@ ledger 都看不到 raw token，且一離開 `approved` 狀態即清除。若 re
 
 確認短語的即時回饋是 Owner GUI contract，不新增 MCP 權限或 HTTP 欄位：client 對錯字、大小寫及多餘
 空白必須保持輸入可重試，且明示「尚未送出／尚未 Merge／main 未修改」；精確短語只代表 client gate
-就緒，畫面仍須明示尚未 Merge、需按最終按鈕。re-preview 會清空輸入並重新鎖住 scroll gate。無論
+就緒，畫面仍須明示尚未 Merge、需按最終按鈕。~~re-preview 會清空輸入並重新鎖住 scroll gate。~~
+re-preview 只重置內層 scroll gate，不清空或 disable 同一 approval id 的 pending input；切換到不同
+approval id、逾時、終局或缺 phrase 時必須清空，且逾時不可由 re-preview 復活。內層清單須有鍵盤焦點、
+可見 focus indicator 與關聯 live hint。final button 仍要同時滿足 scroll、零 blocker 與 exact phrase。無論
 client 顯示什麼，POST 仍由 server 精確比對 `confirmation` 並重驗 TTL、snapshot binding 與 single-use
 state；任何 client 文字都不能成為核准證據。
 POST 拒絕後 client 可重新讀 live approval 以更新 dialog；該讀取不是成功判準，而且必須有獨立 error

@@ -3714,10 +3714,10 @@ helper、外層 render function 未變時逃過 guard。
 
 | 行為 | 真實瀏覽器觀察 |
 |---|---|
-| Scroll gate | 未捲完時 input disabled，live feedback 明示「尚未捲完、這不是 Merge 結果、main 未修改」；在 diff region 逐頁捲到底後才重新開放輸入 |
+| Scroll gate | ~~未捲完時 input disabled，live feedback 明示「尚未捲完、這不是 Merge 結果、main 未修改」；在 diff region 逐頁捲到底後才重新開放輸入~~（此行為已由下方 2026-08-14 disabled-input 更正取代） |
 | 錯誤短語可重試 | 輸入 `marge into main` 後 input 仍可編輯、`aria-invalid=true`、primary button disabled；紅色 live feedback 明示「尚未送出、尚未 Merge、main 沒有被修改」並給出精確短語。沒有 HTTP request、沒有 Git 動作 |
 | Exact phrase | 改成精確 `MERGE INTO MAIN` 後 `aria-invalid=false`、primary button enabled；綠色 live feedback 仍明示「目前尚未 Merge，按下合併進 main 才會送出」。本輪刻意未按下，未取得新的 main mutation 核准 |
-| Re-preview | 點擊後重新取得 live preview、清空輸入並重新鎖住 scroll gate；status 明示「尚未 Merge，請重新捲完變更清單」，不再讓 Owner 猜測 click 是否生效 |
+| Re-preview | ~~點擊後重新取得 live preview、清空輸入並重新鎖住 scroll gate~~（此行為已由下方更正）；status 明示尚未 Merge與重新捲完內層清單 |
 | 其他安全 gate | blocker、terminal approval、空值與大小寫／前後空白由同一個純 gate regression 逐一執行；TTL 與 applied-success path 未改動，沿用上一段已完成的真實 expired／durable success 驗收 |
 
 ~~新 gate digest：`f2563722c1efbf27d080a2df47e9c08188d24a17b86131c039bf4ad1fbba0f6d`。~~
@@ -3735,6 +3735,58 @@ Claude #675/#678 追問「核准 POST 已被拒絕，但 catch 內的 live refre
 
 修正後以隔離的 18-file 真實 Git fixture 重跑正式 Room 頁面：逐頁捲完清單、輸入
 `marge into main`、改為 exact `MERGE INTO MAIN`、再按 re-preview；觀察結果仍分別為可重試紅色錯誤、
-尚未 Merge 的綠色就緒提示，以及重新鎖住且明示未 Merge。沒有按最終 Merge，fixture main 與 canonical
+尚未 Merge 的綠色就緒提示，以及~~重新鎖住~~只鎖 final button 且明示未 Merge（見下方更正）。沒有按最終 Merge，fixture main 與 canonical
 main 都未因本次驗收寫入。新 gate digest：
-`2ec95b2e6100c611d33731ed3ae14e4c311c2223f83b22e917188190afa6e89d`。
+~~`2ec95b2e6100c611d33731ed3ae14e4c311c2223f83b22e917188190afa6e89d`。~~
+
+### 2026-08-14 disabled-input 與 nested-scroll 更正
+
+Owner 在正式畫面再次重現：外層 dialog 已捲到底，但內層 change-list 尚未捲到底，產品把 input disabled，
+因此看起來像輸入框故障。這不是 Owner 操作錯誤；前一版把「能不能輸入」錯誤地等同「能不能提交」。
+新規則拆開兩件事：pending row 且 phrase 存在時 input 可用；final button 仍要求 exact phrase、內層清單
+捲到底、零 blocker、未逾時且非 terminal。
+
+以新的隔離 18-file 真實 Git fixture 在 Chrome 重驗，沒有按 final Merge：
+
+| 行為 | 真實瀏覽器觀察 |
+|---|---|
+| 內層未捲 | dialog 開啟後 `inputEnabled=true`、`buttonEnabled=false`；提示明示「深色變更檔案方框內捲動，不是外層視窗」 |
+| 未捲＋錯字 | 在 scrollTop 尚未到底時輸入 `marge into main` 成功；input 保持可修改、`aria-invalid=true`、button disabled，明示未送出／未 Merge／main 未修改 |
+| 未捲＋exact | 改為 `MERGE INTO MAIN` 後 input 仍可用、`aria-invalid=false`，但 button 仍 disabled；黃色 waiting feedback 明示短語正確、仍差內層 scroll gate |
+| 捲完內層 | 在深色 change-list 內逐頁捲到底後，既有 `MERGE INTO MAIN` 未被清空，button 才 enabled；仍明示尚未 Merge、需按 final button |
+| Re-preview | exact phrase 保留、input 仍可用、button 重新 disabled；status 與 feedback 都明示需重新捲完內層清單，沒有 Merge |
+
+Blocker、terminal、missing phrase 與 malformed input 由 executable pure regression 覆蓋：blocker 保留可編輯
+input但 final button fail closed；terminal／missing phrase disable input。~~新 gate digest：
+`a6f477979fdf8e1da18334816b94f072f86bc104a0e3ebe85d665fde3b2abe80`。~~
+此值已由下方 TTL／鍵盤／approval-id scope 補強後的重驗取代。
+
+### 2026-08-14 TTL、鍵盤與 approval-id scope 補強
+
+Claude #690 指出三個需要直接證據的邊界。修正後的 executable regression 證明：expired approval 會鎖定、
+清空 input，明示不可由 re-preview 復活且沒有送出／Merge；same approval id 保留 typed phrase，不同或
+malformed approval id 清空。靜態 contract 斷言 scroll region 有 `tabindex="0"`、
+`aria-describedby="merge-approval-scroll-hint"` 與 2px `:focus-visible`。
+
+另以含兩筆 pending approvals 的隔離真實 Git fixture 在 Chrome 驗收，沒有按 final Merge：
+
+| 行為 | 真實瀏覽器觀察 |
+|---|---|
+| 鍵盤可達 | exact phrase 在未捲時 input enabled、button disabled；focus 進內層 region 後可見 2px 綠色 outline，原生 `End` 將 `scrollTop` 從 0 推到 666.5/667，焦點仍在內層 region |
+| 鍵盤通過 gate | `End` 到底後 exact phrase 未清空、final button enabled；feedback 仍明示尚未 Merge、必須按 final button |
+| 同一 approval re-preview | exact phrase 保留、內層 `scrollTop` 回 0、final button disabled，status 明示尚未 Merge與需重讀內層清單 |
+| 切換新 approval | 在第一筆輸入 exact phrase 後切換至另一 approval id，input 立即清空且保持可編輯，final button disabled、scrollTop 0 |
+| TTL | 既有真實到期驗收仍證明 server/browser 會進 `expired`；本輪改動的 expired 分支由 exact pure helper 直接執行，斷言 input locked/cleared、不可復活與非成功 copy |
+
+~~新 gate digest：`b2b8bc64f3e5665e129346409938bc3fe2499064d53e7e8b084eb9e60e96c7e4`。~~
+此值只綁定 JS 函式，未涵蓋同輪修正的 blocking HTML／ARIA／focus CSS，因此由下值取代。
+
+TTL interaction composition 另由 source contract 鎖定：ticker 在 deadline 通過時先把同一 approval 的
+`expired=true`，同步 `renderMergeApproval()`；render 重新計算 blocker，`updateMergeApprovalGate()` 將
+expired bit 交給已直接執行的 pure gate，所以正在輸入／捲動中的 phrase 會立即清空並鎖定。若 client 在
+這個轉場前漏掉 tick 而發出 stale POST，server 的 TTL 重驗仍拒絕，既有 nested-failure regression 保證
+拒絕結果不會被 refresh error 吞掉或冒充成功。
+
+最終 served-bytes digest 同時綁定：全部已驗收的 JS gate functions（含 expired branch 與
+`mergeApprovalInputScope`）、完整 blocking section、`#merge-approval-diff` 的 ARIA/focus markup，以及
+`:focus-visible` CSS rule：`8ee89df10d5430bba2f29cfb32b2c703aa6bc1dd925bd2d5f8ece7a6067ce722`。

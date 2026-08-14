@@ -842,11 +842,16 @@ ADR-033「不能把核准燒掉但 merge 沒發生」的載重理由，也讓已
    重啟後 exact retry 或 history 讀取做同一判斷、清除 token hash，並把該 terminal approval 列入
    `unpromotedApprovals`；intent 一旦存在，任何錯誤都不走此路，結果完全交給 ADR-035 observer 收斂。
 6. 確認短語採六個可觀察狀態，而不是只靠 disabled input/button 暗示結果：尚未捲完或重新預覽後明示
-   input 為何鎖定；錯誤短語保持可編輯並明示未送出、未 Merge、main 未修改；精確短語明示仍須按下
+   ~~input 為何鎖定；~~ pending row 的 input 維持可編輯，並明示應捲「內層變更清單」而不是外層視窗；
+   錯誤短語保持可編輯並明示未送出、未 Merge、main 未修改；精確短語明示仍須按下
    最終按鈕；只有第 3 項的 durable positive observation 才顯示 Merge 成功。client gate 不取代 server
    對 confirmation、TTL、binding 與 single-use state 的重驗。server 拒絕後會 best-effort refresh live
    approval；refresh 自身失敗也必須保留原拒絕、具名第二個錯誤並明示非成功，不得讓 nested exception
    使畫面沉默。
+7. Pending input 的保存範圍是 exact approval id：同一筆 re-preview 可保留，切換 snapshot/approval 必須
+   清空。Expired approval 雖可能仍以 `requested` row 被讀到，但在 UI 視為不可復活，input 鎖定並清空，
+   只能由 candidate 另提新 request。內層 scroll region 是安全 gate，因此必須以鍵盤可聚焦／捲動、有
+   可見焦點且與 live hint 關聯；不能把滑鼠能力當成 Owner 的前提。
 
 ### 代價與殘餘風險
 
