@@ -543,6 +543,23 @@ export async function startWebServer(
         });
         return;
       }
+      if (request.method === "GET" && url.pathname === "/api/rooms/merge-history") {
+        const room = url.searchParams.get("room") ?? "";
+        const info = ledger.getRoom(room);
+        if (!info) throw new Error("ROOM_NOT_FOUND");
+        const workspace = await app.workspaces.assertAllowed(info.workspace);
+        const taskId = url.searchParams.get("taskId");
+        if (taskId !== null && !/^[0-9a-f-]{36}$/u.test(taskId)) {
+          throw new Error("INVALID_CANDIDATE_TASK_ID");
+        }
+        json(response, 200, {
+          promotions: await collaboration.listMergeHistory({
+            roomId: room, workspace, ...(taskId === null ? {} : { taskId }),
+          }),
+          chainValid: collaboration.audit.verify(),
+        });
+        return;
+      }
       if (request.method === "GET" && url.pathname === "/api/rooms/merge-approvals/inspect") {
         const room = url.searchParams.get("room") ?? "";
         const info = ledger.getRoom(room);
@@ -1224,10 +1241,10 @@ export async function startWebServer(
           const info = ledger.getRoom(value.room);
           if (!info) throw new Error("ROOM_NOT_FOUND");
           const workspace = await app.workspaces.assertAllowed(info.workspace);
-          // The exact phrase, the exact preview the dialog displayed, and a live re-verification of
-          // every bound value all have to hold. The returned token is single-use and short-lived; it
-          // is never written to the audit chain or the room ledger.
-          json(response, 200, await collaboration.grantMainMerge({
+          // The exact phrase, displayed digest and live binding all have to hold. The token is born
+          // and spent inside the service; it never reaches the browser. A 200 response means the
+          // durable promotion record has been re-read, not merely that approval was granted.
+          json(response, 200, await collaboration.approveAndPromoteMainMerge({
             roomId: value.room,
             workspace,
             approvalId: value.approvalId,

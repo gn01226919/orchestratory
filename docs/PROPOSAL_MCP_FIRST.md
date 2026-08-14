@@ -200,7 +200,7 @@ input: { taskId: string; summary: string }
 output: { checkpointId: string; candidateHead: string; createdAt: string }
 ```
 
-### `candidate_complete`（已實作；promotion 尚未實作）
+### `candidate_complete`（已實作；promotion 由獨立 Owner action 執行）
 
 ```ts
 input: {
@@ -336,14 +336,19 @@ output: {
   → `{ approval; binding: { checked: boolean; valid: boolean; changed: string[]; unavailable?: string };
   confirmationPhrase }`
 - `POST /api/rooms/merge-approvals/approve { room, approvalId, previewDigest, confirmation }`
-  → `{ approval; approvalToken; expiresAt }`
+  → `{ approval; promotion; authorization; mainMutated; replayed }`（raw token 不離開 server）
 - `POST /api/rooms/merge-approvals/reject { room, approvalId, reason? }`
-  → `{ approval; candidateRetained: true; checkpointsRetained: true; recoveryRefRetained: true }`
+  → `{ approval; deletedByThisRejection: "nothing"; mainMutation: false }`
+- `GET /api/rooms/merge-history?room=<id>[&taskId=<uuid>]`
+  → `{ promotions: (MergePromotion | UnreadableMergePromotion)[]; chainValid: boolean }`
 
 `confirmation` 必須精確等於 `MERGE INTO MAIN`（語意化、不含 taskId）；`previewDigest` 必須等於
 dialog 實際顯示的那一份。核准當下會**再驗一次**整組綁定值，任一改變即回
 `MAIN_MERGE_APPROVAL_BINDING_CHANGED:<欄位名>` 並把該 approval 轉為終局 `invalidated`。
-`approvalToken` 只回傳一次，資料庫只存 SHA-256，且一離開 `approved` 狀態即清除。
+`approvalToken` 只存在於 server 的 grant→promotion 呼叫鏈；資料庫只存 SHA-256，瀏覽器、audit 與 Room
+ledger 都看不到 raw token，且一離開 `approved` 狀態即清除。若 response 遺失後重送，server 依 exact
+`approvalId` 回讀同一筆 durable promotion；不得再次執行 Git。只有 `applied` 且
+`authorizedMergeCommit=true` 可被 GUI 顯示為 Merge 成功。
 
 拒絕與逾時**不執行任何 Git 指令**：candidate、checkpoint 與 recovery ref 逐位元不變，Owner 可重新
 preview 再問一次。已核准的 approval 也可由 Owner 撤回（reject）。
@@ -356,10 +361,11 @@ approval 之前對 live state 重驗綁定：漂移者在被回報前即持久�
 （列表與 `candidate_status` 上同名欄位；`inspect` 另以 `binding` 回傳同一物件）只在確實比對過時出現，
 `unavailable` 表示檢查無法完成——此時 approval **既未**被確認也**未**被失效。
 
-### `main_merge_execute`（Phase 5-5，尚未實作）
+### `main_merge_execute`（Phase 5-5 core 已實作；Owner HTTP outlet 已接線）
 
-由本機 GUI/TUI Owner action 或受保護 promotion service 消耗 single-use approval；一般 Agent tool 不
-直接接收可重放 token。
+由本機 GUI Owner action 經 `approveAndPromoteMainMerge()` 消耗 single-use approval；一般 Agent tool 不
+直接接收可重放 token。本輪沒有新增 MCP promotion 工具，Agent 仍只能 preview/request，不能自行核准或
+執行 main merge。Owner 的成功／失敗／不確定結果進入 `/api/rooms/merge-history` durable surface。
 
 **2026-08-06 更正**：這裡原本寫「核心已提供 `CandidateRegistry.consumeMainMerge(...)`」——**該方法已完全
 移除**，5-5 把「消耗核准」與「寫入 main」合併成單一不可分割的操作，正是為了消除「核准被消耗但 merge
@@ -377,9 +383,8 @@ Promotion live gate 的 attributes 契約是：在 promotion 環境以 `git chec
 tracked／ignored／probe 路徑，以及完整 preview 中每個非刪除、候選 merge 將寫入的確切路徑。候選新增
 路徑因此不得避開 clean/smudge filter 拒絕；preview 截斷或 Git 無法回答時必須 fail closed。
 
-**目前仍無 MCP／HTTP 出口**：`promoteMainMerge` 只有測試會呼叫，第二輪才接線。
-
-**它本身不修改 canonical main**，目前也刻意沒有任何 MCP 或 HTTP 出口——實際寫入 main 屬 5-5。
+~~**目前仍無 MCP／HTTP 出口**：`promoteMainMerge` 只有測試會呼叫。~~ **2026-08-14：**仍無 Agent
+MCP 出口；本機 Owner HTTP 已接線，且同一操作會實際修改 canonical main。成功判準與 history 契約見上節。
 
 若發生 drift、scope expansion 或未預覽 conflict：
 

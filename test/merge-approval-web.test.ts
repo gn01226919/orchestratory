@@ -25,8 +25,9 @@ async function repository(): Promise<string> {
 
 /**
  * The dialog's whole HTTP contract, exercised end to end against the real server: list, inspect,
- * approve with the exact phrase, and reject. Negative cases first, because the only thing worse than
- * a dialog that cannot approve is one that approves something the owner did not see.
+ * approve-and-promote with the exact phrase, durable history, and reject. Negative cases first,
+ * because the only thing worse than a dialog that cannot approve is one that approves something
+ * the owner did not see or says "approved" without actually merging it.
  */
 test("the merge approval dialog contract lists, inspects, approves once, and refuses everything else", async (t) => {
   const data = await mkdtemp(join(tmpdir(), "orchestratory-merge-web-data-"));
@@ -146,25 +147,60 @@ test("the merge approval dialog contract lists, inspects, approves once, and ref
   });
   assert.equal(wrongDigest.body.error, "MAIN_MERGE_PREVIEW_DIGEST_MISMATCH");
 
-  const granted = await post("/api/rooms/merge-approvals/approve", {
+  const promoted = await post("/api/rooms/merge-approvals/approve", {
     room: "demo", approvalId: approval.id, previewDigest: approval.binding.previewDigest,
     confirmation: MERGE_APPROVAL_CONFIRMATION,
   });
-  assert.equal(granted.status, 200);
-  const grantedApproval = granted.body.approval as { state: string; decidedBy: string };
-  assert.equal(grantedApproval.state, "approved");
-  assert.equal(grantedApproval.decidedBy, "local-web");
-  assert.match(String(granted.body.approvalToken), /^[A-Za-z0-9_-]{43}$/u);
-  assert.ok(Date.parse(String(granted.body.expiresAt)) > Date.now());
-  // Single-use is the whole point: the same grant cannot be issued twice.
+  assert.equal(promoted.status, 200);
+  assert.equal(JSON.stringify(promoted.body).includes("approvalToken"), false);
+  assert.equal((promoted.body.approval as { state: string }).state, "consumed");
+  assert.equal((promoted.body.promotion as { state: string }).state, "applied");
+  assert.equal(promoted.body.mainMutated, true);
+  const mainAfter = String((promoted.body.promotion as { mainHeadAfter: string }).mainHeadAfter);
+  assert.equal((await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspace })).stdout.trim(), mainAfter);
+  assert.equal(
+    (await execFileAsync("git", ["show", `${mainAfter}:candidate.txt`], { cwd: workspace })).stdout,
+    "candidate\n",
+  );
+
+  const history = await get("/api/rooms/merge-history?room=demo");
+  assert.equal(history.status, 200);
+  assert.equal(history.body.chainValid, true);
+  const entries = history.body.promotions as Array<{
+    id: string; approvalId: string; taskId: string; state: string; mainHeadBefore: string;
+    mainHeadAfter: string; recoveryRef: string; observation: { code: string; hooksExecuted?: unknown[] };
+  }>;
+  assert.equal(entries[0]?.approvalId, approval.id);
+  assert.equal(entries[0]?.taskId, task.taskId);
+  assert.equal(entries[0]?.state, "applied");
+  assert.equal(entries[0]?.mainHeadAfter, mainAfter);
+  assert.match(entries[0]?.recoveryRef ?? "", /^refs\/orchestratory\/checkpoints\//u);
+  assert.equal(JSON.stringify(history.body).includes("approvalToken"), false);
+  assert.equal((await get(`/api/rooms/merge-history?room=demo&taskId=${task.taskId}`)).status, 200);
+  assert.equal((await get("/api/rooms/merge-history?room=demo&taskId=nope")).status, 400);
+  assert.equal((await get("/api/rooms/merge-history?room=missing")).status, 400);
+
+  // A lost HTTP response is safe to retry: the durable promotion is returned, never applied twice.
   const replayed = await post("/api/rooms/merge-approvals/approve", {
     room: "demo", approvalId: approval.id, previewDigest: approval.binding.previewDigest,
     confirmation: MERGE_APPROVAL_CONFIRMATION,
   });
-  assert.equal(replayed.body.error, "MAIN_MERGE_APPROVAL_NOT_PENDING");
+  assert.equal(replayed.status, 200);
+  assert.equal((replayed.body.promotion as { id: string }).id, entries[0]?.id);
+  assert.equal((replayed.body.promotion as { state: string }).state, "applied");
+  assert.equal((await get("/api/rooms/merge-history?room=demo")).body.promotions instanceof Array, true);
+  const mergedTasks = (await get(`/api/rooms/candidates?room=demo&taskId=${task.taskId}`))
+    .body.candidates as Array<{ status: string }>;
+  assert.equal(mergedTasks[0]?.status, "merged");
 
-  const mainHead = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspace })).stdout;
-  const mainStatus = (await execFileAsync("git", ["status", "--porcelain=v1"], { cwd: workspace })).stdout;
+  // The list is not browser-memory history: another registry instance rebuilds it from SQLite and
+  // re-observes main, which is the path used after a daemon restart.
+  const restarted = new CollaborationService(data);
+  const restartedHistory = await restarted.candidates.promotions({ roomId: "demo", mainPath: workspace });
+  assert.equal(restartedHistory[0]?.id, entries[0]?.id);
+  assert.equal(restartedHistory[0]?.state, "applied");
+  restarted.close();
+
   for (const body of [
     "not-an-object",
     { room: "demo" },
@@ -176,19 +212,12 @@ test("the merge approval dialog contract lists, inspects, approves once, and ref
   const rejected = await post("/api/rooms/merge-approvals/reject", {
     room: "demo", approvalId: approval.id, reason: "owner changed their mind",
   });
-  assert.equal(rejected.status, 200);
-  assert.equal((rejected.body.approval as { state: string }).state, "rejected");
+  assert.equal(rejected.body.error, "MAIN_MERGE_APPROVAL_NOT_PENDING");
   // The response describes this action, not the state of the repository: rejection runs no Git
   // command, so it is in no position to assert that anything is still there (PITFALLS #86).
-  assert.equal(rejected.body.deletedByThisRejection, "nothing");
-  assert.equal(rejected.body.mainMutation, false);
-  assert.equal(rejected.body.candidateRetained, undefined);
-  assert.equal(rejected.body.recoveryRefRetained, undefined);
-  // Withdrawing an approval is not a cleanup authorization.
-  assert.equal((await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspace })).stdout, mainHead);
-  assert.equal(
-    (await execFileAsync("git", ["status", "--porcelain=v1"], { cwd: workspace })).stdout, mainStatus,
-  );
+  // A consumed approval cannot be withdrawn and retrying either action cannot rewrite main.
+  assert.equal((await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspace })).stdout.trim(), mainAfter);
+  assert.equal((await execFileAsync("git", ["status", "--porcelain=v1"], { cwd: workspace })).stdout, "");
   assert.equal(
     (await execFileAsync(
       "git", ["rev-parse", "--verify", `${approval.binding.recoveryRef}^{commit}`], { cwd: workspace },
@@ -202,4 +231,50 @@ test("the merge approval dialog contract lists, inspects, approves once, and ref
   assert.equal((await post("/api/rooms/merge-approvals/reject", {
     room: "demo", approvalId: approval.id,
   })).body.error, "MAIN_MERGE_APPROVAL_NOT_PENDING");
+});
+
+test("a grant that fails before durable promotion intent is retired and never shown as merge success", async (t) => {
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-merge-web-preintent-"));
+  const workspace = await repository();
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+  t.after(async () => await rm(workspace, { recursive: true, force: true }));
+  const service = new CollaborationService(data);
+  t.after(() => service.close());
+  service.ledger.createRoom("demo", workspace);
+  const task = await service.candidates.start({
+    actor: "codex1", clientRequestId: randomUUID(), roomId: "demo", mainPath: workspace,
+    task: "pre-intent failure",
+  });
+  await writeFile(join(task.candidatePath, "candidate.txt"), "candidate\n", "utf8");
+  await execFileAsync("git", ["add", "candidate.txt"], { cwd: task.candidatePath });
+  await execFileAsync("git", [...author, "commit", "-m", "candidate work"], { cwd: task.candidatePath });
+  await service.candidates.complete({
+    actor: "codex1", clientRequestId: randomUUID(), taskId: task.taskId, roomId: "demo",
+    mainPath: workspace, summary: "ready",
+  });
+  const preview = await service.candidates.previewMainMerge({
+    taskId: task.taskId, roomId: "demo", mainPath: workspace,
+  });
+  const approval = await service.candidates.requestMainMerge({
+    actor: "codex1", clientRequestId: randomUUID(), taskId: task.taskId, roomId: "demo",
+    mainPath: workspace, completionId: preview.completionId, previewDigest: preview.previewDigest,
+  });
+  const before = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspace })).stdout.trim();
+  Object.defineProperty(service.candidates, "promoteMainMerge", {
+    configurable: true,
+    value: async () => { throw new Error("SYNTHETIC_PRE_INTENT_FAILURE"); },
+  });
+  await assert.rejects(service.approveAndPromoteMainMerge({
+    roomId: "demo", workspace, approvalId: approval.id,
+    previewDigest: approval.previewDigest, confirmation: MERGE_APPROVAL_CONFIRMATION,
+    decidedBy: "local-web",
+  }), /SYNTHETIC_PRE_INTENT_FAILURE/u);
+  const inspected = await service.candidates.inspectMergeApproval({
+    approvalId: approval.id, roomId: "demo", mainPath: workspace,
+  });
+  assert.equal(inspected.approval.state, "rejected");
+  assert.equal(inspected.approval.refusal?.reason, "PROMOTION_NOT_STARTED_AFTER_GRANT");
+  assert.deepEqual(await service.candidates.promotions({ roomId: "demo", mainPath: workspace }), []);
+  assert.equal((await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspace })).stdout.trim(), before);
+  assert.equal((await execFileAsync("git", ["status", "--porcelain=v1"], { cwd: workspace })).stdout, "");
 });

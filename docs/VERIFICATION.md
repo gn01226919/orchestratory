@@ -3638,3 +3638,50 @@ npm run check:release
 
 Loopback Web test 在受限 sandbox 中可能需要允許本機 `127.0.0.1` listen；這不代表允許外網、
 provider call 或使用者資料修改。
+
+## 2026-08-14：Owner 按鈕實際 promotion 與 durable Merge 歷史
+
+### 被重現的產品斷點
+
+修改前直接把 HTTP contract 改成要求「一次操作完成 merge」後執行
+`npm test -- test/merge-approval-web.test.ts`：`1 fail`，第一個失敗是 response 仍含
+`approvalToken`（expected false / actual true）。同一舊路徑的 main HEAD 完全不動、approval 只到
+`approved`，與真實畫面一致；因此不是按鈕文案或瀏覽器偶發問題。
+
+### 自動化證據
+
+`test/merge-approval-web.test.ts` 使用真實臨時 Git repositories、正式 loopback HTTP server、session
+cookie、Origin 與 CSRF：
+
+- exact phrase＋displayed preview digest 的一次 POST 產生真實 two-parent merge commit；approval=`consumed`、
+  promotion=`applied`、`authorizedMergeCommit=true`、main HEAD 精確等於 `mainHeadAfter`，candidate=`merged`。
+- response 與 history JSON 都不含 `approvalToken`；錯 phrase、錯 digest、malformed body、cross-Room、錯
+  task id 都 fail closed。
+- 同一 POST 重送回傳同一 promotion id，main HEAD 不再改變；證明 response loss 不造成 duplicate apply。
+- 新 `CollaborationService` instance 從相同 SQLite 重新列出同一筆 `applied` promotion，證明不是 browser
+  memory history。
+- 人工注入 grant 後、promotion intent 前的同步失敗：approval 以
+  `PROMOTION_NOT_STARTED_AFTER_GRANT` 轉為 `rejected`、promotions 為空、main HEAD/status 不變。
+- `GET /api/rooms/merge-history` 回傳 promotion/task/approval、main before/after、candidate HEAD、recovery、
+  observation、hooks 與 audit `chainValid`；pending badge 只計 `requested`。
+
+Focused result：`test/merge-approval-web.test.ts` = **2 pass / 0 fail**。
+
+### 真實瀏覽器 gate
+
+使用 `/private/tmp` 的隔離 Git repository 與正式 Room 頁面完成；沒有讀取 cookie/storage/provider session，
+沒有外網或正式 main mutation：
+
+| 行為 | 真實瀏覽器觀察 |
+|---|---|
+| Scroll gate | 18 個檔案未捲到底時 input/button disabled；焦點進 diff 並按 End 到底後，提示改為「變更清單已捲到底」，input enabled |
+| Exact phrase | `MERGE INTO MAIN `（尾端空白）仍 disabled；精確 `MERGE INTO MAIN` 才 enabled |
+| In progress | 點擊後可見「正在核准並執行 single-use promotion；完成前不會顯示 Merge 成功」 |
+| Success truth | 最後顯示 `✓ Merge 成功`、`e7bd3c7f4dd4 → 81247088f770`、promotion/approval/recovery id；只有 durable applied＋authorized observation 分支會走到這裡 |
+| Pending → history | pending badge 1 → 0；history badge 0 → 1；歷史列出完整 before/after/candidate HEAD、task、promotion、approval、recovery、`AUTHORIZED_MERGE_COMMIT_OBSERVED_IN_MAIN`、hooks=`none observed` |
+| Restart | 關閉 server，以同一 data directory 建立新的 app/server；pending 仍為 0，同一筆 history 仍為 applied，audit chain valid |
+| TTL | 另一筆真實 approval 只把建立時鐘回撥（產品 15 分鐘常數未改）；頁面從 `00:00` 進入 `已逾時 · expired`，input disabled，阻擋區具名要求 fresh preview |
+
+新 gate digest：`76e5f66110048773ba0128ad6129959f2b8664343194c38a7dafca4bba30bccc`。
+這份 digest 現在包含 `approveMergeIntoMain()`，因為它已從「只 grant」變成真的 main write path；舊 digest
+只保留為歷史證據，不再描述本按鈕的完整行為。

@@ -48,6 +48,9 @@ const ACCEPTED_FUNCTIONS = [
   "repollMergeApproval",
   "openMergeApprovalDialog",
   "closeMergeApprovalDialog",
+  // The final button is now a write path: the browser acceptance must cover its in-progress state,
+  // truthful applied/rolled-back/uncertain result split, and transition into durable history.
+  "approveMergeIntoMain",
   "rejectMergeIntoMain",
 ] as const;
 

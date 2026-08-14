@@ -810,3 +810,42 @@ hook 清單真正把關的地方是 approval 綁定，在 merge 前一刻對 liv
 外部推進無法滿足它（已用「hook 途中 `git update-ref refs/heads/main`」實測：git 自己以 exit 128
 `cannot lock ref 'HEAD'` 中止，產品記為 `needs-manual-review` 並具名 `HEAD`，candidate 不轉 `merged`）。
 提議把「期間偵測」移入殘餘風險並註明失效條件；**待 Owner 裁決。**
+
+## ADR-036：Owner 最終按鈕是 grant＋promotion 的單一產品操作，成功後進 durable Merge 歷史
+
+**日期：** 2026-08-14
+**狀態：** Accepted
+
+### 背景
+
+實際 UI 驗收證明一個產品斷點：Owner 捲完 diff、輸入 `MERGE INTO MAIN` 並按「合併進 main」後，HTTP
+只呼叫 `grantMainMerge()`，把 raw token 回給瀏覽器，再把 approval 顯示成終局 `approved`。產品沒有
+任何後續 HTTP/MCP promotion 出口，所以畫面既沒有 merge，也不能告訴 Owner 成功或失敗。這違反
+ADR-033「不能把核准燒掉但 merge 沒發生」的載重理由，也讓已存在的 promotion audit 對正常使用者不可見。
+
+### 決策
+
+1. 本機 Owner 最終按鈕對應一個 `approveAndPromoteMainMerge()` service operation：先用原有完整綁定
+   grant，再把 raw token 只在 server 記憶體內傳給 `promoteMainMerge()`；token 不回瀏覽器、不入 audit、
+   不入 Room ledger。
+2. HTTP response loss 的 retry 不重新 grant 或 merge。以 exact `approval_id` 查 durable promotion row，
+   重驗 confirmation 與 preview digest 後回傳同一筆重新觀察結果。
+3. 只有 `promotion.state === "applied"`、`observation.authorizedMergeCommit === true`、有實際
+   `mainHeadAfter`，且 response 的 `mainMutated === true` 才顯示「Merge 成功」。`rolled-back` 顯示未套用；
+   `applying`／`needs-manual-review`／讀不到顯示需人工檢查，絕不自動重試。
+4. Pending 與 History 是兩個清單：pending 只計仍可回答的 `requested` approvals；History 直接來自
+   `candidate_merge_promotions`，依 Room/workspace scope 讀取並在 restart 後仍可重建。歷史保留
+   promotion/approval/task、前後 HEAD、candidate HEAD、recovery、state、timestamps、observation、hooks，
+   不含 token。
+5. grant 已提交、但 promotion intent 尚未寫入而同步失敗時，因 `promoteMainMerge` 在 intent 前不會執行
+   Git，可安全把該孤兒 grant 以 `PROMOTION_NOT_STARTED_AFTER_GRANT` 退休。intent 一旦存在，任何錯誤都
+   不走此路；結果完全交給 ADR-035 的 observer 收斂。
+
+### 代價與殘餘風險
+
+- SQLite grant 與 intent 仍不是同一交易；程序若恰在兩者之間被 SIGKILL，會留下短效、無 raw token 的
+  `approved` row。它不能被 spend，TTL 後失效，但期間是可見的未完成核准，不得顯示成功。
+- History 的讀取會重新觀察未結 promotion，可能更新 reconciliation row、audit 與 ledger；它不會重跑
+  merge、rollback、push 或 cleanup，因此不是純粹「無寫入任何 store」的 GET。
+- Native Full-Trust、candidate/main 邊界與外部副作用授權都沒有改變；按鈕只涵蓋已預覽的 main merge，
+  不含 push、publish、deploy、delete 或 cleanup。

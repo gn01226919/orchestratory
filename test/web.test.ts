@@ -1575,6 +1575,10 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomHtml, /id="merge-approvals-open"/u);
   assert.match(roomHtml, /id="merge-approval-count" hidden>0</u);
   assert.match(roomHtml, /class="agent-requests-open merge-approvals-open"/u);
+  assert.match(roomHtml, /id="merge-history-open"/u);
+  assert.match(roomHtml, /✓ Merge 歷史 · Merge history/u);
+  assert.match(roomHtml, /id="merge-history-list"/u);
+  assert.match(roomHtml, /DURABLE PROMOTION LOG/u);
   // It reuses the .workspace-onboarding dialog component as a variant, not a new design language.
   assert.match(
     roomHtml,
@@ -1664,6 +1668,7 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   // The digest sent on approve is the one that was rendered; inspect stays read-only polling.
   assert.match(mergeDialogScript, /previewDigest: approval\.previewDigest,/u);
   assert.match(mergeDialogScript, /\/api\/rooms\/merge-approvals\/approve/u);
+  assert.match(mergeDialogScript, /\/api\/rooms\/merge-history\?room=/u);
   assert.match(mergeDialogScript, /\/api\/rooms\/merge-approvals\/inspect\?room=/u);
   assert.match(mergeDialogScript, /setInterval\(\(\) => void repollMergeApproval\(\), 5000\)/u);
   // A no-op poll must not re-render: rebuilding the diff would reset the scroll position and
@@ -1673,7 +1678,15 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
     mergeDialogScript,
     /=== mergeApprovalSignature\(approval, state\.mergeApprovalBinding, state\.mergeApprovalOverwrites\)\) return;/u,
   );
-  assert.match(mergeDialogScript, /mainMutation: false/u);
+  // Clicking the final control now performs the promotion. Success is only rendered from the
+  // durable state plus the independent authorized-merge observation; approval alone is insufficient.
+  assert.match(mergeDialogScript, /function mergeHistorySucceeded\(/u);
+  assert.match(mergeDialogScript, /entry\?\.state === "applied"/u);
+  assert.match(mergeDialogScript, /entry\?\.observation\?\.authorizedMergeCommit === true/u);
+  assert.match(mergeDialogScript, /value\.mainMutated === true/u);
+  assert.match(mergeDialogScript, /Merge 成功 · Merge succeeded/u);
+  assert.match(mergeDialogScript, /尚未能確認 Merge 成功 · Merge requires review/u);
+  assert.match(mergeDialogScript, /不會重複 apply/u);
   // Rejection describes what this ACTION did and never declares the current state of anything: the
   // three `*Retained` constants it used to print were assertions made by a path that reads nothing.
   assert.match(mergeDialogScript, /value\.deletedByThisRejection === "nothing"/u);

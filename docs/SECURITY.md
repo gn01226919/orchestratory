@@ -60,6 +60,11 @@ bounded metadata，固定小於等於 64 KiB，使用 workspace 外的 0700 dire
   `previewDigest` 產生。綁定在建立、核准與消耗三個時點各驗一次，任一值改變即拒絕並指名改變的欄位，
   不靜默重算。Single-use 由持久狀態的 compare-and-set 保證，並行消耗只有一個成功。
 - 截斷或模擬出衝突的 preview 完全不可核准：Owner 不對看不到的內容簽名。
+- 本機 Web 最終動作不把 raw approval token 交給瀏覽器。server 在同一呼叫內 grant 並立即 promotion；
+  response loss 後的重送只依 durable `approval_id` 回讀同一筆 promotion，不能再次執行 Git。只有
+  `state=applied` 且 `authorizedMergeCommit=true` 的重新觀察可顯示成功。
+- Merge 歷史來自 tamper-evident promotion rows 與 audit chain，不來自 browser storage。讀不到、row
+  malformed、audit chain 失效、`applying` 或 `needs-manual-review` 都不得折疊成「沒有紀錄」或「已安全」。
 - Approval 只授權「把這個 snapshot merge 進 main」，並在授權物件內明列不被授權的動作；拒絕、失效與
   逾時不執行任何 Git 指令，candidate、checkpoint 與 recovery ref 完整保留。
 - Promotion 前建立 recovery point；建立或驗證失敗時不得宣稱 ready。

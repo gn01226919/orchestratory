@@ -58,6 +58,9 @@
         <button id="merge-approvals-open" class="agent-requests-open merge-approvals-open" type="button" aria-haspopup="dialog" disabled>
           <span>⑂ 合併進 main 待核准 · Merge into main</span><b id="merge-approval-count" hidden>0</b>
         </button>
+        <button id="merge-history-open" class="agent-requests-open merge-history-open" type="button" aria-haspopup="dialog">
+          <span>✓ Merge 歷史 · Merge history</span><b id="merge-history-count" hidden>0</b>
+        </button>
         <label class="field" for="room-search">搜尋帳本
           <input id="room-search" type="search" placeholder="關鍵字，清空回直播">
         </label>
@@ -256,7 +259,23 @@
           <button id="merge-approval-cancel" type="button">取消 · Cancel</button>
           <button id="merge-approval-confirm" class="danger" type="button" disabled>合併進 main · Merge into main</button>
         </div>
+        <section id="merge-approval-result" class="merge-approval-result" aria-live="polite" hidden></section>
         <p id="merge-approval-status" class="workspace-onboarding-status" aria-live="polite"></p>
+      </div>
+    </section>
+    <section id="merge-history" class="workspace-onboarding merge-history" hidden role="dialog" aria-modal="true" aria-labelledby="merge-history-title">
+      <div class="workspace-onboarding-card merge-history-card">
+        <header>
+          <span><small>DURABLE PROMOTION LOG</small><b id="merge-history-title">Merge 歷史 · Merge history</b></span>
+          <button id="merge-history-close" type="button" aria-label="關閉 Merge 歷史 · Close merge history">×</button>
+        </header>
+        <p class="merge-history-note">這裡列的是 durable promotion 紀錄，不把「已核准」冒充「已合併」。只有 <code>applied</code> 且觀察到授權 merge commit 才是 Merge 成功。 · Durable promotion records; approval alone is never shown as a successful merge.</p>
+        <div id="merge-history-list" class="merge-history-list" aria-live="polite"></div>
+        <p id="merge-history-status" class="workspace-onboarding-status" aria-live="polite"></p>
+        <div class="workspace-onboarding-actions">
+          <button id="merge-history-refresh" type="button">↻ 重新讀取紀錄 · Refresh</button>
+          <button id="merge-history-done" class="primary" type="button">完成 · Done</button>
+        </div>
       </div>
     </section>
   </body>

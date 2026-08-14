@@ -156,7 +156,8 @@ Single-use 由 `state` ＋ `row_hash` 的 compare-and-set 保證，並行消耗�
 不執行任何 Git 指令，candidate、checkpoint 與 recovery ref 逐位元不變，Owner 可重新 preview 再問一次。
 Approval 只授權 `merge-candidate-into-main`，消耗時帶其他 action 一律拒絕，授權物件並明列 `notAuthorized`。
 
-**Promotion Service（待實作）** 只接受 single-use snapshot-bound approval。流程為：
+~~**Promotion Service（待實作）**~~ **Promotion Service（已實作；2026-08-14 補齊本機 Owner 產品出口）**
+只接受 single-use snapshot-bound approval。流程為：
 
 1. 重新驗證 candidate/main identity、HEAD 與 working state；
 2. 建立並驗證 recovery point；
@@ -164,6 +165,18 @@ Approval 只授權 `merge-candidate-into-main`，消耗時帶其他 action 一�
 4. 若 scope 擴張或 conflict 需要新決策，停止並重新詢問；
 5. 驗證最終 main HEAD／tree／diff；
 6. 保存結果，不自動 push 或 cleanup。
+
+本機 Web 的最終 `POST /api/rooms/merge-approvals/approve` 不再只回傳 raw token。它呼叫
+`approveAndPromoteMainMerge()`：token 只在 server 記憶體中產生，立即交給 `promoteMainMerge()` 消耗，
+不離開 service boundary。若 transport response 遺失，同一 approval 的重送先依 `approval_id` 查 durable
+promotion，回傳同一列的重新觀察結果，不再執行 Git。grant 後、promotion intent 前失敗時，因尚無任何
+Git 寫入可能，該孤兒 grant 以 `PROMOTION_NOT_STARTED_AFTER_GRANT` 明確退休；intent 一旦存在，只有
+promotion observer 能描述 `applied`／`rolled-back`／`needs-manual-review`，前端不得自行推論。
+
+`GET /api/rooms/merge-history` 是 Room/workspace-scoped 的 durable history surface。它直接讀
+`candidate_merge_promotions` 並重新觀察未結紀錄；因此可能更新 reconciliation metadata，但不會自行
+重跑 merge、rollback、push 或 cleanup。GUI pending badge 僅計 `requested` approvals；history 另列
+promotion id、approval/task、前後 HEAD、candidate HEAD、recovery、observation 與 hooks。
 
 Promotion live gate 的 attributes 檢查由 `GitBroker.restorePoint(main, candidatePaths)` 執行。它把完整
 preview 中所有非刪除目標路徑傳給 `git check-attr`，因此候選新增的、main 尚不存在的副檔名也會被全域

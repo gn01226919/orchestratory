@@ -2182,6 +2182,8 @@ body.workspace-modal-open { overflow: hidden; }
 
 .merge-approvals-open { border-color: #5c3a3d; color: #eab9bb; background: #241a1c; }
 .merge-approvals-open b { color: #2a1013; background: #ef9096; }
+.merge-history-open { border-color: #315743; color: #a8dfbf; background: #17231d; }
+.merge-history-open b { color: #102219; background: #7bd7a3; }
 .merge-approval-card { display: grid; gap: 12px; width: min(760px, 100%); }
 .merge-approval-head { display: grid; gap: 8px; padding-top: 14px; }
 .merge-approval-identity { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
@@ -2254,6 +2256,26 @@ body.workspace-modal-open { overflow: hidden; }
 #merge-approval-confirmation, #apply-back-confirmation, #writer-apply-back-confirmation { font-family: var(--font-mono); font-size: 11px; }
 .merge-approval-actions { flex-wrap: wrap; }
 .merge-approval-actions #merge-approval-reject { margin-right: auto; }
+.merge-approval-result { display: grid; gap: 6px; padding: 12px; border: 1px solid #315743; border-radius: 9px; background: rgb(62 207 142 / 8%); }
+.merge-approval-result.is-failed { border-color: #5b2a2e; background: rgb(229 72 77 / 7%); }
+.merge-approval-result.is-uncertain { border-color: #655026; background: rgb(245 166 35 / 8%); }
+.merge-approval-result > b { color: #8fe0b4; font-size: 14px; }
+.merge-approval-result.is-failed > b { color: #f3a5a8; }
+.merge-approval-result.is-uncertain > b { color: var(--warn); }
+.merge-approval-result p, .merge-approval-result code { color: #bdc8c1; font: 10px/1.6 var(--font-mono); overflow-wrap: anywhere; }
+.merge-history-card { display: grid; gap: 13px; width: min(780px, 100%); }
+.merge-history-note { color: var(--muted); font-size: 10px; line-height: 1.65; }
+.merge-history-note code { color: #8fe0b4; }
+.merge-history-list { display: grid; gap: 8px; max-height: min(62vh, 540px); overflow-y: auto; }
+.merge-history-entry { display: grid; gap: 7px; padding: 11px 12px; border: 1px solid var(--border); border-radius: 8px; background: #15171b; }
+.merge-history-entry > header { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; }
+.merge-history-entry strong { color: #d6dbdf; font-size: 11px; }
+.merge-history-state { padding: 3px 7px; border-radius: 999px; color: var(--warn); background: rgb(245 166 35 / 10%); font: 800 8px/1.4 var(--font-mono); }
+.merge-history-state.is-applied { color: #8fe0b4; background: rgb(62 207 142 / 10%); }
+.merge-history-state.is-rolled-back { color: #f3a5a8; background: rgb(229 72 77 / 10%); }
+.merge-history-entry dl { display: grid; grid-template-columns: minmax(130px, .34fr) minmax(0, 1fr); gap: 4px 10px; }
+.merge-history-entry dt { color: var(--faint); font-size: 9px; }
+.merge-history-entry dd { color: #bfc5ca; font: 9px/1.5 var(--font-mono); overflow-wrap: anywhere; }
 #merge-approval .workspace-onboarding-status, #apply-back-approval .workspace-onboarding-status, #writer-apply-back .workspace-onboarding-status { color: #9aa1a9; text-align: left; }
 
 /* 主工作區 apply-back 與 Room 的 Writer apply-back 都沿用上面的 .merge-approval 元件；只有逐行 diff 需要自己的區塊樣式。 */
@@ -2265,5 +2287,6 @@ body.workspace-modal-open { overflow: hidden; }
   .workspace-preview-check { grid-template-columns: 20px minmax(78px, .42fr) minmax(0, 1fr); }
   #workspace-path-form > div { flex-direction: column; }
   .merge-approval-recovery-facts span { grid-template-columns: minmax(0, 1fr); }
+  .merge-history-entry dl { grid-template-columns: minmax(0, 1fr); }
   .merge-approval-actions #merge-approval-reject { margin-right: 0; }
 }

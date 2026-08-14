@@ -103,6 +103,12 @@ checkpoint，彙整：
 - 若 merge 過程需要超出預覽的新刪除、衝突解決或其他 main 修改，必須停止並重新說明範圍。
 - Owner 拒絕或暫緩時，candidate 預設保留，不刪除、不 merge。
 - 成功後驗證實際 main HEAD、工作樹與變更清單，並保存 audit/recovery record。
+- 本機 Owner 在最終按鈕送出後，產品必須於同一次操作內核准並執行 promotion；不得停在只有
+  `approved`、卻沒有任何可用 promotion 出口的狀態。只有 durable promotion 為 `applied`、且重新觀察到
+  `authorizedMergeCommit=true` 與實際 `mainHeadAfter` 時，GUI 才能顯示「Merge 成功」。
+- 待核准清單只顯示仍可回答的 `requested` 記錄；promotion 開始後移至 durable Merge 歷史。歷史必須在
+  daemon restart 後仍可依 Room/workspace 查核，並顯示 approval/promotion/task、前後 HEAD、candidate HEAD、
+  recovery ref、狀態、時間、observation 與已觀察到的 hooks；不得包含 approval token 或秘密。
 
 Promotion 的 live safety gate 必須在 promotion 環境下用 Git 自己解析 clean/smudge attributes；除
 main 目前的 tracked／ignored／代表性 probe 路徑外，還必須逐一詢問完整 preview 中候選 merge 將寫入的
@@ -131,6 +137,8 @@ Agent 準備自行在 shell 中修改 canonical main 時，也必須先主動提
 - GUI 顯示 candidate/main 路徑、task、HEAD、Agent branches、thread、完成狀態與待 merge 決定。
 - Main merge 使用獨立畫面與批准，不與 join、standby、writer 或 message send 共用按鈕／nonce。
 - Runtime 未完成的功能必須顯示 pending，不得用示意 UI 冒充已執行。
+- Merge 最終按鈕在執行期間顯示「核准並執行 promotion」；失敗、rolled-back、`applying` 或
+  `needs-manual-review` 必須與成功使用不同文案，且不得自動重試或重複 apply。
 
 ## 8. Recovery 與資料保護
 
@@ -169,3 +177,5 @@ Agent 準備自行在 shell 中修改 canonical main 時，也必須先主動提
     npm-link 或 Git working tree 現讀任一檔案。GUI bootstrap 必須驗證 UI protocol，不相容時停用變更操作。
 14. SQLite migration 必須辨識精確舊 schema fingerprint、先驗 row integrity、在單一交易內重建，
     未知或中途失敗時 rollback；正式切換前保存 WAL-safe DB backup 與相容舊 runtime。
+15. 真實 Owner HTTP 操作必須一次完成 grant＋single-use promotion，response loss 後重送只能回讀同一筆
+    durable promotion；成功項目離開 pending 並出現在可於重啟後重建的 Merge 歷史。

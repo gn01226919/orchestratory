@@ -4865,6 +4865,36 @@ export class CandidateRegistry {
     return promotions;
   }
 
+  /**
+   * The durable promotion for one exact approval, if one has started.
+   *
+   * This exists for transport retries of the owner action. If the merge completed but the HTTP
+   * response was lost, the caller must read the already-recorded answer instead of attempting a
+   * second grant or a second Git command. A malformed row is never rounded down to "missing".
+   */
+  async promotionForApproval(input: {
+    approvalId: string;
+    roomId: string;
+    mainPath: string;
+  }): Promise<MergePromotion | undefined> {
+    this.#assertOpen();
+    if (typeof input.approvalId !== "string" || !UUID_PATTERN.test(input.approvalId)) {
+      throw new Error("MAIN_MERGE_APPROVAL_ID_INVALID");
+    }
+    const roomId = text(input.roomId, "CANDIDATE_ROOM_INVALID", 48);
+    if (!ROOM_PATTERN.test(roomId)) throw new Error("CANDIDATE_ROOM_INVALID");
+    const mainPath = await canonicalWorkspace(input.mainPath);
+    const row = this.#db.prepare(
+      "SELECT * FROM candidate_merge_promotions WHERE approval_id=?",
+    ).get(input.approvalId) as PromotionRow | undefined;
+    if (!row) return undefined;
+    this.#assertPromotionRow(row);
+    if (row.room_id !== roomId || row.main_path !== mainPath) {
+      throw new Error("MAIN_MERGE_PROMOTION_SCOPE_MISMATCH");
+    }
+    return this.#publicPromotion(await this.#resolvePromotion(row));
+  }
+
   /** Merge approvals recorded for this exact Room/workspace, newest first. */
   async mergeApprovals(input: { roomId: string; mainPath: string; taskId?: string }): Promise<MergeApproval[]> {
     this.#assertOpen();
