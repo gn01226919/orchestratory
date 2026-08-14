@@ -252,7 +252,8 @@
         </div>
         <div id="merge-approval-confirm-area">
           <label for="merge-approval-confirmation">捲完 diff 且沒有阻擋項目後，輸入 <code id="merge-approval-phrase">MERGE INTO MAIN</code> 解鎖 · Once the diff is read to the end and nothing is blocking, type the phrase to enable</label>
-          <input id="merge-approval-confirmation" type="text" maxlength="64" autocomplete="off" spellcheck="false" disabled>
+          <input id="merge-approval-confirmation" type="text" maxlength="64" autocomplete="off" spellcheck="false" aria-describedby="merge-approval-confirmation-feedback" disabled>
+          <p id="merge-approval-confirmation-feedback" class="merge-confirmation-feedback" aria-live="polite"></p>
         </div>
         <div class="workspace-onboarding-actions merge-approval-actions">
           <button id="merge-approval-reject" type="button">拒絕並保留候選 · Reject &amp; keep candidate</button>

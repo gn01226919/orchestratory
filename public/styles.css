@@ -2254,6 +2254,10 @@ body.workspace-modal-open { overflow: hidden; }
 #merge-approval-confirm-area label, #apply-back-confirm-area label, #writer-apply-back-confirm-area label { color: var(--muted); font-size: 10px; line-height: 1.6; }
 #merge-approval-confirm-area code, #apply-back-confirm-area code, #writer-apply-back-confirm-area code { color: #86dfad; font-family: var(--font-mono); }
 #merge-approval-confirmation, #apply-back-confirmation, #writer-apply-back-confirmation { font-family: var(--font-mono); font-size: 11px; }
+.merge-confirmation-feedback { min-height: 17px; margin: 0; color: var(--muted); font: 10px/1.55 var(--font-mono); }
+.merge-confirmation-feedback.is-invalid { color: #f3a5a8; }
+.merge-confirmation-feedback.is-valid { color: #8fe0b4; }
+#merge-approval-confirmation[aria-invalid="true"] { border-color: #9b454c; box-shadow: 0 0 0 1px rgb(229 72 77 / 18%); }
 .merge-approval-actions { flex-wrap: wrap; }
 .merge-approval-actions #merge-approval-reject { margin-right: auto; }
 .merge-approval-result { display: grid; gap: 6px; padding: 12px; border: 1px solid #315743; border-radius: 9px; background: rgb(62 207 142 / 8%); }

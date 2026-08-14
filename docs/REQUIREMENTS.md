@@ -106,6 +106,11 @@ checkpoint，彙整：
 - 本機 Owner 在最終按鈕送出後，產品必須於同一次操作內核准並執行 promotion；不得停在只有
   `approved`、卻沒有任何可用 promotion 出口的狀態。只有 durable promotion 為 `applied`、且重新觀察到
   `authorizedMergeCommit=true` 與實際 `mainHeadAfter` 時，GUI 才能顯示「Merge 成功」。
+- 確認短語必須有就地、可存取的即時回饋：非 exact phrase 時欄位保持可修正、主要按鈕保持停用，並明示
+  「尚未送出、尚未 Merge、main 未修改」與正確短語；exact phrase 只能顯示「可送出但尚未 Merge」。因
+  scroll gate、re-preview、blocker 或 terminal state 鎖定輸入時，輸入框旁必須具名原因與恢復方式。
+- 核准 POST 被拒絕後，即使重新讀取 live approval 也失敗，GUI 仍必須保留原拒絕原因、具名 refresh
+  failure 並明示「這不是 Merge 成功」；nested read error 不得把結果變成沉默或成功。
 - 待核准清單只顯示仍可回答的 `requested` 記錄；promotion 開始後移至 durable Merge 歷史。歷史必須在
   daemon restart 後仍可依 Room/workspace 查核，並顯示 approval/promotion/task、前後 HEAD、candidate HEAD、
   recovery ref、狀態、時間、observation 與已觀察到的 hooks；不得包含 approval token 或秘密。

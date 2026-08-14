@@ -3701,6 +3701,40 @@ Focused result：`test/merge-approval-web.test.ts` = **3 pass / 0 fail**；連�
 | Restart | 關閉 server，以同一 data directory 建立新的 app/server；pending 仍為 0，同一筆 history 仍為 applied，audit chain valid |
 | TTL | 另一筆真實 approval 只把建立時鐘回撥（產品 15 分鐘常數未改）；頁面從 `00:00` 進入 `已逾時 · expired`，input disabled，阻擋區具名要求 fresh preview |
 
-新 gate digest：`76e5f66110048773ba0128ad6129959f2b8664343194c38a7dafca4bba30bccc`。
+~~新 gate digest：`76e5f66110048773ba0128ad6129959f2b8664343194c38a7dafca4bba30bccc`。~~
+此值已由下方 2026-08-14 確認短語回饋重驗取代；它只保留為前一版成功流程的歷史證據。
 這份 digest 現在包含 `approveMergeIntoMain()`，因為它已從「只 grant」變成真的 main write path；舊 digest
 只保留為歷史證據，不再描述本按鈕的完整行為。
+
+### 2026-08-14 確認短語回饋真實瀏覽器重驗
+
+以新 candidate 的正式 Room 頁面及既有 pending approval 做非破壞性重驗；沒有按下最終 Merge 按鈕，
+因此 canonical main 未修改。本輪把純 `mergeApprovalGate()` 納入 browser-acceptance digest，避免未來只改
+helper、外層 render function 未變時逃過 guard。
+
+| 行為 | 真實瀏覽器觀察 |
+|---|---|
+| Scroll gate | 未捲完時 input disabled，live feedback 明示「尚未捲完、這不是 Merge 結果、main 未修改」；在 diff region 逐頁捲到底後才重新開放輸入 |
+| 錯誤短語可重試 | 輸入 `marge into main` 後 input 仍可編輯、`aria-invalid=true`、primary button disabled；紅色 live feedback 明示「尚未送出、尚未 Merge、main 沒有被修改」並給出精確短語。沒有 HTTP request、沒有 Git 動作 |
+| Exact phrase | 改成精確 `MERGE INTO MAIN` 後 `aria-invalid=false`、primary button enabled；綠色 live feedback 仍明示「目前尚未 Merge，按下合併進 main 才會送出」。本輪刻意未按下，未取得新的 main mutation 核准 |
+| Re-preview | 點擊後重新取得 live preview、清空輸入並重新鎖住 scroll gate；status 明示「尚未 Merge，請重新捲完變更清單」，不再讓 Owner 猜測 click 是否生效 |
+| 其他安全 gate | blocker、terminal approval、空值與大小寫／前後空白由同一個純 gate regression 逐一執行；TTL 與 applied-success path 未改動，沿用上一段已完成的真實 expired／durable success 驗收 |
+
+~~新 gate digest：`f2563722c1efbf27d080a2df47e9c08188d24a17b86131c039bf4ad1fbba0f6d`。~~
+此值已由下方 nested-refresh 補強後的重驗取代。
+
+Focused gate：`test/web.test.ts`、`test/merge-dialog-acceptance.test.ts`、
+`test/merge-approval-web.test.ts` 合計 **13 pass / 0 fail**；另有 pinned TypeScript 5.8.3
+`tsc --noEmit`（使用 main 已安裝的 `@types` roots）、`check:syntax`、`check:hygiene`、
+`npm audit --audit-level=high` 與 `git diff --check` 全部 exit 0。
+
+Claude #675/#678 追問「核准 POST 已被拒絕，但 catch 內的 live refresh 本身也失敗」時是否會沉默。
+原實作確實讓 nested rejection 逃出 catch，雖不會 Merge，卻可能遮住原拒絕訊息；現已新增獨立 catch
+及 executable regression，斷言畫面同時保留 `MAIN_MERGE_APPROVAL_EXPIRED`、`NETWORK_UNAVAILABLE`
+並明示「這不是 Merge 成功」。這個 failure injection 是直接 regression，不冒充真實瀏覽器觀察。
+
+修正後以隔離的 18-file 真實 Git fixture 重跑正式 Room 頁面：逐頁捲完清單、輸入
+`marge into main`、改為 exact `MERGE INTO MAIN`、再按 re-preview；觀察結果仍分別為可重試紅色錯誤、
+尚未 Merge 的綠色就緒提示，以及重新鎖住且明示未 Merge。沒有按最終 Merge，fixture main 與 canonical
+main 都未因本次驗收寫入。新 gate digest：
+`2ec95b2e6100c611d33731ed3ae14e4c311c2223f83b22e917188190afa6e89d`。

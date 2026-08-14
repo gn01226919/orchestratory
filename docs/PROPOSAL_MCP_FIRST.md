@@ -351,6 +351,14 @@ ledger 都看不到 raw token，且一離開 `approved` 狀態即清除。若 re
 `approvalId` 回讀同一筆 durable promotion；不得再次執行 Git。只有 `applied` 且
 `authorizedMergeCommit=true` 可被 GUI 顯示為 Merge 成功。
 
+確認短語的即時回饋是 Owner GUI contract，不新增 MCP 權限或 HTTP 欄位：client 對錯字、大小寫及多餘
+空白必須保持輸入可重試，且明示「尚未送出／尚未 Merge／main 未修改」；精確短語只代表 client gate
+就緒，畫面仍須明示尚未 Merge、需按最終按鈕。re-preview 會清空輸入並重新鎖住 scroll gate。無論
+client 顯示什麼，POST 仍由 server 精確比對 `confirmation` 並重驗 TTL、snapshot binding 與 single-use
+state；任何 client 文字都不能成為核准證據。
+POST 拒絕後 client 可重新讀 live approval 以更新 dialog；該讀取不是成功判準，而且必須有獨立 error
+boundary。若 refresh 也失敗，畫面同時保留原拒絕與 refresh failure，並固定標示「不是 Merge 成功」。
+
 拒絕與逾時**不執行任何 Git 指令**：candidate、checkpoint 與 recovery ref 逐位元不變，Owner 可重新
 preview 再問一次。已核准的 approval 也可由 Owner 撤回（reject）。
 

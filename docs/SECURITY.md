@@ -100,6 +100,12 @@ bounded metadata，固定小於等於 64 KiB，使用 workspace 外的 0700 dire
 - GUI Managed 的 read-only/writer/full-trust 選擇只套用到它啟動的 managed worker。
 - Join、standby、send work、managed writer、merge main、cleanup 與 external side effect 使用不同操作與
   approval scope。
+- Merge 確認短語的 client-side gate 只改善可理解性，不是新的授權來源：錯字、大小寫或多餘空白時
+  不得送出 HTTP，輸入框維持可編輯並以 live region 明示「尚未送出、尚未 Merge、main 未修改」；
+  精確短語也只能明示「尚未 Merge，仍須按下最終按鈕」。重新預覽、未捲到底、blocker 與終局狀態
+  必須各自具名，不能以 disabled control 讓 Owner 猜測結果。Server 端仍須獨立重驗 confirmation、
+  snapshot binding、TTL 與 single-use state，不能信任瀏覽器 gate。server 拒絕後的 live-state refresh 若也
+  失敗，client 必須保留兩個具名錯誤並固定標示非成功；nested failure 不得吞掉拒絕結果。
 - 未完成的 runtime capability 顯示 pending/unsupported，不得只靠文件或按鈕假裝成功。
 
 ## 8. Recovery-first 控制

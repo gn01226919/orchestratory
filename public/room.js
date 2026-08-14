@@ -3372,6 +3372,69 @@ byId("office-chat-form").addEventListener("submit", async (event) => {
  */
 
 const MERGE_CONFIRMATION_PHRASE = "MERGE INTO MAIN";
+
+/* @pure-start merge-approval-gate
+ * DOM-free so regression tests execute the exact feedback and gate semantics the browser uses.
+ */
+function mergeApprovalGate(view) {
+  const blockers = Array.isArray(view?.blockers) ? view.blockers : ["unavailable"];
+  const scrolled = view?.scrolled === true;
+  const decided = view?.decided === true;
+  const phrase = typeof view?.phrase === "string" ? view.phrase : "";
+  const typed = typeof view?.typed === "string" ? view.typed : "";
+  const ready = blockers.length === 0 && scrolled && !decided && phrase.length > 0;
+  let hint;
+  let feedback;
+  let tone = "";
+  let ariaInvalid = false;
+  if (decided) {
+    hint = "這筆核准已經有結果，不能再決定一次。 · This approval has already been decided.";
+    feedback = "輸入已鎖定：請從 Merge 歷史核對結果，不要把鎖定狀態當成新的成功。 · Input locked; verify the result in Merge History.";
+  } else if (blockers.length > 0) {
+    hint = "阻擋區還有項目：確認輸入與「合併進 main」保持停用，請先重新產生預覽。 · Blocking items remain; the confirmation input and the primary button stay disabled.";
+    feedback = "輸入已鎖定：阻擋項目尚未排除；沒有送出、沒有 Merge，main 未修改。 · Input locked by blockers; nothing was submitted or merged.";
+  } else if (phrase.length === 0) {
+    hint = "後端沒有給確認短語，這筆 Merge 不可核准。 · No confirmation phrase was supplied; this merge cannot be approved.";
+    feedback = "輸入已鎖定：缺少確認短語；沒有送出、沒有 Merge，main 未修改。 · Input locked because the confirmation phrase is unavailable.";
+  } else if (!scrolled) {
+    hint = "請把上面的變更清單捲到底（展開檔案後會重新計算），確認輸入才會解鎖。 · Scroll the change list to the bottom to enable the confirmation input.";
+    feedback = "輸入已鎖定：尚未捲完上方變更清單；這不是 Merge 結果，main 未修改。捲到底後即可再次輸入。 · Input locked until the change list is read to the end; nothing was merged.";
+  } else if (typed.length === 0) {
+    hint = `變更清單已捲到底：輸入 ${phrase} 即可解鎖「合併進 main」。 · Diff read to the end; type the phrase to enable the primary button.`;
+    feedback = `尚未輸入確認短語；尚未送出、尚未 Merge。請完整輸入 ${phrase}。 · No phrase entered; nothing has been submitted or merged.`;
+  } else if (typed !== phrase) {
+    hint = `變更清單已捲到底：輸入 ${phrase} 即可解鎖「合併進 main」。 · Diff read to the end; type the phrase to enable the primary button.`;
+    feedback = `✗ 確認短語不正確；尚未送出、尚未 Merge，main 沒有被修改。請完整輸入 ${phrase}（區分大小寫，不接受多餘空白）。 · Incorrect phrase; nothing was submitted or merged. Type the exact phrase.`;
+    tone = "is-invalid";
+    ariaInvalid = true;
+  } else {
+    hint = `變更清單已捲到底：輸入 ${phrase} 即可解鎖「合併進 main」。 · Diff read to the end; type the phrase to enable the primary button.`;
+    feedback = "✓ 確認短語正確；目前仍尚未 Merge。按下「合併進 main」才會送出。 · Phrase is correct; the merge has not happened yet. Press the button to submit.";
+    tone = "is-valid";
+  }
+  return {
+    ready,
+    inputDisabled: !ready,
+    inputValue: ready ? typed : "",
+    confirmDisabled: !ready || typed !== phrase,
+    hint,
+    feedback,
+    tone,
+    ariaInvalid,
+  };
+}
+
+function mergeApprovalFailureStatus(approvalFailure, refreshFailure = "") {
+  const primary = typeof approvalFailure === "string" && approvalFailure.length > 0
+    ? approvalFailure
+    : "unavailable";
+  const refresh = typeof refreshFailure === "string" ? refreshFailure : "";
+  return refresh.length > 0
+    ? `核准失敗 · Approval refused：${primary}；live state 重新讀取也失敗：${refresh}。這不是 Merge 成功，請稍後從 Merge 歷史核對。 · Refresh also failed; success is not being claimed.`
+    : `核准失敗 · Approval refused：${primary}`;
+}
+/* @pure-end merge-approval-gate */
+
 const MERGE_OPERATION_LABELS = {
   add: "新增 · Added",
   modify: "修改 · Modified",
@@ -3950,20 +4013,22 @@ function updateMergeApprovalGate() {
   const input = byId("merge-approval-confirmation");
   const confirm = byId("merge-approval-confirm");
   const hint = byId("merge-approval-scroll-hint");
-  if (!input || !confirm || !hint) return;
-  const blocked = (state.mergeApprovalBlockers || []).length > 0;
-  const scrolled = Boolean(state.mergeApprovalScrolled);
-  const ready = !blocked && scrolled && !state.mergeApprovalDecided;
-  if (!ready) input.value = "";
-  input.disabled = !ready;
-  confirm.disabled = !ready || input.value !== mergeConfirmationPhrase();
-  hint.textContent = state.mergeApprovalDecided
-    ? "這筆核准已經有結果，不能再決定一次。 · This approval has already been decided."
-    : blocked
-      ? "阻擋區還有項目：確認輸入與「合併進 main」保持停用，請先重新產生預覽。 · Blocking items remain; the confirmation input and the primary button stay disabled."
-      : scrolled
-        ? `變更清單已捲到底：輸入 ${mergeConfirmationPhrase()} 即可解鎖「合併進 main」。 · Diff read to the end; type the phrase to enable the primary button.`
-        : "請把上面的變更清單捲到底（展開檔案後會重新計算），確認輸入才會解鎖。 · Scroll the change list to the bottom to enable the confirmation input.";
+  const feedback = byId("merge-approval-confirmation-feedback");
+  if (!input || !confirm || !hint || !feedback) return;
+  const gate = mergeApprovalGate({
+    blockers: state.mergeApprovalBlockers || [],
+    scrolled: state.mergeApprovalScrolled,
+    decided: state.mergeApprovalDecided,
+    phrase: mergeConfirmationPhrase(),
+    typed: input.value,
+  });
+  if (input.value !== gate.inputValue) input.value = gate.inputValue;
+  input.disabled = gate.inputDisabled;
+  input.setAttribute("aria-invalid", String(gate.ariaInvalid));
+  confirm.disabled = gate.confirmDisabled;
+  hint.textContent = gate.hint;
+  feedback.textContent = gate.feedback;
+  feedback.className = `merge-confirmation-feedback${gate.tone ? ` ${gate.tone}` : ""}`;
 }
 
 function renderMergeApprovalPicker() {
@@ -4134,8 +4199,15 @@ async function approveMergeIntoMain() {
   const approval = state.mergeApproval;
   const status = byId("merge-approval-status");
   const confirm = byId("merge-approval-confirm");
-  if (!approval || (state.mergeApprovalBlockers || []).length > 0 || !state.mergeApprovalScrolled) return;
+  if (!approval || (state.mergeApprovalBlockers || []).length > 0 || !state.mergeApprovalScrolled) {
+    updateMergeApprovalGate();
+    return;
+  }
   const confirmation = byId("merge-approval-confirmation").value;
+  if (confirmation !== mergeConfirmationPhrase()) {
+    updateMergeApprovalGate();
+    return;
+  }
   confirm.disabled = true;
   status.textContent = "正在核准並執行 single-use promotion；完成前不會顯示 Merge 成功… · Approving and running the single-use promotion; success is shown only after durable verification…";
   try {
@@ -4179,8 +4251,16 @@ async function approveMergeIntoMain() {
     result.hidden = false;
   } catch (error) {
     /* 先重新讀取（會清空狀態列），再寫入失敗原因，否則訊息會被覆蓋掉。 */
-    await loadMergeApproval(approval.id);
-    status.textContent = `核准失敗 · Approval refused：${humanError(error)}`;
+    let refreshError = null;
+    try {
+      await loadMergeApproval(approval.id);
+    } catch (caught) {
+      refreshError = caught;
+    }
+    status.textContent = mergeApprovalFailureStatus(
+      humanError(error),
+      refreshError ? humanError(refreshError) : "",
+    );
   }
   await refreshMergeApprovals();
 }
@@ -4249,7 +4329,7 @@ async function repreviewMergeApproval() {
   await loadMergeApproval(approval.id);
   const blockers = state.mergeApprovalBlockers || [];
   status.textContent = blockers.length === 0
-    ? "已依 live state 重新產生預覽，阻擋項目已清空。 · Re-previewed against live state; nothing is blocking now."
+    ? "已依 live state 重新產生預覽，阻擋項目已清空；尚未 Merge。請重新捲完變更清單，輸入框就會解鎖。 · Re-previewed against live state; nothing was merged. Read the refreshed change list to unlock the input."
     : "已依 live state 重新產生預覽；阻擋項目仍在。這份 snapshot 已經無法核准，請讓候選端重新提出一次合併要求（main_merge_request）。 · Re-previewed; this snapshot can no longer be approved — the candidate has to request a fresh one.";
 }
 
@@ -4287,8 +4367,7 @@ byId("merge-approval-diff").addEventListener("toggle", () => {
   updateMergeApprovalGate();
 }, true);
 byId("merge-approval-confirmation").addEventListener("input", () => {
-  byId("merge-approval-confirm").disabled = byId("merge-approval-confirmation").disabled ||
-    byId("merge-approval-confirmation").value !== mergeConfirmationPhrase();
+  updateMergeApprovalGate();
 });
 byId("merge-approval-confirm").addEventListener("click", () => void approveMergeIntoMain());
 byId("merge-approval-reject").addEventListener("click", () => void rejectMergeIntoMain());

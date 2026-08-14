@@ -183,6 +183,13 @@ daemon 若在 grant 與 intent 中間被殺，重啟後 exact POST retry 或 Mer
 promotion id、approval/task、前後 HEAD、candidate HEAD、recovery、observation 與 hooks；沒有 promotion
 row 的 terminal approval 另列為「核准未進入 promotion」，不會消失也不會冒充成功。
 
+確認輸入的 UI gate 由 DOM-free `mergeApprovalGate()` 計算同一份狀態：`blocked`、`not-scrolled`、
+`empty`、`incorrect`、`exact`、`decided` 各自回傳 controls 與 live-region copy。錯字不送 HTTP，欄位保持
+可編輯且 `aria-invalid=true`；re-preview 重新鎖定 scroll gate 時會明說「尚未 Merge」及重新捲到底的出口。
+這是使用者回饋層，不改變 server 的 exact phrase、snapshot binding 或 promotion contract。
+核准 POST 的 error path 會 best-effort 重新讀 live approval；該讀取另有獨立 catch，失敗時同時保留原拒絕
+與 refresh failure，並固定標示非成功，避免 nested error 吞掉 Owner 唯一可見的結果。
+
 Promotion live gate 的 attributes 檢查由 `GitBroker.restorePoint(main, candidatePaths)` 執行。它把完整
 preview 中所有非刪除目標路徑傳給 `git check-attr`，因此候選新增的、main 尚不存在的副檔名也會被全域
 attributes 規則涵蓋；preview 截斷時仍由既有 blocker 拒絕，不以不完整路徑清單放行。

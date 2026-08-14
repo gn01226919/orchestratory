@@ -841,6 +841,12 @@ ADR-033「不能把核准燒掉但 merge 沒發生」的載重理由，也讓已
    Git，可安全把該孤兒 grant 以 `PROMOTION_NOT_STARTED_AFTER_GRANT` 退休。daemon 在兩者之間被殺時，
    重啟後 exact retry 或 history 讀取做同一判斷、清除 token hash，並把該 terminal approval 列入
    `unpromotedApprovals`；intent 一旦存在，任何錯誤都不走此路，結果完全交給 ADR-035 observer 收斂。
+6. 確認短語採六個可觀察狀態，而不是只靠 disabled input/button 暗示結果：尚未捲完或重新預覽後明示
+   input 為何鎖定；錯誤短語保持可編輯並明示未送出、未 Merge、main 未修改；精確短語明示仍須按下
+   最終按鈕；只有第 3 項的 durable positive observation 才顯示 Merge 成功。client gate 不取代 server
+   對 confirmation、TTL、binding 與 single-use state 的重驗。server 拒絕後會 best-effort refresh live
+   approval；refresh 自身失敗也必須保留原拒絕、具名第二個錯誤並明示非成功，不得讓 nested exception
+   使畫面沉默。
 
 ### 代價與殘餘風險
 
@@ -854,3 +860,5 @@ ADR-033「不能把核准燒掉但 merge 沒發生」的載重理由，也讓已
   merge、rollback、push 或 cleanup，因此不是純粹「無寫入任何 store」的 GET。
 - Native Full-Trust、candidate/main 邊界與外部副作用授權都沒有改變；按鈕只涵蓋已預覽的 main merge，
   不含 push、publish、deploy、delete 或 cleanup。
+- 多一個 client-side 狀態機與 accessible live region；它降低 Owner 把錯字或 locked control 誤讀為
+  已送出的風險，但無法證明 server 結果，最終事實仍只來自 durable promotion/history。

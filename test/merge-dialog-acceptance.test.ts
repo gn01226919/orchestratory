@@ -32,6 +32,8 @@ const ACCEPTED_FUNCTIONS = [
   "formatCountdown",
   "tickMergeApprovalTtl",
   "mergeDiffScrolledToBottom",
+  "mergeApprovalGate",
+  "mergeApprovalFailureStatus",
   "updateMergeApprovalGate",
   "mergeApprovalBlockers",
   "mergeRiskLevel",
