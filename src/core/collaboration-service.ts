@@ -110,6 +110,7 @@ export class CollaborationService {
   readonly #worktrees: WorktreeBroker;
   readonly #writerWorktrees: WriterWorktreeLifecycle | undefined;
   readonly #dataDirectory: string;
+  readonly #ownerPromotionsInFlight = new Set<string>();
   #closed = false;
 
   constructor(dataDirectory: string, options: {
@@ -671,13 +672,62 @@ export class CollaborationService {
     roomId: string;
     workspace: string;
     taskId?: string;
-  }): Promise<Awaited<ReturnType<CandidateRegistry["promotions"]>>> {
+  }): Promise<{
+    promotions: Awaited<ReturnType<CandidateRegistry["promotions"]>>;
+    unpromotedApprovals: MergeApproval[];
+  }> {
     this.#assertRoomWorkspace(input.roomId, input.workspace);
-    return await this.candidates.promotions({
+    let promotions = await this.candidates.promotions({
       roomId: input.roomId,
       mainPath: input.workspace,
       ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
     });
+    const started = new Set(promotions.flatMap((promotion) =>
+      "approvalId" in promotion ? [promotion.approvalId] : []));
+    let approvals = await this.candidates.mergeApprovals({
+      roomId: input.roomId,
+      mainPath: input.workspace,
+      ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+    });
+    // A durable grant with no intent row can only be left by the retired two-stage HTTP flow or by
+    // a crash between grant and intent. The raw token is no longer available after restart, so it
+    // is not authority waiting to be used; it is a failed owner operation waiting to be named.
+    // Never race the live call in this process: it marks the approval before grant and holds the
+    // mark until either an intent exists or the call has retired the grant itself.
+    for (const approval of approvals) {
+      if (approval.state !== "approved" || started.has(approval.id)
+        || this.#ownerPromotionsInFlight.has(approval.id)) continue;
+      try {
+        await this.rejectMainMerge({
+          roomId: input.roomId,
+          workspace: input.workspace,
+          approvalId: approval.id,
+          decidedBy: "local-web",
+          reason: "PROMOTION_NOT_STARTED_AFTER_GRANT",
+        });
+      } catch (error) {
+        // A concurrent intent writer wins safely: re-read both stores rather than calling either
+        // outcome "missing". Any other error remains visible to the caller.
+        if (!(error instanceof Error) || error.message !== "MAIN_MERGE_APPROVAL_NOT_PENDING") throw error;
+      }
+    }
+    promotions = await this.candidates.promotions({
+      roomId: input.roomId,
+      mainPath: input.workspace,
+      ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+    });
+    approvals = await this.candidates.mergeApprovals({
+      roomId: input.roomId,
+      mainPath: input.workspace,
+      ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+    });
+    const promoted = new Set(promotions.flatMap((promotion) =>
+      "approvalId" in promotion ? [promotion.approvalId] : []));
+    return {
+      promotions,
+      unpromotedApprovals: approvals.filter((approval) =>
+        approval.state !== "requested" && !promoted.has(approval.id)),
+    };
   }
 
   async inspectMergeApproval(input: {
@@ -803,32 +853,19 @@ export class CollaborationService {
     decidedBy: "local-web" | "local-tui";
   }): Promise<MergePromotionResult & { approval: MergeApproval; replayed: boolean }> {
     this.#assertRoomWorkspace(input.roomId, input.workspace);
-    const existing = await this.candidates.promotionForApproval({
-      approvalId: input.approvalId, roomId: input.roomId, mainPath: input.workspace,
-    });
-    if (existing) return await this.#replayedPromotion(input, existing);
-
-    const granted = await this.grantMainMerge(input);
+    if (this.#ownerPromotionsInFlight.has(input.approvalId)) {
+      throw new Error("MAIN_MERGE_PROMOTION_IN_FLIGHT");
+    }
+    this.#ownerPromotionsInFlight.add(input.approvalId);
     try {
-      const result = await this.candidates.promoteMainMerge({
-        approvalId: granted.approval.id,
-        token: granted.approvalToken,
-        action: granted.approval.grants,
-        taskId: granted.approval.binding.taskId,
-        roomId: input.roomId,
-        mainPath: input.workspace,
-      });
-      const inspected = await this.candidates.inspectMergeApproval({
+      const existing = await this.candidates.promotionForApproval({
         approvalId: input.approvalId, roomId: input.roomId, mainPath: input.workspace,
       });
-      return { ...result, approval: inspected.approval, replayed: false };
-    } catch (error) {
-      const durable = await this.candidates.promotionForApproval({
+      if (existing) return await this.#replayedPromotion(input, existing);
+      const beforeGrant = await this.candidates.inspectMergeApproval({
         approvalId: input.approvalId, roomId: input.roomId, mainPath: input.workspace,
       });
-      if (!durable) {
-        // No intent row means no Git command could have started. Retiring the now-unspendable grant
-        // prevents the UI from showing a live authority whose only token has already left memory.
+      if (beforeGrant.approval.state === "approved") {
         await this.rejectMainMerge({
           roomId: input.roomId,
           workspace: input.workspace,
@@ -836,8 +873,41 @@ export class CollaborationService {
           decidedBy: input.decidedBy,
           reason: "PROMOTION_NOT_STARTED_AFTER_GRANT",
         });
+        throw new Error("MAIN_MERGE_APPROVAL_ORPHANED_NO_PROMOTION");
       }
-      throw error;
+      const granted = await this.grantMainMerge(input);
+      try {
+        const result = await this.candidates.promoteMainMerge({
+          approvalId: granted.approval.id,
+          token: granted.approvalToken,
+          action: granted.approval.grants,
+          taskId: granted.approval.binding.taskId,
+          roomId: input.roomId,
+          mainPath: input.workspace,
+        });
+        const inspected = await this.candidates.inspectMergeApproval({
+          approvalId: input.approvalId, roomId: input.roomId, mainPath: input.workspace,
+        });
+        return { ...result, approval: inspected.approval, replayed: false };
+      } catch (error) {
+        const durable = await this.candidates.promotionForApproval({
+          approvalId: input.approvalId, roomId: input.roomId, mainPath: input.workspace,
+        });
+        if (!durable) {
+          // No intent row means no Git command could have started. Retiring the now-unspendable grant
+          // prevents the UI from showing a live authority whose only token has already left memory.
+          await this.rejectMainMerge({
+            roomId: input.roomId,
+            workspace: input.workspace,
+            approvalId: input.approvalId,
+            decidedBy: input.decidedBy,
+            reason: "PROMOTION_NOT_STARTED_AFTER_GRANT",
+          });
+        }
+        throw error;
+      }
+    } finally {
+      this.#ownerPromotionsInFlight.delete(input.approvalId);
     }
   }
 

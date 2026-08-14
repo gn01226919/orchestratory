@@ -172,11 +172,16 @@ Approval 只授權 `merge-candidate-into-main`，消耗時帶其他 action 一�
 promotion，回傳同一列的重新觀察結果，不再執行 Git。grant 後、promotion intent 前失敗時，因尚無任何
 Git 寫入可能，該孤兒 grant 以 `PROMOTION_NOT_STARTED_AFTER_GRANT` 明確退休；intent 一旦存在，只有
 promotion observer 能描述 `applied`／`rolled-back`／`needs-manual-review`，前端不得自行推論。
+daemon 若在 grant 與 intent 中間被殺，重啟後 exact POST retry 或 Merge 歷史讀取會發現
+`approved` 且沒有任何 promotion row，撤銷 token hash、轉為同一具名 rejected 狀態，並在 history 的
+`unpromotedApprovals` 顯示。正常在途操作以 service-local approval id set 標記，避免同一 daemon 的 history
+讀取把合法的極短窗口誤判成 orphan；併發第二個 owner POST 以 `MAIN_MERGE_PROMOTION_IN_FLIGHT` 拒絕。
 
 `GET /api/rooms/merge-history` 是 Room/workspace-scoped 的 durable history surface。它直接讀
 `candidate_merge_promotions` 並重新觀察未結紀錄；因此可能更新 reconciliation metadata，但不會自行
 重跑 merge、rollback、push 或 cleanup。GUI pending badge 僅計 `requested` approvals；history 另列
-promotion id、approval/task、前後 HEAD、candidate HEAD、recovery、observation 與 hooks。
+promotion id、approval/task、前後 HEAD、candidate HEAD、recovery、observation 與 hooks；沒有 promotion
+row 的 terminal approval 另列為「核准未進入 promotion」，不會消失也不會冒充成功。
 
 Promotion live gate 的 attributes 檢查由 `GitBroker.restorePoint(main, candidatePaths)` 執行。它把完整
 preview 中所有非刪除目標路徑傳給 `git check-attr`，因此候選新增的、main 尚不存在的副檔名也會被全域

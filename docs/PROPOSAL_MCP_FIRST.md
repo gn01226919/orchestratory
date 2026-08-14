@@ -340,7 +340,8 @@ output: {
 - `POST /api/rooms/merge-approvals/reject { room, approvalId, reason? }`
   → `{ approval; deletedByThisRejection: "nothing"; mainMutation: false }`
 - `GET /api/rooms/merge-history?room=<id>[&taskId=<uuid>]`
-  → `{ promotions: (MergePromotion | UnreadableMergePromotion)[]; chainValid: boolean }`
+  → `{ promotions: (MergePromotion | UnreadableMergePromotion)[];
+  unpromotedApprovals: MergeApproval[]; chainValid: boolean }`
 
 `confirmation` 必須精確等於 `MERGE INTO MAIN`（語意化、不含 taskId）；`previewDigest` 必須等於
 dialog 實際顯示的那一份。核准當下會**再驗一次**整組綁定值，任一改變即回

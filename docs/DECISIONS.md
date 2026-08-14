@@ -838,13 +838,18 @@ ADR-033「不能把核准燒掉但 merge 沒發生」的載重理由，也讓已
    promotion/approval/task、前後 HEAD、candidate HEAD、recovery、state、timestamps、observation、hooks，
    不含 token。
 5. grant 已提交、但 promotion intent 尚未寫入而同步失敗時，因 `promoteMainMerge` 在 intent 前不會執行
-   Git，可安全把該孤兒 grant 以 `PROMOTION_NOT_STARTED_AFTER_GRANT` 退休。intent 一旦存在，任何錯誤都
-   不走此路；結果完全交給 ADR-035 的 observer 收斂。
+   Git，可安全把該孤兒 grant 以 `PROMOTION_NOT_STARTED_AFTER_GRANT` 退休。daemon 在兩者之間被殺時，
+   重啟後 exact retry 或 history 讀取做同一判斷、清除 token hash，並把該 terminal approval 列入
+   `unpromotedApprovals`；intent 一旦存在，任何錯誤都不走此路，結果完全交給 ADR-035 observer 收斂。
 
 ### 代價與殘餘風險
 
-- SQLite grant 與 intent 仍不是同一交易；程序若恰在兩者之間被 SIGKILL，會留下短效、無 raw token 的
-  `approved` row。它不能被 spend，TTL 後失效，但期間是可見的未完成核准，不得顯示成功。
+- SQLite grant 與 intent 仍不是同一交易；程序若恰在兩者之間被 SIGKILL，會短暫留下 `approved` row，
+  下一次 retry/history 會具名退休。跨行程共用同一 data directory 時，service-local in-flight set 不足以
+  區分另一個仍活著的 daemon。若第二行程在 intent commit 前退休 approval，第一行程的 consume CAS 失敗；
+  若 intent 已先 commit，仍可能短暫同時存在「intent＋已退休 approval」，但該 intent 會在任何 Git command
+  前轉為 `rolled-back`。因此競爭會造成具名的假失敗，不會造成未授權 merge；正式單 daemon 啟動紀律仍是
+  避免這種可用性失敗的前提。
 - History 的讀取會重新觀察未結 promotion，可能更新 reconciliation row、audit 與 ledger；它不會重跑
   merge、rollback、push 或 cleanup，因此不是純粹「無寫入任何 store」的 GET。
 - Native Full-Trust、candidate/main 邊界與外部副作用授權都沒有改變；按鈕只涵蓋已預覽的 main merge，

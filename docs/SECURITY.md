@@ -65,6 +65,9 @@ bounded metadata，固定小於等於 64 KiB，使用 workspace 外的 0700 dire
   `state=applied` 且 `authorizedMergeCommit=true` 的重新觀察可顯示成功。
 - Merge 歷史來自 tamper-evident promotion rows 與 audit chain，不來自 browser storage。讀不到、row
   malformed、audit chain 失效、`applying` 或 `needs-manual-review` 都不得折疊成「沒有紀錄」或「已安全」。
+- 舊版已回給 browser 的 raw token 在新版沒有任何 HTTP/MCP 消耗入口；strict approve schema 也拒絕
+  `approvalToken` 欄位。重啟後一筆 `approved` 且沒有 promotion intent 的列會被具名退休並清除 token
+  hash；回歸測試持有真實舊 token，證明退休後直接呼叫核心也得到 `NOT_APPROVED` 且 main 不變。
 - Approval 只授權「把這個 snapshot merge 進 main」，並在授權物件內明列不被授權的動作；拒絕、失效與
   逾時不執行任何 Git 指令，candidate、checkpoint 與 recovery ref 完整保留。
 - Promotion 前建立 recovery point；建立或驗證失敗時不得宣稱 ready。

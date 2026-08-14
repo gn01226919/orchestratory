@@ -103,6 +103,7 @@ const state = {
   mergeNotAuthorized: [],
   mergeApprovalsRoom: "",
   mergeHistory: [],
+  mergeUnpromotedApprovals: [],
   mergeHistoryRoom: "",
   mergeHistoryReturnFocus: null,
 };
@@ -1041,6 +1042,7 @@ async function selectRoom(id) {
   state.mergeApprovalsRoom = "";
   renderMergeApprovalBadge();
   state.mergeHistory = [];
+  state.mergeUnpromotedApprovals = [];
   state.mergeHistoryRoom = "";
   renderMergeHistoryBadge();
   state.selectedPresenceId = "";
@@ -3465,7 +3467,7 @@ function mergeHistorySucceeded(entry) {
 function renderMergeHistoryBadge() {
   const badge = byId("merge-history-count");
   if (!badge) return;
-  const count = (state.mergeHistory || []).length;
+  const count = (state.mergeHistory || []).length + (state.mergeUnpromotedApprovals || []).length;
   badge.textContent = String(count);
   badge.hidden = count === 0;
 }
@@ -3482,7 +3484,7 @@ function renderMergeHistory() {
   const host = byId("merge-history-list");
   if (!host) return;
   host.textContent = "";
-  if (!(state.mergeHistory || []).length) {
+  if (!(state.mergeHistory || []).length && !(state.mergeUnpromotedApprovals || []).length) {
     const empty = document.createElement("p");
     empty.className = "merge-history-note";
     empty.textContent = "尚無 promotion 紀錄。核准本身不會被列成 Merge 成功。 · No promotion records yet; approval alone is not merge success.";
@@ -3520,11 +3522,33 @@ function renderMergeHistory() {
     item.append(header, facts);
     host.append(item);
   }
+  for (const approval of state.mergeUnpromotedApprovals || []) {
+    const item = document.createElement("article");
+    item.className = "merge-history-entry";
+    const header = document.createElement("header");
+    const title = document.createElement("strong");
+    title.textContent = "核准未進入 promotion · Approval did not start a merge";
+    const stateTag = document.createElement("span");
+    stateTag.className = "merge-history-state is-rolled-back";
+    stateTag.textContent = String(approval.state || "unavailable");
+    header.append(title, stateTag);
+    const facts = document.createElement("dl");
+    historyFact(facts, "時間 · Updated", approval.updatedAt);
+    historyFact(facts, "Task", approval.taskId);
+    historyFact(facts, "Approval", approval.id);
+    historyFact(facts, "Candidate HEAD", approval.candidateHead || approval.binding?.candidateHead);
+    historyFact(facts, "main HEAD bound", approval.mainHead || approval.binding?.mainHead);
+    historyFact(facts, "Recovery ref", approval.binding?.recoveryRef);
+    historyFact(facts, "Reason", approval.refusal?.reason || approval.refusal?.code);
+    item.append(header, facts);
+    host.append(item);
+  }
 }
 
 async function refreshMergeHistory() {
   if (!state.room) {
     state.mergeHistory = [];
+    state.mergeUnpromotedApprovals = [];
     state.mergeHistoryRoom = "";
     renderMergeHistoryBadge();
     renderMergeHistory();
@@ -3532,6 +3556,8 @@ async function refreshMergeHistory() {
   }
   const value = await api(`/api/rooms/merge-history?room=${encodeURIComponent(state.room)}`);
   state.mergeHistory = Array.isArray(value.promotions) ? value.promotions : [];
+  state.mergeUnpromotedApprovals = Array.isArray(value.unpromotedApprovals)
+    ? value.unpromotedApprovals : [];
   state.mergeHistoryRoom = state.room;
   renderMergeHistoryBadge();
   renderMergeHistory();

@@ -1405,12 +1405,12 @@ const MERGE_PROMOTIONS_GROUP_COLUMNS = ["merge_pgid", "merge_boot_at_sec"] as co
  * The durable INTENT to write canonical main, and the record of what was observed afterwards.
  *
  * It exists because spending the approval and writing main cannot be one atomic act: one is a SQLite
- * transaction, the other is a subprocess mutating a working tree. What CAN be atomic is spending the
- * approval and recording that main is about to be written, and that is exactly what this row is —
- * inserted in the same transaction that consumes the approval, before git is invoked. A process that
- * dies at any point after that leaves this row behind saying "a promotion was under way", which is
- * the honest answer, and the observation that resolves it looks at the repository rather than
- * retrying anything.
+ * transition, the other is a subprocess mutating a working tree. The intent is committed first; the
+ * approval is then consumed by a row-hash-and-state compare-and-set, still before Git is invoked.
+ * A concurrent retirement can therefore leave an intent beside a terminal non-consumed approval,
+ * but that makes the consume CAS fail and the intent is settled rolled-back before any Git command.
+ * A process that dies after intent creation leaves this row behind saying "a promotion was under
+ * way"; the observation that resolves it reads the repository rather than retrying anything.
  *
  * `owner_pid` distinguishes "still running" from "died". Without it a reader could not tell a
  * promotion in flight in another process from a crashed one, and would have to either report every
@@ -8068,9 +8068,10 @@ export class CandidateRegistry {
   }
 
   /**
-   * The UPDATE itself, without a transaction of its own, so that promotion can put it in the SAME
-   * transaction as the durable intent to write main. That co-commit is the whole of bar item 1:
-   * spending the approval and recording that main is about to change are one decision or neither.
+   * The conditional UPDATE shared by grant, retirement and consumption. Each caller wraps it in a
+   * SQLite write transaction; the row hash plus previous state form the compare-and-set. Promotion
+   * intentionally commits its intent first, then calls this transition before Git. If another
+   * process retired the row in between, consumption loses the CAS and the intent is rolled back.
    */
   #updateMergeApprovalRow(previous: MergeApprovalRow, fields: Partial<MergeApprovalRow>): MergeApprovalRow {
     if (MERGE_APPROVAL_TERMINAL.has(previous.state)) throw new Error("MAIN_MERGE_APPROVAL_NOT_PENDING");

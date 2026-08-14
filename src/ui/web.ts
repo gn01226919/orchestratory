@@ -553,7 +553,7 @@ export async function startWebServer(
           throw new Error("INVALID_CANDIDATE_TASK_ID");
         }
         json(response, 200, {
-          promotions: await collaboration.listMergeHistory({
+          ...await collaboration.listMergeHistory({
             roomId: room, workspace, ...(taskId === null ? {} : { taskId }),
           }),
           chainValid: collaboration.audit.verify(),

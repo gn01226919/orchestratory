@@ -130,6 +130,10 @@ test("the merge approval dialog contract lists, inspects, approves once, and ref
       room: "demo", approvalId: approval.id, previewDigest: approval.binding.previewDigest,
       confirmation: MERGE_APPROVAL_CONFIRMATION, extra: true,
     },
+    {
+      room: "demo", approvalId: approval.id, previewDigest: approval.binding.previewDigest,
+      confirmation: MERGE_APPROVAL_CONFIRMATION, approvalToken: "captured-legacy-token",
+    },
   ]) {
     const refused = await post("/api/rooms/merge-approvals/approve", body);
     assert.equal(refused.status, 400);
@@ -166,6 +170,7 @@ test("the merge approval dialog contract lists, inspects, approves once, and ref
   const history = await get("/api/rooms/merge-history?room=demo");
   assert.equal(history.status, 200);
   assert.equal(history.body.chainValid, true);
+  assert.deepEqual(history.body.unpromotedApprovals, []);
   const entries = history.body.promotions as Array<{
     id: string; approvalId: string; taskId: string; state: string; mainHeadBefore: string;
     mainHeadAfter: string; recoveryRef: string; observation: { code: string; hooksExecuted?: unknown[] };
@@ -277,4 +282,67 @@ test("a grant that fails before durable promotion intent is retired and never sh
   assert.deepEqual(await service.candidates.promotions({ roomId: "demo", mainPath: workspace }), []);
   assert.equal((await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspace })).stdout.trim(), before);
   assert.equal((await execFileAsync("git", ["status", "--porcelain=v1"], { cwd: workspace })).stdout, "");
+});
+
+test("restart retires an approved approval with no promotion and revokes its captured legacy token", async (t) => {
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-merge-web-orphan-restart-"));
+  const workspace = await repository();
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+  t.after(async () => await rm(workspace, { recursive: true, force: true }));
+  const first = new CollaborationService(data);
+  first.ledger.createRoom("demo", workspace);
+  const task = await first.candidates.start({
+    actor: "codex1", clientRequestId: randomUUID(), roomId: "demo", mainPath: workspace,
+    task: "crash after grant before promotion intent",
+  });
+  await writeFile(join(task.candidatePath, "candidate.txt"), "candidate\n", "utf8");
+  await execFileAsync("git", ["add", "candidate.txt"], { cwd: task.candidatePath });
+  await execFileAsync("git", [...author, "commit", "-m", "candidate work"], { cwd: task.candidatePath });
+  await first.candidates.complete({
+    actor: "codex1", clientRequestId: randomUUID(), taskId: task.taskId, roomId: "demo",
+    mainPath: workspace, summary: "ready",
+  });
+  const preview = await first.candidates.previewMainMerge({
+    taskId: task.taskId, roomId: "demo", mainPath: workspace,
+  });
+  const approval = await first.candidates.requestMainMerge({
+    actor: "codex1", clientRequestId: randomUUID(), taskId: task.taskId, roomId: "demo",
+    mainPath: workspace, completionId: preview.completionId, previewDigest: preview.previewDigest,
+  });
+  const granted = await first.candidates.grantMainMerge({
+    approvalId: approval.id, roomId: "demo", mainPath: workspace,
+    previewDigest: approval.previewDigest, confirmation: MERGE_APPROVAL_CONFIRMATION,
+    decidedBy: "local-web",
+  });
+  const capturedLegacyToken = granted.approvalToken;
+  const before = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspace })).stdout.trim();
+  first.close(); // crash/restart boundary: durable approved row exists, no promotion intent does.
+
+  const restarted = new CollaborationService(data);
+  t.after(() => restarted.close());
+  await assert.rejects(restarted.approveAndPromoteMainMerge({
+    roomId: "demo", workspace, approvalId: approval.id,
+    previewDigest: approval.previewDigest, confirmation: MERGE_APPROVAL_CONFIRMATION,
+    decidedBy: "local-web",
+  }), /MAIN_MERGE_APPROVAL_ORPHANED_NO_PROMOTION/u);
+  const history = await restarted.listMergeHistory({ roomId: "demo", workspace });
+  assert.deepEqual(history.promotions, []);
+  assert.equal(history.unpromotedApprovals.length, 1);
+  assert.equal(history.unpromotedApprovals[0]?.id, approval.id);
+  assert.equal(history.unpromotedApprovals[0]?.state, "rejected");
+  assert.equal(
+    history.unpromotedApprovals[0]?.refusal?.reason,
+    "PROMOTION_NOT_STARTED_AFTER_GRANT",
+  );
+  await assert.rejects(restarted.candidates.promoteMainMerge({
+    approvalId: approval.id,
+    token: capturedLegacyToken,
+    action: approval.grants,
+    taskId: task.taskId,
+    roomId: "demo",
+    mainPath: workspace,
+  }), /MAIN_MERGE_APPROVAL_NOT_APPROVED/u);
+  assert.equal((await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspace })).stdout.trim(), before);
+  assert.equal((await execFileAsync("git", ["status", "--porcelain=v1"], { cwd: workspace })).stdout, "");
+  assert.equal(restarted.audit.verify(), true);
 });

@@ -3662,10 +3662,29 @@ cookie、Origin 與 CSRF：
   memory history。
 - 人工注入 grant 後、promotion intent 前的同步失敗：approval 以
   `PROMOTION_NOT_STARTED_AFTER_GRANT` 轉為 `rejected`、promotions 為空、main HEAD/status 不變。
+- 另建真實 approved-without-promotion row 後關閉第一個 service，保存當時取得的 legacy token，再以
+  相同 SQLite data directory 啟動第二個 service：exact retry 將孤兒 grant 具名退休，History 只把它列為
+  `unpromotedApprovals` 而不冒充 promotion；以先前捕獲 token 直接呼叫 core promotion 仍得到
+  `MAIN_MERGE_APPROVAL_NOT_APPROVED`，main HEAD/status 不變、audit chain valid。
+- approve HTTP strict schema 明確拒絕 client 傳入 `approvalToken`；成功 response、durable History JSON 與
+  audit/ledger 都不含 raw token。這同時覆蓋舊 client-token surface 不可再從瀏覽器進入產品路徑。
+- promotion intent 一旦已 durable，retry 不會走 orphan retirement；它只依 exact approval id 回讀同一筆
+  promotion，並交由既有 observer 將 `applying` 收斂為 `applied`、`rolled-back` 或
+  `needs-manual-review`。讀不到或 observation 不成立從不轉成成功。
+- 跨 daemon 的 retire-vs-promote 以既有 state＋row-hash CAS fail closed：intent 先 commit、consume 後執行；
+  retirement 若在兩者間勝出，consume 得到 `MAIN_MERGE_APPROVAL_CONCURRENT_UPDATE`，promotion row 以
+  `APPROVAL_NOT_SPENT_NO_GIT_COMMAND_RAN` 轉為 `rolled-back`，Git 尚未啟動。既有 concurrent consumption
+  regression 亦證明同一 approval 最多一個 winner、最多一筆 promotion。
 - `GET /api/rooms/merge-history` 回傳 promotion/task/approval、main before/after、candidate HEAD、recovery、
   observation、hooks 與 audit `chainValid`；pending badge 只計 `requested`。
 
-Focused result：`test/merge-approval-web.test.ts` = **2 pass / 0 fail**。
+Focused result：`test/merge-approval-web.test.ts` = **3 pass / 0 fail**；連同
+`test/web.test.ts`、`test/merge-dialog-acceptance.test.ts` 為 **12 pass / 0 fail**。
+
+最終擴大 gate：`test/merge-approval.test.ts`、`test/merge-approval-web.test.ts`、
+`test/merge-promotion.test.ts`、`test/web.test.ts`、`test/merge-dialog-acceptance.test.ts` 合計
+**248 pass / 0 fail**。Room Claude 審查 #658 第一輪 BLOCKER；修復 orphan grant 與 legacy token surface
+後 #661 PASS；誠實更正 intent／consume 非同交易並確認 CAS fail-closed 後 #664 最終 PASS（3/3）。
 
 ### 真實瀏覽器 gate
 
