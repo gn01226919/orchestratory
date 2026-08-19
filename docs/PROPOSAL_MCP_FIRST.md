@@ -351,6 +351,12 @@ ledger 都看不到 raw token，且一離開 `approved` 狀態即清除。若 re
 `approvalId` 回讀同一筆 durable promotion；不得再次執行 Git。只有 `applied` 且
 `authorizedMergeCommit=true` 可被 GUI 顯示為 Merge 成功。
 
+GUI 對這個相容 API 做 fail-closed outcome classification：`applied`、
+`observation.authorizedMergeCommit=true` 與非空 `mainHeadAfter` 三者缺一，就不能進入「已 Merge」。
+Unpromoted rejected／expired／invalidated approvals 只表示「未進入 Merge」；approved／consumed 或 malformed
+而沒有 promotion row 表示「需要檢查」。這個呈現不授予任何新 MCP capability，也不把 archive close
+解讀成刪除／acknowledge。API 讀取失敗時 badge 是 unknown，不是零或沿用未標示的 cache。
+
 確認短語的即時回饋是 Owner GUI contract，不新增 MCP 權限或 HTTP 欄位：client 對錯字、大小寫及多餘
 空白必須保持輸入可重試，且明示「尚未送出／尚未 Merge／main 未修改」；精確短語只代表 client gate
 就緒，畫面仍須明示尚未 Merge、需按最終按鈕。~~re-preview 會清空輸入並重新鎖住 scroll gate。~~

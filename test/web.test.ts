@@ -1573,12 +1573,23 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   // ── Phase 5-3 bar item 6: the merge-into-main approval dialog ──────────────
   // The highest-risk pending action gets the same global count badge as agent requests.
   assert.match(roomHtml, /id="merge-approvals-open"/u);
-  assert.match(roomHtml, /id="merge-approval-count" hidden>0</u);
+  assert.match(roomHtml, /id="merge-approval-count" aria-label="0 件待核准">0</u);
   assert.match(roomHtml, /class="agent-requests-open merge-approvals-open"/u);
   assert.match(roomHtml, /id="merge-history-open"/u);
-  assert.match(roomHtml, /✓ Merge 歷史 · Merge history/u);
-  assert.match(roomHtml, /id="merge-history-list"/u);
-  assert.match(roomHtml, /DURABLE PROMOTION LOG/u);
+  assert.match(roomHtml, /✓ 已 Merge · Merged/u);
+  assert.match(roomHtml, /id="merge-history-other-open"/u);
+  assert.match(roomHtml, /○ 需檢查／未進入 · Review \/ not merged/u);
+  assert.match(roomHtml, /id="merge-outcome-nav-status"[^>]*aria-live="polite"/u);
+  assert.match(roomHtml, /id="merge-history-merged-list"/u);
+  assert.match(roomHtml, /id="merge-history-review-list"/u);
+  assert.match(roomHtml, /id="merge-history-unpromoted-list"/u);
+  assert.match(roomHtml, /DURABLE OUTCOME ARCHIVE/u);
+  assert.match(roomHtml, /關閉紀錄 · Close records/u);
+  assert.doesNotMatch(roomHtml, />完成 · Done</u);
+  assert.match(
+    roomStyles,
+    /\.app \{ grid-template-columns: 1fr; grid-template-rows: auto 100vh; height: auto; min-height: 100vh; \}/u,
+  );
   // It reuses the .workspace-onboarding dialog component as a variant, not a new design language.
   assert.match(
     roomHtml,
@@ -2215,7 +2226,7 @@ test("Merge confirmation gives truthful, retryable feedback for exact and incorr
   const decided = gate.mergeApprovalGate({ ...passing, decided: true });
   assert.equal(decided.inputDisabled, true);
   assert.equal(decided.inputValue, "");
-  assert.match(decided.feedback, /Merge 歷史/u);
+  assert.match(decided.feedback, /Merge 結果檔案/u);
 
   const malformed = gate.mergeApprovalGate(undefined);
   assert.equal(malformed.inputDisabled, true);
@@ -2246,6 +2257,64 @@ test("Merge confirmation gives truthful, retryable feedback for exact and incorr
   assert.match(nestedFailure, /這不是 Merge 成功/u);
   assert.match(nestedFailure, /MAIN_MERGE_APPROVAL_EXPIRED/u);
   assert.match(nestedFailure, /NETWORK_UNAVAILABLE/u);
+});
+
+test("Merge outcome archive counts only verified success as merged", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const start = source.indexOf("/* @pure-start merge-history-buckets");
+  const end = source.indexOf("/* @pure-end merge-history-buckets */");
+  assert.ok(start > 0 && end > start, "room.js must expose the DOM-free outcome classifier");
+  const block = source.slice(start, end);
+  assert.doesNotMatch(
+    block,
+    /(?:\b(?:document|window|navigator|localStorage|state)\s*\.|\b(?:fetch|byId|api|setInterval|setTimeout|require|import)\s*\()/u,
+  );
+  const classifier = runInNewContext(
+    `${block}\n({ mergeHistorySucceeded, mergeHistoryBuckets });`,
+    Object.create(null) as object,
+    { timeout: 2_000 },
+  ) as {
+    mergeHistorySucceeded: (entry: unknown) => boolean;
+    mergeHistoryBuckets: (promotions: unknown, approvals: unknown) => {
+      mergedPromotions: unknown[]; reviewPromotions: unknown[];
+      notStartedApprovals: unknown[]; reviewApprovals: unknown[]; otherCount: number;
+    };
+  };
+  const verified = {
+    id: "verified", state: "applied", mainHeadAfter: "a".repeat(40),
+    observation: { authorizedMergeCommit: true },
+  };
+  const missingObservation = { id: "missing-observation", state: "applied", mainHeadAfter: "b".repeat(40) };
+  const missingHead = { id: "missing-head", state: "applied", observation: { authorizedMergeCommit: true } };
+  const rolledBack = { id: "rolled-back", state: "rolled-back", mainHeadAfter: "c".repeat(40) };
+  const approvals = [
+    { id: "expired", state: "expired" },
+    { id: "rejected", state: "rejected" },
+    { id: "invalidated", state: "invalidated" },
+    { id: "consumed-without-row", state: "consumed" },
+    { id: "approved-without-row", state: "approved" },
+  ];
+  const buckets = classifier.mergeHistoryBuckets(
+    [verified, missingObservation, missingHead, rolledBack],
+    approvals,
+  );
+  assert.equal(classifier.mergeHistorySucceeded(verified), true);
+  assert.equal(classifier.mergeHistorySucceeded({ ...verified, mainHeadAfter: "" }), false);
+  assert.equal(classifier.mergeHistorySucceeded(undefined), false);
+  assert.deepEqual(Array.from(buckets.mergedPromotions), [verified]);
+  assert.deepEqual(Array.from(buckets.reviewPromotions), [missingObservation, missingHead, rolledBack]);
+  assert.deepEqual(Array.from(buckets.notStartedApprovals), approvals.slice(0, 3));
+  assert.deepEqual(Array.from(buckets.reviewApprovals), approvals.slice(3));
+  assert.equal(buckets.otherCount, 8);
+  const everyRow = [
+    ...buckets.mergedPromotions,
+    ...buckets.reviewPromotions,
+    ...buckets.notStartedApprovals,
+    ...buckets.reviewApprovals,
+  ];
+  assert.equal(everyRow.length, 9, "the mutually exclusive buckets preserve every input row");
+  assert.equal(new Set(everyRow).size, 9, "no row can appear in two outcome buckets");
+  assert.equal(buckets.mergedPromotions.length + buckets.otherCount, 9);
 });
 
 test("Web dashboard cancels only the exact active Writer run", async (t) => {

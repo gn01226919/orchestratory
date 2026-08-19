@@ -55,12 +55,21 @@
           </form>
           <div id="sidebar-managed-agent-list" class="office-presence-list managed-agent-list"></div>
         </section>
-        <button id="merge-approvals-open" class="agent-requests-open merge-approvals-open" type="button" aria-haspopup="dialog" disabled>
-          <span>⑂ 合併進 main 待核准 · Merge into main</span><b id="merge-approval-count" hidden>0</b>
-        </button>
-        <button id="merge-history-open" class="agent-requests-open merge-history-open" type="button" aria-haspopup="dialog">
-          <span>✓ Merge 歷史 · Merge history</span><b id="merge-history-count" hidden>0</b>
-        </button>
+        <section class="merge-outcome-nav" aria-labelledby="merge-outcome-nav-title">
+          <p id="merge-outcome-nav-title">合併任務 · Merge tasks</p>
+          <button id="merge-approvals-open" class="agent-requests-open merge-approvals-open" type="button" aria-haspopup="dialog" aria-controls="merge-approval" disabled>
+            <span>⑂ 待核准 · Pending approval</span><b id="merge-approval-count" aria-label="0 件待核准">0</b>
+          </button>
+          <p class="merge-outcome-nav-title">結果檔案 · Outcome archive</p>
+          <button id="merge-history-open" class="agent-requests-open merge-history-open" type="button" aria-haspopup="dialog" aria-controls="merge-history">
+            <span>✓ 已 Merge · Merged</span><b id="merge-history-count" aria-label="已 Merge 數量尚未讀取">—</b>
+          </button>
+          <button id="merge-history-other-open" class="agent-requests-open merge-history-other-open" type="button" aria-haspopup="dialog" aria-controls="merge-history">
+            <span>○ 需檢查／未進入 · Review / not merged</span><b id="merge-history-other-count" aria-label="非成功 Merge 結果數量尚未讀取">—</b>
+          </button>
+          <small>數字是 durable 紀錄，不是待辦徽章；關閉只收起紀錄面板。只有已驗證的 promotion 會算進「已 Merge」。</small>
+          <p id="merge-outcome-nav-status" class="merge-outcome-nav-status" aria-live="polite"></p>
+        </section>
         <label class="field" for="room-search">搜尋帳本
           <input id="room-search" type="search" placeholder="關鍵字，清空回直播">
         </label>
@@ -267,15 +276,28 @@
     <section id="merge-history" class="workspace-onboarding merge-history" hidden role="dialog" aria-modal="true" aria-labelledby="merge-history-title">
       <div class="workspace-onboarding-card merge-history-card">
         <header>
-          <span><small>DURABLE PROMOTION LOG</small><b id="merge-history-title">Merge 歷史 · Merge history</b></span>
-          <button id="merge-history-close" type="button" aria-label="關閉 Merge 歷史 · Close merge history">×</button>
+          <span><small>DURABLE OUTCOME ARCHIVE</small><b id="merge-history-title">Merge 結果檔案 · Merge outcome records</b></span>
+          <button id="merge-history-close" type="button" aria-label="關閉 Merge 結果檔案 · Close merge records">×</button>
         </header>
-        <p class="merge-history-note">這裡列的是 durable promotion 紀錄，不把「已核准」冒充「已合併」。只有 <code>applied</code> 且觀察到授權 merge commit 才是 Merge 成功。 · Durable promotion records; approval alone is never shown as a successful merge.</p>
-        <div id="merge-history-list" class="merge-history-list" aria-live="polite"></div>
+        <p class="merge-history-note">這是不會被「關閉」清除的 durable audit 檔案，不是待辦清單。只有 <code>applied</code>、觀察到授權 merge commit，且讀到 main HEAD after 才會進入「已 Merge」。 · This durable audit archive is not a task queue and closing it never clears records.</p>
+        <div class="merge-history-sections" aria-live="polite">
+          <section id="merge-history-merged-section" class="merge-history-section is-merged" tabindex="-1" aria-labelledby="merge-history-merged-title">
+            <header><span><b id="merge-history-merged-title">已 Merge · Merged</b><small>已驗證的 main 事實 · verified repository fact</small></span><strong id="merge-history-merged-total">0</strong></header>
+            <div id="merge-history-merged-list" class="merge-history-list"></div>
+          </section>
+          <section id="merge-history-review-section" class="merge-history-section is-review" tabindex="-1" aria-labelledby="merge-history-review-title">
+            <header><span><b id="merge-history-review-title">需要檢查 · Review required</b><small>重新讀取或核對 recovery；絕不重複 apply · refresh or inspect; never re-apply</small></span><strong id="merge-history-review-total">0</strong></header>
+            <div id="merge-history-review-list" class="merge-history-list"></div>
+          </section>
+          <section id="merge-history-unpromoted-section" class="merge-history-section is-unpromoted" tabindex="-1" aria-labelledby="merge-history-unpromoted-title">
+            <header><span><b id="merge-history-unpromoted-title">未進入 Merge · Merge never started</b><small>已過期、已拒絕或已失效的核准</small></span><strong id="merge-history-unpromoted-total">0</strong></header>
+            <div id="merge-history-unpromoted-list" class="merge-history-list"></div>
+          </section>
+        </div>
         <p id="merge-history-status" class="workspace-onboarding-status" aria-live="polite"></p>
         <div class="workspace-onboarding-actions">
           <button id="merge-history-refresh" type="button">↻ 重新讀取紀錄 · Refresh</button>
-          <button id="merge-history-done" class="primary" type="button">完成 · Done</button>
+          <button id="merge-history-done" class="primary" type="button">關閉紀錄 · Close records</button>
         </div>
       </div>
     </section>

@@ -58,6 +58,17 @@ const ACCEPTED_FUNCTIONS = [
   // truthful applied/rolled-back/uncertain result split, and transition into durable history.
   "approveMergeIntoMain",
   "rejectMergeIntoMain",
+  // The same browser pass verified the durable post-action archive: only a promotion carrying
+  // every positive repository fact enters the green Merged bucket; all uncertainty stays out.
+  "mergeHistorySucceeded",
+  "mergeHistoryBuckets",
+  "renderMergeHistoryBadge",
+  "renderPromotionHistoryEntry",
+  "renderApprovalHistoryEntry",
+  "renderMergeHistory",
+  "refreshMergeHistory",
+  "openMergeHistory",
+  "closeMergeHistory",
 ] as const;
 
 const ACCEPTED_ROOM_FRAGMENTS = [
@@ -68,6 +79,8 @@ const ACCEPTED_ROOM_FRAGMENTS = [
       /<div id="merge-approval-diff"[^>]*><\/div>/u,
       /<button id="merge-approval-confirm"[^>]*>.*?<\/button>/u,
       /<p id="merge-approval-status"[^>]*><\/p>/u,
+      /<section class="merge-outcome-nav"[\s\S]*?<\/section>/u,
+      /<section id="merge-history"[\s\S]*<\/section>\s*<\/body>/u,
     ],
   },
   {
@@ -76,6 +89,10 @@ const ACCEPTED_ROOM_FRAGMENTS = [
       /^\.merge-approval-diff:focus-visible \{.*\}$/mu,
       /^\.merge-approval-actions #merge-approval-confirm\[aria-disabled="true"\]:not\(:disabled\) \{.*\}$/mu,
       /^#merge-approval-diff\.is-attention,.*\}$/mu,
+      /^\.merge-outcome-nav \{.*\}$/mu,
+      /^\.merge-history-section\.is-merged > header strong \{.*\}$/mu,
+      /^\.merge-history-state\.is-closed \{.*\}$/mu,
+      /^  \.app \{ grid-template-columns: 1fr; grid-template-rows: auto 100vh; height: auto; min-height: 100vh; \}$/mu,
     ],
   },
 ] as const;

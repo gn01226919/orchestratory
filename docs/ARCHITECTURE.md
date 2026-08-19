@@ -177,11 +177,13 @@ daemon 若在 grant 與 intent 中間被殺，重啟後 exact POST retry 或 Mer
 `unpromotedApprovals` 顯示。正常在途操作以 service-local approval id set 標記，避免同一 daemon 的 history
 讀取把合法的極短窗口誤判成 orphan；併發第二個 owner POST 以 `MAIN_MERGE_PROMOTION_IN_FLIGHT` 拒絕。
 
-`GET /api/rooms/merge-history` 是 Room/workspace-scoped 的 durable history surface。它直接讀
+`GET /api/rooms/merge-history` 是 Room/workspace-scoped 的 durable outcome surface。它直接讀
 `candidate_merge_promotions` 並重新觀察未結紀錄；因此可能更新 reconciliation metadata，但不會自行
-重跑 merge、rollback、push 或 cleanup。GUI pending badge 僅計 `requested` approvals；history 另列
-promotion id、approval/task、前後 HEAD、candidate HEAD、recovery、observation 與 hooks；沒有 promotion
-row 的 terminal approval 另列為「核准未進入 promotion」，不會消失也不會冒充成功。
+重跑 merge、rollback、push 或 cleanup。API 保留 `promotions + unpromotedApprovals` 的舊／新相容 contract；
+GUI 再以 fail-closed classifier 分成三個互斥 bucket：完整正向 observation 的 applied row 才是「已 Merge」，
+不完整／不確定 row 是「需要檢查」，rejected／expired／invalidated 且沒有 promotion 的 approval 是
+「未進入 Merge」。Pending 僅計仍可回答且未逾時的 `requested` approvals 並明示零；archive count 是稽核
+紀錄數，不是未完成任務數。任何讀取失敗先把 badge 降為未知，保留具名錯誤，不把 cache 或空陣列當新事實。
 
 確認輸入的 UI gate 由 DOM-free `mergeApprovalGate()` 計算同一份狀態：`blocked`、`not-scrolled`、
 `empty`、`incorrect`、`exact`、`decided` 各自回傳 controls 與 live-region copy。錯字不送 HTTP，欄位保持

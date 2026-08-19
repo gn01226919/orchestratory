@@ -3847,3 +3847,29 @@ ready 後的 final Merge：
 最終 served-bytes digest 包含上述 gate／intent／Enter／in-flight／failure／render functions、完整
 blocking／diff／final-button／aria-live status HTML，以及 focus／attention／aria-disabled CSS：
 `19e30a27b1eac6dc5002bf28f569dab9e12cad68d2abe6c586ed9de59c70eed8`。
+
+### 2026-08-19 Merge 結果分區與 durable 成功計數重驗
+
+Owner 指出側欄「Merge 歷史 9」在關閉 dialog 後仍顯示 9，無法判斷任務是否已完成。直接查核目前
+durable store 證明 9 不是九筆待辦：它由 3 筆 `candidate_merge_promotions.state=applied` 與 6 筆沒有
+promotion 的 terminal approvals（3 rejected、3 expired）相加而成。修正後 pending 與 outcome archive
+分離，archive 再按 repository fact 分成 Merged／Review required／Merge never started。
+
+以 candidate served bytes 連到正式 Room API 及目前 store，在真實 Chrome 與 in-app browser 驗收；沒有
+按 Merge、沒有 Git 寫入、沒有讀取 cookie/storage/provider credential，也沒有外網請求：
+
+| 行為 | 真實瀏覽器觀察 |
+|---|---|
+| 側欄語意 | `待核准 0`、`已 Merge 3`、`其他結果 6` 同時可見；不再把九筆 durable rows 冒充九個未完成任務 |
+| 成功分類 | 三筆綠色列皆有 `applied`、`AUTHORIZED_MERGE_COMMIT_OBSERVED_IN_MAIN` 與非空 main HEAD after；缺任一正向事實的直接 regression 全部進 review |
+| 非成功分類 | 六筆 rejected／expired approvals 全在「未進入 Merge」，Review count 為 0；approved／consumed without promotion 的 synthetic regression 進 review，不進 merged |
+| 關閉語意 | 按鈕改為「關閉紀錄」；關閉後焦點回到原入口，數字仍為 3／6，側欄 live status 明示「3 筆仍在已 Merge、6 筆仍在需檢查／未進入」，證明 close 只收起面板而不清除 durable row |
+| 鍵盤 | 由「其他結果」開啟時焦點直達對應 section；Esc 關閉並回到 `merge-history-other-open` |
+| 390px | Chrome viewport 390×844，document `scrollWidth=clientWidth=390`；Merge 任務區可見，按鈕高 44px；dialog width 370px、無頁面水平溢位 |
+| 200% 等效重排 | 1470px 桌面寬度折半為 735px 驗收，document `scrollWidth=clientWidth=735`；側欄改為完整 auto row，不再以 37px row 遮住 outcome controls |
+| 讀取失敗 | refresh 開始先把兩個 archive badge 降為 `—` unknown；catch 明示讀不到不等於空 archive，不沿用未標示的成功數字 |
+
+舊 digest `19e30a27b1eac6dc5002bf28f569dab9e12cad68d2abe6c586ed9de59c70eed8` 保留為先前 merge
+confirmation flow 的歷史證據；本次在完全沿用該已驗收 write path 的同時，新增 outcome classifier、archive
+render/open/close 與 responsive fragments。新的 served-bytes digest：
+`11002087d193472110f0f21d8717a794298d818c195009d45fd4ad497ba5c025`。

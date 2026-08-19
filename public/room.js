@@ -107,6 +107,8 @@ const state = {
   mergeApprovalsRoom: "",
   mergeHistory: [],
   mergeUnpromotedApprovals: [],
+  mergeHistoryLoaded: false,
+  mergeHistoryFocus: "merged",
   mergeHistoryRoom: "",
   mergeHistoryReturnFocus: null,
 };
@@ -1046,6 +1048,8 @@ async function selectRoom(id) {
   renderMergeApprovalBadge();
   state.mergeHistory = [];
   state.mergeUnpromotedApprovals = [];
+  state.mergeHistoryLoaded = false;
+  state.mergeHistoryFocus = "merged";
   state.mergeHistoryRoom = "";
   renderMergeHistoryBadge();
   state.selectedPresenceId = "";
@@ -3394,7 +3398,7 @@ function mergeApprovalGate(view) {
   let ariaInvalid = false;
   if (decided) {
     hint = "這筆核准已經有結果，不能再決定一次。 · This approval has already been decided.";
-    feedback = "輸入已鎖定：請從 Merge 歷史核對結果，不要把鎖定狀態當成新的成功。 · Input locked; verify the result in Merge History.";
+    feedback = "輸入已鎖定：請從 Merge 結果檔案核對結果，不要把鎖定狀態當成新的成功。 · Input locked; verify the durable outcome record.";
   } else if (expired) {
     hint = "這筆核准已逾時且不能復活；輸入已鎖定。候選端必須提出一筆新的 snapshot-bound 核准。 · This approval expired and cannot be revived; request a new snapshot-bound approval.";
     feedback = "輸入已鎖定並清空：重新產生預覽不會讓這筆逾時核准恢復，尚未送出、尚未 Merge。 · Input locked and cleared; re-preview cannot revive this expired approval, and nothing was submitted or merged.";
@@ -3475,7 +3479,7 @@ function mergeApprovalFailureStatus(approvalFailure, refreshFailure = "") {
     : "unavailable";
   const refresh = typeof refreshFailure === "string" ? refreshFailure : "";
   return refresh.length > 0
-    ? `核准失敗 · Approval refused：${primary}；live state 重新讀取也失敗：${refresh}。這不是 Merge 成功，請稍後從 Merge 歷史核對。 · Refresh also failed; success is not being claimed.`
+    ? `核准失敗 · Approval refused：${primary}；live state 重新讀取也失敗：${refresh}。這不是 Merge 成功，請稍後從 Merge 結果檔案核對。 · Refresh also failed; success is not being claimed.`
     : `核准失敗 · Approval refused：${primary}`;
 }
 /* @pure-end merge-approval-gate */
@@ -3521,14 +3525,11 @@ function renderMergeApprovalBadge() {
   if (!button || !badge) return;
   const pending = (state.mergeApprovals || []).filter(mergeApprovalPending);
   badge.textContent = String(pending.length);
-  badge.hidden = pending.length === 0;
+  badge.hidden = false;
+  badge.setAttribute("aria-label", `${pending.length} 件待核准`);
   button.disabled = pending.length === 0;
   const label = button.querySelector("span");
-  if (label) {
-    label.textContent = pending.length > 0
-      ? `⑂ ${pending.length} 件合併進 main 待核准 · pending merge approval`
-      : "⑂ 合併進 main 待核准 · Merge into main";
-  }
+  if (label) label.textContent = "⑂ 待核准 · Pending approval";
 }
 
 async function refreshMergeApprovals() {
@@ -3567,17 +3568,63 @@ async function refreshMergeApprovals() {
   }
 }
 
+/* @pure-start merge-history-buckets
+ * Durable records are untrusted input.  The green count is intentionally narrow: if any positive
+ * fact is missing, the row belongs to review rather than being rounded up to success.
+ */
 function mergeHistorySucceeded(entry) {
   return entry?.state === "applied" && entry?.observation?.authorizedMergeCommit === true
-    && typeof entry?.mainHeadAfter === "string";
+    && typeof entry?.mainHeadAfter === "string" && entry.mainHeadAfter.trim().length > 0;
 }
+
+function mergeHistoryBuckets(promotions, unpromotedApprovals) {
+  const mergedPromotions = [];
+  const reviewPromotions = [];
+  const notStartedApprovals = [];
+  const reviewApprovals = [];
+  for (const promotion of Array.isArray(promotions) ? promotions : []) {
+    (mergeHistorySucceeded(promotion) ? mergedPromotions : reviewPromotions).push(promotion);
+  }
+  for (const approval of Array.isArray(unpromotedApprovals) ? unpromotedApprovals : []) {
+    if (["rejected", "expired", "invalidated"].includes(approval?.state)) {
+      notStartedApprovals.push(approval);
+    } else {
+      /* approved/consumed/malformed without a promotion row is not a closed non-event. */
+      reviewApprovals.push(approval);
+    }
+  }
+  return {
+    mergedPromotions,
+    reviewPromotions,
+    notStartedApprovals,
+    reviewApprovals,
+    otherCount: reviewPromotions.length + reviewApprovals.length + notStartedApprovals.length,
+  };
+}
+/* @pure-end merge-history-buckets */
 
 function renderMergeHistoryBadge() {
   const badge = byId("merge-history-count");
-  if (!badge) return;
-  const count = (state.mergeHistory || []).length + (state.mergeUnpromotedApprovals || []).length;
-  badge.textContent = String(count);
-  badge.hidden = count === 0;
+  const otherBadge = byId("merge-history-other-count");
+  const mergedButton = byId("merge-history-open");
+  const otherButton = byId("merge-history-other-open");
+  if (!badge || !otherBadge || !mergedButton || !otherButton) return;
+  if (!state.mergeHistoryLoaded) {
+    badge.textContent = "—";
+    otherBadge.textContent = "—";
+    badge.setAttribute("aria-label", "已 Merge 數量尚未讀取");
+    otherBadge.setAttribute("aria-label", "其他 Merge 結果數量尚未讀取");
+    mergedButton.disabled = false;
+    otherButton.disabled = false;
+    return;
+  }
+  const buckets = mergeHistoryBuckets(state.mergeHistory, state.mergeUnpromotedApprovals);
+  badge.textContent = String(buckets.mergedPromotions.length);
+  otherBadge.textContent = String(buckets.otherCount);
+  badge.setAttribute("aria-label", `${buckets.mergedPromotions.length} 筆已 Merge`);
+  otherBadge.setAttribute("aria-label", `${buckets.otherCount} 筆需檢查或未進入 Merge 的紀錄`);
+  mergedButton.disabled = buckets.mergedPromotions.length === 0;
+  otherButton.disabled = buckets.otherCount === 0;
 }
 
 function historyFact(list, label, value) {
@@ -3588,68 +3635,113 @@ function historyFact(list, label, value) {
   list.append(term, detail);
 }
 
+function mergeHistoryEmpty(host, text) {
+  const empty = document.createElement("p");
+  empty.className = "merge-history-note";
+  empty.textContent = text;
+  host.append(empty);
+}
+
+function renderPromotionHistoryEntry(host, entry) {
+  const item = document.createElement("article");
+  item.className = "merge-history-entry";
+  const header = document.createElement("header");
+  const title = document.createElement("strong");
+  const succeeded = mergeHistorySucceeded(entry);
+  title.textContent = succeeded
+    ? "Merge 成功 · Merge succeeded"
+    : entry?.state === "applied"
+      ? "Merge 驗證不完整 · Verification incomplete"
+      : entry?.state === "applying"
+        ? "Promotion 結果尚未收斂 · Outcome unresolved"
+        : entry?.state === "needs-manual-review"
+          ? "必須人工核對 · Manual review required"
+          : entry?.state === "rolled-back"
+            ? "Promotion 已回復，仍需核對 · Rolled back; verify"
+            : "紀錄不完整，必須核對 · Record requires review";
+  const stateTag = document.createElement("span");
+  stateTag.className = `merge-history-state is-${String(entry?.state || "unknown")}`;
+  stateTag.textContent = String(entry?.state || "unknown");
+  header.append(title, stateTag);
+  const facts = document.createElement("dl");
+  historyFact(facts, "時間 · Updated", entry?.updatedAt);
+  historyFact(facts, "Task", entry?.taskId);
+  historyFact(facts, "Promotion", entry?.id);
+  historyFact(facts, "Approval", entry?.approvalId);
+  historyFact(facts, "main HEAD before", entry?.mainHeadBefore);
+  historyFact(facts, "main HEAD after", entry?.mainHeadAfter);
+  historyFact(facts, "Candidate HEAD", entry?.candidateHead);
+  historyFact(facts, "Recovery ref", entry?.recoveryRef);
+  historyFact(facts, "Observation", entry?.observation?.code);
+  const hooks = entry?.observation?.hooksExecuted;
+  historyFact(facts, "Hooks", Array.isArray(hooks)
+    ? (hooks.length ? hooks.map((hook) => `${hook.name}(exit ${hook.exitCode ?? "?"})`).join("、") : "none observed")
+    : "未讀到 · unavailable");
+  item.append(header, facts);
+  if (!succeeded) {
+    const action = document.createElement("p");
+    action.className = "merge-history-action";
+    action.textContent = "不要再次 apply。先重新讀取 observation；若仍停在此區，依 recovery ref 人工核對 main。 · Never re-apply; refresh observation, then inspect main against the recovery ref if unresolved.";
+    item.append(action);
+  }
+  host.append(item);
+}
+
+function renderApprovalHistoryEntry(host, approval, reviewRequired = false) {
+  const item = document.createElement("article");
+  item.className = "merge-history-entry";
+  const header = document.createElement("header");
+  const title = document.createElement("strong");
+  title.textContent = reviewRequired
+    ? "核准與 promotion 關聯不完整 · Approval linkage requires review"
+    : "未進入 Merge · Merge never started";
+  const stateTag = document.createElement("span");
+  stateTag.className = reviewRequired ? "merge-history-state" : "merge-history-state is-closed";
+  stateTag.textContent = String(approval?.state || "unavailable");
+  header.append(title, stateTag);
+  const facts = document.createElement("dl");
+  historyFact(facts, "時間 · Updated", approval?.updatedAt);
+  historyFact(facts, "Task", approval?.taskId);
+  historyFact(facts, "Approval", approval?.id);
+  historyFact(facts, "Candidate HEAD", approval?.candidateHead || approval?.binding?.candidateHead);
+  historyFact(facts, "main HEAD bound", approval?.mainHead || approval?.binding?.mainHead);
+  historyFact(facts, "Recovery ref", approval?.binding?.recoveryRef);
+  historyFact(facts, "Reason", approval?.refusal?.reason || approval?.refusal?.code);
+  item.append(header, facts);
+  if (reviewRequired) {
+    const action = document.createElement("p");
+    action.className = "merge-history-action";
+    action.textContent = "不要再次核准或 apply；重新讀取後仍存在時，依 approval 與 recovery ref 人工核對。 · Do not approve or apply again; refresh, then inspect the approval and recovery ref if it persists.";
+    item.append(action);
+  }
+  host.append(item);
+}
+
 function renderMergeHistory() {
-  const host = byId("merge-history-list");
-  if (!host) return;
-  host.textContent = "";
-  if (!(state.mergeHistory || []).length && !(state.mergeUnpromotedApprovals || []).length) {
-    const empty = document.createElement("p");
-    empty.className = "merge-history-note";
-    empty.textContent = "尚無 promotion 紀錄。核准本身不會被列成 Merge 成功。 · No promotion records yet; approval alone is not merge success.";
-    host.append(empty);
-    return;
+  const mergedHost = byId("merge-history-merged-list");
+  const reviewHost = byId("merge-history-review-list");
+  const unpromotedHost = byId("merge-history-unpromoted-list");
+  if (!mergedHost || !reviewHost || !unpromotedHost) return;
+  mergedHost.textContent = "";
+  reviewHost.textContent = "";
+  unpromotedHost.textContent = "";
+  const buckets = mergeHistoryBuckets(state.mergeHistory, state.mergeUnpromotedApprovals);
+  byId("merge-history-merged-total").textContent = String(buckets.mergedPromotions.length);
+  const reviewCount = buckets.reviewPromotions.length + buckets.reviewApprovals.length;
+  byId("merge-history-review-total").textContent = String(reviewCount);
+  byId("merge-history-unpromoted-total").textContent = String(buckets.notStartedApprovals.length);
+  for (const entry of buckets.mergedPromotions) renderPromotionHistoryEntry(mergedHost, entry);
+  for (const entry of buckets.reviewPromotions) renderPromotionHistoryEntry(reviewHost, entry);
+  for (const approval of buckets.reviewApprovals) renderApprovalHistoryEntry(reviewHost, approval, true);
+  for (const approval of buckets.notStartedApprovals) renderApprovalHistoryEntry(unpromotedHost, approval);
+  if (!buckets.mergedPromotions.length) {
+    mergeHistoryEmpty(mergedHost, "尚無已驗證的 Merge。 · No verified merges.");
   }
-  for (const entry of state.mergeHistory) {
-    const item = document.createElement("article");
-    item.className = "merge-history-entry";
-    const header = document.createElement("header");
-    const title = document.createElement("strong");
-    title.textContent = mergeHistorySucceeded(entry)
-      ? "Merge 成功 · Merge succeeded"
-      : entry.state === "rolled-back"
-        ? "未套用，已回復 · Not applied"
-        : "需要檢查 · Review required";
-    const stateTag = document.createElement("span");
-    stateTag.className = `merge-history-state is-${String(entry.state || "unknown")}`;
-    stateTag.textContent = String(entry.state || "unknown");
-    header.append(title, stateTag);
-    const facts = document.createElement("dl");
-    historyFact(facts, "時間 · Updated", entry.updatedAt);
-    historyFact(facts, "Task", entry.taskId);
-    historyFact(facts, "Promotion", entry.id);
-    historyFact(facts, "Approval", entry.approvalId);
-    historyFact(facts, "main HEAD before", entry.mainHeadBefore);
-    historyFact(facts, "main HEAD after", entry.mainHeadAfter);
-    historyFact(facts, "Candidate HEAD", entry.candidateHead);
-    historyFact(facts, "Recovery ref", entry.recoveryRef);
-    historyFact(facts, "Observation", entry.observation?.code);
-    const hooks = entry.observation?.hooksExecuted;
-    historyFact(facts, "Hooks", Array.isArray(hooks)
-      ? (hooks.length ? hooks.map((hook) => `${hook.name}(exit ${hook.exitCode ?? "?"})`).join("、") : "none observed")
-      : "未讀到 · unavailable");
-    item.append(header, facts);
-    host.append(item);
+  if (!reviewCount) {
+    mergeHistoryEmpty(reviewHost, "目前沒有需人工檢查的 promotion 或核准。 · Nothing currently requires review.");
   }
-  for (const approval of state.mergeUnpromotedApprovals || []) {
-    const item = document.createElement("article");
-    item.className = "merge-history-entry";
-    const header = document.createElement("header");
-    const title = document.createElement("strong");
-    title.textContent = "核准未進入 promotion · Approval did not start a merge";
-    const stateTag = document.createElement("span");
-    stateTag.className = "merge-history-state is-rolled-back";
-    stateTag.textContent = String(approval.state || "unavailable");
-    header.append(title, stateTag);
-    const facts = document.createElement("dl");
-    historyFact(facts, "時間 · Updated", approval.updatedAt);
-    historyFact(facts, "Task", approval.taskId);
-    historyFact(facts, "Approval", approval.id);
-    historyFact(facts, "Candidate HEAD", approval.candidateHead || approval.binding?.candidateHead);
-    historyFact(facts, "main HEAD bound", approval.mainHead || approval.binding?.mainHead);
-    historyFact(facts, "Recovery ref", approval.binding?.recoveryRef);
-    historyFact(facts, "Reason", approval.refusal?.reason || approval.refusal?.code);
-    item.append(header, facts);
-    host.append(item);
+  if (!buckets.notStartedApprovals.length) {
+    mergeHistoryEmpty(unpromotedHost, "目前沒有已結案但未開始 Merge 的核准。 · No closed approvals that stopped before Merge.");
   }
 }
 
@@ -3657,15 +3749,19 @@ async function refreshMergeHistory() {
   if (!state.room) {
     state.mergeHistory = [];
     state.mergeUnpromotedApprovals = [];
+    state.mergeHistoryLoaded = false;
     state.mergeHistoryRoom = "";
     renderMergeHistoryBadge();
     renderMergeHistory();
     return [];
   }
+  state.mergeHistoryLoaded = false;
+  renderMergeHistoryBadge();
   const value = await api(`/api/rooms/merge-history?room=${encodeURIComponent(state.room)}`);
   state.mergeHistory = Array.isArray(value.promotions) ? value.promotions : [];
   state.mergeUnpromotedApprovals = Array.isArray(value.unpromotedApprovals)
     ? value.unpromotedApprovals : [];
+  state.mergeHistoryLoaded = true;
   state.mergeHistoryRoom = state.room;
   renderMergeHistoryBadge();
   renderMergeHistory();
@@ -4379,17 +4475,17 @@ async function approveMergeIntoMain() {
       const log = document.createElement("code");
       if (mergeHistorySucceeded(promotion) && value.mainMutated === true) {
         title.textContent = "✓ Merge 成功 · Merge succeeded";
-        detail.textContent = `main HEAD ${shortSha(promotion.mainHeadBefore)} → ${shortSha(promotion.mainHeadAfter)}；候選已移出待核准並寫入 Merge 歷史。`;
+        detail.textContent = `main HEAD ${shortSha(promotion.mainHeadBefore)} → ${shortSha(promotion.mainHeadAfter)}；候選已移出待核准並進入「已 Merge」結果區。`;
         status.textContent = "Merge 已完成並由 durable promotion observation 驗證。沒有自動 push、publish、deploy、delete 或 cleanup。 · Merge completed and durably verified; no external side effects were performed.";
       } else if (promotion.state === "rolled-back" && value.mainMutated === false) {
         result.classList.add("is-failed");
         title.textContent = "Merge 未套用 · Merge not applied";
         detail.textContent = `promotion 已記錄為 rolled-back（${promotion.observation?.code || "未讀到原因"}）；candidate 與 recovery ref 保留。`;
-        status.textContent = "沒有顯示成功，也不會自動重試；請從 Merge 歷史核對完整紀錄。 · No success was claimed and no automatic retry will run.";
+        status.textContent = "沒有顯示成功，也不會自動重試；請從「需要檢查」核對完整紀錄。 · No success was claimed and no automatic retry will run.";
       } else {
         result.classList.add("is-uncertain");
         title.textContent = "尚未能確認 Merge 成功 · Merge requires review";
-        detail.textContent = `promotion=${promotion.state || "unavailable"}；observation=${promotion.observation?.code || "unavailable"}。這不是成功，請從 Merge 歷史與 recovery 紀錄人工確認。`;
+        detail.textContent = `promotion=${promotion.state || "unavailable"}；observation=${promotion.observation?.code || "unavailable"}。這不是成功，已放入「需要檢查」；請與 recovery 紀錄一起人工確認。`;
         status.textContent = "系統不會把不確定狀態說成成功，也不會重複 apply。 · An uncertain outcome is not success and will not be applied again automatically.";
       }
       log.textContent = `promotion ${promotion.id || "unavailable"} · approval ${approval.id} · recovery ${promotion.recoveryRef || approval.binding?.recoveryRef || "unavailable"}`;
@@ -4415,17 +4511,23 @@ async function approveMergeIntoMain() {
   }
 }
 
-async function openMergeHistory() {
+async function openMergeHistory(focus = "merged") {
   const dialog = byId("merge-history");
   state.mergeHistoryReturnFocus = document.activeElement;
+  state.mergeHistoryFocus = focus === "other" ? "other" : "merged";
   dialog.hidden = false;
   document.body.classList.add("workspace-modal-open");
   byId("merge-history-status").textContent = "正在從 durable store 讀取… · Reading durable promotion records…";
   try { await refreshMergeHistory(); }
   catch (error) {
-    byId("merge-history-status").textContent = `Merge 歷史讀取失敗：${humanError(error)}；讀不到不等於沒有紀錄。 · History unavailable; this is not an empty history.`;
+    byId("merge-history-status").textContent = `Merge 結果檔案讀取失敗：${humanError(error)}；讀不到不等於沒有紀錄。 · Outcome archive unavailable; this is not an empty archive.`;
   }
-  byId("merge-history-done").focus();
+  const buckets = mergeHistoryBuckets(state.mergeHistory, state.mergeUnpromotedApprovals);
+  const target = state.mergeHistoryFocus === "other"
+    ? (buckets.reviewPromotions.length + buckets.reviewApprovals.length > 0
+      ? byId("merge-history-review-section") : byId("merge-history-unpromoted-section"))
+    : byId("merge-history-merged-section");
+  target?.focus();
 }
 
 function closeMergeHistory() {
@@ -4433,6 +4535,11 @@ function closeMergeHistory() {
   if (!dialog || dialog.hidden) return;
   dialog.hidden = true;
   document.body.classList.remove("workspace-modal-open");
+  const buckets = mergeHistoryBuckets(state.mergeHistory, state.mergeUnpromotedApprovals);
+  const navStatus = byId("merge-outcome-nav-status");
+  navStatus.textContent = state.mergeHistoryLoaded
+    ? `紀錄面板已關閉；${buckets.mergedPromotions.length} 筆仍在「已 Merge」，${buckets.otherCount} 筆仍在「需檢查／未進入」。 · Records closed, not cleared.`
+    : "紀錄面板已關閉；目前數量仍是未知，請重新開啟後重試。 · Records closed; counts remain unknown until a successful refresh.";
   state.mergeHistoryReturnFocus?.focus?.();
   state.mergeHistoryReturnFocus = null;
 }
@@ -4484,14 +4591,15 @@ async function repreviewMergeApproval() {
 }
 
 byId("merge-approvals-open").addEventListener("click", () => openMergeApprovalDialog(""));
-byId("merge-history-open").addEventListener("click", () => void openMergeHistory());
+byId("merge-history-open").addEventListener("click", () => void openMergeHistory("merged"));
+byId("merge-history-other-open").addEventListener("click", () => void openMergeHistory("other"));
 byId("merge-history-close").addEventListener("click", closeMergeHistory);
 byId("merge-history-done").addEventListener("click", closeMergeHistory);
 byId("merge-history-refresh").addEventListener("click", async () => {
   byId("merge-history-status").textContent = "正在重新讀取… · Refreshing…";
   try { await refreshMergeHistory(); }
   catch (error) {
-    byId("merge-history-status").textContent = `Merge 歷史讀取失敗：${humanError(error)}；讀不到不等於沒有紀錄。`;
+    byId("merge-history-status").textContent = `Merge 結果檔案讀取失敗：${humanError(error)}；讀不到不等於沒有紀錄。`;
   }
 });
 byId("merge-history").addEventListener("click", (event) => {
