@@ -3500,9 +3500,11 @@ const MERGE_TEST_LABELS = {
   "not-run": "未執行 · not run",
 };
 
+/* @pure-start merge-approval-pending */
 function mergeApprovalPending(approval) {
   return Boolean(approval) && approval.state === "requested" && approval.expired !== true;
 }
+/* @pure-end merge-approval-pending */
 
 function mergeConfirmationPhrase() {
   return state.mergeConfirmationPhrase || MERGE_CONFIRMATION_PHRASE;

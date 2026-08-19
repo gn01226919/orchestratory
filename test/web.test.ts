@@ -2317,6 +2317,26 @@ test("Merge outcome archive counts only verified success as merged", async () =>
   assert.equal(buckets.mergedPromotions.length + buckets.otherCount, 9);
 });
 
+test("Merge pending badge accepts only active unexpired requested approvals", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const start = source.indexOf("/* @pure-start merge-approval-pending */");
+  const end = source.indexOf("/* @pure-end merge-approval-pending */");
+  assert.ok(start > 0 && end > start);
+  const block = source.slice(start, end);
+  const pending = runInNewContext(
+    `${block}\nmergeApprovalPending;`,
+    Object.create(null) as object,
+    { timeout: 2_000 },
+  ) as (approval: unknown) => boolean;
+  const active = { id: "active", state: "requested", expired: false };
+  assert.equal(pending(active), true);
+  assert.equal(pending({ ...active, expired: true }), false);
+  assert.equal(pending({ ...active, state: "approved" }), false);
+  assert.equal(pending({ ...active, state: "rejected" }), false);
+  assert.equal(pending(undefined), false);
+  assert.deepEqual([active, { state: "requested", expired: true }, { state: "approved" }].filter(pending), [active]);
+});
+
 test("Web dashboard cancels only the exact active Writer run", async (t) => {
   const data = await mkdtemp(join(tmpdir(), "orchestratory-web-cancel-data-"));
   const workspace = await repository();
