@@ -103,6 +103,48 @@ checkpoint，彙整：
 - 若 merge 過程需要超出預覽的新刪除、衝突解決或其他 main 修改，必須停止並重新說明範圍。
 - Owner 拒絕或暫緩時，candidate 預設保留，不刪除、不 merge。
 - 成功後驗證實際 main HEAD、工作樹與變更清單，並保存 audit/recovery record。
+- 本機 Owner 在最終按鈕送出後，產品必須於同一次操作內核准並執行 promotion；不得停在只有
+  `approved`、卻沒有任何可用 promotion 出口的狀態。只有 durable promotion 為 `applied`、且重新觀察到
+  `authorizedMergeCommit=true` 與實際 `mainHeadAfter` 時，GUI 才能顯示「Merge 成功」。
+- 確認短語必須有就地、可存取的即時回饋：非 exact phrase 時欄位保持可修正、~~主要按鈕保持停用~~
+  真正提交保持阻擋，並明示
+  「尚未送出、尚未 Merge、main 未修改」與正確短語；exact phrase 只能顯示「可送出但尚未 Merge」。因
+  ~~scroll gate、re-preview、blocker 或 terminal state 鎖定輸入時，輸入框旁必須具名原因與恢復方式。~~
+  pending approval 且 confirmation phrase 可用時，輸入框必須保持可輸入；scroll gate、re-preview 與
+  blocker 只阻擋最終提交。按鈕使用 `aria-disabled` 表達尚不可提交但仍接收 intent click：該 click 只聚焦／
+  高亮缺少的 input、內層 diff 或 re-preview，並以 live status 明示未送出／未 Merge，不得發出 HTTP。
+  只有 terminal state、已逾時或缺少 phrase 才 native-disable 並清空輸入；
+  逾時 copy 必須明示該 approval 不可復活、需由 candidate 提出新的 snapshot-bound request。
+  已輸入文字只可在同一 approval id 的 re-preview／re-render 保留，切換至新 approval 必須清空。
+- 內層變更清單必須可由鍵盤聚焦及捲動，具可見 focus indicator，且以 `aria-describedby` 關聯明示
+  「內層清單、不是外層 dialog」的 live scroll hint；不能把滑鼠操作當成唯一通過 scroll gate 的方式。
+- 只有 exact phrase、內層 diff 已捲到底、零 blocker、未逾時且非 terminal 的同一 snapshot 可由 intent
+  handler 進入既有 approval POST；任何未就緒 click 都必須可見有反應但 fail closed。
+- 確認輸入框的 Enter 不得直接執行最高風險動作：未就緒時走相同 intent guidance；已就緒時只把焦點
+  移到 final button 並要求第二次明確 activation。POST 在途時 client 必須鎖住重送並顯示「處理中，不會
+  重複送出」；結束或失敗後可靠 `finally` 釋放。相同 guidance 的重複 activation 必須重新觸發 aria-live，
+  target 改變時移除舊 attention 並重新計算，不得讓 screen reader 或可視焦點停在舊缺口。
+- 核准 POST 被拒絕後，即使重新讀取 live approval 也失敗，GUI 仍必須保留原拒絕原因、具名 refresh
+  failure 並明示「這不是 Merge 成功」；nested read error 不得把結果變成沉默或成功。
+- 核准在 promotion intent／任何 Git 寫入前失敗時，舊 approval 必須保持 terminal 且不可復活；Owner
+  可由同一 dialog 明確要求重新讀取 live state，系統建立**不同 approval id** 的新 snapshot-bound request、
+  自動切換並恢復輸入。此操作不得自動 grant／Merge；若舊 approval 已有 promotion row 或狀態不確定，
+  必須導向 Merge 紀錄人工核對，不得提供重複 apply 出口。
+- Durable promotion restore point 必須以 UTF-8 bytes 設定有限上界，不得只把 SQLite TEXT 上限無界放大。
+  ignored path 顯示清單可以截斷，但必須持久保存 schema version、總數與 truncation flag；完整 path＋content
+  fingerprint 不得截斷。省略顯示路徑不得被解讀為「已恢復」或「沒有差異」，malformed／不一致 legacy 或
+  current payload 必須 fail closed。Candidate 寫入路徑的 overwrite scan 仍須使用完整 preview 清單。
+- 待處理區只顯示仍可回答且未逾時的 `requested` 記錄；零筆時整個 task control 消失，不留下 `0` 或
+  歷史總數 badge。Durable 結果檔案必須是獨立、無數字徽章的「Merge 紀錄」入口；只有 classifier
+  找到 `needs-manual-review`、malformed／不完整 promotion 或沒有 promotion 的非終局 approval 時，入口
+  才顯示不帶數字的「需檢查」提示。Dialog 內才分成
+  「已 Merge」「需要檢查」「未進入 Merge」：只有 promotion=`applied`、
+  `authorizedMergeCommit=true` 且非空 `mainHeadAfter` 才能計入綠色「已 Merge」；缺任一正向事實的
+  promotion、malformed row 或沒有 promotion 的非終局 approval 都進「需要檢查」；只有 rejected／expired／
+  invalidated 且沒有 promotion 的 approval 才進「未進入 Merge」。結果必須在 daemon restart 後仍可依
+  Room/workspace 查核，並顯示 approval/promotion/task、前後 HEAD、candidate HEAD、recovery ref、狀態、
+  時間、observation 與已觀察到的 hooks；不得包含 approval token 或秘密。關閉檔案不刪除、不歸零；
+  讀取失敗只在紀錄 dialog 內具名，不得在側欄重新出現數字或把讀不到說成零筆。
 
 Promotion 的 live safety gate 必須在 promotion 環境下用 Git 自己解析 clean/smudge attributes；除
 main 目前的 tracked／ignored／代表性 probe 路徑外，還必須逐一詢問完整 preview 中候選 merge 將寫入的
@@ -131,6 +173,8 @@ Agent 準備自行在 shell 中修改 canonical main 時，也必須先主動提
 - GUI 顯示 candidate/main 路徑、task、HEAD、Agent branches、thread、完成狀態與待 merge 決定。
 - Main merge 使用獨立畫面與批准，不與 join、standby、writer 或 message send 共用按鈕／nonce。
 - Runtime 未完成的功能必須顯示 pending，不得用示意 UI 冒充已執行。
+- Merge 最終按鈕在執行期間顯示「核准並執行 promotion」；失敗、rolled-back、`applying` 或
+  `needs-manual-review` 必須與成功使用不同文案，且不得自動重試或重複 apply。
 
 ## 8. Recovery 與資料保護
 
@@ -169,3 +213,5 @@ Agent 準備自行在 shell 中修改 canonical main 時，也必須先主動提
     npm-link 或 Git working tree 現讀任一檔案。GUI bootstrap 必須驗證 UI protocol，不相容時停用變更操作。
 14. SQLite migration 必須辨識精確舊 schema fingerprint、先驗 row integrity、在單一交易內重建，
     未知或中途失敗時 rollback；正式切換前保存 WAL-safe DB backup 與相容舊 runtime。
+15. 真實 Owner HTTP 操作必須一次完成 grant＋single-use promotion，response loss 後重送只能回讀同一筆
+    durable promotion；成功項目離開 pending 並出現在可於重啟後重建的 Merge 歷史。

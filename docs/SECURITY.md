@@ -60,6 +60,18 @@ bounded metadata，固定小於等於 64 KiB，使用 workspace 外的 0700 dire
   `previewDigest` 產生。綁定在建立、核准與消耗三個時點各驗一次，任一值改變即拒絕並指名改變的欄位，
   不靜默重算。Single-use 由持久狀態的 compare-and-set 保證，並行消耗只有一個成功。
 - 截斷或模擬出衝突的 preview 完全不可核准：Owner 不對看不到的內容簽名。
+- 本機 Web 最終動作不把 raw approval token 交給瀏覽器。server 在同一呼叫內 grant 並立即 promotion；
+  response loss 後的重送只依 durable `approval_id` 回讀同一筆 promotion，不能再次執行 Git。只有
+  `state=applied` 且 `authorizedMergeCommit=true` 的重新觀察可顯示成功。
+- Merge 結果檔案來自 tamper-evident promotion rows 與 audit chain，不來自 browser storage。只有
+  applied＋authorized observation＋非空 main HEAD after 能標成「已 Merge」；讀不到、row malformed、
+  audit chain 失效、`applying`、`needs-manual-review` 或缺少正向事實都不得折疊成「沒有紀錄」「已安全」
+  或綠色成功。關閉檔案只關閉 dialog，不刪除 durable row；sidebar 不顯示任何 archive count。Classifier
+  只可在確有 review bucket 時顯示不帶數字的人工檢查提示；rejected／expired／invalidated 等 terminal-only
+  rows 不得觸發。讀取失敗只在 dialog 內具名，而非沿用未標示的成功數字、偽稱已清除或重新建立任務徽章。
+- 舊版已回給 browser 的 raw token 在新版沒有任何 HTTP/MCP 消耗入口；strict approve schema 也拒絕
+  `approvalToken` 欄位。重啟後一筆 `approved` 且沒有 promotion intent 的列會被具名退休並清除 token
+  hash；回歸測試持有真實舊 token，證明退休後直接呼叫核心也得到 `NOT_APPROVED` 且 main 不變。
 - Approval 只授權「把這個 snapshot merge 進 main」，並在授權物件內明列不被授權的動作；拒絕、失效與
   逾時不執行任何 Git 指令，candidate、checkpoint 與 recovery ref 完整保留。
 - Promotion 前建立 recovery point；建立或驗證失敗時不得宣稱 ready。
@@ -92,6 +104,29 @@ bounded metadata，固定小於等於 64 KiB，使用 workspace 外的 0700 dire
 - GUI Managed 的 read-only/writer/full-trust 選擇只套用到它啟動的 managed worker。
 - Join、standby、send work、managed writer、merge main、cleanup 與 external side effect 使用不同操作與
   approval scope。
+- Merge 確認短語的 client-side gate 只改善可理解性，不是新的授權來源：錯字、大小寫或多餘空白時
+  不得送出 HTTP，輸入框維持可編輯並以 live region 明示「尚未送出、尚未 Merge、main 未修改」；
+  精確短語也只能明示「尚未 Merge，仍須按下最終按鈕」。重新預覽、未捲到底、blocker 與終局狀態
+  必須各自具名，不能以 disabled control 讓 Owner 猜測結果。Server 端仍須獨立重驗 confirmation、
+  snapshot binding、TTL 與 single-use state，不能信任瀏覽器 gate。server 拒絕後的 live-state refresh 若也
+  失敗，client 必須保留兩個具名錯誤並固定標示非成功；nested failure 不得吞掉拒絕結果。
+- Pending approval 的 input／intent button 可互動不等於授權：未捲完內層 diff、存在 blocker 或 phrase
+  不精確時，final submission 必須保持阻擋。按鈕以 `aria-disabled` 呈現；click handler 的 pure target
+  分流只聚焦缺少條件、顯示「未送出／未 Merge」，不得呼叫 API。只有 exact＋scrolled＋zero-blocker 才
+  進既有 approve path，server 仍獨立重驗。只有 terminal、expired 或
+  missing-phrase 才鎖定並清空 input；expired copy 必須說明該 approval 已死且 re-preview 不會復活。
+  confirmation value 以 approval id 為 scope：同一筆 re-preview 可保留，切換新 approval 必須清空，避免
+  舊意圖被誤帶到不同 snapshot。內層 scroll region 必須可由鍵盤聚焦／捲動並有可見焦點。
+- Terminal approval 的 input 鎖定是 single-use 保護，不得移除；恢復路徑必須建立新 approval id。Web retry
+  端點只接受 terminal、未建立 promotion row 的舊核准，重新跑 live preview 與全部 server gates，且只寫
+  `requested` row；舊 token/state 不複製。已有 promotion 或讀不到 outcome 時 fail closed 到 history review。
+- `restore_json` 的限制以 UTF-8 bytes 在程式與 SQLite 各驗一次，最大 64 KiB。ignored path list 的 omission
+  必須有 total/truncated metadata，完整內容 fingerprint 不省略；legacy list 若不能證明完整即拒讀。Schema
+  migration 交易式複製 hash-bound rows，malformed row 即使重算無金鑰 row hash 也不得成為正向收斂事實。
+- Enter 在 confirmation input 內不得直接 submit；ready 只 focus final button，要求另一個明確按鍵／click。
+  Client `mergeApprovalSubmitting` 必須在第一個 await 前阻擋第二次 activation，並以 `finally` 收斂；這只
+  避免重疊 UI，不能取代 server single-use。aria-live guidance 以 versioned clear→next-frame set 重播，
+  取消舊 callback 與舊 highlight，避免過時提示誘導新的 activation。
 - 未完成的 runtime capability 顯示 pending/unsupported，不得只靠文件或按鈕假裝成功。
 
 ## 8. Recovery-first 控制

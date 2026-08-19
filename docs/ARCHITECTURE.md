@@ -156,7 +156,8 @@ Single-use 由 `state` ＋ `row_hash` 的 compare-and-set 保證，並行消耗�
 不執行任何 Git 指令，candidate、checkpoint 與 recovery ref 逐位元不變，Owner 可重新 preview 再問一次。
 Approval 只授權 `merge-candidate-into-main`，消耗時帶其他 action 一律拒絕，授權物件並明列 `notAuthorized`。
 
-**Promotion Service（待實作）** 只接受 single-use snapshot-bound approval。流程為：
+~~**Promotion Service（待實作）**~~ **Promotion Service（已實作；2026-08-14 補齊本機 Owner 產品出口）**
+只接受 single-use snapshot-bound approval。流程為：
 
 1. 重新驗證 candidate/main identity、HEAD 與 working state；
 2. 建立並驗證 recovery point；
@@ -164,6 +165,63 @@ Approval 只授權 `merge-candidate-into-main`，消耗時帶其他 action 一�
 4. 若 scope 擴張或 conflict 需要新決策，停止並重新詢問；
 5. 驗證最終 main HEAD／tree／diff；
 6. 保存結果，不自動 push 或 cleanup。
+
+本機 Web 的最終 `POST /api/rooms/merge-approvals/approve` 不再只回傳 raw token。它呼叫
+`approveAndPromoteMainMerge()`：token 只在 server 記憶體中產生，立即交給 `promoteMainMerge()` 消耗，
+不離開 service boundary。若 transport response 遺失，同一 approval 的重送先依 `approval_id` 查 durable
+promotion，回傳同一列的重新觀察結果，不再執行 Git。grant 後、promotion intent 前失敗時，因尚無任何
+Git 寫入可能，該孤兒 grant 以 `PROMOTION_NOT_STARTED_AFTER_GRANT` 明確退休；intent 一旦存在，只有
+promotion observer 能描述 `applied`／`rolled-back`／`needs-manual-review`，前端不得自行推論。
+daemon 若在 grant 與 intent 中間被殺，重啟後 exact POST retry 或 Merge 歷史讀取會發現
+`approved` 且沒有任何 promotion row，撤銷 token hash、轉為同一具名 rejected 狀態，並在 history 的
+`unpromotedApprovals` 顯示。正常在途操作以 service-local approval id set 標記，避免同一 daemon 的 history
+讀取把合法的極短窗口誤判成 orphan；併發第二個 owner POST 以 `MAIN_MERGE_PROMOTION_IN_FLIGHT` 拒絕。
+
+`GET /api/rooms/merge-history` 是 Room/workspace-scoped 的 durable outcome surface。它直接讀
+`candidate_merge_promotions` 並重新觀察未結紀錄；因此可能更新 reconciliation metadata，但不會自行
+重跑 merge、rollback、push 或 cleanup。API 保留 `promotions + unpromotedApprovals` 的舊／新相容 contract；
+GUI 再以 fail-closed classifier 分成三個互斥 bucket：完整正向 observation 的 applied row 才是「已 Merge」，
+不完整／不確定 row 是「需要檢查」，rejected／expired／invalidated 且沒有 promotion 的 approval 是
+「未進入 Merge」。Pending 僅計仍可回答且未逾時的 `requested` approvals；一旦為零，task control 從
+sidebar DOM flow 隱藏。Archive 在 sidebar 只有無數字的「Merge 紀錄」入口，各 bucket count 只存在 dialog
+內，因此歷史總數無法再冒充未完成任務。若 fail-closed classifier 的 review bucket 非空，入口附加不帶
+數字的「需檢查」狀態；terminal-only archive 不觸發。任何讀取失敗在 dialog 內保留具名錯誤，不把 cache
+或空陣列當新事實，也不把「未知」顯示成已清除。
+
+確認輸入的 UI gate 由 DOM-free `mergeApprovalGate()` 計算同一份狀態：`blocked`、`not-scrolled`、
+`empty`、`incorrect`、`exact`、`decided` 各自回傳 controls 與 live-region copy。錯字不送 HTTP，欄位保持
+可編輯且 `aria-invalid=true`；re-preview 重新鎖定 scroll gate 時會明說「尚未 Merge」及重新捲到底的出口。
+Scroll gate 只控制 final submission：pending row 的 input 不因未捲完或 blocker 被 disable／清空，已輸入短語
+只在同一 approval id 的 re-preview／re-render 保留；載入不同 approval id 時先清空。逾時視為不可復活的
+本地終止條件，input 鎖定並清空，畫面要求 candidate 另提新的 snapshot-bound request，不暗示 re-preview
+能救回舊核准。提示明確區分「內層深色變更清單」與外層 dialog；scroll region 有 `tabindex=0`、
+`aria-describedby` 連到 live hint 與 2px `:focus-visible`，原生 PageDown/End 鍵可完成同一門檻。
+Primary button 在 pending/phrase-present 時不使用 native `disabled`（它會吞掉 click），改以 `aria-disabled`
+呈現 submission gate。`mergeApprovalIntentTarget()` 是 DOM-free 分流：`diff`／`input`／`blockers` 只把焦點與
+外層 viewport 帶到缺少條件、觸發可見 attention 並寫 aria-live「尚未送出」；只有 `submit` 呼叫
+`approveMergeIntoMain()`。Terminal/expired/missing phrase 沒有本地前進路徑，仍 native-disabled。
+Input 的 Enter handler 刻意不把 `submit` target 直接送出：它只 focus final button 並要求第二次 activation，
+保留最高風險動作的明確 final-button 手勢；其他 target 委派相同 guidance。`mergeApprovalSubmitting` 在任何
+await 前設為 true、native-disable button，`finally` 釋放，server single-use 仍是最終 authority。
+Guidance 用遞增 sequence 清空後在下一 animation frame 重寫 aria-live；清除／新 target 會遞增 sequence
+取消舊 callback，focus 前也移除三個 possible targets 的舊 `is-attention`。
+這是使用者回饋層，不改變 server 的 exact phrase、snapshot binding 或 promotion contract。
+核准 POST 的 error path 會 best-effort 重新讀 live approval；該讀取另有獨立 catch，失敗時同時保留原拒絕
+與 refresh failure，並固定標示非成功，避免 nested error 吞掉 Owner 唯一可見的結果。
+
+2026-08-19 起，terminal approval 不再只有鎖死的 input：`POST /api/rooms/merge-approvals/retry` 先以
+Room/workspace scope 讀舊 row，僅接受 `rejected|invalidated|expired` 且**沒有 promotion row** 的結果，
+再從 completed candidate 重新計算 live preview/gates，寫入新 UUID 的 `requested` approval。它不復活舊
+row、不產生 token、不執行 Git；UI 清空舊 approval-scoped phrase、自動載入新 id 並重置 scroll gate。
+`consumed`、已有 intent、unreadable 或 unresolved promotion 一律不走此出口。
+
+Promotion restore payload 使用 schema v2 與兩層上界：SQLite
+`length(CAST(restore_json AS BLOB)) <= 65536`，寫入前也以 `Buffer.byteLength(..., "utf8")` 執行同一限制。
+Serializer 只會縮短 `ignoredPaths` 顯示 prefix，並同步保存 `ignoredPathsTotal`、
+`ignoredPathsTruncated`；`ignoredFingerprint` 始終涵蓋完整 path＋content inventory。v6→v7 以單一
+`BEGIN IMMEDIATE` rebuild table、逐欄複製舊 row 與 hash、重建 indexes 後才更新 schema version；任一步
+失敗整體 rollback。Reader 對 legacy payload 只在 path list 等於 ignored total 時接受，v2 metadata 不一致
+或其他 malformed shape 使 promotion row unreadable，crash observer 不得把它當作 restored/applied 證據。
 
 Promotion live gate 的 attributes 檢查由 `GitBroker.restorePoint(main, candidatePaths)` 執行。它把完整
 preview 中所有非刪除目標路徑傳給 `git check-attr`，因此候選新增的、main 尚不存在的副檔名也會被全域

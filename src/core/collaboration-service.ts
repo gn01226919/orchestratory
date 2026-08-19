@@ -39,6 +39,7 @@ import { WorktreeBroker } from "./worktree-broker.ts";
 import { CollaborationAuditLog, type AuditOutcome } from "./collaboration-audit.ts";
 import {
   CandidateRegistry,
+  MERGE_APPROVAL_CONFIRMATION,
   MergeApprovalBindingError,
   MergeApprovalBindingUnverifiableError,
   type CandidateCheckpoint,
@@ -48,7 +49,9 @@ import {
   type MergeApproval,
   type MergeApprovalBindingCheck,
   type MergeApprovalDriftEvent,
+  type MergePromotion,
   type MergePromotionEvent,
+  type MergePromotionResult,
   type MergeApprovalPreview,
 } from "./candidate-registry.ts";
 
@@ -107,6 +110,7 @@ export class CollaborationService {
   readonly #worktrees: WorktreeBroker;
   readonly #writerWorktrees: WriterWorktreeLifecycle | undefined;
   readonly #dataDirectory: string;
+  readonly #ownerPromotionsInFlight = new Set<string>();
   #closed = false;
 
   constructor(dataDirectory: string, options: {
@@ -664,6 +668,68 @@ export class CollaborationService {
     });
   }
 
+  async listMergeHistory(input: {
+    roomId: string;
+    workspace: string;
+    taskId?: string;
+  }): Promise<{
+    promotions: Awaited<ReturnType<CandidateRegistry["promotions"]>>;
+    unpromotedApprovals: MergeApproval[];
+  }> {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    let promotions = await this.candidates.promotions({
+      roomId: input.roomId,
+      mainPath: input.workspace,
+      ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+    });
+    const started = new Set(promotions.flatMap((promotion) =>
+      "approvalId" in promotion ? [promotion.approvalId] : []));
+    let approvals = await this.candidates.mergeApprovals({
+      roomId: input.roomId,
+      mainPath: input.workspace,
+      ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+    });
+    // A durable grant with no intent row can only be left by the retired two-stage HTTP flow or by
+    // a crash between grant and intent. The raw token is no longer available after restart, so it
+    // is not authority waiting to be used; it is a failed owner operation waiting to be named.
+    // Never race the live call in this process: it marks the approval before grant and holds the
+    // mark until either an intent exists or the call has retired the grant itself.
+    for (const approval of approvals) {
+      if (approval.state !== "approved" || started.has(approval.id)
+        || this.#ownerPromotionsInFlight.has(approval.id)) continue;
+      try {
+        await this.rejectMainMerge({
+          roomId: input.roomId,
+          workspace: input.workspace,
+          approvalId: approval.id,
+          decidedBy: "local-web",
+          reason: "PROMOTION_NOT_STARTED_AFTER_GRANT",
+        });
+      } catch (error) {
+        // A concurrent intent writer wins safely: re-read both stores rather than calling either
+        // outcome "missing". Any other error remains visible to the caller.
+        if (!(error instanceof Error) || error.message !== "MAIN_MERGE_APPROVAL_NOT_PENDING") throw error;
+      }
+    }
+    promotions = await this.candidates.promotions({
+      roomId: input.roomId,
+      mainPath: input.workspace,
+      ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+    });
+    approvals = await this.candidates.mergeApprovals({
+      roomId: input.roomId,
+      mainPath: input.workspace,
+      ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+    });
+    const promoted = new Set(promotions.flatMap((promotion) =>
+      "approvalId" in promotion ? [promotion.approvalId] : []));
+    return {
+      promotions,
+      unpromotedApprovals: approvals.filter((approval) =>
+        approval.state !== "requested" && !promoted.has(approval.id)),
+    };
+  }
+
   async inspectMergeApproval(input: {
     roomId: string;
     workspace: string;
@@ -673,6 +739,68 @@ export class CollaborationService {
     return await this.candidates.inspectMergeApproval({
       approvalId: input.approvalId, roomId: input.roomId, mainPath: input.workspace,
     });
+  }
+
+  /**
+   * Creates a new owner question after a terminal approval that never started a promotion.
+   *
+   * This does not revive or copy authority from the old row. It proves there is no promotion record,
+   * recomputes every live binding and gate, and writes a new `requested` row with a new idempotency
+   * key. The browser receives no grant token and canonical main is not mutated.
+   */
+  async retryMainMergeApproval(input: {
+    roomId: string;
+    workspace: string;
+    approvalId: string;
+  }): Promise<{ approval: MergeApproval; supersedesApprovalId: string; mainMutation: false }> {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    const inspected = await this.candidates.inspectMergeApproval({
+      approvalId: input.approvalId, roomId: input.roomId, mainPath: input.workspace,
+    });
+    const previous = inspected.approval;
+    if (!new Set(["rejected", "invalidated", "expired"]).has(previous.state)) {
+      throw new Error("MAIN_MERGE_APPROVAL_RETRY_NOT_ELIGIBLE");
+    }
+    if (await this.candidates.promotionForApproval({
+      approvalId: previous.id, roomId: input.roomId, mainPath: input.workspace,
+    })) {
+      throw new Error("MAIN_MERGE_APPROVAL_RETRY_REQUIRES_HISTORY_REVIEW");
+    }
+    const preview = await this.candidates.previewMainMerge({
+      taskId: previous.binding.taskId, roomId: input.roomId, mainPath: input.workspace,
+    });
+    if (!preview.approvable) throw new Error(`MAIN_MERGE_APPROVAL_RETRY_BLOCKED:${preview.blockers.join(",")}`);
+    const approval = await this.candidates.requestMainMerge({
+      actor: "you",
+      clientRequestId: randomUUID(),
+      taskId: previous.binding.taskId,
+      roomId: input.roomId,
+      mainPath: input.workspace,
+      completionId: preview.completionId,
+      previewDigest: preview.previewDigest,
+    });
+    this.audit.append({
+      roomId: input.roomId, taskId: approval.binding.taskId,
+      type: "candidate.merge-approval-requested", actor: "you", executedBy: "you",
+      action: "main-merge-request", path: approval.binding.mainPath, outcome: "succeeded",
+      detail: {
+        approvalId: approval.id,
+        supersedesApprovalId: previous.id,
+        completionId: approval.binding.completionId,
+        candidateHead: approval.binding.candidateHead,
+        mainHead: approval.binding.mainHead,
+        previewDigest: approval.binding.previewDigest,
+        state: approval.state,
+        freshSnapshot: true,
+        mainMutation: false,
+      },
+    });
+    this.#candidateLedger(input.roomId, approval.binding.taskId,
+      `Owner 已針對終局核准 ${previous.id.slice(0, 8)} 重新建立 live preview；新核准 ${approval.id.slice(0, 8)}`
+        + ` 綁定 candidate ${approval.binding.candidateHead.slice(0, 12)} 與 main ${approval.binding.mainHead.slice(0, 12)}`
+        + `。這是新的 single-use 問題，尚未核准、尚未 Merge，main 未修改。`,
+      `candidate:${approval.binding.taskId}:merge-approval:${approval.id}:requested`);
+    return { approval, supersedesApprovalId: previous.id, mainMutation: false };
   }
 
   /**
@@ -767,6 +895,118 @@ export class CollaborationService {
         + `僅授權 merge。本階段未寫入 main；實際 merge 屬後續階段。`,
       `candidate:merge-approval:${granted.approval.id}:granted`);
     return granted;
+  }
+
+  /**
+   * The local Owner's one visible action: grant this exact snapshot and immediately spend that
+   * authority on the one operation it names. The raw token never crosses the service boundary.
+   *
+   * A transport retry first reads the durable promotion by approval id. It therefore returns the
+   * same answer after a lost response and can never issue a second Git command. If granting
+   * succeeded but promotion never recorded an intent, the orphaned grant is retired explicitly;
+   * once an intent exists, only the promotion observer may describe the outcome.
+   */
+  async approveAndPromoteMainMerge(input: {
+    roomId: string;
+    workspace: string;
+    approvalId: string;
+    previewDigest: string;
+    confirmation: string;
+    decidedBy: "local-web" | "local-tui";
+  }): Promise<MergePromotionResult & { approval: MergeApproval; replayed: boolean }> {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    if (this.#ownerPromotionsInFlight.has(input.approvalId)) {
+      throw new Error("MAIN_MERGE_PROMOTION_IN_FLIGHT");
+    }
+    this.#ownerPromotionsInFlight.add(input.approvalId);
+    try {
+      const existing = await this.candidates.promotionForApproval({
+        approvalId: input.approvalId, roomId: input.roomId, mainPath: input.workspace,
+      });
+      if (existing) return await this.#replayedPromotion(input, existing);
+      const beforeGrant = await this.candidates.inspectMergeApproval({
+        approvalId: input.approvalId, roomId: input.roomId, mainPath: input.workspace,
+      });
+      if (beforeGrant.approval.state === "approved") {
+        await this.rejectMainMerge({
+          roomId: input.roomId,
+          workspace: input.workspace,
+          approvalId: input.approvalId,
+          decidedBy: input.decidedBy,
+          reason: "PROMOTION_NOT_STARTED_AFTER_GRANT",
+        });
+        throw new Error("MAIN_MERGE_APPROVAL_ORPHANED_NO_PROMOTION");
+      }
+      const granted = await this.grantMainMerge(input);
+      try {
+        const result = await this.candidates.promoteMainMerge({
+          approvalId: granted.approval.id,
+          token: granted.approvalToken,
+          action: granted.approval.grants,
+          taskId: granted.approval.binding.taskId,
+          roomId: input.roomId,
+          mainPath: input.workspace,
+        });
+        const inspected = await this.candidates.inspectMergeApproval({
+          approvalId: input.approvalId, roomId: input.roomId, mainPath: input.workspace,
+        });
+        return { ...result, approval: inspected.approval, replayed: false };
+      } catch (error) {
+        const durable = await this.candidates.promotionForApproval({
+          approvalId: input.approvalId, roomId: input.roomId, mainPath: input.workspace,
+        });
+        if (!durable) {
+          // No intent row means no Git command could have started. Retiring the now-unspendable grant
+          // prevents the UI from showing a live authority whose only token has already left memory.
+          await this.rejectMainMerge({
+            roomId: input.roomId,
+            workspace: input.workspace,
+            approvalId: input.approvalId,
+            decidedBy: input.decidedBy,
+            reason: "PROMOTION_NOT_STARTED_AFTER_GRANT",
+          });
+        }
+        throw error;
+      }
+    } finally {
+      this.#ownerPromotionsInFlight.delete(input.approvalId);
+    }
+  }
+
+  async #replayedPromotion(input: {
+    roomId: string;
+    workspace: string;
+    approvalId: string;
+    previewDigest: string;
+    confirmation: string;
+    decidedBy: "local-web" | "local-tui";
+  }, promotion: MergePromotion): Promise<MergePromotionResult & { approval: MergeApproval; replayed: boolean }> {
+    const inspected = await this.candidates.inspectMergeApproval({
+      approvalId: input.approvalId, roomId: input.roomId, mainPath: input.workspace,
+    });
+    // Retrying a successful HTTP request may recover its answer, but it may not broaden what was
+    // approved or let a caller omit the same proof the original request required.
+    if (input.confirmation !== MERGE_APPROVAL_CONFIRMATION) {
+      throw new Error("MAIN_MERGE_CONFIRMATION_MISMATCH");
+    }
+    if (input.previewDigest !== inspected.approval.previewDigest) {
+      throw new Error("MAIN_MERGE_PREVIEW_DIGEST_MISMATCH");
+    }
+    return {
+      promotion,
+      approval: inspected.approval,
+      replayed: true,
+      mainMutated: promotion.observation.authorizedMergeCommit === true,
+      authorization: {
+        approvalId: inspected.approval.id,
+        grants: inspected.approval.grants,
+        notAuthorized: inspected.approval.notAuthorized,
+        singleUse: true,
+        binding: inspected.approval.binding,
+        preview: inspected.approval.preview,
+        consumedAt: inspected.approval.updatedAt,
+      },
+    };
   }
 
   /** Refusing or withdrawing. It never deletes a candidate, a checkpoint or a recovery ref. */

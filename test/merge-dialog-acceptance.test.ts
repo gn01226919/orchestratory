@@ -32,7 +32,14 @@ const ACCEPTED_FUNCTIONS = [
   "formatCountdown",
   "tickMergeApprovalTtl",
   "mergeDiffScrolledToBottom",
+  "mergeApprovalGate",
+  "mergeApprovalInputScope",
+  "mergeApprovalIntentTarget",
+  "mergeApprovalFailureStatus",
+  "mergeApprovalRetryEligible",
   "updateMergeApprovalGate",
+  "handleMergeApprovalPrimaryIntent",
+  "handleMergeApprovalConfirmationKeydown",
   "mergeApprovalBlockers",
   "mergeRiskLevel",
   "renderMergeApproval",
@@ -48,7 +55,51 @@ const ACCEPTED_FUNCTIONS = [
   "repollMergeApproval",
   "openMergeApprovalDialog",
   "closeMergeApprovalDialog",
+  "repreviewMergeApproval",
+  "retryMergeApprovalWithFreshSnapshot",
+  // The final button is now a write path: the browser acceptance must cover its in-progress state,
+  // truthful applied/rolled-back/uncertain result split, and transition into durable history.
+  "approveMergeIntoMain",
   "rejectMergeIntoMain",
+  // The same browser pass verified the durable post-action archive: only a promotion carrying
+  // every positive repository fact enters the green Merged bucket; all uncertainty stays out.
+  "mergeHistorySucceeded",
+  "mergeHistoryBuckets",
+  "renderMergeHistoryBadge",
+  "renderPromotionHistoryEntry",
+  "renderApprovalHistoryEntry",
+  "renderMergeHistory",
+  "refreshMergeHistory",
+  "openMergeHistory",
+  "closeMergeHistory",
+] as const;
+
+const ACCEPTED_ROOM_FRAGMENTS = [
+  {
+    file: "room.html",
+    patterns: [
+      /<section id="merge-approval-blocking"[\s\S]*?<\/section>/u,
+      /<div id="merge-approval-diff"[^>]*><\/div>/u,
+      /<button id="merge-approval-confirm"[^>]*>.*?<\/button>/u,
+      /<p id="merge-approval-status"[^>]*><\/p>/u,
+      /<section id="merge-approval-retry-panel"[\s\S]*?<\/section>/u,
+      /<section class="merge-outcome-nav"[\s\S]*?<\/section>/u,
+      /<section id="merge-history"[\s\S]*<\/section>\s*<\/body>/u,
+    ],
+  },
+  {
+    file: "styles.css",
+    patterns: [
+      /^\.merge-approval-diff:focus-visible \{.*\}$/mu,
+      /^\.merge-approval-actions #merge-approval-confirm\[aria-disabled="true"\]:not\(:disabled\) \{.*\}$/mu,
+      /^#merge-approval-diff\.is-attention,.*\}$/mu,
+      /^\.merge-outcome-nav \{.*\}$/mu,
+      /^\.merge-history-section\.is-merged > header strong \{.*\}$/mu,
+      /^\.merge-history-state\.is-closed \{.*\}$/mu,
+      /^\.merge-history-action button \{.*\}$/mu,
+      /^  \.app \{ grid-template-columns: 1fr; grid-template-rows: auto 100vh; height: auto; min-height: 100vh; \}$/mu,
+    ],
+  },
 ] as const;
 
 function acceptedSource(file: string, names: readonly string[]): string {
@@ -69,19 +120,35 @@ function acceptedSource(file: string, names: readonly string[]): string {
   }).join("\n");
 }
 
+function acceptedFragments(groups: readonly { file: string; patterns: readonly RegExp[] }[]): string {
+  return groups.map(({ file, patterns }) => {
+    const source = readFileSync(join(root, "public", file), "utf8");
+    return patterns.map((pattern) => {
+      const found = pattern.exec(source);
+      assert.ok(found, `accepted browser fragment is gone from public/${file}`);
+      return found[0];
+    }).join("\n");
+  }).join("\n");
+}
+
 /*
  * Both write-back paths are covered. They are different endpoints with different
  * previews, and each was accepted in a browser separately, so each carries its own
  * digest — a change to one must not be able to hide behind the other still matching.
  */
 const ACCEPTED_GATES = [
-  { file: "room.js", names: ACCEPTED_FUNCTIONS, label: "candidate → main merge approval" },
+  {
+    file: "room.js", names: ACCEPTED_FUNCTIONS, fragments: ACCEPTED_ROOM_FRAGMENTS,
+    label: "candidate → main merge approval",
+  },
   { file: "app.js", names: ACCEPTED_APPLY_BACK_FUNCTIONS, label: "workspace apply-back" },
 ] as const;
 
 for (const gate of ACCEPTED_GATES) {
   test(`the accepted ${gate.label} gate still matches its recorded browser acceptance`, () => {
-  const digest = createHash("sha256").update(acceptedSource(gate.file, gate.names), "utf8").digest("hex");
+  const accepted = acceptedSource(gate.file, gate.names)
+    + ("fragments" in gate ? `\n${acceptedFragments(gate.fragments)}` : "");
+  const digest = createHash("sha256").update(accepted, "utf8").digest("hex");
   const verification = readFileSync(join(root, "docs", "VERIFICATION.md"), "utf8");
 
   assert.ok(

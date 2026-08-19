@@ -1573,8 +1573,27 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   // ── Phase 5-3 bar item 6: the merge-into-main approval dialog ──────────────
   // The highest-risk pending action gets the same global count badge as agent requests.
   assert.match(roomHtml, /id="merge-approvals-open"/u);
-  assert.match(roomHtml, /id="merge-approval-count" hidden>0</u);
+  assert.match(roomHtml, /id="merge-approval-count" aria-label="0 件待核准">0</u);
   assert.match(roomHtml, /class="agent-requests-open merge-approvals-open"/u);
+  assert.match(roomHtml, /id="merge-active-task" class="merge-active-task" hidden/u);
+  assert.match(roomHtml, /id="merge-history-open"/u);
+  assert.match(roomHtml, /▤ Merge 紀錄 · Merge records/u);
+  assert.match(roomHtml, /id="merge-records-attention" class="merge-records-attention" hidden/u);
+  assert.match(roomHtml, /需檢查 · Review required/u);
+  assert.match(roomHtml, /稽核紀錄（不是待辦） · Audit records, not tasks/u);
+  assert.doesNotMatch(roomHtml, /id="merge-history-count"/u);
+  assert.doesNotMatch(roomHtml, /id="merge-history-other-open"/u);
+  assert.match(roomHtml, /id="merge-outcome-nav-status"[^>]*aria-live="polite"/u);
+  assert.match(roomHtml, /id="merge-history-merged-list"/u);
+  assert.match(roomHtml, /id="merge-history-review-list"/u);
+  assert.match(roomHtml, /id="merge-history-unpromoted-list"/u);
+  assert.match(roomHtml, /DURABLE OUTCOME ARCHIVE/u);
+  assert.match(roomHtml, /關閉紀錄 · Close records/u);
+  assert.doesNotMatch(roomHtml, />完成 · Done</u);
+  assert.match(
+    roomStyles,
+    /\.app \{ grid-template-columns: 1fr; grid-template-rows: auto 100vh; height: auto; min-height: 100vh; \}/u,
+  );
   // It reuses the .workspace-onboarding dialog component as a variant, not a new design language.
   assert.match(
     roomHtml,
@@ -1589,7 +1608,7 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomHtml, /無法核准 · Blocking/u);
   assert.match(
     roomHtml,
-    /下列項目存在期間，確認輸入與「合併進 main」保持停用。 · While any of these is present the confirmation input and the primary button stay disabled\./u,
+    /Blocking items keep the primary button disabled; ordinary blockers do not lock the field, but expired or terminal approvals cannot be revived\./u,
   );
   assert.match(roomHtml, /id="merge-approval-repreview" type="button">↻ 重新產生預覽 · Re-preview/u);
   // The scroll-gated region holds the promotion disclosure BEFORE the file list, so its label has
@@ -1597,17 +1616,21 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomHtml, /這次促進會執行什麼、覆蓋什麼，以及變更檔案（預設收合，請捲到底）/u);
   assert.match(roomHtml, /What this promotion would execute and overwrite, then the changed files \(collapsed by default, scroll to the bottom\)/u);
   assert.match(roomHtml, /id="merge-approval-diff"/u);
+  assert.match(roomHtml, /id="merge-approval-diff"[^>]*tabindex="0"[^>]*aria-describedby="merge-approval-scroll-hint"/u);
   assert.match(roomHtml, /復原點 · Recovery point/u);
   assert.match(roomHtml, /id="merge-approval-restore"/u);
   assert.match(roomHtml, /⧉ 複製還原指令 · Copy restore command/u);
   assert.match(roomHtml, /核准視窗剩餘 · Approval window/u);
   assert.match(roomHtml, /id="merge-approval-refresh" type="button">↻ 重新產生預覽 · Re-preview/u);
-  // The dialog blocks the confirmation input until the gate opens, so it ships disabled.
-  assert.match(roomHtml, /id="merge-approval-confirmation" type="text" maxlength="64" autocomplete="off" spellcheck="false" disabled/u);
+  // Static HTML ships fail-closed; renderMergeApproval enables the field for a live pending row.
+  assert.match(roomHtml, /id="merge-approval-confirmation" type="text" maxlength="64" autocomplete="off" spellcheck="false" aria-describedby="merge-approval-confirmation-feedback" disabled/u);
+  assert.match(roomHtml, /id="merge-approval-confirmation-feedback" class="merge-confirmation-feedback" aria-live="polite"/u);
   assert.match(roomHtml, /<code id="merge-approval-phrase">MERGE INTO MAIN<\/code>/u);
+  assert.match(roomHtml, /可先輸入/u);
+  assert.match(roomHtml, /the final button also requires the inner diff/u);
   // Cancel takes default focus; the merge button is the only primary and is styled danger.
   assert.match(roomHtml, /id="merge-approval-cancel" type="button">取消 · Cancel/u);
-  assert.match(roomHtml, /id="merge-approval-confirm" class="danger" type="button" disabled>合併進 main · Merge into main/u);
+  assert.match(roomHtml, /id="merge-approval-confirm" class="danger" type="button" aria-disabled="true" aria-describedby="merge-approval-scroll-hint merge-approval-confirmation-feedback merge-approval-status" disabled>合併進 main · Merge into main/u);
   assert.match(roomHtml, /id="merge-approval-reject" type="button">拒絕並保留候選 · Reject &amp; keep candidate/u);
   assert.doesNotMatch(roomHtml, /id="merge-approval-confirm"[^>]*class="[^"]*primary/u);
 
@@ -1624,15 +1647,33 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   // Scroll-gate: bottom of the diff AND an empty blocking section, then type-to-enable.
   assert.match(mergeDialogScript, /function mergeDiffScrolledToBottom\(/u);
   assert.match(mergeDialogScript, /region\.scrollTop \+ region\.clientHeight >= region\.scrollHeight - 4/u);
-  assert.match(mergeDialogScript, /const ready = !blocked && scrolled && !state\.mergeApprovalDecided;/u);
-  assert.match(mergeDialogScript, /if \(!ready\) input\.value = "";/u);
-  assert.match(mergeDialogScript, /input\.disabled = !ready;/u);
-  assert.match(mergeDialogScript, /confirm\.disabled = !ready \|\| input\.value !== mergeConfirmationPhrase\(\);/u);
+  assert.match(mergeDialogScript, /function mergeApprovalGate\(/u);
+  assert.match(mergeDialogScript, /input\.disabled = gate\.inputDisabled;/u);
+  assert.match(mergeDialogScript, /input\.setAttribute\("aria-invalid", String\(gate\.ariaInvalid\)\);/u);
+  assert.match(mergeDialogScript, /confirm\.disabled = gate\.inputDisabled \|\| state\.mergeApprovalSubmitting;/u);
+  assert.match(mergeDialogScript, /confirm\.setAttribute\("aria-disabled", String\(gate\.confirmDisabled \|\| state\.mergeApprovalSubmitting\)\);/u);
+  assert.match(mergeDialogScript, /function handleMergeApprovalPrimaryIntent\(/u);
+  assert.match(mergeDialogScript, /function handleMergeApprovalConfirmationKeydown\(/u);
+  assert.match(mergeDialogScript, /event\.key !== "Enter" \|\| event\.isComposing \|\| event\.keyCode === 229/u);
+  assert.match(mergeDialogScript, /focusMergeApprovalRequirement\(byId\("merge-approval-confirm"\)\)/u);
+  assert.match(mergeDialogScript, /尚未送出、尚未 Merge。確認短語與閱讀條件已完成/u);
+  assert.match(mergeDialogScript, /if \(target === "submit"\) \{\s+await approveMergeIntoMain\(\);/u);
+  assert.match(mergeDialogScript, /target === "diff"/u);
+  assert.match(mergeDialogScript, /focusMergeApprovalRequirement\(byId\("merge-approval-diff"\)\)/u);
+  assert.match(mergeDialogScript, /尚未送出、尚未 Merge。已將焦點移到內層深色變更清單/u);
+  assert.match(
+    mergeDialogScript,
+    /byId\("merge-approval-confirm"\)\.addEventListener\("click", \(\) => void handleMergeApprovalPrimaryIntent\(\)\);/u,
+  );
+  assert.match(mergeDialogScript, /if \(state\.mergeApprovalSubmitting\) \{/u);
+  assert.match(mergeDialogScript, /state\.mergeApprovalSubmitting = true;\s+confirm\.disabled = true;/u);
+  assert.match(mergeDialogScript, /finally \{\s+state\.mergeApprovalSubmitting = false;/u);
+  assert.match(mergeDialogScript, /status\.textContent = "";\s+requestAnimationFrame/u);
   assert.match(mergeDialogScript, /byId\("merge-approval-diff"\)\.addEventListener\("scroll"/u);
   assert.match(mergeDialogScript, /byId\("merge-approval-diff"\)\.addEventListener\("toggle"/u);
   assert.match(
     mergeDialogScript,
-    /byId\("merge-approval-confirmation"\)\.value !== mergeConfirmationPhrase\(\)/u,
+    /byId\("merge-approval-confirmation"\)\.addEventListener\("input", \(\) => \{\s+clearMergeApprovalIntentGuide\(\);\s+updateMergeApprovalGate\(\);/u,
   );
   // Blocking section: conflicts, every truncation flag and an invalid binding keep it disabled.
   assert.match(mergeDialogScript, /function mergeApprovalBlockers\(/u);
@@ -1647,6 +1688,11 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(mergeDialogScript, /preview\.largeFileScanTruncated/u);
   assert.match(mergeDialogScript, /blockingSection\.hidden = blockers\.length === 0;/u);
   assert.match(mergeDialogScript, /function repreviewMergeApproval\(/u);
+  assert.match(mergeDialogScript, /function retryMergeApprovalWithFreshSnapshot\(/u);
+  assert.match(mergeDialogScript, /\/api\/rooms\/merge-approvals\/retry/u);
+  assert.match(mergeDialogScript, /state\.mergeApprovalInputApprovalId = ""/u);
+  assert.match(mergeDialogScript, /await loadMergeApproval\(fresh\.id\)/u);
+  assert.match(mergeDialogScript, /舊核准.*保持終局/u);
   // Mode changes, submodules and opaque files are marked as such, not as ordinary edits.
   assert.match(mergeDialogScript, /模式變更 \$\{file\.mode\.from\} → \$\{file\.mode\.to\}，不是一般檔案編輯 · mode change, not an ordinary edit/u);
   assert.match(mergeDialogScript, /Submodule 指標變更，不是一般檔案編輯 · submodule pointer, not an ordinary edit/u);
@@ -1661,9 +1707,16 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(mergeDialogScript, /function formatCountdown\(/u);
   assert.match(mergeDialogScript, /setInterval\(tickMergeApprovalTtl, 1000\)/u);
   assert.match(mergeDialogScript, /已逾時 · expired/u);
+  // Expiry while the owner is typing or scrolling is composed, not merely styled: the ticker marks
+  // the exact approval expired and synchronously re-renders; updateMergeApprovalGate receives that
+  // bit and the pure gate clears/locks the input. A stale client click remains server-refused.
+  assert.match(mergeDialogScript, /approval\.expired = true;\s+renderMergeApproval\(\);/u);
+  assert.match(mergeDialogScript, /expired: state\.mergeApproval\?\.expired === true/u);
+  assert.match(mergeDialogScript, /if \(!approval \|\| \(state\.mergeApprovalBlockers \|\| \[\]\)\.length > 0 \|\| !state\.mergeApprovalScrolled\)/u);
   // The digest sent on approve is the one that was rendered; inspect stays read-only polling.
   assert.match(mergeDialogScript, /previewDigest: approval\.previewDigest,/u);
   assert.match(mergeDialogScript, /\/api\/rooms\/merge-approvals\/approve/u);
+  assert.match(mergeDialogScript, /\/api\/rooms\/merge-history\?room=/u);
   assert.match(mergeDialogScript, /\/api\/rooms\/merge-approvals\/inspect\?room=/u);
   assert.match(mergeDialogScript, /setInterval\(\(\) => void repollMergeApproval\(\), 5000\)/u);
   // A no-op poll must not re-render: rebuilding the diff would reset the scroll position and
@@ -1673,7 +1726,15 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
     mergeDialogScript,
     /=== mergeApprovalSignature\(approval, state\.mergeApprovalBinding, state\.mergeApprovalOverwrites\)\) return;/u,
   );
-  assert.match(mergeDialogScript, /mainMutation: false/u);
+  // Clicking the final control now performs the promotion. Success is only rendered from the
+  // durable state plus the independent authorized-merge observation; approval alone is insufficient.
+  assert.match(mergeDialogScript, /function mergeHistorySucceeded\(/u);
+  assert.match(mergeDialogScript, /entry\?\.state === "applied"/u);
+  assert.match(mergeDialogScript, /entry\?\.observation\?\.authorizedMergeCommit === true/u);
+  assert.match(mergeDialogScript, /value\.mainMutated === true/u);
+  assert.match(mergeDialogScript, /Merge 成功 · Merge succeeded/u);
+  assert.match(mergeDialogScript, /尚未能確認 Merge 成功 · Merge requires review/u);
+  assert.match(mergeDialogScript, /不會重複 apply/u);
   // Rejection describes what this ACTION did and never declares the current state of anything: the
   // three `*Retained` constants it used to print were assertions made by a path that reads nothing.
   assert.match(mergeDialogScript, /value\.deletedByThisRejection === "nothing"/u);
@@ -1685,8 +1746,8 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(mergeDialogScript, /未重新讀取/u);
   assert.match(mergeDialogScript, /拒絕不等於刪除授權/u);
   // Bilingual state text, and a binding refusal that says which bound values moved.
-  assert.match(mergeDialogScript, /Blocking items remain; the confirmation input and the primary button stay disabled\./u);
-  assert.match(mergeDialogScript, /Scroll the change list to the bottom to enable the confirmation input\./u);
+  assert.match(mergeDialogScript, /Blockers prevent submission; pressing Merge only guides you to them and sends nothing\./u);
+  assert.match(mergeDialogScript, /pressing Merge only guides you there and submits nothing\./u);
   assert.match(roomScript, /MAIN_MERGE_APPROVAL_BINDING_CHANGED:/u);
   assert.match(roomScript, /const MERGE_BINDING_LABELS = \{/u);
   assert.match(roomScript, /function renderMergeApprovalBadge\(/u);
@@ -1694,8 +1755,13 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomStyles, /\.merge-approvals-open b \{/u);
   assert.match(roomStyles, /\.merge-approval-blocking \{/u);
   assert.match(roomStyles, /\.merge-approval-diff \{/u);
+  assert.match(roomStyles, /\.merge-approval-diff:focus-visible \{ outline: 2px solid var\(--accent\); outline-offset: 2px; \}/u);
   assert.match(roomStyles, /\.merge-file-tag\.is-mode/u);
   assert.match(roomStyles, /\.merge-approval-recovery \{/u);
+  assert.match(roomStyles, /\.merge-confirmation-feedback\.is-invalid/u);
+  assert.match(roomStyles, /#merge-approval-confirm\[aria-disabled="true"\]:not\(:disabled\)/u);
+  assert.match(roomStyles, /merge-requirement-attention/u);
+  assert.match(roomStyles, /#merge-approval-confirmation\[aria-invalid="true"\]/u);
 
   const usageView = await fetch(
     `${server.url}/api/view?runId=${restoreRunId}&kind=usage`,
@@ -2058,6 +2124,286 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
     req.on("error", reject);
     req.end();
   });
+});
+
+test("Merge confirmation gives truthful, retryable feedback for exact and incorrect phrases", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const start = source.indexOf("/* @pure-start merge-approval-gate");
+  const end = source.indexOf("/* @pure-end merge-approval-gate */");
+  assert.ok(start > 0 && end > start, "room.js must expose the DOM-free merge approval gate block");
+  const block = source.slice(start, end);
+  assert.doesNotMatch(
+    block,
+    /(?:\b(?:document|window|navigator|localStorage|state)\s*\.|\b(?:fetch|byId|api|setInterval|setTimeout|require|import)\s*\()/u,
+  );
+  const gate = runInNewContext(
+    `${block}\n({ mergeApprovalGate, mergeApprovalInputScope, mergeApprovalIntentTarget, mergeApprovalFailureStatus, mergeApprovalRetryEligible });`,
+    Object.create(null) as object,
+    { timeout: 2_000 },
+  ) as { mergeApprovalGate: (view: unknown) => {
+    ready: boolean; inputDisabled: boolean; inputValue: string; confirmDisabled: boolean;
+    feedback: string; tone: string; ariaInvalid: boolean; hint: string;
+  }; mergeApprovalInputScope: (currentApprovalId: unknown, loadedApprovalId: unknown, typed: unknown) => {
+    approvalId: string; value: string;
+  }; mergeApprovalIntentTarget: (view: unknown) => string;
+  mergeApprovalFailureStatus: (approvalFailure: unknown, refreshFailure?: unknown) => string;
+  mergeApprovalRetryEligible: (approval: unknown) => boolean };
+  const passing = {
+    blockers: [], scrolled: true, decided: false, phrase: "MERGE INTO MAIN", typed: "MERGE INTO MAIN",
+  };
+  const exact = gate.mergeApprovalGate(passing);
+  assert.equal(exact.inputDisabled, false);
+  assert.equal(exact.confirmDisabled, false);
+  assert.equal(exact.ariaInvalid, false);
+  assert.equal(exact.tone, "is-valid");
+  assert.equal(gate.mergeApprovalIntentTarget(passing), "submit");
+  assert.match(exact.feedback, /確認短語正確/u);
+  assert.match(exact.feedback, /仍尚未 Merge/u);
+
+  for (const typed of [
+    "marge into main", "merge into main", "MERGE INTO MAIN ", " MERGE INTO MAIN",
+    "MERGE  INTO MAIN", "MERGE INTO MAI",
+  ]) {
+    const wrong = gate.mergeApprovalGate({ ...passing, typed });
+    assert.equal(wrong.inputDisabled, false, typed);
+    assert.equal(wrong.inputValue, typed, typed);
+    assert.equal(wrong.confirmDisabled, true, typed);
+    assert.equal(wrong.ariaInvalid, true, typed);
+    assert.equal(wrong.tone, "is-invalid", typed);
+    assert.match(wrong.feedback, /確認短語不正確/u, typed);
+    assert.match(wrong.feedback, /尚未送出、尚未 Merge，main 沒有被修改/u, typed);
+    assert.match(wrong.feedback, /MERGE INTO MAIN/u, typed);
+  }
+
+  const empty = gate.mergeApprovalGate({ ...passing, typed: "" });
+  assert.equal(empty.inputDisabled, false);
+  assert.equal(empty.confirmDisabled, true);
+  assert.equal(empty.ariaInvalid, false);
+  assert.match(empty.feedback, /尚未輸入/u);
+
+  const unread = gate.mergeApprovalGate({ ...passing, typed: "marge into main", scrolled: false });
+  assert.equal(unread.inputDisabled, false);
+  assert.equal(unread.inputValue, "marge into main");
+  assert.equal(unread.confirmDisabled, true);
+  assert.equal(unread.ariaInvalid, true);
+  assert.match(unread.feedback, /輸入框仍可修改/u);
+  assert.match(unread.feedback, /上方深色變更清單方框內捲到底/u);
+  assert.match(unread.feedback, /main 未修改/u);
+
+  const exactUnread = gate.mergeApprovalGate({ ...passing, scrolled: false });
+  assert.equal(exactUnread.inputDisabled, false);
+  assert.equal(exactUnread.inputValue, "MERGE INTO MAIN");
+  assert.equal(exactUnread.confirmDisabled, true);
+  assert.equal(exactUnread.ariaInvalid, false);
+  assert.equal(exactUnread.tone, "is-waiting");
+  assert.match(exactUnread.feedback, /確認短語正確/u);
+  assert.match(exactUnread.feedback, /還沒捲完內層變更清單/u);
+  assert.match(exactUnread.feedback, /不是捲外層視窗/u);
+  assert.equal(gate.mergeApprovalIntentTarget({ ...passing, scrolled: false }), "diff");
+
+  const emptyUnread = gate.mergeApprovalGate({ ...passing, typed: "", scrolled: false });
+  assert.equal(emptyUnread.inputDisabled, false);
+  assert.equal(emptyUnread.confirmDisabled, true);
+  assert.match(emptyUnread.feedback, /可以先輸入/u);
+  assert.match(emptyUnread.feedback, /內層變更清單/u);
+
+  const blocked = gate.mergeApprovalGate({ ...passing, blockers: ["conflict"] });
+  assert.equal(blocked.inputDisabled, false);
+  assert.equal(blocked.inputValue, "MERGE INTO MAIN");
+  assert.equal(blocked.confirmDisabled, true);
+  assert.equal(blocked.tone, "is-waiting");
+  assert.match(blocked.feedback, /阻擋項目/u);
+  assert.match(blocked.feedback, /尚未 Merge/u);
+  assert.equal(gate.mergeApprovalIntentTarget({ ...passing, blockers: ["conflict"] }), "blockers");
+
+  const blockedWrong = gate.mergeApprovalGate({ ...passing, typed: "marge", blockers: ["conflict"] });
+  assert.equal(blockedWrong.inputDisabled, false);
+  assert.equal(blockedWrong.confirmDisabled, true);
+  assert.equal(blockedWrong.ariaInvalid, true);
+  assert.match(blockedWrong.feedback, /輸入框仍可修改/u);
+  assert.match(blockedWrong.feedback, /阻擋項目/u);
+
+  const expired = gate.mergeApprovalGate({ ...passing, expired: true });
+  assert.equal(expired.inputDisabled, true);
+  assert.equal(expired.inputValue, "");
+  assert.equal(expired.confirmDisabled, true);
+  assert.equal(expired.ariaInvalid, false);
+  assert.match(expired.hint, /已逾時且不能復活/u);
+  assert.match(expired.feedback, /重新產生預覽不會讓這筆逾時核准恢復/u);
+  assert.match(expired.feedback, /尚未送出、尚未 Merge/u);
+  assert.equal(gate.mergeApprovalIntentTarget({ ...passing, expired: true }), "unavailable");
+
+  const decided = gate.mergeApprovalGate({ ...passing, decided: true });
+  assert.equal(decided.inputDisabled, true);
+  assert.equal(decided.inputValue, "");
+  assert.match(decided.feedback, /Merge 結果檔案/u);
+
+  const malformed = gate.mergeApprovalGate(undefined);
+  assert.equal(malformed.inputDisabled, true);
+  assert.equal(malformed.confirmDisabled, true);
+  assert.equal(gate.mergeApprovalIntentTarget(undefined), "unavailable");
+  assert.equal(gate.mergeApprovalIntentTarget({ ...passing, typed: "marge" }), "input");
+  assert.equal(gate.mergeApprovalIntentTarget({ ...passing, typed: "" }), "input");
+  assert.equal(gate.mergeApprovalIntentTarget({ ...passing, decided: true }), "unavailable");
+
+  const sameApproval = gate.mergeApprovalInputScope("approval-a", "approval-a", "MERGE INTO MAIN");
+  assert.equal(sameApproval.approvalId, "approval-a");
+  assert.equal(sameApproval.value, "MERGE INTO MAIN");
+  const freshApproval = gate.mergeApprovalInputScope("approval-a", "approval-b", "MERGE INTO MAIN");
+  assert.equal(freshApproval.approvalId, "approval-b");
+  assert.equal(freshApproval.value, "");
+  const malformedApproval = gate.mergeApprovalInputScope("approval-a", undefined, "MERGE INTO MAIN");
+  assert.equal(malformedApproval.approvalId, "");
+  assert.equal(malformedApproval.value, "");
+
+  const refused = gate.mergeApprovalFailureStatus("MAIN_MERGE_APPROVAL_EXPIRED");
+  assert.match(refused, /核准失敗/u);
+  assert.match(refused, /MAIN_MERGE_APPROVAL_EXPIRED/u);
+  assert.match(refused, /建立一筆全新的 snapshot-bound 核准/u);
+  assert.equal(gate.mergeApprovalRetryEligible({ state: "rejected" }), true);
+  assert.equal(gate.mergeApprovalRetryEligible({ state: "invalidated" }), true);
+  assert.equal(gate.mergeApprovalRetryEligible({ state: "expired" }), true);
+  assert.equal(gate.mergeApprovalRetryEligible({ state: "consumed" }), false);
+  assert.equal(gate.mergeApprovalRetryEligible({ state: "requested" }), false);
+  const nestedFailure = gate.mergeApprovalFailureStatus(
+    "MAIN_MERGE_APPROVAL_EXPIRED",
+    "NETWORK_UNAVAILABLE",
+  );
+  assert.match(nestedFailure, /live state 重新讀取也失敗/u);
+  assert.match(nestedFailure, /這不是 Merge 成功/u);
+  assert.match(nestedFailure, /MAIN_MERGE_APPROVAL_EXPIRED/u);
+  assert.match(nestedFailure, /NETWORK_UNAVAILABLE/u);
+});
+
+test("Merge outcome archive counts only verified success as merged", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const start = source.indexOf("/* @pure-start merge-history-buckets");
+  const end = source.indexOf("/* @pure-end merge-history-buckets */");
+  assert.ok(start > 0 && end > start, "room.js must expose the DOM-free outcome classifier");
+  const block = source.slice(start, end);
+  assert.doesNotMatch(
+    block,
+    /(?:\b(?:document|window|navigator|localStorage|state)\s*\.|\b(?:fetch|byId|api|setInterval|setTimeout|require|import)\s*\()/u,
+  );
+  const classifier = runInNewContext(
+    `${block}\n({ mergeHistorySucceeded, mergeHistoryBuckets });`,
+    Object.create(null) as object,
+    { timeout: 2_000 },
+  ) as {
+    mergeHistorySucceeded: (entry: unknown) => boolean;
+    mergeHistoryBuckets: (promotions: unknown, approvals: unknown) => {
+      mergedPromotions: unknown[]; reviewPromotions: unknown[];
+      notStartedApprovals: unknown[]; reviewApprovals: unknown[]; otherCount: number;
+    };
+  };
+  const verified = {
+    id: "verified", state: "applied", mainHeadAfter: "a".repeat(40),
+    observation: { authorizedMergeCommit: true },
+  };
+  const missingObservation = { id: "missing-observation", state: "applied", mainHeadAfter: "b".repeat(40) };
+  const missingHead = { id: "missing-head", state: "applied", observation: { authorizedMergeCommit: true } };
+  const rolledBack = { id: "rolled-back", state: "rolled-back", mainHeadAfter: "c".repeat(40) };
+  const approvals = [
+    { id: "expired", state: "expired" },
+    { id: "rejected", state: "rejected" },
+    { id: "invalidated", state: "invalidated" },
+    { id: "consumed-without-row", state: "consumed" },
+    { id: "approved-without-row", state: "approved" },
+  ];
+  const buckets = classifier.mergeHistoryBuckets(
+    [verified, missingObservation, missingHead, rolledBack],
+    approvals,
+  );
+  assert.equal(classifier.mergeHistorySucceeded(verified), true);
+  assert.equal(classifier.mergeHistorySucceeded({ ...verified, mainHeadAfter: "" }), false);
+  assert.equal(classifier.mergeHistorySucceeded(undefined), false);
+  assert.deepEqual(Array.from(buckets.mergedPromotions), [verified]);
+  assert.deepEqual(Array.from(buckets.reviewPromotions), [missingObservation, missingHead, rolledBack]);
+  assert.deepEqual(Array.from(buckets.notStartedApprovals), approvals.slice(0, 3));
+  assert.deepEqual(Array.from(buckets.reviewApprovals), approvals.slice(3));
+  assert.equal(buckets.otherCount, 8);
+  const everyRow = [
+    ...buckets.mergedPromotions,
+    ...buckets.reviewPromotions,
+    ...buckets.notStartedApprovals,
+    ...buckets.reviewApprovals,
+  ];
+  assert.equal(everyRow.length, 9, "the mutually exclusive buckets preserve every input row");
+  assert.equal(new Set(everyRow).size, 9, "no row can appear in two outcome buckets");
+  assert.equal(buckets.mergedPromotions.length + buckets.otherCount, 9);
+});
+
+test("Merge pending badge accepts only active unexpired requested approvals", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const start = source.indexOf("/* @pure-start merge-approval-pending */");
+  const end = source.indexOf("/* @pure-end merge-approval-pending */");
+  assert.ok(start > 0 && end > start);
+  const block = source.slice(start, end);
+  const pending = runInNewContext(
+    `${block}\nmergeApprovalPending;`,
+    Object.create(null) as object,
+    { timeout: 2_000 },
+  ) as (approval: unknown) => boolean;
+  const active = { id: "active", state: "requested", expired: false };
+  assert.equal(pending(active), true);
+  assert.equal(pending({ ...active, expired: true }), false);
+  assert.equal(pending({ ...active, state: "approved" }), false);
+  assert.equal(pending({ ...active, state: "rejected" }), false);
+  assert.equal(pending(undefined), false);
+  assert.deepEqual([active, { state: "requested", expired: true }, { state: "approved" }].filter(pending), [active]);
+});
+
+test("Merge task sidebar disappears when every request is complete or terminal", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const pendingStart = source.indexOf("/* @pure-start merge-approval-pending */");
+  const pendingEnd = source.indexOf("/* @pure-end merge-approval-pending */");
+  const summaryStart = source.indexOf("/* @pure-start merge-task-summary */");
+  const summaryEnd = source.indexOf("/* @pure-end merge-task-summary */");
+  assert.ok(pendingStart > 0 && pendingEnd > pendingStart && summaryStart > pendingEnd && summaryEnd > summaryStart);
+  const block = `${source.slice(pendingStart, pendingEnd)}\n${source.slice(summaryStart, summaryEnd)}`;
+  const summarize = runInNewContext(
+    `${block}\nmergeTaskSummary;`,
+    Object.create(null) as object,
+    { timeout: 2_000 },
+  ) as (approvals: unknown) => { pending: unknown[]; count: number; visible: boolean };
+  const terminal = summarize([
+    { state: "consumed", expired: false },
+    { state: "rejected", expired: false },
+    { state: "requested", expired: true },
+  ]);
+  assert.equal(terminal.count, 0);
+  assert.equal(terminal.visible, false);
+  assert.deepEqual(Array.from(terminal.pending), []);
+  const active = { state: "requested", expired: false };
+  const mixed = summarize([active, { state: "consumed", expired: false }]);
+  assert.equal(mixed.count, 1);
+  assert.equal(mixed.visible, true);
+  assert.deepEqual(Array.from(mixed.pending), [active]);
+  assert.match(source, /activeTask\.hidden = !summary\.visible/u);
+});
+
+test("Merge records shows nonnumeric attention only for outcomes requiring review", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const start = source.indexOf("/* @pure-start merge-records-attention */");
+  const end = source.indexOf("/* @pure-end merge-records-attention */");
+  assert.ok(start > 0 && end > start);
+  const block = source.slice(start, end);
+  const requiresAttention = runInNewContext(
+    `${block}\nmergeRecordsAttention;`,
+    Object.create(null) as object,
+    { timeout: 2_000 },
+  ) as (buckets: unknown) => boolean;
+  assert.equal(requiresAttention({ reviewPromotions: [{}], reviewApprovals: [] }), true);
+  assert.equal(requiresAttention({ reviewPromotions: [], reviewApprovals: [{}] }), true);
+  assert.equal(requiresAttention({
+    mergedPromotions: [{}],
+    reviewPromotions: [],
+    reviewApprovals: [],
+    notStartedApprovals: [{ state: "expired" }, { state: "rejected" }],
+  }), false);
+  assert.equal(requiresAttention(undefined), false);
+  assert.match(source, /attention\.hidden = !requiresReview/u);
+  assert.doesNotMatch(source, /merge-records-attention[\s\S]{0,500}textContent\s*=\s*String/u);
 });
 
 test("Web dashboard cancels only the exact active Writer run", async (t) => {

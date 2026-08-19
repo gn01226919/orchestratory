@@ -150,11 +150,21 @@ export interface HookEnvironment {
  * file rather than restoring it. Two steps that each look correct, one destroyed local secret.
  */
 export interface GitRestorePoint {
+  /**
+   * Persisted restore-point shape. Optional on the TypeScript interface only so an older in-memory
+   * broker/test double can still be read; every restore point produced by this build and every new
+   * promotion row carries version 2.
+   */
+  schemaVersion?: 2;
   head: string;
   /** The same inspection the rest of the product uses, computed once and shared. */
   inspection: GitInspection;
   /** Ignored paths, so the owner can be shown WHICH files a merge would destroy, not a warning. */
   ignoredPaths: string[];
+  /** Total ignored inventory size, including paths omitted from the bounded display list. */
+  ignoredPathsTotal?: number;
+  /** True means `ignoredPaths` is a prefix only; fingerprints still cover the complete inventory. */
+  ignoredPathsTruncated?: boolean;
   /** Empty only when this working tree may receive a merge; see `PROMOTION_BLOCKERS`. */
   blockers: string[];
   clean: boolean;
@@ -1305,9 +1315,12 @@ export class GitBroker {
     ));
     const reflogEntries = reflog.split("\n").filter(Boolean);
     return {
+      schemaVersion: 2,
       head,
       inspection,
       ignoredPaths: ignored.paths.slice(0, MAX_REPORTED_IGNORED_PATHS),
+      ignoredPathsTotal: ignored.files,
+      ignoredPathsTruncated: ignored.paths.length > MAX_REPORTED_IGNORED_PATHS,
       blockers,
       clean: blockers.length === 0,
       untrackedFiles: untracked.files,

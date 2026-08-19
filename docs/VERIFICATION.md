@@ -3638,3 +3638,299 @@ npm run check:release
 
 Loopback Web test 在受限 sandbox 中可能需要允許本機 `127.0.0.1` listen；這不代表允許外網、
 provider call 或使用者資料修改。
+
+## 2026-08-14：Owner 按鈕實際 promotion 與 durable Merge 歷史
+
+### 被重現的產品斷點
+
+修改前直接把 HTTP contract 改成要求「一次操作完成 merge」後執行
+`npm test -- test/merge-approval-web.test.ts`：`1 fail`，第一個失敗是 response 仍含
+`approvalToken`（expected false / actual true）。同一舊路徑的 main HEAD 完全不動、approval 只到
+`approved`，與真實畫面一致；因此不是按鈕文案或瀏覽器偶發問題。
+
+### 自動化證據
+
+`test/merge-approval-web.test.ts` 使用真實臨時 Git repositories、正式 loopback HTTP server、session
+cookie、Origin 與 CSRF：
+
+- exact phrase＋displayed preview digest 的一次 POST 產生真實 two-parent merge commit；approval=`consumed`、
+  promotion=`applied`、`authorizedMergeCommit=true`、main HEAD 精確等於 `mainHeadAfter`，candidate=`merged`。
+- response 與 history JSON 都不含 `approvalToken`；錯 phrase、錯 digest、malformed body、cross-Room、錯
+  task id 都 fail closed。
+- 同一 POST 重送回傳同一 promotion id，main HEAD 不再改變；證明 response loss 不造成 duplicate apply。
+- 新 `CollaborationService` instance 從相同 SQLite 重新列出同一筆 `applied` promotion，證明不是 browser
+  memory history。
+- 人工注入 grant 後、promotion intent 前的同步失敗：approval 以
+  `PROMOTION_NOT_STARTED_AFTER_GRANT` 轉為 `rejected`、promotions 為空、main HEAD/status 不變。
+- 另建真實 approved-without-promotion row 後關閉第一個 service，保存當時取得的 legacy token，再以
+  相同 SQLite data directory 啟動第二個 service：exact retry 將孤兒 grant 具名退休，History 只把它列為
+  `unpromotedApprovals` 而不冒充 promotion；以先前捕獲 token 直接呼叫 core promotion 仍得到
+  `MAIN_MERGE_APPROVAL_NOT_APPROVED`，main HEAD/status 不變、audit chain valid。
+- approve HTTP strict schema 明確拒絕 client 傳入 `approvalToken`；成功 response、durable History JSON 與
+  audit/ledger 都不含 raw token。這同時覆蓋舊 client-token surface 不可再從瀏覽器進入產品路徑。
+- promotion intent 一旦已 durable，retry 不會走 orphan retirement；它只依 exact approval id 回讀同一筆
+  promotion，並交由既有 observer 將 `applying` 收斂為 `applied`、`rolled-back` 或
+  `needs-manual-review`。讀不到或 observation 不成立從不轉成成功。
+- 跨 daemon 的 retire-vs-promote 以既有 state＋row-hash CAS fail closed：intent 先 commit、consume 後執行；
+  retirement 若在兩者間勝出，consume 得到 `MAIN_MERGE_APPROVAL_CONCURRENT_UPDATE`，promotion row 以
+  `APPROVAL_NOT_SPENT_NO_GIT_COMMAND_RAN` 轉為 `rolled-back`，Git 尚未啟動。既有 concurrent consumption
+  regression 亦證明同一 approval 最多一個 winner、最多一筆 promotion。
+- `GET /api/rooms/merge-history` 回傳 promotion/task/approval、main before/after、candidate HEAD、recovery、
+  observation、hooks 與 audit `chainValid`；pending badge 只計 `requested`。
+
+Focused result：`test/merge-approval-web.test.ts` = **3 pass / 0 fail**；連同
+`test/web.test.ts`、`test/merge-dialog-acceptance.test.ts` 為 **12 pass / 0 fail**。
+
+最終擴大 gate：`test/merge-approval.test.ts`、`test/merge-approval-web.test.ts`、
+`test/merge-promotion.test.ts`、`test/web.test.ts`、`test/merge-dialog-acceptance.test.ts` 合計
+**248 pass / 0 fail**。Room Claude 審查 #658 第一輪 BLOCKER；修復 orphan grant 與 legacy token surface
+後 #661 PASS；誠實更正 intent／consume 非同交易並確認 CAS fail-closed 後 #664 最終 PASS（3/3）。
+
+### 真實瀏覽器 gate
+
+使用 `/private/tmp` 的隔離 Git repository 與正式 Room 頁面完成；沒有讀取 cookie/storage/provider session，
+沒有外網或正式 main mutation：
+
+| 行為 | 真實瀏覽器觀察 |
+|---|---|
+| Scroll gate | 18 個檔案未捲到底時 input/button disabled；焦點進 diff 並按 End 到底後，提示改為「變更清單已捲到底」，input enabled |
+| Exact phrase | `MERGE INTO MAIN `（尾端空白）仍 disabled；精確 `MERGE INTO MAIN` 才 enabled |
+| In progress | 點擊後可見「正在核准並執行 single-use promotion；完成前不會顯示 Merge 成功」 |
+| Success truth | 最後顯示 `✓ Merge 成功`、`e7bd3c7f4dd4 → 81247088f770`、promotion/approval/recovery id；只有 durable applied＋authorized observation 分支會走到這裡 |
+| Pending → history | pending badge 1 → 0；history badge 0 → 1；歷史列出完整 before/after/candidate HEAD、task、promotion、approval、recovery、`AUTHORIZED_MERGE_COMMIT_OBSERVED_IN_MAIN`、hooks=`none observed` |
+| Restart | 關閉 server，以同一 data directory 建立新的 app/server；pending 仍為 0，同一筆 history 仍為 applied，audit chain valid |
+| TTL | 另一筆真實 approval 只把建立時鐘回撥（產品 15 分鐘常數未改）；頁面從 `00:00` 進入 `已逾時 · expired`，input disabled，阻擋區具名要求 fresh preview |
+
+~~新 gate digest：`76e5f66110048773ba0128ad6129959f2b8664343194c38a7dafca4bba30bccc`。~~
+此值已由下方 2026-08-14 確認短語回饋重驗取代；它只保留為前一版成功流程的歷史證據。
+這份 digest 現在包含 `approveMergeIntoMain()`，因為它已從「只 grant」變成真的 main write path；舊 digest
+只保留為歷史證據，不再描述本按鈕的完整行為。
+
+### 2026-08-14 確認短語回饋真實瀏覽器重驗
+
+以新 candidate 的正式 Room 頁面及既有 pending approval 做非破壞性重驗；沒有按下最終 Merge 按鈕，
+因此 canonical main 未修改。本輪把純 `mergeApprovalGate()` 納入 browser-acceptance digest，避免未來只改
+helper、外層 render function 未變時逃過 guard。
+
+| 行為 | 真實瀏覽器觀察 |
+|---|---|
+| Scroll gate | ~~未捲完時 input disabled，live feedback 明示「尚未捲完、這不是 Merge 結果、main 未修改」；在 diff region 逐頁捲到底後才重新開放輸入~~（此行為已由下方 2026-08-14 disabled-input 更正取代） |
+| 錯誤短語可重試 | 輸入 `marge into main` 後 input 仍可編輯、`aria-invalid=true`、primary button disabled；紅色 live feedback 明示「尚未送出、尚未 Merge、main 沒有被修改」並給出精確短語。沒有 HTTP request、沒有 Git 動作 |
+| Exact phrase | 改成精確 `MERGE INTO MAIN` 後 `aria-invalid=false`、primary button enabled；綠色 live feedback 仍明示「目前尚未 Merge，按下合併進 main 才會送出」。本輪刻意未按下，未取得新的 main mutation 核准 |
+| Re-preview | ~~點擊後重新取得 live preview、清空輸入並重新鎖住 scroll gate~~（此行為已由下方更正）；status 明示尚未 Merge與重新捲完內層清單 |
+| 其他安全 gate | blocker、terminal approval、空值與大小寫／前後空白由同一個純 gate regression 逐一執行；TTL 與 applied-success path 未改動，沿用上一段已完成的真實 expired／durable success 驗收 |
+
+~~新 gate digest：`f2563722c1efbf27d080a2df47e9c08188d24a17b86131c039bf4ad1fbba0f6d`。~~
+此值已由下方 nested-refresh 補強後的重驗取代。
+
+Focused gate：`test/web.test.ts`、`test/merge-dialog-acceptance.test.ts`、
+`test/merge-approval-web.test.ts` 合計 **13 pass / 0 fail**；另有 pinned TypeScript 5.8.3
+`tsc --noEmit`（使用 main 已安裝的 `@types` roots）、`check:syntax`、`check:hygiene`、
+`npm audit --audit-level=high` 與 `git diff --check` 全部 exit 0。
+
+Claude #675/#678 追問「核准 POST 已被拒絕，但 catch 內的 live refresh 本身也失敗」時是否會沉默。
+原實作確實讓 nested rejection 逃出 catch，雖不會 Merge，卻可能遮住原拒絕訊息；現已新增獨立 catch
+及 executable regression，斷言畫面同時保留 `MAIN_MERGE_APPROVAL_EXPIRED`、`NETWORK_UNAVAILABLE`
+並明示「這不是 Merge 成功」。這個 failure injection 是直接 regression，不冒充真實瀏覽器觀察。
+
+修正後以隔離的 18-file 真實 Git fixture 重跑正式 Room 頁面：逐頁捲完清單、輸入
+`marge into main`、改為 exact `MERGE INTO MAIN`、再按 re-preview；觀察結果仍分別為可重試紅色錯誤、
+尚未 Merge 的綠色就緒提示，以及~~重新鎖住~~只鎖 final button 且明示未 Merge（見下方更正）。沒有按最終 Merge，fixture main 與 canonical
+main 都未因本次驗收寫入。新 gate digest：
+~~`2ec95b2e6100c611d33731ed3ae14e4c311c2223f83b22e917188190afa6e89d`。~~
+
+### 2026-08-14 disabled-input 與 nested-scroll 更正
+
+Owner 在正式畫面再次重現：外層 dialog 已捲到底，但內層 change-list 尚未捲到底，產品把 input disabled，
+因此看起來像輸入框故障。這不是 Owner 操作錯誤；前一版把「能不能輸入」錯誤地等同「能不能提交」。
+新規則拆開兩件事：pending row 且 phrase 存在時 input 可用；final button 仍要求 exact phrase、內層清單
+捲到底、零 blocker、未逾時且非 terminal。
+
+以新的隔離 18-file 真實 Git fixture 在 Chrome 重驗，沒有按 final Merge：
+
+| 行為 | 真實瀏覽器觀察 |
+|---|---|
+| 內層未捲 | dialog 開啟後 `inputEnabled=true`、`buttonEnabled=false`；提示明示「深色變更檔案方框內捲動，不是外層視窗」 |
+| 未捲＋錯字 | 在 scrollTop 尚未到底時輸入 `marge into main` 成功；input 保持可修改、`aria-invalid=true`、button disabled，明示未送出／未 Merge／main 未修改 |
+| 未捲＋exact | 改為 `MERGE INTO MAIN` 後 input 仍可用、`aria-invalid=false`，但 button 仍 disabled；黃色 waiting feedback 明示短語正確、仍差內層 scroll gate |
+| 捲完內層 | 在深色 change-list 內逐頁捲到底後，既有 `MERGE INTO MAIN` 未被清空，button 才 enabled；仍明示尚未 Merge、需按 final button |
+| Re-preview | exact phrase 保留、input 仍可用、button 重新 disabled；status 與 feedback 都明示需重新捲完內層清單，沒有 Merge |
+
+Blocker、terminal、missing phrase 與 malformed input 由 executable pure regression 覆蓋：blocker 保留可編輯
+input但 final button fail closed；terminal／missing phrase disable input。~~新 gate digest：
+`a6f477979fdf8e1da18334816b94f072f86bc104a0e3ebe85d665fde3b2abe80`。~~
+此值已由下方 TTL／鍵盤／approval-id scope 補強後的重驗取代。
+
+### 2026-08-14 TTL、鍵盤與 approval-id scope 補強
+
+Claude #690 指出三個需要直接證據的邊界。修正後的 executable regression 證明：expired approval 會鎖定、
+清空 input，明示不可由 re-preview 復活且沒有送出／Merge；same approval id 保留 typed phrase，不同或
+malformed approval id 清空。靜態 contract 斷言 scroll region 有 `tabindex="0"`、
+`aria-describedby="merge-approval-scroll-hint"` 與 2px `:focus-visible`。
+
+另以含兩筆 pending approvals 的隔離真實 Git fixture 在 Chrome 驗收，沒有按 final Merge：
+
+| 行為 | 真實瀏覽器觀察 |
+|---|---|
+| 鍵盤可達 | exact phrase 在未捲時 input enabled、button disabled；focus 進內層 region 後可見 2px 綠色 outline，原生 `End` 將 `scrollTop` 從 0 推到 666.5/667，焦點仍在內層 region |
+| 鍵盤通過 gate | `End` 到底後 exact phrase 未清空、final button enabled；feedback 仍明示尚未 Merge、必須按 final button |
+| 同一 approval re-preview | exact phrase 保留、內層 `scrollTop` 回 0、final button disabled，status 明示尚未 Merge與需重讀內層清單 |
+| 切換新 approval | 在第一筆輸入 exact phrase 後切換至另一 approval id，input 立即清空且保持可編輯，final button disabled、scrollTop 0 |
+| TTL | 既有真實到期驗收仍證明 server/browser 會進 `expired`；本輪改動的 expired 分支由 exact pure helper 直接執行，斷言 input locked/cleared、不可復活與非成功 copy |
+
+~~新 gate digest：`b2b8bc64f3e5665e129346409938bc3fe2499064d53e7e8b084eb9e60e96c7e4`。~~
+此值只綁定 JS 函式，未涵蓋同輪修正的 blocking HTML／ARIA／focus CSS，因此由下值取代。
+
+TTL interaction composition 另由 source contract 鎖定：ticker 在 deadline 通過時先把同一 approval 的
+`expired=true`，同步 `renderMergeApproval()`；render 重新計算 blocker，`updateMergeApprovalGate()` 將
+expired bit 交給已直接執行的 pure gate，所以正在輸入／捲動中的 phrase 會立即清空並鎖定。若 client 在
+這個轉場前漏掉 tick 而發出 stale POST，server 的 TTL 重驗仍拒絕，既有 nested-failure regression 保證
+拒絕結果不會被 refresh error 吞掉或冒充成功。
+
+~~最終 served-bytes digest同時綁定：全部已驗收的 JS gate functions（含 expired branch 與
+`mergeApprovalInputScope`）、完整 blocking section、`#merge-approval-diff` 的 ARIA/focus markup，以及
+`:focus-visible` CSS rule：`8ee89df10d5430bba2f29cfb32b2c703aa6bc1dd925bd2d5f8ece7a6067ce722`。~~
+此值已由下方「未就緒 click 必須有回饋」重驗取代。
+
+### 2026-08-14 未就緒 Merge click 的可見、安全回饋
+
+Owner 在正式 4320 畫面輸入 exact phrase 後直接按 Merge；因 inner diff 尚未捲完，舊版 button 使用
+native `disabled`，瀏覽器完全不派發 click，因此沒有 HTTP、沒有 Merge，也沒有任何新的回饋。Durable
+查核證明該 approval 仍是 `requested`、canonical main 仍為 `a90a7fe`、沒有 promotion row；這不是 Merge
+失敗，而是 click 被 control 吞掉，但使用者無法從沉默分辨。
+
+修正版以 `mergeApprovalIntentTarget()` 執行同一份 gate 的 DOM-free 分流：`diff`／`input`／`blockers`／
+`unavailable` 絕不呼叫 approve endpoint，只聚焦並高亮缺少條件、調整外層 viewport、在 aria-live status
+明示「尚未送出／尚未 Merge」；只有 `submit` 分支呼叫 `approveMergeIntoMain()`。Pending button 使用
+`aria-disabled` 保留不可提交語意與視覺，terminal／expired／missing phrase 仍使用 native disabled。
+
+以含兩筆 pending approvals 的隔離真實 Git fixture 在 Chrome 重現 Owner 截圖順序，沒有按 ready 後的
+final Merge：
+
+| 行為 | 真實瀏覽器觀察 |
+|---|---|
+| Exact＋未捲 | input=`MERGE INTO MAIN`、inner `scrollTop=0`；button `nativeDisabled=false`、`aria-disabled=true` |
+| 點擊回饋 | click 後 inner region 取得焦點與 `is-attention`，外層畫面被帶回該 region；live status 明示「尚未送出、尚未 Merge」，result 仍 hidden |
+| 沒有副作用 | fixture main HEAD 仍 `b0b1b3608842c0c57866278a01362f3981203ca1`；SQLite approvals=`requested|2`、promotions=`0` |
+| 完成條件 | 內層按 `End` 到底（`37.5/38`）後 phrase 保留，導引 status 清空，`aria-disabled=false`；feedback 仍明示尚未 Merge、需再按 final button |
+
+Executable regression 逐一斷言 exact-ready→`submit`、exact-unread→`diff`、wrong/empty→`input`、
+blocker→`blockers`、expired/terminal/malformed→`unavailable`；source contract 另鎖定只有 `submit` branch
+可呼叫 approve，click listener 不再直接連到 write path。
+
+〜新 served-bytes digest 同時涵蓋上述 JS functions、intent handler、button HTML/ARIA、blocking/diff markup、
+focus/attention/aria-disabled CSS：`911e752c705ab7d210e6637cd5de45f95e0f1f333c754378e4c52bb734431118`。〜
+此值對應第一版 intent handler；加入 Enter 二段確認、in-flight guard、重複 aria-live 播報與
+status markup 後，已由下方重驗取代。
+
+#### 2026-08-14 強制重新整理後的最終 Chrome 重驗
+
+Owner 強制重新整理 4320 後，原 approval 已過 23:23 TTL，因此實際 Room 將待核准按鈕關閉並保留
+durable history；這是 terminal expiry，不是新的 click failure。為了不繞過 TTL 或觸碰 canonical main，
+使用兩筆全新 pending approvals 的隔離 Git／SQLite fixture 重驗最終 served bytes；全程沒有按下
+ready 後的 final Merge：
+
+| 行為 | 真實 Chrome 觀察 |
+|---|---|
+| Empty＋click | button `nativeDisabled=false`、`aria-disabled=true`；點擊後 input 取得焦點與 `is-attention`，live status 明示「尚未送出、尚未 Merge」，result hidden |
+| Exact＋未捲＋click | inner diff 取得焦點與 `is-attention`，live status 指名需在該內層方框讀到底；沒有 submit |
+| 重複點擊 | 相同文字重寫時 `intentGuideSequence` 由 `3` 進到 `4`，可重新觸發 aria-live；焦點仍在當下缺少的 diff |
+| Exact＋未捲＋Enter | input 的 Enter 經同一 intent router 把焦點導到 diff，result hidden，沒有 submit |
+| Exact＋已捲＋Enter | diff `scrollTop=38/scrollHeight=321`、button `aria-disabled=false`；Enter 只將焦點移到 final button，並明示「尚未送出」，仍需第二次明確啟動 |
+| 沒有副作用 | approvals 仍為 `requested|2`、promotions=`0`；fixture main 仍 clean，HEAD=`07d89c2b916745fc3b54a6377d65d98daca500c0` |
+
+直接 regression 另鎖定：physical disabled 只取決於 terminal input-disabled 或 in-flight；semantic
+`aria-disabled` 才反映 not-ready；Enter 包含 IME guards，ready 時不 POST；`mergeApprovalSubmitting`
+在第一個 await 前設定，並在 `finally` 還原；intent guide 以 versioned clear／`requestAnimationFrame`
+重寫，且每次 activation 都重新計算 target。
+
+最終 served-bytes digest 包含上述 gate／intent／Enter／in-flight／failure／render functions、完整
+blocking／diff／final-button／aria-live status HTML，以及 focus／attention／aria-disabled CSS：
+`19e30a27b1eac6dc5002bf28f569dab9e12cad68d2abe6c586ed9de59c70eed8`。
+
+### 2026-08-19 Merge 結果分區與 durable 成功計數重驗
+
+Owner 指出側欄「Merge 歷史 9」在關閉 dialog 後仍顯示 9，無法判斷任務是否已完成。直接查核目前
+durable store 證明 9 不是九筆待辦：它由 3 筆 `candidate_merge_promotions.state=applied` 與 6 筆沒有
+promotion 的 terminal approvals（3 rejected、3 expired）相加而成。修正後 pending 與 outcome archive
+分離，archive 再按 repository fact 分成 Merged／Review required／Merge never started。
+
+以 candidate served bytes 連到正式 Room API 及目前 store，在真實 Chrome 與 in-app browser 驗收；沒有
+按 Merge、沒有 Git 寫入、沒有讀取 cookie/storage/provider credential，也沒有外網請求：
+
+| 行為 | 真實瀏覽器觀察 |
+|---|---|
+| 側欄語意 | ~~`待核准 0`、`已 Merge 3`、`其他結果 6` 同時可見~~；Owner 同日更正：歷史數字本身仍會被理解成待辦，此行為由下方「歷史計數退出側欄」取代 |
+| 成功分類 | 三筆綠色列皆有 `applied`、`AUTHORIZED_MERGE_COMMIT_OBSERVED_IN_MAIN` 與非空 main HEAD after；缺任一正向事實的直接 regression 全部進 review |
+| 非成功分類 | 六筆 rejected／expired approvals 全在「未進入 Merge」，Review count 為 0；approved／consumed without promotion 的 synthetic regression 進 review，不進 merged |
+| 關閉語意 | ~~關閉後側欄數字仍為 3／6~~；durable row 確實保留，但 Owner 明確要求歷史數字不得留在任務側欄，修正版見下方 |
+| 鍵盤 | 由「其他結果」開啟時焦點直達對應 section；Esc 關閉並回到 `merge-history-other-open` |
+| 390px | Chrome viewport 390×844，document `scrollWidth=clientWidth=390`；Merge 任務區可見，按鈕高 44px；dialog width 370px、無頁面水平溢位 |
+| 200% 等效重排 | 1470px 桌面寬度折半為 735px 驗收，document `scrollWidth=clientWidth=735`；側欄改為完整 auto row，不再以 37px row 遮住 outcome controls |
+| 讀取失敗 | ~~refresh 開始把 archive badge 降為 `—`~~；修正版完全移除 sidebar archive badge，錯誤只在 dialog 內具名 |
+
+舊 digest `19e30a27b1eac6dc5002bf28f569dab9e12cad68d2abe6c586ed9de59c70eed8` 保留為先前 merge
+confirmation flow 的歷史證據；本次在完全沿用該已驗收 write path 的同時，新增 outcome classifier、archive
+render/open/close 與 responsive fragments。新的 served-bytes digest：
+`11002087d193472110f0f21d8717a794298d818c195009d45fd4ad497ba5c025`。
+
+### 2026-08-19 Owner 更正：歷史計數退出側欄
+
+Owner 進一步澄清：「完成就應該消除」是指 completed／rejected／expired merge 不得繼續以任何數字
+留在 sidebar，並不是要刪除 audit log。前一版雖把 9 拆成 3／6，仍把 archive totals 放在任務視覺區，
+因此不足以解決混淆。修正版採兩層語意：sidebar 只顯示 active、unexpired `requested` task；其 count
+為零時整個 control `display:none`。歷史只有一個無總數、無數字 aria-label 的「Merge 紀錄」入口；
+只有 review bucket 非空時附加不帶數字的「需檢查」提示，terminal-only archive 不觸發。~~3／0／6~~
+只在 dialog 的 Merged／Review required／Merge never started headings 中顯示；下方本輪真實 acceptance
+又建立並拒絕一筆 snapshot-bound request，另把先前新建後到期的一筆收進 archive，所以目前 durable
+counts 是 3／0／8。這些數字仍完全不出現在 sidebar。
+
+以目前真實 durable store 在 Chrome 驗收，沒有執行 Merge 或其他 Git 寫入：
+
+| 行為 | 真實 Chrome 觀察 |
+|---|---|
+| 完成後消失 | current approvals 沒有 active requested；`#merge-active-task` computed display=`none`，sidebar 不存在 0、9、3 或 6 的 merge task/history badge |
+| 歷史入口 | 目前 Review=0，所以可見文字只有 `Merge 紀錄 · Merge records`；accessible name 為「durable audit records，不是待辦」，不含總數 |
+| Durable logs | ~~開啟 dialog 後 counts 為 Merged=3、Review=0、Never started=6~~；本輪 request＋reject 驗收後為 Merged=3、Review=0、Never started=8，完整 promotion/approval/recovery facts 仍保留 |
+| Close | 關閉只收起 dialog 並回焦 `merge-history-open`；sidebar 仍沒有歷史數字，live status 明示 records closed, not cleared or counted as tasks |
+| 390px | viewport 390×844，document `scrollWidth=clientWidth=390`；active task 隱藏、無數字 records 入口完整可見 |
+| 直接 regression | terminal-only approvals 得到 `{count:0, visible:false}`；混入一筆 active requested 才得到 `{count:1, visible:true}` |
+| Review 提示 | review promotion 或未配對的非終局 approval 會顯示不帶數字的 `需檢查`；只有 merged＋expired／rejected terminal rows 時提示隱藏 |
+
+本輪另用真實 Chrome 對一筆新的、但不執行 promotion 的 request 驗收完整 client gate：TTL 由 14:46
+持續倒數；內層變更清單在 `scrollTop=0`／`scrollHeight=861`／`clientHeight=262` 時，即使確認短語正確，
+final control 仍 `aria-disabled=true`；錯誤的 `marge into main` 得到 `aria-invalid=true` 且明示「尚未送出、
+尚未 Merge」；內層按 End 到 `scrollTop=600` 後，精確 `MERGE INTO MAIN` 才使 final control
+`aria-disabled=false`。驗收沒有按下 Merge，而是按「拒絕並保留候選」；main 未修改，task control 立即
+`display:none`，該拒絕列只留在 Never started archive。Review=0，故「需檢查」提示保持隱藏。
+
+此版保留先前已驗收的 merge write path，只更改 sidebar task/archive 呈現與相應直接 regression。新的
+served-bytes digest `291a5e29071d79940104316c55e0d3db24a6be2ba532612fe2020a86b7e2738a`；
+它取代上方 `11002087…a025` 對 sidebar outcome controls 的描述。
+
+### 2026-08-19 restore v7 與失敗後 fresh approval regression
+
+- 真實 Git fixture 建立 257 個長 ignored paths，未截斷 JSON 明確超過舊 8,000-byte ceiling；promotion
+  `applied`，SQLite payload UTF-8 bytes ≤65,536，v2 明示 total=257、truncated=true，且 persisted
+  `ignoredFingerprint` 等於完整 live inventory。`differencesFrom` 不因 display paths 省略而捏造差異。
+- 真實 v6 8K CHECK table 以 v7 code 開啟：transactional rebuild 後 schema=7、row hash 逐字不變、task 與
+  applying indexes 重建、applied history 仍可讀。模擬 legacy complete payload 可讀；重算 row hash 後放入
+  不一致 v2 truncation metadata，public promotion 只能回 `unreadable`，不得回 applied。
+- Synthetic pre-intent failure 證明舊 approval 為 rejected、reason=`PROMOTION_NOT_STARTED_AFTER_GRANT`、
+  promotions=0、main HEAD/status 不變；fresh retry 產生不同 approval id 的 requested row，舊 row 仍 rejected，
+  `mainMutation=false`。Consumed／已有 promotion 的 row 不提供此出口。
+- 真實瀏覽器以隔離 fixture 驗收 failed→fresh request→input restored：History 先顯示舊 approval
+  `ce448666…` 為 rejected／Merge never started，按「建立新的預覽與核准」後建立不同 id
+  `a2e5f5bc…` 的 requested row；畫面明示舊核准保持終局、尚未 Merge，並自動切換到新核准。
+  新 input 由 `disabled=true` 變為 `false` 且 value 清空；輸入 `marge into main` 得到
+  `aria-invalid=true`，改為精確 `MERGE INTO MAIN` 得到 `aria-invalid=false`，但未讀完 inner diff 時
+  仍明示「尚未 Merge」且不送出。側欄只顯示一筆新待核准，History 仍只保留一筆舊 rejected
+  outcome；fixture main HEAD 保持 `a2c87d7874a79ddf98ca11520d7affb35350ea85`、工作樹乾淨，整個驗收
+  沒有按最終 Merge。新的 served-bytes digest：
+  `7de4477f7538e8de78fb5ee0f2bd6214e756a11fbcff182dc66652d9cfabd3ec`。
+- Room Claude review #765（第 1／3 輪）結論 PASS。審查後另逐項確認：promotion table constant 確實在
+  同一 transaction 內重建 task／applying indexes；real v6 migration regression 已實跑；promotion rows
+  刻意不在 constructor `#verify()` 全域驗證，舊 truncated legacy row 只會在其 public history view 變成
+  `unreadable`，不會鎖死 candidates/checkpoints/recovery；`requestMainMerge()` 的 structural open slot 與
+  per-task cap 會拒絕重複 retry POST 產生多筆 pending。殘餘風險是 observation payload 仍有自己的 8 KiB
+  上限（不屬本次 restore overflow）與 UI 有三個同義 retry 入口，但都走同一 in-flight guard。

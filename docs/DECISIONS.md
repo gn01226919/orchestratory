@@ -810,3 +810,106 @@ hook 清單真正把關的地方是 approval 綁定，在 merge 前一刻對 liv
 外部推進無法滿足它（已用「hook 途中 `git update-ref refs/heads/main`」實測：git 自己以 exit 128
 `cannot lock ref 'HEAD'` 中止，產品記為 `needs-manual-review` 並具名 `HEAD`，candidate 不轉 `merged`）。
 提議把「期間偵測」移入殘餘風險並註明失效條件；**待 Owner 裁決。**
+
+## ADR-036：Owner 最終按鈕是 grant＋promotion 的單一產品操作，成功後進 durable Merge 歷史
+
+**日期：** 2026-08-14
+**狀態：** Accepted
+
+### 背景
+
+實際 UI 驗收證明一個產品斷點：Owner 捲完 diff、輸入 `MERGE INTO MAIN` 並按「合併進 main」後，HTTP
+只呼叫 `grantMainMerge()`，把 raw token 回給瀏覽器，再把 approval 顯示成終局 `approved`。產品沒有
+任何後續 HTTP/MCP promotion 出口，所以畫面既沒有 merge，也不能告訴 Owner 成功或失敗。這違反
+ADR-033「不能把核准燒掉但 merge 沒發生」的載重理由，也讓已存在的 promotion audit 對正常使用者不可見。
+
+### 決策
+
+1. 本機 Owner 最終按鈕對應一個 `approveAndPromoteMainMerge()` service operation：先用原有完整綁定
+   grant，再把 raw token 只在 server 記憶體內傳給 `promoteMainMerge()`；token 不回瀏覽器、不入 audit、
+   不入 Room ledger。
+2. HTTP response loss 的 retry 不重新 grant 或 merge。以 exact `approval_id` 查 durable promotion row，
+   重驗 confirmation 與 preview digest 後回傳同一筆重新觀察結果。
+3. 只有 `promotion.state === "applied"`、`observation.authorizedMergeCommit === true`、有實際
+   `mainHeadAfter`，且 response 的 `mainMutated === true` 才顯示「Merge 成功」。`rolled-back` 顯示未套用；
+   `applying`／`needs-manual-review`／讀不到顯示需人工檢查，絕不自動重試。
+4. Pending 與 outcome archive 是不同工作語意：pending 只計仍可回答且未逾時的 `requested` approvals，
+   為零時整個 task control 消失；archive 在 sidebar 只有無總數的「Merge 紀錄」入口，只有 review bucket
+   非空時附加不帶數字的人工檢查提示。入口直接來自
+   `candidate_merge_promotions` 與沒有 promotion 的 terminal
+   approvals，依 Room/workspace scope 讀取並在 restart 後仍可重建。Archive 分成「已 Merge」「需要檢查」
+   與「未進入 Merge」；只有 applied＋authorized observation＋非空 main HEAD after 進入第一類，所有缺少
+   正向事實或 malformed 的列 fail closed 到第二類，rejected／expired／invalidated 且沒有 promotion 才進
+   第三類，三類 count 只顯示在 dialog 內；terminal-only rows 不產生側欄提示。關閉不清除 durable rows，
+   讀取失敗在 dialog 內具名。各列保留 promotion/approval/task、前後 HEAD、
+   candidate HEAD、recovery、state、timestamps、observation、hooks，不含 token。
+5. grant 已提交、但 promotion intent 尚未寫入而同步失敗時，因 `promoteMainMerge` 在 intent 前不會執行
+   Git，可安全把該孤兒 grant 以 `PROMOTION_NOT_STARTED_AFTER_GRANT` 退休。daemon 在兩者之間被殺時，
+   重啟後 exact retry 或 history 讀取做同一判斷、清除 token hash，並把該 terminal approval 列入
+   `unpromotedApprovals`；intent 一旦存在，任何錯誤都不走此路，結果完全交給 ADR-035 observer 收斂。
+6. 確認短語採六個可觀察狀態，而不是只靠 disabled input/button 暗示結果：尚未捲完或重新預覽後明示
+   ~~input 為何鎖定；~~ pending row 的 input 維持可編輯，並明示應捲「內層變更清單」而不是外層視窗；
+   錯誤短語保持可編輯並明示未送出、未 Merge、main 未修改；精確短語明示仍須按下
+   最終按鈕；只有第 3 項的 durable positive observation 才顯示 Merge 成功。client gate 不取代 server
+   對 confirmation、TTL、binding 與 single-use state 的重驗。server 拒絕後會 best-effort refresh live
+   approval；refresh 自身失敗也必須保留原拒絕、具名第二個錯誤並明示非成功，不得讓 nested exception
+   使畫面沉默。
+7. Pending input 的保存範圍是 exact approval id：同一筆 re-preview 可保留，切換 snapshot/approval 必須
+   清空。Expired approval 雖可能仍以 `requested` row 被讀到，但在 UI 視為不可復活，input 鎖定並清空，
+   只能由 candidate 另提新 request。內層 scroll region 是安全 gate，因此必須以鍵盤可聚焦／捲動、有
+   可見焦點且與 live hint 關聯；不能把滑鼠能力當成 Owner 的前提。
+8. 原生 disabled button 會吞掉 click，讓 Owner 無法分辨「安全阻擋」與「產品故障」。Pending 且 phrase
+   存在時，final button 改用 `aria-disabled` 表示不可提交但保留 intent click；未就緒 click 只把焦點／
+   外層 viewport 帶到缺少條件並在 live status 明示未送出，不得發 HTTP。只有 pure gate 回傳 `submit`
+   才進第 1 項 operation；terminal/expired/missing phrase 仍 native-disabled。
+9. Confirmation input 的 Enter 不直接觸發第 1 項 operation：未就緒走 guidance，ready 只 focus final
+   button，Owner 必須再 activation 一次。Client 以 await 前的 `mergeApprovalSubmitting` 與 `finally`
+   防重入，但 exactly-once 仍由 server single-use 保證。Guidance 每次 activation 都 versioned clear/rewrite
+   aria-live，並移除舊 target attention，讓重複與狀態變更都不是沉默或過時回饋。
+
+### 代價與殘餘風險
+
+- SQLite grant 與 intent 仍不是同一交易；程序若恰在兩者之間被 SIGKILL，會短暫留下 `approved` row，
+  下一次 retry/history 會具名退休。跨行程共用同一 data directory 時，service-local in-flight set 不足以
+  區分另一個仍活著的 daemon。若第二行程在 intent commit 前退休 approval，第一行程的 consume CAS 失敗；
+  若 intent 已先 commit，仍可能短暫同時存在「intent＋已退休 approval」，但該 intent 會在任何 Git command
+  前轉為 `rolled-back`。因此競爭會造成具名的假失敗，不會造成未授權 merge；正式單 daemon 啟動紀律仍是
+  避免這種可用性失敗的前提。
+- History 的讀取會重新觀察未結 promotion，可能更新 reconciliation row、audit 與 ledger；它不會重跑
+  merge、rollback、push 或 cleanup，因此不是純粹「無寫入任何 store」的 GET。
+- Native Full-Trust、candidate/main 邊界與外部副作用授權都沒有改變；按鈕只涵蓋已預覽的 main merge，
+  不含 push、publish、deploy、delete 或 cleanup。
+- 多一個 client-side 狀態機與 accessible live region；它降低 Owner 把錯字或 locked control 誤讀為
+  已送出的風險，但無法證明 server 結果，最終事實仍只來自 durable promotion/history。
+
+## ADR-037：Bounded restore schema 與 terminal approval 的 fresh-request 出口
+
+**日期：** 2026-08-19
+**狀態：** Accepted
+
+### 背景
+
+正式 repo 的 257 個 ignored paths 產生 13,475-byte `GitRestorePoint`，但
+`candidate_merge_promotions.restore_json` 只有 8,000-character CHECK。Owner 已 grant 後，intent insert 在
+任何 Git 寫入前失敗；service 正確退休舊 grant，GUI 卻只剩 terminal input，讓人誤以為重新整理應該復活
+同一授權。單純放大為無界 TEXT 會把可用性問題改成儲存／解析 DoS；單純丟掉 paths 又會把不完整 restore
+描述成完整。
+
+### 決策
+
+1. Schema v7 將 restore constraint 改為 65,536 UTF-8 bytes，writer 與 SQLite BLOB length 雙重驗證。
+2. Persisted restore schema v2 保存 `ignoredPathsTotal` 與 `ignoredPathsTruncated`；只有 path display prefix
+   可縮短，`ignoredFiles` 與完整 path＋content `ignoredFingerprint` 不變。Legacy row 只有在 list 可證明完整
+   時讀取；malformed current/legacy row fail closed。
+3. v6→v7 transactionally rebuild promotion table，逐欄複製 payload/hash 並重建 exclusive/task indexes；
+   不改寫舊 hash。Crash observer 與 public history 都走同一 strict parser。
+4. Terminal、未開始 promotion 的 approval 可由 Owner 建立 fresh request：server 先證明沒有 promotion row，
+   重新 preview live state，再產生新 approval UUID。舊 row 不復活、無 token 複製、無自動 Merge；UI 切換
+   新 id 時清空 phrase 並重置 scroll gate。已有 intent/consumed/unreadable outcome 必須到 history review。
+
+### 影響
+
+- Native Full-Trust Agent 能力、candidate/main 與 exact-seat 邊界不變；變更只在 GUI Owner promotion control
+  plane 與 durable schema。
+- 舊 runtime 不支援 schema v7，正式 runtime 切換前需成對備份 DB/runtime；rollback 不能只替換 executable。
+- 64 KiB 仍可能拒絕極端非路徑 metadata，這是具名 fail-closed 上限，不是自動壓縮或資料遺失授權。

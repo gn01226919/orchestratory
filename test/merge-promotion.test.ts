@@ -25,13 +25,16 @@ import {
   MERGE_UNACCOUNTED_ABANDON_CONFIRMATION,
   MERGE_UNREADABLE_ABANDON_CONFIRMATION,
   MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION,
+  MAX_PROMOTION_RESTORE_JSON_BYTES,
   type CandidateTask,
   type MergeApproval,
   type MergePromotion,
   type UnreadableMergePromotion,
 } from "../src/core/candidate-registry.ts";
 import { CollaborationService } from "../src/core/collaboration-service.ts";
-import { GitBroker, readExecutedHooks, readLeaderSessionOpened } from "../src/core/git-broker.ts";
+import {
+  GitBroker, readExecutedHooks, readLeaderSessionOpened, type GitRestorePoint,
+} from "../src/core/git-broker.ts";
 import { runCandidatePromotionsCommand } from "../src/main.ts";
 import { helpText } from "../src/help.ts";
 
@@ -362,6 +365,77 @@ test("a real promotion runs the repository's hooks and a preview never does", as
   // Measured, not asserted from a flag: the hooks left evidence on disk.
   const ran = (await readFile(marker, "utf8")).split("\n").filter(Boolean);
   assert.deepEqual(ran.sort(), ["commit-msg", "post-merge", "pre-merge-commit"]);
+});
+
+test("257 long ignored paths persist inside a byte-bounded restore point without losing the full fingerprint", async (t) => {
+  const f = await fixture(t);
+  for (let index = 0; index < 257; index += 1) {
+    const segments = [0, 1, 2, 3].map((part) =>
+      `${String(index).padStart(3, "0")}-${part}-${"ignored-segment".repeat(6)}`);
+    const directory = join(f.source, "ignored", ...segments);
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, `payload-${String(index).padStart(3, "0")}.cache`), `ignored ${index}\n`, "utf8");
+  }
+  const observed = await new GitBroker().restorePoint(f.source);
+  assert.equal(observed.ignoredFiles, 257);
+  assert.ok(Buffer.byteLength(JSON.stringify(observed), "utf8") > 8_000,
+    "the regression fixture did not exceed the retired 8 KiB ceiling");
+
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const promoted = await promote(f, approval, token);
+  assert.equal(promoted.promotion.state, "applied");
+
+  const db = new DatabaseSync(f.path, { readOnly: true });
+  const stored = db.prepare(`SELECT restore_json,
+    length(CAST(restore_json AS BLOB)) AS restore_bytes FROM candidate_merge_promotions WHERE approval_id=?`)
+    .get(approval.id) as unknown as { restore_json: string; restore_bytes: number };
+  db.close();
+  const restore = JSON.parse(stored.restore_json) as {
+    schemaVersion: number; ignoredPaths: string[]; ignoredPathsTotal: number;
+    ignoredPathsTruncated: boolean; ignoredFingerprint: string;
+  };
+  assert.equal(restore.schemaVersion, 2);
+  assert.equal(restore.ignoredPathsTotal, 257);
+  assert.equal(restore.ignoredPathsTruncated, true);
+  assert.ok(restore.ignoredPaths.length < restore.ignoredPathsTotal);
+  assert.ok(stored.restore_bytes <= MAX_PROMOTION_RESTORE_JSON_BYTES);
+  assert.equal(Buffer.byteLength(stored.restore_json, "utf8"), stored.restore_bytes);
+  assert.equal(restore.ignoredFingerprint, observed.ignoredFingerprint,
+    "truncating the path report changed the complete path+content fingerprint");
+  assert.equal((await new GitBroker().differencesFrom(
+    f.source, restore as unknown as GitRestorePoint,
+  )).includes("ignoredFiles"), false,
+    "an omitted display path was incorrectly reported as a restoration difference");
+});
+
+test("legacy complete restore rows remain readable while malformed v2 truncation metadata fails closed", async (t) => {
+  const f = await fixture(t);
+  const approval = await raise(f);
+  assert.equal((await promote(f, approval, await grant(f, approval))).promotion.state, "applied");
+  f.registry.close();
+
+  rewritePromotionRestore(f.path, (restore) => {
+    delete restore.schemaVersion;
+    delete restore.ignoredPathsTotal;
+    delete restore.ignoredPathsTruncated;
+    return restore;
+  });
+  const legacyReader = new CandidateRegistry(f.data);
+  assert.equal(readable((await legacyReader.promotions({ roomId: "demo", mainPath: f.source }))[0]).state, "applied");
+  legacyReader.close();
+
+  rewritePromotionRestore(f.path, (restore) => ({
+    ...restore,
+    schemaVersion: 2,
+    ignoredPathsTotal: Number(restore.ignoredFiles) + 1,
+    ignoredPathsTruncated: false,
+  }));
+  const malformedReader = new CandidateRegistry(f.data);
+  t.after(() => malformedReader.close());
+  const listed = (await malformedReader.promotions({ roomId: "demo", mainPath: f.source }))[0];
+  assert.equal(listed?.state, "unreadable",
+    "a malformed restore payload with a recomputed unkeyed row hash was treated as an applied fact");
 });
 
 for (const hookName of ["pre-merge-commit", "post-merge"]) {
@@ -1290,6 +1364,44 @@ function schemaVersion(path: string): number {
   return version;
 }
 
+function downgradePromotionRestoreConstraintToV6(path: string): string {
+  const db = new DatabaseSync(path);
+  const current = db.prepare(
+    "SELECT sql FROM sqlite_schema WHERE type='table' AND name='candidate_merge_promotions'",
+  ).get() as { sql: string };
+  const v6Sql = current.sql.replace(
+    /CHECK\(\s*length\(CAST\(restore_json AS BLOB\)\) BETWEEN 2 AND 65536\s*\)/u,
+    "CHECK(length(restore_json) BETWEEN 2 AND 8000)",
+  );
+  assert.notEqual(v6Sql, current.sql, "the current restore byte constraint was not found");
+  const rowHash = String((db.prepare(
+    "SELECT row_hash FROM candidate_merge_promotions LIMIT 1",
+  ).get() as { row_hash: string }).row_hash);
+  db.exec(`BEGIN IMMEDIATE;
+    ALTER TABLE candidate_merge_promotions RENAME TO candidate_merge_promotions_v7;
+    DROP INDEX candidate_merge_promotions_task;
+    DROP INDEX candidate_merge_promotions_applying;
+    ${v6Sql};
+    INSERT INTO candidate_merge_promotions (
+      id,approval_id,task_id,room_id,main_path,main_branch,candidate_head,recovery_ref,
+      main_head_before,main_head_after,restore_json,observation_json,state,owner_pid,
+      started_at_ms,updated_at_ms,row_hash,merge_pgid,merge_boot_at_sec
+    ) SELECT
+      id,approval_id,task_id,room_id,main_path,main_branch,candidate_head,recovery_ref,
+      main_head_before,main_head_after,restore_json,observation_json,state,owner_pid,
+      started_at_ms,updated_at_ms,row_hash,merge_pgid,merge_boot_at_sec
+    FROM candidate_merge_promotions_v7;
+    DROP TABLE candidate_merge_promotions_v7;
+    CREATE INDEX candidate_merge_promotions_task
+      ON candidate_merge_promotions(task_id, started_at_ms DESC);
+    CREATE UNIQUE INDEX candidate_merge_promotions_applying
+      ON candidate_merge_promotions(main_path) WHERE state='applying';
+    PRAGMA user_version=6;
+    COMMIT;`);
+  db.close();
+  return rowHash;
+}
+
 /**
  * The blast radius of a perfectly legitimate approval written by the previous release.
  *
@@ -1315,7 +1427,7 @@ test("an owner's approval from the previous release upgrades to a terminal state
   // Opening runs the real v4→v5 upgrade. It reads no approval row and rewrites none.
   const upgraded = new CandidateRegistry(f.data);
   t.after(() => upgraded.close());
-  assert.equal(schemaVersion(f.path), 6);
+  assert.equal(schemaVersion(f.path), 7);
   assert.equal(storedApproval(f.path, approval.id).row_hash, before.approvalHash,
     "the upgrade rewrote an existing approval row");
 
@@ -1720,6 +1832,31 @@ function rewritePromotionRow(path: string, change: (current: {
     ).run(ownerPid, observationJson, rowHash, pgid, boot, String(row.id)).changes),
     1,
   );
+  db.close();
+}
+
+/** Rewrites only restore_json and recomputes the public row digest, to test schema validation itself. */
+function rewritePromotionRestore(
+  path: string,
+  edit: (restore: Record<string, unknown>) => Record<string, unknown>,
+): void {
+  const db = new DatabaseSync(path);
+  const row = db.prepare("SELECT * FROM candidate_merge_promotions LIMIT 1").get() as unknown as
+    Record<string, string | number | null>;
+  const restoreJson = JSON.stringify(edit(JSON.parse(String(row.restore_json)) as Record<string, unknown>));
+  const base = [
+    row.id, row.approval_id, row.task_id, row.room_id, row.main_path, row.main_branch,
+    row.candidate_head, row.recovery_ref, row.main_head_before, row.main_head_after,
+    restoreJson, row.observation_json, row.state, row.owner_pid, row.started_at_ms, row.updated_at_ms,
+  ];
+  const pgid = row.merge_pgid;
+  const boot = row.merge_boot_at_sec;
+  const rowHash = createHash("sha256").update(JSON.stringify(
+    pgid === null && boot === null ? base : [...base, pgid, boot],
+  ), "utf8").digest("hex");
+  assert.equal(Number(db.prepare(
+    "UPDATE candidate_merge_promotions SET restore_json=?,row_hash=? WHERE id=?",
+  ).run(restoreJson, rowHash, String(row.id)).changes), 1);
   db.close();
 }
 
@@ -3708,7 +3845,7 @@ test("a v5 snapshot taken before the configuration fields existed is terminal, n
     rewindPreview(f.path, f.task.taskId, (preview) => {
       downgrade((preview.promotion as { hooks: Record<string, unknown> }).hooks);
     });
-    assert.equal(schemaVersion(f.path), 6, "the fixture stopped being a current-schema database");
+    assert.equal(schemaVersion(f.path), 7, "the fixture stopped being a current-schema database");
 
     const reopened = new CandidateRegistry(f.data);
     // Granting is tried FIRST, on a registry that has read nothing yet, so the refusal is produced
@@ -5032,7 +5169,7 @@ test("a v5 promotion database upgrades by name, and a newer one is refused befor
   const approval = await raise(f);
   assert.equal((await promote(f, approval, await grant(f, approval))).promotion.state, "applied");
   f.registry.close();
-  assert.equal(schemaVersion(f.path), 6);
+  assert.equal(schemaVersion(f.path), 7);
 
   const before = new DatabaseSync(f.path);
   const row = before.prepare("SELECT * FROM candidate_merge_promotions LIMIT 1")
@@ -5060,8 +5197,8 @@ test("a v5 promotion database upgrades by name, and a newer one is refused befor
 
   const upgraded = new CandidateRegistry(f.data);
   t.after(() => upgraded.close());
-  assert.equal(schemaVersion(f.path), 6, "opening a v5 database must move it to the version it now is");
-  assert.deepEqual(upgraded.integrity(), { schemaVersion: 6, quickCheck: "ok", rowsValid: true });
+  assert.equal(schemaVersion(f.path), 7, "opening a v5 database must move it to the version it now is");
+  assert.deepEqual(upgraded.integrity(), { schemaVersion: 7, quickCheck: "ok", rowsValid: true });
   assert.equal(readable((await upgraded.promotions({ roomId: "demo", mainPath: f.source }))[0]).state, "applied");
   const after = new DatabaseSync(f.path);
   const upgradedRow = after.prepare("SELECT row_hash FROM candidate_merge_promotions LIMIT 1")
@@ -5076,9 +5213,33 @@ test("a v5 promotion database upgrades by name, and a newer one is refused befor
   // The other direction, through the same guard an older build uses: a version this build does not
   // know is refused at open, by name, before anything reads or writes a row.
   const ahead = new DatabaseSync(f.path);
-  ahead.exec("PRAGMA user_version=7");
+  ahead.exec("PRAGMA user_version=8");
   ahead.close();
   assert.throws(() => new CandidateRegistry(f.data), /CANDIDATE_REGISTRY_SCHEMA_UNSUPPORTED/u);
+});
+
+test("a real v6 8K promotion table upgrades transactionally to the v7 UTF-8 byte bound", async (t) => {
+  const f = await fixture(t);
+  const approval = await raise(f);
+  assert.equal((await promote(f, approval, await grant(f, approval))).promotion.state, "applied");
+  f.registry.close();
+  const storedHash = downgradePromotionRestoreConstraintToV6(f.path);
+  assert.equal(schemaVersion(f.path), 6);
+
+  const upgraded = new CandidateRegistry(f.data);
+  t.after(() => upgraded.close());
+  assert.equal(schemaVersion(f.path), 7);
+  const db = new DatabaseSync(f.path, { readOnly: true });
+  const row = db.prepare("SELECT row_hash FROM candidate_merge_promotions LIMIT 1")
+    .get() as { row_hash: string };
+  const sql = String((db.prepare(
+    "SELECT sql FROM sqlite_schema WHERE type='table' AND name='candidate_merge_promotions'",
+  ).get() as { sql: string }).sql);
+  db.close();
+  assert.equal(row.row_hash, storedHash, "the table rebuild changed a hash-bound row");
+  assert.match(sql, /length\(CAST\(restore_json AS BLOB\)\) BETWEEN 2 AND 65536/u);
+  assert.doesNotMatch(sql, /length\(restore_json\) BETWEEN 2 AND 8000/u);
+  assert.equal(readable((await upgraded.promotions({ roomId: "demo", mainPath: f.source }))[0]).state, "applied");
 });
 
 /*

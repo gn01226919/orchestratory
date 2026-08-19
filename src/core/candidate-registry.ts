@@ -1161,6 +1161,12 @@ interface ReservedIdentifiers {
 /**
  * The schema this build writes.
  *
+ * v7 changes the promotion restore payload constraint from an 8,000-character ceiling to an
+ * explicit 64 KiB UTF-8 byte ceiling. The payload itself remains hash-bound, and its ignored-path
+ * report is bounded separately while the complete content fingerprint remains intact. The table is
+ * rebuilt transactionally because SQLite cannot alter a CHECK constraint in place; existing row
+ * bytes and row hashes are copied unchanged.
+ *
  * v6 is v5 plus `merge_pgid` and `merge_boot_at_sec`. Adding columns without moving this number
  * looked free — `ADD COLUMN` is additive and no stored hash moves — but it left the DOWNGRADE
  * direction with no name: an older build opening a database this one has touched still saw
@@ -1170,7 +1176,10 @@ interface ReservedIdentifiers {
  * not an answer an owner can act on. Moving the number makes the older build refuse at OPEN, by
  * name, with `CANDIDATE_REGISTRY_SCHEMA_UNSUPPORTED`, which is the check it already has.
  */
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
+/** Durable promotion restore records are bounded in bytes, not JavaScript or SQLite characters. */
+export const MAX_PROMOTION_RESTORE_JSON_BYTES = 64 * 1024;
+const RESTORE_POINT_SCHEMA_VERSION = 2;
 const MAX_LIST = 100;
 const MAX_TESTS = 32;
 const MAX_RISKS = 32;
@@ -1405,12 +1414,12 @@ const MERGE_PROMOTIONS_GROUP_COLUMNS = ["merge_pgid", "merge_boot_at_sec"] as co
  * The durable INTENT to write canonical main, and the record of what was observed afterwards.
  *
  * It exists because spending the approval and writing main cannot be one atomic act: one is a SQLite
- * transaction, the other is a subprocess mutating a working tree. What CAN be atomic is spending the
- * approval and recording that main is about to be written, and that is exactly what this row is —
- * inserted in the same transaction that consumes the approval, before git is invoked. A process that
- * dies at any point after that leaves this row behind saying "a promotion was under way", which is
- * the honest answer, and the observation that resolves it looks at the repository rather than
- * retrying anything.
+ * transition, the other is a subprocess mutating a working tree. The intent is committed first; the
+ * approval is then consumed by a row-hash-and-state compare-and-set, still before Git is invoked.
+ * A concurrent retirement can therefore leave an intent beside a terminal non-consumed approval,
+ * but that makes the consume CAS fail and the intent is settled rolled-back before any Git command.
+ * A process that dies after intent creation leaves this row behind saying "a promotion was under
+ * way"; the observation that resolves it reads the repository rather than retrying anything.
  *
  * `owner_pid` distinguishes "still running" from "died". Without it a reader could not tell a
  * promotion in flight in another process from a crashed one, and would have to either report every
@@ -1437,7 +1446,9 @@ const MERGE_PROMOTIONS_TABLE_SQL = `CREATE TABLE candidate_merge_promotions (
         recovery_ref TEXT NOT NULL CHECK(length(recovery_ref) BETWEEN 1 AND 512),
         main_head_before TEXT NOT NULL CHECK(length(main_head_before) BETWEEN 40 AND 64),
         main_head_after TEXT CHECK(main_head_after IS NULL OR length(main_head_after) BETWEEN 40 AND 64),
-        restore_json TEXT NOT NULL CHECK(length(restore_json) BETWEEN 2 AND 8000),
+        restore_json TEXT NOT NULL CHECK(
+          length(CAST(restore_json AS BLOB)) BETWEEN 2 AND ${MAX_PROMOTION_RESTORE_JSON_BYTES}
+        ),
         observation_json TEXT NOT NULL CHECK(length(observation_json) BETWEEN 2 AND 8000),
         state TEXT NOT NULL CHECK(state IN ('applying','applied','rolled-back','needs-manual-review')),
         owner_pid INTEGER NOT NULL CHECK(owner_pid > 0),
@@ -1674,6 +1685,139 @@ function mergePromotionHash(row: Omit<PromotionRow, "row_hash">): string {
       ? base
       : [...base, row.merge_pgid, row.merge_boot_at_sec],
   ));
+}
+
+const RESTORE_POINT_BASE_KEYS = [
+  "head", "inspection", "ignoredPaths", "blockers", "clean", "untrackedFiles", "ignoredFiles",
+  "worktreeFingerprint", "indexFingerprint", "untrackedFingerprint", "ignoredFingerprint",
+  "stashDigest", "stashEntries", "reflogEntries", "reflogDigest", "hooks",
+] as const;
+const RESTORE_POINT_V2_KEYS = [
+  ...RESTORE_POINT_BASE_KEYS, "schemaVersion", "ignoredPathsTotal", "ignoredPathsTruncated",
+] as const;
+
+function restoreInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) >= 0;
+}
+
+function restoreStringArray(value: unknown, max: number, maxLength: number): value is string[] {
+  return Array.isArray(value) && value.length <= max
+    && value.every((entry) => typeof entry === "string" && entry.length <= maxLength && !entry.includes("\0"));
+}
+
+/**
+ * Reads the hash-bound payload as data, never as a type assertion.
+ *
+ * Legacy rows are accepted only when their ignored list is demonstrably complete. Older builds
+ * silently sliced that list at 500 without recording the omission; accepting such a row as a full
+ * restoration description would be the forbidden "omitted paths were restored" claim. New rows
+ * carry the omission explicitly and retain the full ignored-content fingerprint independently.
+ */
+function parsePromotionRestorePoint(serialized: string): GitRestorePoint {
+  const bytes = Buffer.byteLength(serialized, "utf8");
+  if (bytes < 2 || bytes > MAX_PROMOTION_RESTORE_JSON_BYTES) {
+    throw new Error("MAIN_MERGE_PROMOTION_RESTORE_POINT_INVALID");
+  }
+  let parsed: unknown;
+  try { parsed = JSON.parse(serialized) as unknown; }
+  catch { throw new Error("MAIN_MERGE_PROMOTION_RESTORE_POINT_INVALID"); }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("MAIN_MERGE_PROMOTION_RESTORE_POINT_INVALID");
+  }
+  const value = parsed as Record<string, unknown>;
+  const version = value.schemaVersion;
+  const allowed = new Set(version === undefined ? RESTORE_POINT_BASE_KEYS : RESTORE_POINT_V2_KEYS);
+  if ((version !== undefined && version !== RESTORE_POINT_SCHEMA_VERSION)
+    || Object.keys(value).some((key) => !allowed.has(key as typeof RESTORE_POINT_V2_KEYS[number]))) {
+    throw new Error("MAIN_MERGE_PROMOTION_RESTORE_POINT_INVALID");
+  }
+  const inspection = value.inspection as Record<string, unknown> | null;
+  const hooks = value.hooks as Record<string, unknown> | null;
+  const hookFiles = hooks?.hooks;
+  const inside = hooks?.insideWorkingTree;
+  const ignoredPaths = value.ignoredPaths;
+  const ignoredFiles = value.ignoredFiles;
+  const ignoredTotal = version === RESTORE_POINT_SCHEMA_VERSION ? value.ignoredPathsTotal : ignoredFiles;
+  const ignoredTruncated = version === RESTORE_POINT_SCHEMA_VERSION
+    ? value.ignoredPathsTruncated
+    : false;
+  const hashFields = [
+    value.worktreeFingerprint, value.indexFingerprint, value.untrackedFingerprint,
+    value.ignoredFingerprint, value.stashDigest, value.reflogDigest,
+  ];
+  const inspectionValid = typeof inspection === "object" && inspection !== null
+    && !Array.isArray(inspection)
+    && Object.keys(inspection).every((key) => [
+      "root", "clean", "changedFiles", "changedLines", "changedBytes", "untrackedFiles",
+      "statusSummary", "fingerprint",
+    ].includes(key))
+    && typeof inspection.root === "string" && isAbsolute(inspection.root)
+    && typeof inspection.clean === "boolean"
+    && restoreInteger(inspection.changedFiles) && restoreInteger(inspection.changedLines)
+    && restoreInteger(inspection.changedBytes) && restoreInteger(inspection.untrackedFiles)
+    && typeof inspection.statusSummary === "string" && inspection.statusSummary.length <= MAX_STATUS_SUMMARY
+    && typeof inspection.fingerprint === "string" && HASH_PATTERN.test(inspection.fingerprint);
+  const hooksValid = typeof hooks === "object" && hooks !== null && !Array.isArray(hooks)
+    && Object.keys(hooks).every((key) => [
+      "hooksPath", "insideWorkingTree", "hooks", "drivers", "filters", "programs", "configDigest",
+      "unreadable", "fingerprint",
+    ].includes(key))
+    && typeof hooks.hooksPath === "string" && hooks.hooksPath.length <= 4_096
+    && (inside === null || restoreStringArray(inside, 8, 4_096))
+    && Array.isArray(hookFiles) && hookFiles.length <= 64
+    && hookFiles.every((entry) => typeof entry === "object" && entry !== null && !Array.isArray(entry)
+      && Object.keys(entry).every((key) => ["name", "sha256", "bytes"].includes(key))
+      && typeof (entry as Record<string, unknown>).name === "string"
+      && String((entry as Record<string, unknown>).name).length <= 255
+      && typeof (entry as Record<string, unknown>).sha256 === "string"
+      && HASH_PATTERN.test(String((entry as Record<string, unknown>).sha256))
+      && restoreInteger((entry as Record<string, unknown>).bytes))
+    && restoreStringArray(hooks.drivers, 1_000, 16_384)
+    && restoreStringArray(hooks.filters, 1_000, 16_384)
+    && restoreStringArray(hooks.programs, 1_000, 4_096)
+    && typeof hooks.configDigest === "string" && HASH_PATTERN.test(hooks.configDigest)
+    && typeof hooks.unreadable === "boolean"
+    && typeof hooks.fingerprint === "string" && HASH_PATTERN.test(hooks.fingerprint);
+  const ignoredMetadataValid = restoreInteger(ignoredFiles) && restoreInteger(ignoredTotal)
+    && ignoredTotal === ignoredFiles && restoreStringArray(ignoredPaths, 500, 4_096)
+    && ignoredPaths.length <= ignoredTotal
+    && (version === undefined
+      ? ignoredPaths.length === ignoredTotal
+      : typeof ignoredTruncated === "boolean" && ignoredTruncated === (ignoredPaths.length < ignoredTotal));
+  if (!HEAD_PATTERN.test(String(value.head)) || !inspectionValid || !hooksValid || !ignoredMetadataValid
+    || !restoreStringArray(value.blockers, 100, 128) || typeof value.clean !== "boolean"
+    || value.clean !== ((value.blockers as string[]).length === 0)
+    || !restoreInteger(value.untrackedFiles) || value.untrackedFiles !== inspection.untrackedFiles
+    || !hashFields.every((field) => typeof field === "string" && HASH_PATTERN.test(field))
+    || !restoreInteger(value.stashEntries) || !restoreInteger(value.reflogEntries)) {
+    throw new Error("MAIN_MERGE_PROMOTION_RESTORE_POINT_INVALID");
+  }
+  return parsed as GitRestorePoint;
+}
+
+/**
+ * Produces a bounded v2 payload. Only the display/path report may shrink; counts and the complete
+ * path+content fingerprint are copied unchanged. If non-path facts alone exceed the ceiling, the
+ * promotion refuses before its durable intent and before Git writes anything.
+ */
+function serializePromotionRestorePoint(point: GitRestorePoint): string {
+  const paths = [...point.ignoredPaths];
+  const total = point.ignoredFiles;
+  let serialized = "";
+  for (;;) {
+    serialized = JSON.stringify({
+      ...point,
+      schemaVersion: RESTORE_POINT_SCHEMA_VERSION,
+      ignoredPaths: paths,
+      ignoredPathsTotal: total,
+      ignoredPathsTruncated: paths.length < total,
+    });
+    if (Buffer.byteLength(serialized, "utf8") <= MAX_PROMOTION_RESTORE_JSON_BYTES) break;
+    if (paths.length === 0) throw new Error("MAIN_MERGE_PROMOTION_RESTORE_POINT_TOO_LARGE");
+    paths.pop();
+  }
+  parsePromotionRestorePoint(serialized);
+  return serialized;
 }
 
 /**
@@ -4628,7 +4772,7 @@ export class CandidateRegistry {
       recovery_ref: row.recovery_ref,
       main_head_before: restore.head,
       main_head_after: null,
-      restore_json: JSON.stringify(restore),
+      restore_json: serializePromotionRestorePoint(restore),
       observation_json: JSON.stringify(pending),
       state: "applying",
       owner_pid: process.pid,
@@ -4863,6 +5007,36 @@ export class CandidateRegistry {
       promotions.push(this.#publicPromotion(await this.#resolvePromotion(row)));
     }
     return promotions;
+  }
+
+  /**
+   * The durable promotion for one exact approval, if one has started.
+   *
+   * This exists for transport retries of the owner action. If the merge completed but the HTTP
+   * response was lost, the caller must read the already-recorded answer instead of attempting a
+   * second grant or a second Git command. A malformed row is never rounded down to "missing".
+   */
+  async promotionForApproval(input: {
+    approvalId: string;
+    roomId: string;
+    mainPath: string;
+  }): Promise<MergePromotion | undefined> {
+    this.#assertOpen();
+    if (typeof input.approvalId !== "string" || !UUID_PATTERN.test(input.approvalId)) {
+      throw new Error("MAIN_MERGE_APPROVAL_ID_INVALID");
+    }
+    const roomId = text(input.roomId, "CANDIDATE_ROOM_INVALID", 48);
+    if (!ROOM_PATTERN.test(roomId)) throw new Error("CANDIDATE_ROOM_INVALID");
+    const mainPath = await canonicalWorkspace(input.mainPath);
+    const row = this.#db.prepare(
+      "SELECT * FROM candidate_merge_promotions WHERE approval_id=?",
+    ).get(input.approvalId) as PromotionRow | undefined;
+    if (!row) return undefined;
+    this.#assertPromotionRow(row);
+    if (row.room_id !== roomId || row.main_path !== mainPath) {
+      throw new Error("MAIN_MERGE_PROMOTION_SCOPE_MISMATCH");
+    }
+    return this.#publicPromotion(await this.#resolvePromotion(row));
   }
 
   /** Merge approvals recorded for this exact Room/workspace, newest first. */
@@ -5494,6 +5668,33 @@ export class CandidateRegistry {
     }
   }
 
+  /**
+   * Rebuilds only the promotion table to replace its immutable CHECK constraint.
+   *
+   * Every stored value, including `restore_json` and `row_hash`, is copied byte-for-byte. A row
+   * outside the new bound makes the INSERT fail and rolls the entire migration back; opening then
+   * fails closed without leaving a half-upgraded ledger. Indexes are recreated before commit.
+   */
+  #upgradePromotionRestoreStorage(): void {
+    this.#db.exec(`BEGIN IMMEDIATE;
+      ALTER TABLE candidate_merge_promotions RENAME TO candidate_merge_promotions_v6;
+      DROP INDEX IF EXISTS candidate_merge_promotions_task;
+      DROP INDEX IF EXISTS candidate_merge_promotions_applying;
+      ${MERGE_PROMOTIONS_TABLE_SQL}
+      INSERT INTO candidate_merge_promotions (
+        id,approval_id,task_id,room_id,main_path,main_branch,candidate_head,recovery_ref,
+        main_head_before,main_head_after,restore_json,observation_json,state,owner_pid,
+        started_at_ms,updated_at_ms,row_hash,merge_pgid,merge_boot_at_sec
+      ) SELECT
+        id,approval_id,task_id,room_id,main_path,main_branch,candidate_head,recovery_ref,
+        main_head_before,main_head_after,restore_json,observation_json,state,owner_pid,
+        started_at_ms,updated_at_ms,row_hash,merge_pgid,merge_boot_at_sec
+      FROM candidate_merge_promotions_v6;
+      DROP TABLE candidate_merge_promotions_v6;
+      PRAGMA user_version=${SCHEMA_VERSION};
+      COMMIT;`);
+  }
+
   #upgrade(from: number): void {
     if (from === 1 || from === 3) this.#assertCompletionsReadable();
     if (from === 1) {
@@ -5524,12 +5725,13 @@ export class CandidateRegistry {
         PRAGMA user_version=${SCHEMA_VERSION}; COMMIT;`);
       return;
     }
-    if (from === 5) {
+    if (from === 5 || from === 6) {
       // v5 is this schema without the two merge-group columns. `#assertPromotionGroupColumns` adds
-      // them a moment from now and is idempotent, so the only thing left is the version itself.
-      // `mergePromotionHash` leaves the pair out while both are null, so every v5 row keeps the
-      // hash it was stored with and nothing is rewritten ([[PITFALLS]] #100).
-      this.#db.exec(`BEGIN IMMEDIATE; PRAGMA user_version=${SCHEMA_VERSION}; COMMIT;`);
+      // them before the v7 table rebuild. Null columns remain excluded from the legacy hash, so v5
+      // and v6 rows both retain their stored row hash. The subsequent rebuild changes only the
+      // byte-bound CHECK and the schema version.
+      this.#assertPromotionGroupColumns();
+      this.#upgradePromotionRestoreStorage();
       return;
     }
     // v2 carried the request ledger without `owner_token`. It was never committed or released, so
@@ -6382,7 +6584,7 @@ export class CandidateRegistry {
     state: MergePromotionState;
     headAfter: string | null;
   }> {
-    const restore = JSON.parse(row.restore_json) as GitRestorePoint;
+    const restore = parsePromotionRestorePoint(row.restore_json);
     const previous = JSON.parse(row.observation_json) as MergePromotionObservation;
     // Every source, for the same reason `promotionPending` reads every source: this is the other
     // half of the decision that hands the owner a recovery command, and it was reading one. It
@@ -7074,7 +7276,7 @@ export class CandidateRegistry {
       || row.updated_at_ms < row.started_at_ms) {
       throw new Error("MAIN_MERGE_PROMOTION_ROW_TAMPERED");
     }
-    JSON.parse(row.restore_json);
+    parsePromotionRestorePoint(row.restore_json);
     JSON.parse(row.observation_json);
     // The two columns are one fact written together: every write that sets either sets both, and a
     // row written before they existed carries NULL in BOTH. Half of the pair is therefore damage in
@@ -8038,9 +8240,10 @@ export class CandidateRegistry {
   }
 
   /**
-   * The UPDATE itself, without a transaction of its own, so that promotion can put it in the SAME
-   * transaction as the durable intent to write main. That co-commit is the whole of bar item 1:
-   * spending the approval and recording that main is about to change are one decision or neither.
+   * The conditional UPDATE shared by grant, retirement and consumption. Each caller wraps it in a
+   * SQLite write transaction; the row hash plus previous state form the compare-and-set. Promotion
+   * intentionally commits its intent first, then calls this transition before Git. If another
+   * process retired the row in between, consumption loses the CAS and the intent is rolled back.
    */
   #updateMergeApprovalRow(previous: MergeApprovalRow, fields: Partial<MergeApprovalRow>): MergeApprovalRow {
     if (MERGE_APPROVAL_TERMINAL.has(previous.state)) throw new Error("MAIN_MERGE_APPROVAL_NOT_PENDING");
