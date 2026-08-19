@@ -1733,6 +1733,25 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(mergeDialogScript, /entry\?\.observation\?\.authorizedMergeCommit === true/u);
   assert.match(mergeDialogScript, /value\.mainMutated === true/u);
   assert.match(mergeDialogScript, /Merge 成功 · Merge succeeded/u);
+  assert.match(mergeDialogScript, /function returnToRoomAfterSuccessfulMerge\(\)/u);
+  assert.match(mergeDialogScript, /closeMergeApprovalDialog\(\);\s+switchView\("ledger"\);\s+byId\("post-input"\)\?\.focus\(\);/u);
+  assert.match(mergeDialogScript, /const succeeded = mergeHistorySucceeded\(promotion\) && value\.mainMutated === true;/u);
+  assert.match(mergeDialogScript, /完成並回到 Room 主畫面 · Done & return to Room/u);
+  assert.equal(
+    mergeDialogScript.match(/完成並回到 Room 主畫面 · Done & return to Room/gu)?.length,
+    1,
+  );
+  assert.match(
+    mergeDialogScript,
+    /if \(succeeded\) \{[\s\S]*?returnButton = document\.createElement\("button"\);[\s\S]*?\} else if \(promotion\.state === "rolled-back"/u,
+  );
+  const nonSuccessResultBranches = mergeDialogScript.slice(
+    mergeDialogScript.indexOf('} else if (promotion.state === "rolled-back"'),
+    mergeDialogScript.indexOf("log.textContent =", mergeDialogScript.indexOf('} else if (promotion.state === "rolled-back"')),
+  );
+  assert.doesNotMatch(nonSuccessResultBranches, /merge-success-return|Done & return to Room/u);
+  assert.match(mergeDialogScript, /returnButton\.addEventListener\("click", returnToRoomAfterSuccessfulMerge\);/u);
+  assert.match(mergeDialogScript, /if \(returnButton\) result\.append\(returnButton\);\s+result\.hidden = false;\s+returnButton\?\.focus\(\);/u);
   assert.match(mergeDialogScript, /尚未能確認 Merge 成功 · Merge requires review/u);
   assert.match(mergeDialogScript, /不會重複 apply/u);
   // Rejection describes what this ACTION did and never declares the current state of anything: the
@@ -1758,6 +1777,7 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomStyles, /\.merge-approval-diff:focus-visible \{ outline: 2px solid var\(--accent\); outline-offset: 2px; \}/u);
   assert.match(roomStyles, /\.merge-file-tag\.is-mode/u);
   assert.match(roomStyles, /\.merge-approval-recovery \{/u);
+  assert.match(roomStyles, /\.merge-success-return \{ min-height: 44px;/u);
   assert.match(roomStyles, /\.merge-confirmation-feedback\.is-invalid/u);
   assert.match(roomStyles, /#merge-approval-confirm\[aria-disabled="true"\]:not\(:disabled\)/u);
   assert.match(roomStyles, /merge-requirement-attention/u);
@@ -2315,6 +2335,9 @@ test("Merge outcome archive counts only verified success as merged", async () =>
     approvals,
   );
   assert.equal(classifier.mergeHistorySucceeded(verified), true);
+  assert.equal(classifier.mergeHistorySucceeded(missingObservation), false);
+  assert.equal(classifier.mergeHistorySucceeded(missingHead), false);
+  assert.equal(classifier.mergeHistorySucceeded({ ...verified, state: "needs-manual-review" }), false);
   assert.equal(classifier.mergeHistorySucceeded({ ...verified, mainHeadAfter: "" }), false);
   assert.equal(classifier.mergeHistorySucceeded(undefined), false);
   assert.deepEqual(Array.from(buckets.mergedPromotions), [verified]);

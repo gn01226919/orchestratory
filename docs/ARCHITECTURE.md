@@ -203,6 +203,11 @@ Primary button 在 pending/phrase-present 時不使用 native `disabled`（它�
 Input 的 Enter handler 刻意不把 `submit` target 直接送出：它只 focus final button 並要求第二次 activation，
 保留最高風險動作的明確 final-button 手勢；其他 target 委派相同 guidance。`mergeApprovalSubmitting` 在任何
 await 前設為 true、native-disable button，`finally` 釋放，server single-use 仍是最終 authority。
+
+成功結果的「完成並回到 Room 主畫面」位於純 presentation boundary：它只呼叫既有 dialog close、
+`switchView("ledger")` 與 composer focus，不呼叫 API、不改 promotion／approval row，也不清除 Merge History。
+該 DOM control 只在 `applied + authorizedMergeCommit + mainMutated` 的同一正向分支建立；rolled-back、
+uncertain 與 request failure 沒有這個出口，避免把「離開錯誤畫面」誤畫成成功。
 Guidance 用遞增 sequence 清空後在下一 animation frame 重寫 aria-live；清除／新 target 會遞增 sequence
 取消舊 callback，focus 前也移除三個 possible targets 的舊 `is-attention`。
 這是使用者回饋層，不改變 server 的 exact phrase、snapshot binding 或 promotion contract。
