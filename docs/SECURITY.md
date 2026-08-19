@@ -117,6 +117,12 @@ bounded metadata，固定小於等於 64 KiB，使用 workspace 外的 0700 dire
   missing-phrase 才鎖定並清空 input；expired copy 必須說明該 approval 已死且 re-preview 不會復活。
   confirmation value 以 approval id 為 scope：同一筆 re-preview 可保留，切換新 approval 必須清空，避免
   舊意圖被誤帶到不同 snapshot。內層 scroll region 必須可由鍵盤聚焦／捲動並有可見焦點。
+- Terminal approval 的 input 鎖定是 single-use 保護，不得移除；恢復路徑必須建立新 approval id。Web retry
+  端點只接受 terminal、未建立 promotion row 的舊核准，重新跑 live preview 與全部 server gates，且只寫
+  `requested` row；舊 token/state 不複製。已有 promotion 或讀不到 outcome 時 fail closed 到 history review。
+- `restore_json` 的限制以 UTF-8 bytes 在程式與 SQLite 各驗一次，最大 64 KiB。ignored path list 的 omission
+  必須有 total/truncated metadata，完整內容 fingerprint 不省略；legacy list 若不能證明完整即拒讀。Schema
+  migration 交易式複製 hash-bound rows，malformed row 即使重算無金鑰 row hash 也不得成為正向收斂事實。
 - Enter 在 confirmation input 內不得直接 submit；ready 只 focus final button，要求另一個明確按鍵／click。
   Client `mergeApprovalSubmitting` 必須在第一個 await 前阻擋第二次 activation，並以 `finally` 收斂；這只
   避免重疊 UI，不能取代 server single-use。aria-live guidance 以 versioned clear→next-frame set 重播，

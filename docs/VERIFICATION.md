@@ -3907,3 +3907,30 @@ final control 仍 `aria-disabled=true`；錯誤的 `marge into main` 得到 `ari
 此版保留先前已驗收的 merge write path，只更改 sidebar task/archive 呈現與相應直接 regression。新的
 served-bytes digest `291a5e29071d79940104316c55e0d3db24a6be2ba532612fe2020a86b7e2738a`；
 它取代上方 `11002087…a025` 對 sidebar outcome controls 的描述。
+
+### 2026-08-19 restore v7 與失敗後 fresh approval regression
+
+- 真實 Git fixture 建立 257 個長 ignored paths，未截斷 JSON 明確超過舊 8,000-byte ceiling；promotion
+  `applied`，SQLite payload UTF-8 bytes ≤65,536，v2 明示 total=257、truncated=true，且 persisted
+  `ignoredFingerprint` 等於完整 live inventory。`differencesFrom` 不因 display paths 省略而捏造差異。
+- 真實 v6 8K CHECK table 以 v7 code 開啟：transactional rebuild 後 schema=7、row hash 逐字不變、task 與
+  applying indexes 重建、applied history 仍可讀。模擬 legacy complete payload 可讀；重算 row hash 後放入
+  不一致 v2 truncation metadata，public promotion 只能回 `unreadable`，不得回 applied。
+- Synthetic pre-intent failure 證明舊 approval 為 rejected、reason=`PROMOTION_NOT_STARTED_AFTER_GRANT`、
+  promotions=0、main HEAD/status 不變；fresh retry 產生不同 approval id 的 requested row，舊 row 仍 rejected，
+  `mainMutation=false`。Consumed／已有 promotion 的 row 不提供此出口。
+- 真實瀏覽器以隔離 fixture 驗收 failed→fresh request→input restored：History 先顯示舊 approval
+  `ce448666…` 為 rejected／Merge never started，按「建立新的預覽與核准」後建立不同 id
+  `a2e5f5bc…` 的 requested row；畫面明示舊核准保持終局、尚未 Merge，並自動切換到新核准。
+  新 input 由 `disabled=true` 變為 `false` 且 value 清空；輸入 `marge into main` 得到
+  `aria-invalid=true`，改為精確 `MERGE INTO MAIN` 得到 `aria-invalid=false`，但未讀完 inner diff 時
+  仍明示「尚未 Merge」且不送出。側欄只顯示一筆新待核准，History 仍只保留一筆舊 rejected
+  outcome；fixture main HEAD 保持 `a2c87d7874a79ddf98ca11520d7affb35350ea85`、工作樹乾淨，整個驗收
+  沒有按最終 Merge。新的 served-bytes digest：
+  `7de4477f7538e8de78fb5ee0f2bd6214e756a11fbcff182dc66652d9cfabd3ec`。
+- Room Claude review #765（第 1／3 輪）結論 PASS。審查後另逐項確認：promotion table constant 確實在
+  同一 transaction 內重建 task／applying indexes；real v6 migration regression 已實跑；promotion rows
+  刻意不在 constructor `#verify()` 全域驗證，舊 truncated legacy row 只會在其 public history view 變成
+  `unreadable`，不會鎖死 candidates/checkpoints/recovery；`requestMainMerge()` 的 structural open slot 與
+  per-task cap 會拒絕重複 retry POST 產生多筆 pending。殘餘風險是 observation payload 仍有自己的 8 KiB
+  上限（不屬本次 restore overflow）與 UI 有三個同義 retry 入口，但都走同一 in-flight guard。

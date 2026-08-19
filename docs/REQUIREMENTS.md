@@ -126,6 +126,14 @@ checkpoint，彙整：
   target 改變時移除舊 attention 並重新計算，不得讓 screen reader 或可視焦點停在舊缺口。
 - 核准 POST 被拒絕後，即使重新讀取 live approval 也失敗，GUI 仍必須保留原拒絕原因、具名 refresh
   failure 並明示「這不是 Merge 成功」；nested read error 不得把結果變成沉默或成功。
+- 核准在 promotion intent／任何 Git 寫入前失敗時，舊 approval 必須保持 terminal 且不可復活；Owner
+  可由同一 dialog 明確要求重新讀取 live state，系統建立**不同 approval id** 的新 snapshot-bound request、
+  自動切換並恢復輸入。此操作不得自動 grant／Merge；若舊 approval 已有 promotion row 或狀態不確定，
+  必須導向 Merge 紀錄人工核對，不得提供重複 apply 出口。
+- Durable promotion restore point 必須以 UTF-8 bytes 設定有限上界，不得只把 SQLite TEXT 上限無界放大。
+  ignored path 顯示清單可以截斷，但必須持久保存 schema version、總數與 truncation flag；完整 path＋content
+  fingerprint 不得截斷。省略顯示路徑不得被解讀為「已恢復」或「沒有差異」，malformed／不一致 legacy 或
+  current payload 必須 fail closed。Candidate 寫入路徑的 overwrite scan 仍須使用完整 preview 清單。
 - 待處理區只顯示仍可回答且未逾時的 `requested` 記錄；零筆時整個 task control 消失，不留下 `0` 或
   歷史總數 badge。Durable 結果檔案必須是獨立、無數字徽章的「Merge 紀錄」入口；只有 classifier
   找到 `needs-manual-review`、malformed／不完整 promotion 或沒有 promotion 的非終局 approval 時，入口

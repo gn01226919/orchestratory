@@ -339,6 +339,10 @@ output: {
   → `{ approval; promotion; authorization; mainMutated; replayed }`（raw token 不離開 server）
 - `POST /api/rooms/merge-approvals/reject { room, approvalId, reason? }`
   → `{ approval; deletedByThisRejection: "nothing"; mainMutation: false }`
+- `POST /api/rooms/merge-approvals/retry { room, approvalId }`
+  → `201 { approval; supersedesApprovalId; mainMutation: false }`。只接受沒有 promotion row 的 terminal
+  `rejected|invalidated|expired` approval；它重新執行等同 `main_merge_preview` 的 live read/gates，再建立新的
+  `requested` row。這不是 MCP authority、不是 grant、不是舊 token replay，也不執行 Merge。
 - `GET /api/rooms/merge-history?room=<id>[&taskId=<uuid>]`
   → `{ promotions: (MergePromotion | UnreadableMergePromotion)[];
   unpromotedApprovals: MergeApproval[]; chainValid: boolean }`

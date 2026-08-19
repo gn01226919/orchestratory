@@ -209,6 +209,20 @@ Guidance 用遞增 sequence 清空後在下一 animation frame 重寫 aria-live�
 核准 POST 的 error path 會 best-effort 重新讀 live approval；該讀取另有獨立 catch，失敗時同時保留原拒絕
 與 refresh failure，並固定標示非成功，避免 nested error 吞掉 Owner 唯一可見的結果。
 
+2026-08-19 起，terminal approval 不再只有鎖死的 input：`POST /api/rooms/merge-approvals/retry` 先以
+Room/workspace scope 讀舊 row，僅接受 `rejected|invalidated|expired` 且**沒有 promotion row** 的結果，
+再從 completed candidate 重新計算 live preview/gates，寫入新 UUID 的 `requested` approval。它不復活舊
+row、不產生 token、不執行 Git；UI 清空舊 approval-scoped phrase、自動載入新 id 並重置 scroll gate。
+`consumed`、已有 intent、unreadable 或 unresolved promotion 一律不走此出口。
+
+Promotion restore payload 使用 schema v2 與兩層上界：SQLite
+`length(CAST(restore_json AS BLOB)) <= 65536`，寫入前也以 `Buffer.byteLength(..., "utf8")` 執行同一限制。
+Serializer 只會縮短 `ignoredPaths` 顯示 prefix，並同步保存 `ignoredPathsTotal`、
+`ignoredPathsTruncated`；`ignoredFingerprint` 始終涵蓋完整 path＋content inventory。v6→v7 以單一
+`BEGIN IMMEDIATE` rebuild table、逐欄複製舊 row 與 hash、重建 indexes 後才更新 schema version；任一步
+失敗整體 rollback。Reader 對 legacy payload 只在 path list 等於 ignored total 時接受，v2 metadata 不一致
+或其他 malformed shape 使 promotion row unreadable，crash observer 不得把它當作 restored/applied 證據。
+
 Promotion live gate 的 attributes 檢查由 `GitBroker.restorePoint(main, candidatePaths)` 執行。它把完整
 preview 中所有非刪除目標路徑傳給 `git check-attr`，因此候選新增的、main 尚不存在的副檔名也會被全域
 attributes 規則涵蓋；preview 截斷時仍由既有 blocker 拒絕，不以不完整路徑清單放行。

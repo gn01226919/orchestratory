@@ -1688,6 +1688,11 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(mergeDialogScript, /preview\.largeFileScanTruncated/u);
   assert.match(mergeDialogScript, /blockingSection\.hidden = blockers\.length === 0;/u);
   assert.match(mergeDialogScript, /function repreviewMergeApproval\(/u);
+  assert.match(mergeDialogScript, /function retryMergeApprovalWithFreshSnapshot\(/u);
+  assert.match(mergeDialogScript, /\/api\/rooms\/merge-approvals\/retry/u);
+  assert.match(mergeDialogScript, /state\.mergeApprovalInputApprovalId = ""/u);
+  assert.match(mergeDialogScript, /await loadMergeApproval\(fresh\.id\)/u);
+  assert.match(mergeDialogScript, /舊核准.*保持終局/u);
   // Mode changes, submodules and opaque files are marked as such, not as ordinary edits.
   assert.match(mergeDialogScript, /模式變更 \$\{file\.mode\.from\} → \$\{file\.mode\.to\}，不是一般檔案編輯 · mode change, not an ordinary edit/u);
   assert.match(mergeDialogScript, /Submodule 指標變更，不是一般檔案編輯 · submodule pointer, not an ordinary edit/u);
@@ -2132,7 +2137,7 @@ test("Merge confirmation gives truthful, retryable feedback for exact and incorr
     /(?:\b(?:document|window|navigator|localStorage|state)\s*\.|\b(?:fetch|byId|api|setInterval|setTimeout|require|import)\s*\()/u,
   );
   const gate = runInNewContext(
-    `${block}\n({ mergeApprovalGate, mergeApprovalInputScope, mergeApprovalIntentTarget, mergeApprovalFailureStatus });`,
+    `${block}\n({ mergeApprovalGate, mergeApprovalInputScope, mergeApprovalIntentTarget, mergeApprovalFailureStatus, mergeApprovalRetryEligible });`,
     Object.create(null) as object,
     { timeout: 2_000 },
   ) as { mergeApprovalGate: (view: unknown) => {
@@ -2141,7 +2146,8 @@ test("Merge confirmation gives truthful, retryable feedback for exact and incorr
   }; mergeApprovalInputScope: (currentApprovalId: unknown, loadedApprovalId: unknown, typed: unknown) => {
     approvalId: string; value: string;
   }; mergeApprovalIntentTarget: (view: unknown) => string;
-  mergeApprovalFailureStatus: (approvalFailure: unknown, refreshFailure?: unknown) => string };
+  mergeApprovalFailureStatus: (approvalFailure: unknown, refreshFailure?: unknown) => string;
+  mergeApprovalRetryEligible: (approval: unknown) => boolean };
   const passing = {
     blockers: [], scrolled: true, decided: false, phrase: "MERGE INTO MAIN", typed: "MERGE INTO MAIN",
   };
@@ -2253,6 +2259,12 @@ test("Merge confirmation gives truthful, retryable feedback for exact and incorr
   const refused = gate.mergeApprovalFailureStatus("MAIN_MERGE_APPROVAL_EXPIRED");
   assert.match(refused, /核准失敗/u);
   assert.match(refused, /MAIN_MERGE_APPROVAL_EXPIRED/u);
+  assert.match(refused, /建立一筆全新的 snapshot-bound 核准/u);
+  assert.equal(gate.mergeApprovalRetryEligible({ state: "rejected" }), true);
+  assert.equal(gate.mergeApprovalRetryEligible({ state: "invalidated" }), true);
+  assert.equal(gate.mergeApprovalRetryEligible({ state: "expired" }), true);
+  assert.equal(gate.mergeApprovalRetryEligible({ state: "consumed" }), false);
+  assert.equal(gate.mergeApprovalRetryEligible({ state: "requested" }), false);
   const nestedFailure = gate.mergeApprovalFailureStatus(
     "MAIN_MERGE_APPROVAL_EXPIRED",
     "NETWORK_UNAVAILABLE",

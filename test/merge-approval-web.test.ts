@@ -185,6 +185,17 @@ test("the merge approval dialog contract lists, inspects, approves once, and ref
   assert.equal((await get("/api/rooms/merge-history?room=demo&taskId=nope")).status, 400);
   assert.equal((await get("/api/rooms/merge-history?room=missing")).status, 400);
 
+  for (const body of ["not-an-object", { room: "demo" }, { room: "demo", approvalId: "nope" },
+    { room: "demo", approvalId: approval.id, extra: true }]) {
+    const refused = await post("/api/rooms/merge-approvals/retry", body);
+    assert.equal(refused.status, 400);
+    assert.equal(refused.body.error, "INVALID_MERGE_APPROVAL_RETRY_REQUEST");
+  }
+  const unsafeRetry = await post("/api/rooms/merge-approvals/retry", {
+    room: "demo", approvalId: approval.id,
+  });
+  assert.equal(unsafeRetry.body.error, "MAIN_MERGE_APPROVAL_RETRY_NOT_ELIGIBLE");
+
   // A lost HTTP response is safe to retry: the durable promotion is returned, never applied twice.
   const replayed = await post("/api/rooms/merge-approvals/approve", {
     room: "demo", approvalId: approval.id, previewDigest: approval.binding.previewDigest,
@@ -282,6 +293,20 @@ test("a grant that fails before durable promotion intent is retired and never sh
   assert.deepEqual(await service.candidates.promotions({ roomId: "demo", mainPath: workspace }), []);
   assert.equal((await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspace })).stdout.trim(), before);
   assert.equal((await execFileAsync("git", ["status", "--porcelain=v1"], { cwd: workspace })).stdout, "");
+
+  const retried = await service.retryMainMergeApproval({
+    roomId: "demo", workspace, approvalId: approval.id,
+  });
+  assert.notEqual(retried.approval.id, approval.id, "the terminal single-use approval was revived");
+  assert.equal(retried.approval.state, "requested");
+  assert.equal(retried.supersedesApprovalId, approval.id);
+  assert.equal(retried.mainMutation, false);
+  assert.equal((await service.candidates.inspectMergeApproval({
+    approvalId: approval.id, roomId: "demo", mainPath: workspace,
+  })).approval.state, "rejected", "the old terminal approval changed state");
+  assert.equal((await service.listMergeApprovals({ roomId: "demo", workspace }))
+    .filter((entry) => entry.state === "requested").length, 1);
+  assert.equal((await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: workspace })).stdout.trim(), before);
 });
 
 test("restart retires an approved approval with no promotion and revokes its captured legacy token", async (t) => {

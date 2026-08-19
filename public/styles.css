@@ -2310,6 +2310,7 @@ body.workspace-modal-open { overflow: hidden; }
 .merge-history-entry dl { display: grid; grid-template-columns: minmax(130px, .34fr) minmax(0, 1fr); gap: 4px 10px; }
 .merge-history-entry dt { color: var(--faint); font-size: 9px; }
 .merge-history-entry dd { color: #bfc5ca; font: 9px/1.5 var(--font-mono); overflow-wrap: anywhere; }
+.merge-history-action button { display: block; margin-top: 8px; min-height: 40px; }
 .merge-history-action { padding-top: 7px; border-top: 1px solid #2c3036; color: #d7b66e; font: 9px/1.55 var(--font-mono); }
 #merge-approval .workspace-onboarding-status, #apply-back-approval .workspace-onboarding-status, #writer-apply-back .workspace-onboarding-status { color: #9aa1a9; text-align: left; }
 

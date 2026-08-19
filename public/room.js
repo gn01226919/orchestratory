@@ -3478,7 +3478,11 @@ function mergeApprovalFailureStatus(approvalFailure, refreshFailure = "") {
   const refresh = typeof refreshFailure === "string" ? refreshFailure : "";
   return refresh.length > 0
     ? `核准失敗 · Approval refused：${primary}；live state 重新讀取也失敗：${refresh}。這不是 Merge 成功，請稍後從 Merge 結果檔案核對。 · Refresh also failed; success is not being claimed.`
-    : `核准失敗 · Approval refused：${primary}`;
+    : `核准失敗 · Approval refused：${primary}。這不是 Merge 成功；若畫面顯示「建立新的預覽與核准」，可安全建立一筆全新的 snapshot-bound 核准再試。 · This was not a successful merge; use the fresh preview action when offered.`;
+}
+
+function mergeApprovalRetryEligible(approval) {
+  return Boolean(approval) && ["rejected", "invalidated", "expired"].includes(approval.state);
 }
 /* @pure-end merge-approval-gate */
 
@@ -3727,6 +3731,19 @@ function renderApprovalHistoryEntry(host, approval, reviewRequired = false) {
     const action = document.createElement("p");
     action.className = "merge-history-action";
     action.textContent = "不要再次核准或 apply；重新讀取後仍存在時，依 approval 與 recovery ref 人工核對。 · Do not approve or apply again; refresh, then inspect the approval and recovery ref if it persists.";
+    item.append(action);
+  } else if (mergeApprovalRetryEligible(approval)) {
+    const action = document.createElement("p");
+    action.className = "merge-history-action";
+    action.textContent = "這筆核准沒有進入 promotion；可重新讀取 live state 並建立全新的核准。舊核准仍永久保留為終局紀錄。 · A fresh request is available; the old approval remains closed.";
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.textContent = "↻ 建立新的預覽與核准 · Create fresh preview & approval";
+    retry.addEventListener("click", () => {
+      closeMergeHistory();
+      openMergeApprovalDialog(approval.id);
+    });
+    action.append(retry);
     item.append(action);
   }
   host.append(item);
@@ -4314,6 +4331,13 @@ function renderMergeApproval() {
     row.textContent = blocker;
     list.append(row);
   }
+  const retryable = mergeApprovalRetryEligible(approval);
+  byId("merge-approval-retry-panel").hidden = !retryable;
+  const retryLabel = retryable
+    ? "↻ 建立新的預覽與核准 · Create fresh preview & approval"
+    : "↻ 重新讀取這份預覽 · Refresh this preview";
+  byId("merge-approval-repreview").textContent = retryLabel;
+  byId("merge-approval-refresh").textContent = retryLabel;
   byId("merge-approval-reject").disabled = !approval || approval.state !== "requested" || state.mergeApprovalDecided;
   tickMergeApprovalTtl();
   /* 內容比視窗短時本來就已經在底部；展開檔案會讓它重新變成未讀完。 */
@@ -4590,12 +4614,52 @@ async function repreviewMergeApproval() {
   const approval = state.mergeApproval;
   const status = byId("merge-approval-status");
   if (!approval) return;
+  if (mergeApprovalRetryEligible(approval)) {
+    await retryMergeApprovalWithFreshSnapshot();
+    return;
+  }
   state.mergeApprovalScrolled = false;
   await loadMergeApproval(approval.id);
   const blockers = state.mergeApprovalBlockers || [];
   status.textContent = blockers.length === 0
     ? "已依 live state 重新產生預覽，阻擋項目已清空；尚未 Merge。輸入框仍可使用；請在內層變更清單方框重新捲到底，最終按鈕才會解鎖。 · Re-previewed against live state; nothing was merged. The field remains editable; read the refreshed inner change list to unlock the final button."
     : "已依 live state 重新產生預覽；阻擋項目仍在。這份 snapshot 已經無法核准，請讓候選端重新提出一次合併要求（main_merge_request）。 · Re-previewed; this snapshot can no longer be approved — the candidate has to request a fresh one.";
+}
+
+async function retryMergeApprovalWithFreshSnapshot() {
+  const approval = state.mergeApproval;
+  const status = byId("merge-approval-status");
+  if (!approval || !mergeApprovalRetryEligible(approval) || state.mergeApprovalSubmitting) return;
+  state.mergeApprovalSubmitting = true;
+  updateMergeApprovalGate();
+  const buttons = [byId("merge-approval-new-request"), byId("merge-approval-repreview"), byId("merge-approval-refresh")];
+  for (const button of buttons) button.disabled = true;
+  status.textContent = "正在重新讀取 live main 並建立全新的 snapshot-bound 核准；不會重用舊授權，也不會自動 Merge… · Creating a fresh approval from live state; no merge will run.";
+  try {
+    const value = await api("/api/rooms/merge-approvals/retry", {
+      method: "POST",
+      body: JSON.stringify({ room: state.room, approvalId: approval.id }),
+    });
+    const fresh = value.approval;
+    state.mergeApprovalInputApprovalId = "";
+    byId("merge-approval-confirmation").value = "";
+    state.mergeApprovalDecided = false;
+    state.mergeApprovalScrolled = false;
+    state.mergeApprovalOverwrites = null;
+    const result = byId("merge-approval-result");
+    result.hidden = true;
+    result.textContent = "";
+    await refreshMergeApprovals();
+    await loadMergeApproval(fresh.id);
+    status.textContent = `已建立新的核准 ${fresh.id.slice(0, 8)}，舊核准 ${approval.id.slice(0, 8)} 保持終局；尚未 Merge。請重新檢視變更並輸入確認短語。 · Fresh approval created and selected; nothing was merged.`;
+    byId("merge-approval-diff").focus();
+  } catch (error) {
+    status.textContent = `無法建立新的核准 · Fresh approval was not created：${humanError(error)}。舊核准仍安全結案，main 未因這次操作而修改；修正阻擋原因後可再次按這個按鈕。 · The old approval remains closed and this action did not modify main.`;
+  } finally {
+    state.mergeApprovalSubmitting = false;
+    for (const button of buttons) button.disabled = false;
+    updateMergeApprovalGate();
+  }
 }
 
 byId("merge-approvals-open").addEventListener("click", () => openMergeApprovalDialog(""));
@@ -4643,6 +4707,7 @@ byId("merge-approval-confirm").addEventListener("click", () => void handleMergeA
 byId("merge-approval-reject").addEventListener("click", () => void rejectMergeIntoMain());
 byId("merge-approval-repreview").addEventListener("click", () => void repreviewMergeApproval());
 byId("merge-approval-refresh").addEventListener("click", () => void repreviewMergeApproval());
+byId("merge-approval-new-request").addEventListener("click", () => void retryMergeApprovalWithFreshSnapshot());
 byId("merge-approval-select").addEventListener("change", () => {
   state.mergeApprovalDecided = false;
   state.mergeApprovalScrolled = false;

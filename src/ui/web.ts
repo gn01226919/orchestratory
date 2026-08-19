@@ -1254,6 +1254,24 @@ export async function startWebServer(
           }));
           return;
         }
+        if (url.pathname === "/api/rooms/merge-approvals/retry") {
+          if (typeof body !== "object" || body === null || Array.isArray(body)) {
+            throw new Error("INVALID_MERGE_APPROVAL_RETRY_REQUEST");
+          }
+          const value = body as Record<string, unknown>;
+          if (Object.keys(value).some((key) => !["room", "approvalId"].includes(key))
+            || typeof value.room !== "string" || typeof value.approvalId !== "string"
+            || !/^[0-9a-f-]{36}$/u.test(value.approvalId)) {
+            throw new Error("INVALID_MERGE_APPROVAL_RETRY_REQUEST");
+          }
+          const info = ledger.getRoom(value.room);
+          if (!info) throw new Error("ROOM_NOT_FOUND");
+          const workspace = await app.workspaces.assertAllowed(info.workspace);
+          json(response, 201, await collaboration.retryMainMergeApproval({
+            roomId: value.room, workspace, approvalId: value.approvalId,
+          }));
+          return;
+        }
         if (url.pathname === "/api/rooms/merge-approvals/reject") {
           if (typeof body !== "object" || body === null || Array.isArray(body)) {
             throw new Error("INVALID_MERGE_APPROVAL_REQUEST");

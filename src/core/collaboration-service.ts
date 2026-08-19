@@ -742,6 +742,68 @@ export class CollaborationService {
   }
 
   /**
+   * Creates a new owner question after a terminal approval that never started a promotion.
+   *
+   * This does not revive or copy authority from the old row. It proves there is no promotion record,
+   * recomputes every live binding and gate, and writes a new `requested` row with a new idempotency
+   * key. The browser receives no grant token and canonical main is not mutated.
+   */
+  async retryMainMergeApproval(input: {
+    roomId: string;
+    workspace: string;
+    approvalId: string;
+  }): Promise<{ approval: MergeApproval; supersedesApprovalId: string; mainMutation: false }> {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    const inspected = await this.candidates.inspectMergeApproval({
+      approvalId: input.approvalId, roomId: input.roomId, mainPath: input.workspace,
+    });
+    const previous = inspected.approval;
+    if (!new Set(["rejected", "invalidated", "expired"]).has(previous.state)) {
+      throw new Error("MAIN_MERGE_APPROVAL_RETRY_NOT_ELIGIBLE");
+    }
+    if (await this.candidates.promotionForApproval({
+      approvalId: previous.id, roomId: input.roomId, mainPath: input.workspace,
+    })) {
+      throw new Error("MAIN_MERGE_APPROVAL_RETRY_REQUIRES_HISTORY_REVIEW");
+    }
+    const preview = await this.candidates.previewMainMerge({
+      taskId: previous.binding.taskId, roomId: input.roomId, mainPath: input.workspace,
+    });
+    if (!preview.approvable) throw new Error(`MAIN_MERGE_APPROVAL_RETRY_BLOCKED:${preview.blockers.join(",")}`);
+    const approval = await this.candidates.requestMainMerge({
+      actor: "you",
+      clientRequestId: randomUUID(),
+      taskId: previous.binding.taskId,
+      roomId: input.roomId,
+      mainPath: input.workspace,
+      completionId: preview.completionId,
+      previewDigest: preview.previewDigest,
+    });
+    this.audit.append({
+      roomId: input.roomId, taskId: approval.binding.taskId,
+      type: "candidate.merge-approval-requested", actor: "you", executedBy: "you",
+      action: "main-merge-request", path: approval.binding.mainPath, outcome: "succeeded",
+      detail: {
+        approvalId: approval.id,
+        supersedesApprovalId: previous.id,
+        completionId: approval.binding.completionId,
+        candidateHead: approval.binding.candidateHead,
+        mainHead: approval.binding.mainHead,
+        previewDigest: approval.binding.previewDigest,
+        state: approval.state,
+        freshSnapshot: true,
+        mainMutation: false,
+      },
+    });
+    this.#candidateLedger(input.roomId, approval.binding.taskId,
+      `Owner 已針對終局核准 ${previous.id.slice(0, 8)} 重新建立 live preview；新核准 ${approval.id.slice(0, 8)}`
+        + ` 綁定 candidate ${approval.binding.candidateHead.slice(0, 12)} 與 main ${approval.binding.mainHead.slice(0, 12)}`
+        + `。這是新的 single-use 問題，尚未核准、尚未 Merge，main 未修改。`,
+      `candidate:${approval.binding.taskId}:merge-approval:${approval.id}:requested`);
+    return { approval, supersedesApprovalId: previous.id, mainMutation: false };
+  }
+
+  /**
    * The owner's decision. A refusal caused by drift is audited too — an approval that silently
    * disappeared would leave the owner unable to tell a stale snapshot from a lost one.
    */

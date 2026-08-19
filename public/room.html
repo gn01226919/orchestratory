@@ -270,6 +270,11 @@
           <button id="merge-approval-confirm" class="danger" type="button" aria-disabled="true" aria-describedby="merge-approval-scroll-hint merge-approval-confirmation-feedback merge-approval-status" disabled>合併進 main · Merge into main</button>
         </div>
         <section id="merge-approval-result" class="merge-approval-result" aria-live="polite" hidden></section>
+        <section id="merge-approval-retry-panel" class="merge-approval-result is-failed" aria-live="polite" hidden>
+          <b>這筆核准已結案，但可以安全重試 · This approval is closed; a safe retry is available</b>
+          <p>系統不會復活或重用舊授權。按下後會重新讀取 live main、建立新的 snapshot-bound 核准，並自動切換到可輸入的新畫面；不會自動 Merge。</p>
+          <button id="merge-approval-new-request" type="button">↻ 建立新的預覽與核准 · Create fresh preview &amp; approval</button>
+        </section>
         <p id="merge-approval-status" class="workspace-onboarding-status" aria-live="polite"></p>
       </div>
     </section>

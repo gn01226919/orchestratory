@@ -881,3 +881,35 @@ ADR-033「不能把核准燒掉但 merge 沒發生」的載重理由，也讓已
   不含 push、publish、deploy、delete 或 cleanup。
 - 多一個 client-side 狀態機與 accessible live region；它降低 Owner 把錯字或 locked control 誤讀為
   已送出的風險，但無法證明 server 結果，最終事實仍只來自 durable promotion/history。
+
+## ADR-037：Bounded restore schema 與 terminal approval 的 fresh-request 出口
+
+**日期：** 2026-08-19
+**狀態：** Accepted
+
+### 背景
+
+正式 repo 的 257 個 ignored paths 產生 13,475-byte `GitRestorePoint`，但
+`candidate_merge_promotions.restore_json` 只有 8,000-character CHECK。Owner 已 grant 後，intent insert 在
+任何 Git 寫入前失敗；service 正確退休舊 grant，GUI 卻只剩 terminal input，讓人誤以為重新整理應該復活
+同一授權。單純放大為無界 TEXT 會把可用性問題改成儲存／解析 DoS；單純丟掉 paths 又會把不完整 restore
+描述成完整。
+
+### 決策
+
+1. Schema v7 將 restore constraint 改為 65,536 UTF-8 bytes，writer 與 SQLite BLOB length 雙重驗證。
+2. Persisted restore schema v2 保存 `ignoredPathsTotal` 與 `ignoredPathsTruncated`；只有 path display prefix
+   可縮短，`ignoredFiles` 與完整 path＋content `ignoredFingerprint` 不變。Legacy row 只有在 list 可證明完整
+   時讀取；malformed current/legacy row fail closed。
+3. v6→v7 transactionally rebuild promotion table，逐欄複製 payload/hash 並重建 exclusive/task indexes；
+   不改寫舊 hash。Crash observer 與 public history 都走同一 strict parser。
+4. Terminal、未開始 promotion 的 approval 可由 Owner 建立 fresh request：server 先證明沒有 promotion row，
+   重新 preview live state，再產生新 approval UUID。舊 row 不復活、無 token 複製、無自動 Merge；UI 切換
+   新 id 時清空 phrase 並重置 scroll gate。已有 intent/consumed/unreadable outcome 必須到 history review。
+
+### 影響
+
+- Native Full-Trust Agent 能力、candidate/main 與 exact-seat 邊界不變；變更只在 GUI Owner promotion control
+  plane 與 durable schema。
+- 舊 runtime 不支援 schema v7，正式 runtime 切換前需成對備份 DB/runtime；rollback 不能只替換 executable。
+- 64 KiB 仍可能拒絕極端非路徑 metadata，這是具名 fail-closed 上限，不是自動壓縮或資料遺失授權。
