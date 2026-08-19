@@ -1578,6 +1578,8 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomHtml, /id="merge-active-task" class="merge-active-task" hidden/u);
   assert.match(roomHtml, /id="merge-history-open"/u);
   assert.match(roomHtml, /▤ Merge 紀錄 · Merge records/u);
+  assert.match(roomHtml, /id="merge-records-attention" class="merge-records-attention" hidden/u);
+  assert.match(roomHtml, /需檢查 · Review required/u);
   assert.match(roomHtml, /稽核紀錄（不是待辦） · Audit records, not tasks/u);
   assert.doesNotMatch(roomHtml, /id="merge-history-count"/u);
   assert.doesNotMatch(roomHtml, /id="merge-history-other-open"/u);
@@ -2366,6 +2368,30 @@ test("Merge task sidebar disappears when every request is complete or terminal",
   assert.equal(mixed.visible, true);
   assert.deepEqual(Array.from(mixed.pending), [active]);
   assert.match(source, /activeTask\.hidden = !summary\.visible/u);
+});
+
+test("Merge records shows nonnumeric attention only for outcomes requiring review", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const start = source.indexOf("/* @pure-start merge-records-attention */");
+  const end = source.indexOf("/* @pure-end merge-records-attention */");
+  assert.ok(start > 0 && end > start);
+  const block = source.slice(start, end);
+  const requiresAttention = runInNewContext(
+    `${block}\nmergeRecordsAttention;`,
+    Object.create(null) as object,
+    { timeout: 2_000 },
+  ) as (buckets: unknown) => boolean;
+  assert.equal(requiresAttention({ reviewPromotions: [{}], reviewApprovals: [] }), true);
+  assert.equal(requiresAttention({ reviewPromotions: [], reviewApprovals: [{}] }), true);
+  assert.equal(requiresAttention({
+    mergedPromotions: [{}],
+    reviewPromotions: [],
+    reviewApprovals: [],
+    notStartedApprovals: [{ state: "expired" }, { state: "rejected" }],
+  }), false);
+  assert.equal(requiresAttention(undefined), false);
+  assert.match(source, /attention\.hidden = !requiresReview/u);
+  assert.doesNotMatch(source, /merge-records-attention[\s\S]{0,500}textContent\s*=\s*String/u);
 });
 
 test("Web dashboard cancels only the exact active Writer run", async (t) => {

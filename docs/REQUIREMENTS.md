@@ -127,7 +127,9 @@ checkpoint，彙整：
 - 核准 POST 被拒絕後，即使重新讀取 live approval 也失敗，GUI 仍必須保留原拒絕原因、具名 refresh
   failure 並明示「這不是 Merge 成功」；nested read error 不得把結果變成沉默或成功。
 - 待處理區只顯示仍可回答且未逾時的 `requested` 記錄；零筆時整個 task control 消失，不留下 `0` 或
-  歷史總數 badge。Durable 結果檔案必須是獨立、無數字徽章的「Merge 紀錄」入口，dialog 內才分成
+  歷史總數 badge。Durable 結果檔案必須是獨立、無數字徽章的「Merge 紀錄」入口；只有 classifier
+  找到 `needs-manual-review`、malformed／不完整 promotion 或沒有 promotion 的非終局 approval 時，入口
+  才顯示不帶數字的「需檢查」提示。Dialog 內才分成
   「已 Merge」「需要檢查」「未進入 Merge」：只有 promotion=`applied`、
   `authorizedMergeCommit=true` 且非空 `mainHeadAfter` 才能計入綠色「已 Merge」；缺任一正向事實的
   promotion、malformed row 或沒有 promotion 的非終局 approval 都進「需要檢查」；只有 rejected／expired／

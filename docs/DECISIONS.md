@@ -834,12 +834,14 @@ ADR-033「不能把核准燒掉但 merge 沒發生」的載重理由，也讓已
    `mainHeadAfter`，且 response 的 `mainMutated === true` 才顯示「Merge 成功」。`rolled-back` 顯示未套用；
    `applying`／`needs-manual-review`／讀不到顯示需人工檢查，絕不自動重試。
 4. Pending 與 outcome archive 是不同工作語意：pending 只計仍可回答且未逾時的 `requested` approvals，
-   為零時整個 task control 消失；archive 在 sidebar 只有無數字的「Merge 紀錄」入口，直接來自
+   為零時整個 task control 消失；archive 在 sidebar 只有無總數的「Merge 紀錄」入口，只有 review bucket
+   非空時附加不帶數字的人工檢查提示。入口直接來自
    `candidate_merge_promotions` 與沒有 promotion 的 terminal
    approvals，依 Room/workspace scope 讀取並在 restart 後仍可重建。Archive 分成「已 Merge」「需要檢查」
    與「未進入 Merge」；只有 applied＋authorized observation＋非空 main HEAD after 進入第一類，所有缺少
    正向事實或 malformed 的列 fail closed 到第二類，rejected／expired／invalidated 且沒有 promotion 才進
-   第三類，三類 count 只顯示在 dialog 內。關閉不清除 durable rows，讀取失敗在 dialog 內具名。各列保留 promotion/approval/task、前後 HEAD、
+   第三類，三類 count 只顯示在 dialog 內；terminal-only rows 不產生側欄提示。關閉不清除 durable rows，
+   讀取失敗在 dialog 內具名。各列保留 promotion/approval/task、前後 HEAD、
    candidate HEAD、recovery、state、timestamps、observation、hooks，不含 token。
 5. grant 已提交、但 promotion intent 尚未寫入而同步失敗時，因 `promoteMainMerge` 在 intent 前不會執行
    Git，可安全把該孤兒 grant 以 `PROMOTION_NOT_STARTED_AFTER_GRANT` 退休。daemon 在兩者之間被殺時，

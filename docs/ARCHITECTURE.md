@@ -184,7 +184,9 @@ GUI 再以 fail-closed classifier 分成三個互斥 bucket：完整正向 obser
 不完整／不確定 row 是「需要檢查」，rejected／expired／invalidated 且沒有 promotion 的 approval 是
 「未進入 Merge」。Pending 僅計仍可回答且未逾時的 `requested` approvals；一旦為零，task control 從
 sidebar DOM flow 隱藏。Archive 在 sidebar 只有無數字的「Merge 紀錄」入口，各 bucket count 只存在 dialog
-內，因此歷史總數無法再冒充未完成任務。任何讀取失敗在 dialog 內保留具名錯誤，不把 cache 或空陣列當新事實。
+內，因此歷史總數無法再冒充未完成任務。若 fail-closed classifier 的 review bucket 非空，入口附加不帶
+數字的「需檢查」狀態；terminal-only archive 不觸發。任何讀取失敗在 dialog 內保留具名錯誤，不把 cache
+或空陣列當新事實，也不把「未知」顯示成已清除。
 
 確認輸入的 UI gate 由 DOM-free `mergeApprovalGate()` 計算同一份狀態：`blocked`、`not-scrolled`、
 `empty`、`incorrect`、`exact`、`decided` 各自回傳 controls 與 live-region copy。錯字不送 HTTP，欄位保持

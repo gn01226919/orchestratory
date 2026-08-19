@@ -3879,20 +3879,31 @@ render/open/close 與 responsive fragments。新的 served-bytes digest：
 Owner 進一步澄清：「完成就應該消除」是指 completed／rejected／expired merge 不得繼續以任何數字
 留在 sidebar，並不是要刪除 audit log。前一版雖把 9 拆成 3／6，仍把 archive totals 放在任務視覺區，
 因此不足以解決混淆。修正版採兩層語意：sidebar 只顯示 active、unexpired `requested` task；其 count
-為零時整個 control `display:none`。歷史只有一個無 count、無數字 aria-label 的「Merge 紀錄」入口；
-3／0／6 只在 dialog 的 Merged／Review required／Merge never started headings 中顯示。
+為零時整個 control `display:none`。歷史只有一個無總數、無數字 aria-label 的「Merge 紀錄」入口；
+只有 review bucket 非空時附加不帶數字的「需檢查」提示，terminal-only archive 不觸發。~~3／0／6~~
+只在 dialog 的 Merged／Review required／Merge never started headings 中顯示；下方本輪真實 acceptance
+又建立並拒絕一筆 snapshot-bound request，另把先前新建後到期的一筆收進 archive，所以目前 durable
+counts 是 3／0／8。這些數字仍完全不出現在 sidebar。
 
 以目前真實 durable store 在 Chrome 驗收，沒有執行 Merge 或其他 Git 寫入：
 
 | 行為 | 真實 Chrome 觀察 |
 |---|---|
 | 完成後消失 | current approvals 沒有 active requested；`#merge-active-task` computed display=`none`，sidebar 不存在 0、9、3 或 6 的 merge task/history badge |
-| 歷史入口 | 可見文字只有 `Merge 紀錄 · Merge records`；accessible name 為「durable audit records，不是待辦」，不含總數 |
-| Durable logs | 開啟 dialog 後 counts 為 Merged=3、Review=0、Never started=6；完整 promotion/approval/recovery facts 仍保留 |
+| 歷史入口 | 目前 Review=0，所以可見文字只有 `Merge 紀錄 · Merge records`；accessible name 為「durable audit records，不是待辦」，不含總數 |
+| Durable logs | ~~開啟 dialog 後 counts 為 Merged=3、Review=0、Never started=6~~；本輪 request＋reject 驗收後為 Merged=3、Review=0、Never started=8，完整 promotion/approval/recovery facts 仍保留 |
 | Close | 關閉只收起 dialog 並回焦 `merge-history-open`；sidebar 仍沒有歷史數字，live status 明示 records closed, not cleared or counted as tasks |
 | 390px | viewport 390×844，document `scrollWidth=clientWidth=390`；active task 隱藏、無數字 records 入口完整可見 |
 | 直接 regression | terminal-only approvals 得到 `{count:0, visible:false}`；混入一筆 active requested 才得到 `{count:1, visible:true}` |
+| Review 提示 | review promotion 或未配對的非終局 approval 會顯示不帶數字的 `需檢查`；只有 merged＋expired／rejected terminal rows 時提示隱藏 |
+
+本輪另用真實 Chrome 對一筆新的、但不執行 promotion 的 request 驗收完整 client gate：TTL 由 14:46
+持續倒數；內層變更清單在 `scrollTop=0`／`scrollHeight=861`／`clientHeight=262` 時，即使確認短語正確，
+final control 仍 `aria-disabled=true`；錯誤的 `marge into main` 得到 `aria-invalid=true` 且明示「尚未送出、
+尚未 Merge」；內層按 End 到 `scrollTop=600` 後，精確 `MERGE INTO MAIN` 才使 final control
+`aria-disabled=false`。驗收沒有按下 Merge，而是按「拒絕並保留候選」；main 未修改，task control 立即
+`display:none`，該拒絕列只留在 Never started archive。Review=0，故「需檢查」提示保持隱藏。
 
 此版保留先前已驗收的 merge write path，只更改 sidebar task/archive 呈現與相應直接 regression。新的
-served-bytes digest `09d6df28f17e0ebad7d2342ace15a41f997660d09d274d2aeb2f86f8c87eaefa`；
+served-bytes digest `291a5e29071d79940104316c55e0d3db24a6be2ba532612fe2020a86b7e2738a`；
 它取代上方 `11002087…a025` 對 sidebar outcome controls 的描述。

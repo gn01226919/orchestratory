@@ -3612,15 +3612,33 @@ function mergeHistoryBuckets(promotions, unpromotedApprovals) {
 }
 /* @pure-end merge-history-buckets */
 
+/* @pure-start merge-records-attention */
+function mergeRecordsAttention(buckets) {
+  return Boolean(buckets)
+    && ((buckets.reviewPromotions?.length || 0) + (buckets.reviewApprovals?.length || 0)) > 0;
+}
+/* @pure-end merge-records-attention */
+
 function renderMergeHistoryBadge() {
   const recordsButton = byId("merge-history-open");
-  if (!recordsButton) return;
+  const attention = byId("merge-records-attention");
+  if (!recordsButton || !attention) return;
   if (!state.mergeHistoryLoaded) {
+    attention.hidden = true;
     recordsButton.setAttribute("aria-label", "開啟 Merge 紀錄；紀錄數量尚未讀取");
     recordsButton.disabled = false;
     return;
   }
-  recordsButton.setAttribute("aria-label", "開啟 Merge 紀錄；durable audit records，不是待辦");
+  const requiresReview = mergeRecordsAttention(
+    mergeHistoryBuckets(state.mergeHistory, state.mergeUnpromotedApprovals),
+  );
+  attention.hidden = !requiresReview;
+  recordsButton.setAttribute(
+    "aria-label",
+    requiresReview
+      ? "開啟 Merge 紀錄；有需要人工檢查的結果，不是已完成任務"
+      : "開啟 Merge 紀錄；durable audit records，不是待辦",
+  );
   recordsButton.disabled = false;
 }
 

@@ -2193,7 +2193,8 @@ body.workspace-modal-open { overflow: hidden; }
 .merge-outcome-nav > .merge-outcome-nav-status:empty { display: none; }
 .merge-outcome-nav .agent-requests-open { min-height: 44px; }
 .merge-history-open { border-color: #315743; color: #a8dfbf; background: #17231d; }
-.merge-history-open b { color: #102219; background: #7bd7a3; }
+.merge-records-attention { padding: 3px 6px; border: 1px solid #8f672a; border-radius: 999px; color: #f0c875; background: #2c2418; font: normal 800 7px/1.3 var(--font-mono); letter-spacing: .02em; }
+.merge-records-attention[hidden] { display: none; }
 .merge-approval-card { display: grid; gap: 12px; width: min(760px, 100%); }
 .merge-approval-head { display: grid; gap: 8px; padding-top: 14px; }
 .merge-approval-identity { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }

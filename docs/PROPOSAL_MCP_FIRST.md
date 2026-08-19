@@ -355,8 +355,9 @@ GUI 對這個相容 API 做 fail-closed outcome classification：`applied`、
 `observation.authorizedMergeCommit=true` 與非空 `mainHeadAfter` 三者缺一，就不能進入「已 Merge」。
 Unpromoted rejected／expired／invalidated approvals 只表示「未進入 Merge」；approved／consumed 或 malformed
 而沒有 promotion row 表示「需要檢查」。這個呈現不授予任何新 MCP capability，也不把 archive close
-解讀成刪除／acknowledge。Sidebar 的 archive 入口沒有 count badge；API 讀取失敗只在 dialog 內具名，
-不是零或沿用未標示的 cache。Active pending 為零時 task control 完全消失。
+解讀成刪除／acknowledge。Sidebar 的 archive 入口沒有 count badge；只有 review bucket 非空時顯示不帶
+數字的人工檢查提示，terminal-only archive 不觸發。API 讀取失敗只在 dialog 內具名，不是零或沿用
+未標示的 cache。Active pending 為零時 task control 完全消失。
 
 確認短語的即時回饋是 Owner GUI contract，不新增 MCP 權限或 HTTP 欄位：client 對錯字、大小寫及多餘
 空白必須保持輸入可重試，且明示「尚未送出／尚未 Merge／main 未修改」；精確短語只代表 client gate
