@@ -3934,3 +3934,27 @@ served-bytes digest `291a5e29071d79940104316c55e0d3db24a6be2ba532612fe2020a86b7e
   `unreadable`，不會鎖死 candidates/checkpoints/recovery；`requestMainMerge()` 的 structural open slot 與
   per-task cap 會拒絕重複 retry POST 產生多筆 pending。殘餘風險是 observation payload 仍有自己的 8 KiB
   上限（不屬本次 restore overflow）與 UI 有三個同義 retry 入口，但都走同一 in-flight guard。
+
+### 2026-08-19 Merge 成功後返回 Room 主畫面
+
+以 candidate served bytes、正式 Room HTTP 與隔離 Git repository 驗收；fixture 建立 18 個新增檔，真實
+通過 inner-diff scroll gate、輸入精確 `MERGE INTO MAIN` 並產生 one-time two-parent merge。沒有碰 canonical
+main、provider session、cookie/storage 內容或外網。
+
+| 行為 | 真實 in-app browser 觀察 |
+|---|---|
+| 成功才顯示 | promotion `984e4c9f…` 為 applied，main `88b8365e… → 12aec835…`，畫面顯示並自動聚焦「完成並回到 Room 主畫面」；direct branch regression 證明 rolled-back／uncertain 不建立該按鈕 |
+| 返回主畫面 | 點擊後 merge dialog 從 accessibility tree 消失、ledger messages 可見、Room composer 成為 active focus |
+| 任務語意 | pending task control 消失，sidebar 只留下無數字的「Merge 紀錄」入口 |
+| Durable log | 返回後重新開啟 Merge 紀錄仍見 Merged=1，完整 promotion/approval/task、before/after HEAD、candidate HEAD、recovery、observation 與 hooks 保留；Review=0、Never started=0 |
+| 副作用邊界 | 返回 activation 沒有第二次 promotion、沒有 API/MCP、push、publish、deploy、delete 或 cleanup |
+
+新的 served-bytes digest：`feae694a9d713fd83b66d8c2a177bbe4c4ee519fada516be82167784b74108b8`。
+
+Room Claude #777（第 1／3 輪）結論 **PASS**。依其 residual checks 再確認：
+`mergeHistorySucceeded()` 明確同時要求 `state=applied`、`authorizedMergeCommit=true` 與非空
+`mainHeadAfter`；直接 classifier regression 對缺 observation、缺 HEAD、`needs-manual-review` 都回 false。
+`closeMergeApprovalDialog()` 只有 DOM/timer/state 清理，沒有 fetch/api/history write；真實 browser 已確認
+composer 實際成為 active focus，且返回後 History row 仍存在。成功結果只在 approve Promise 的一次 response
+render 建立，既有 5 秒 poll 不重畫結果卡。Privacy UI audit 對 candidate 與 main 都只回報相同四個既有
+loopback fetch（`app.js:94`、`room.js:120/126/140`）；本次變更沒有新增 finding 或 network/storage/analytics。

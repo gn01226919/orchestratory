@@ -4472,6 +4472,12 @@ function closeMergeApprovalDialog() {
   state.mergeApprovalReturnFocus = null;
 }
 
+function returnToRoomAfterSuccessfulMerge() {
+  closeMergeApprovalDialog();
+  switchView("ledger");
+  byId("post-input")?.focus();
+}
+
 async function approveMergeIntoMain() {
   const approval = state.mergeApproval;
   const status = byId("merge-approval-status");
@@ -4512,10 +4518,17 @@ async function approveMergeIntoMain() {
       const title = document.createElement("b");
       const detail = document.createElement("p");
       const log = document.createElement("code");
-      if (mergeHistorySucceeded(promotion) && value.mainMutated === true) {
+      const succeeded = mergeHistorySucceeded(promotion) && value.mainMutated === true;
+      let returnButton = null;
+      if (succeeded) {
         title.textContent = "✓ Merge 成功 · Merge succeeded";
         detail.textContent = `main HEAD ${shortSha(promotion.mainHeadBefore)} → ${shortSha(promotion.mainHeadAfter)}；候選已從待處理區消失，durable 結果保留於「Merge 紀錄」。`;
         status.textContent = "Merge 已完成並由 durable promotion observation 驗證。沒有自動 push、publish、deploy、delete 或 cleanup。 · Merge completed and durably verified; no external side effects were performed.";
+        returnButton = document.createElement("button");
+        returnButton.type = "button";
+        returnButton.className = "merge-success-return";
+        returnButton.textContent = "完成並回到 Room 主畫面 · Done & return to Room";
+        returnButton.addEventListener("click", returnToRoomAfterSuccessfulMerge);
       } else if (promotion.state === "rolled-back" && value.mainMutated === false) {
         result.classList.add("is-failed");
         title.textContent = "Merge 未套用 · Merge not applied";
@@ -4529,7 +4542,9 @@ async function approveMergeIntoMain() {
       }
       log.textContent = `promotion ${promotion.id || "unavailable"} · approval ${approval.id} · recovery ${promotion.recoveryRef || approval.binding?.recoveryRef || "unavailable"}`;
       result.append(title, detail, log);
+      if (returnButton) result.append(returnButton);
       result.hidden = false;
+      returnButton?.focus();
     } catch (error) {
       /* 先重新讀取（會清空狀態列），再寫入失敗原因，否則訊息會被覆蓋掉。 */
       let refreshError = null;

@@ -377,6 +377,10 @@ Input Enter 只導引或 focus final button，不直接 POST；client in-flight 
 POST 拒絕後 client 可重新讀 live approval 以更新 dialog；該讀取不是成功判準，而且必須有獨立 error
 boundary。若 refresh 也失敗，畫面同時保留原拒絕與 refresh failure，並固定標示「不是 Merge 成功」。
 
+成功結果卡片的「完成並回到 Room 主畫面」不新增 MCP／HTTP contract：只有上述 durable 正向條件成立時
+client 才建立按鈕；activation 只關閉 dialog、切回 ledger 並聚焦 composer。它不攜帶 approval token、
+不重送 approve、不刪除或 acknowledge Merge History。非成功與不確定結果不得顯示此控制。
+
 拒絕與逾時**不執行任何 Git 指令**：candidate、checkpoint 與 recovery ref 逐位元不變，Owner 可重新
 preview 再問一次。已核准的 approval 也可由 Owner 撤回（reject）。
 

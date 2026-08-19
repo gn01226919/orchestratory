@@ -130,6 +130,9 @@ checkpoint，彙整：
   可由同一 dialog 明確要求重新讀取 live state，系統建立**不同 approval id** 的新 snapshot-bound request、
   自動切換並恢復輸入。此操作不得自動 grant／Merge；若舊 approval 已有 promotion row 或狀態不確定，
   必須導向 Merge 紀錄人工核對，不得提供重複 apply 出口。
+- 只有 durable positive observation 已顯示「Merge 成功」後，結果卡片才可提供「完成並回到 Room 主畫面」；
+  該控制只關閉 dialog、切回帳本直播並聚焦發言框，不得新增 HTTP／MCP 呼叫、再次 promotion 或清除 durable
+  Merge 紀錄。`rolled-back`、`needs-manual-review`、讀不到與其他不確定結果不得顯示成功返回控制。
 - Durable promotion restore point 必須以 UTF-8 bytes 設定有限上界，不得只把 SQLite TEXT 上限無界放大。
   ignored path 顯示清單可以截斷，但必須持久保存 schema version、總數與 truncation flag；完整 path＋content
   fingerprint 不得截斷。省略顯示路徑不得被解讀為「已恢復」或「沒有差異」，malformed／不一致 legacy 或

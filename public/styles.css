@@ -2283,6 +2283,7 @@ body.workspace-modal-open { overflow: hidden; }
 .merge-approval-result.is-failed > b { color: #f3a5a8; }
 .merge-approval-result.is-uncertain > b { color: var(--warn); }
 .merge-approval-result p, .merge-approval-result code { color: #bdc8c1; font: 10px/1.6 var(--font-mono); overflow-wrap: anywhere; }
+.merge-success-return { min-height: 44px; margin-top: 8px; justify-self: end; }
 .merge-history-card { display: grid; gap: 13px; width: min(820px, 100%); }
 .merge-history-note { color: var(--muted); font-size: 10px; line-height: 1.65; }
 .merge-history-note code { color: #8fe0b4; }

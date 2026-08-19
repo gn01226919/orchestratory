@@ -913,3 +913,28 @@ ADR-033「不能把核准燒掉但 merge 沒發生」的載重理由，也讓已
   plane 與 durable schema。
 - 舊 runtime 不支援 schema v7，正式 runtime 切換前需成對備份 DB/runtime；rollback 不能只替換 executable。
 - 64 KiB 仍可能拒絕極端非路徑 metadata，這是具名 fail-closed 上限，不是自動壓縮或資料遺失授權。
+
+## ADR-038：Merge 成功後提供不改狀態的返回 Room 動作
+
+**日期：** 2026-08-19
+**狀態：** Accepted
+
+### 背景
+
+Owner 已在真實 promotion 畫面看到 durable「Merge 成功」，但結果 dialog 沒有明確完成路徑；只能猜測
+關閉符號是否代表完成、清除紀錄或返回。這會把已驗證結果與純 UI navigation 混在一起。
+
+### 決策
+
+1. 只有 ADR-036 的完整正向成功條件成立，結果卡片才建立「完成並回到 Room 主畫面」原生按鈕。
+2. activation 只關閉 merge dialog、切回 ledger view 並聚焦 Room composer；不呼叫 API/MCP、不再 promotion、
+   不清除或 acknowledge durable Merge History。
+3. rolled-back、uncertain、讀不到或 POST failure 不建立按鈕；返回主畫面本身不是成功證據。
+4. 按鈕最小高度 44px，成功卡顯示後取得焦點，保留全域可見 `:focus-visible`。
+
+### 影響
+
+- 只影響 GUI Managed/Owner Web 呈現；Native Full-Trust、Room exact-seat、candidate/main 與 approval authority
+  均不改變。
+- Durable 結果與 recovery artifacts 仍完整保留；同帳號瀏覽器擴充套件仍可竄改畫面，最終核對面是 History、
+  main HEAD 與 audit chain。
