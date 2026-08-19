@@ -1575,10 +1575,12 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomHtml, /id="merge-approvals-open"/u);
   assert.match(roomHtml, /id="merge-approval-count" aria-label="0 件待核准">0</u);
   assert.match(roomHtml, /class="agent-requests-open merge-approvals-open"/u);
+  assert.match(roomHtml, /id="merge-active-task" class="merge-active-task" hidden/u);
   assert.match(roomHtml, /id="merge-history-open"/u);
-  assert.match(roomHtml, /✓ 已 Merge · Merged/u);
-  assert.match(roomHtml, /id="merge-history-other-open"/u);
-  assert.match(roomHtml, /○ 需檢查／未進入 · Review \/ not merged/u);
+  assert.match(roomHtml, /▤ Merge 紀錄 · Merge records/u);
+  assert.match(roomHtml, /稽核紀錄（不是待辦） · Audit records, not tasks/u);
+  assert.doesNotMatch(roomHtml, /id="merge-history-count"/u);
+  assert.doesNotMatch(roomHtml, /id="merge-history-other-open"/u);
   assert.match(roomHtml, /id="merge-outcome-nav-status"[^>]*aria-live="polite"/u);
   assert.match(roomHtml, /id="merge-history-merged-list"/u);
   assert.match(roomHtml, /id="merge-history-review-list"/u);
@@ -2335,6 +2337,35 @@ test("Merge pending badge accepts only active unexpired requested approvals", as
   assert.equal(pending({ ...active, state: "rejected" }), false);
   assert.equal(pending(undefined), false);
   assert.deepEqual([active, { state: "requested", expired: true }, { state: "approved" }].filter(pending), [active]);
+});
+
+test("Merge task sidebar disappears when every request is complete or terminal", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const pendingStart = source.indexOf("/* @pure-start merge-approval-pending */");
+  const pendingEnd = source.indexOf("/* @pure-end merge-approval-pending */");
+  const summaryStart = source.indexOf("/* @pure-start merge-task-summary */");
+  const summaryEnd = source.indexOf("/* @pure-end merge-task-summary */");
+  assert.ok(pendingStart > 0 && pendingEnd > pendingStart && summaryStart > pendingEnd && summaryEnd > summaryStart);
+  const block = `${source.slice(pendingStart, pendingEnd)}\n${source.slice(summaryStart, summaryEnd)}`;
+  const summarize = runInNewContext(
+    `${block}\nmergeTaskSummary;`,
+    Object.create(null) as object,
+    { timeout: 2_000 },
+  ) as (approvals: unknown) => { pending: unknown[]; count: number; visible: boolean };
+  const terminal = summarize([
+    { state: "consumed", expired: false },
+    { state: "rejected", expired: false },
+    { state: "requested", expired: true },
+  ]);
+  assert.equal(terminal.count, 0);
+  assert.equal(terminal.visible, false);
+  assert.deepEqual(Array.from(terminal.pending), []);
+  const active = { state: "requested", expired: false };
+  const mixed = summarize([active, { state: "consumed", expired: false }]);
+  assert.equal(mixed.count, 1);
+  assert.equal(mixed.visible, true);
+  assert.deepEqual(Array.from(mixed.pending), [active]);
+  assert.match(source, /activeTask\.hidden = !summary\.visible/u);
 });
 
 test("Web dashboard cancels only the exact active Writer run", async (t) => {

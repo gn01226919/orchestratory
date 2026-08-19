@@ -2185,14 +2185,15 @@ body.workspace-modal-open { overflow: hidden; }
 .merge-outcome-nav { display: grid; gap: 6px; padding: 9px; border: 1px solid #30343a; border-radius: 9px; background: #14161a; }
 .merge-outcome-nav > p { color: #b8bec5; font: 800 9px/1.4 var(--font-mono); letter-spacing: .03em; }
 .merge-outcome-nav > .merge-outcome-nav-title { margin-top: 4px; color: #767d85; }
+.merge-active-task { display: grid; gap: 6px; }
+.merge-active-task[hidden] { display: none !important; }
+.merge-active-task > p { color: #b8bec5; font: 800 9px/1.4 var(--font-mono); letter-spacing: .03em; }
 .merge-outcome-nav > small { color: #6f757d; font-size: 8px; line-height: 1.5; }
 .merge-outcome-nav > .merge-outcome-nav-status { min-height: 0; color: #8d949c; font-size: 8px; line-height: 1.45; }
 .merge-outcome-nav > .merge-outcome-nav-status:empty { display: none; }
 .merge-outcome-nav .agent-requests-open { min-height: 44px; }
 .merge-history-open { border-color: #315743; color: #a8dfbf; background: #17231d; }
 .merge-history-open b { color: #102219; background: #7bd7a3; }
-.merge-history-other-open { border-color: #4b4941; color: #c8c1af; background: #1e1d1a; }
-.merge-history-other-open b { color: #211e16; background: #cbbf9b; }
 .merge-approval-card { display: grid; gap: 12px; width: min(760px, 100%); }
 .merge-approval-head { display: grid; gap: 8px; padding-top: 14px; }
 .merge-approval-identity { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }

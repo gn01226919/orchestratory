@@ -3860,16 +3860,39 @@ promotion 的 terminal approvals（3 rejected、3 expired）相加而成。修�
 
 | 行為 | 真實瀏覽器觀察 |
 |---|---|
-| 側欄語意 | `待核准 0`、`已 Merge 3`、`其他結果 6` 同時可見；不再把九筆 durable rows 冒充九個未完成任務 |
+| 側欄語意 | ~~`待核准 0`、`已 Merge 3`、`其他結果 6` 同時可見~~；Owner 同日更正：歷史數字本身仍會被理解成待辦，此行為由下方「歷史計數退出側欄」取代 |
 | 成功分類 | 三筆綠色列皆有 `applied`、`AUTHORIZED_MERGE_COMMIT_OBSERVED_IN_MAIN` 與非空 main HEAD after；缺任一正向事實的直接 regression 全部進 review |
 | 非成功分類 | 六筆 rejected／expired approvals 全在「未進入 Merge」，Review count 為 0；approved／consumed without promotion 的 synthetic regression 進 review，不進 merged |
-| 關閉語意 | 按鈕改為「關閉紀錄」；關閉後焦點回到原入口，數字仍為 3／6，側欄 live status 明示「3 筆仍在已 Merge、6 筆仍在需檢查／未進入」，證明 close 只收起面板而不清除 durable row |
+| 關閉語意 | ~~關閉後側欄數字仍為 3／6~~；durable row 確實保留，但 Owner 明確要求歷史數字不得留在任務側欄，修正版見下方 |
 | 鍵盤 | 由「其他結果」開啟時焦點直達對應 section；Esc 關閉並回到 `merge-history-other-open` |
 | 390px | Chrome viewport 390×844，document `scrollWidth=clientWidth=390`；Merge 任務區可見，按鈕高 44px；dialog width 370px、無頁面水平溢位 |
 | 200% 等效重排 | 1470px 桌面寬度折半為 735px 驗收，document `scrollWidth=clientWidth=735`；側欄改為完整 auto row，不再以 37px row 遮住 outcome controls |
-| 讀取失敗 | refresh 開始先把兩個 archive badge 降為 `—` unknown；catch 明示讀不到不等於空 archive，不沿用未標示的成功數字 |
+| 讀取失敗 | ~~refresh 開始把 archive badge 降為 `—`~~；修正版完全移除 sidebar archive badge，錯誤只在 dialog 內具名 |
 
 舊 digest `19e30a27b1eac6dc5002bf28f569dab9e12cad68d2abe6c586ed9de59c70eed8` 保留為先前 merge
 confirmation flow 的歷史證據；本次在完全沿用該已驗收 write path 的同時，新增 outcome classifier、archive
 render/open/close 與 responsive fragments。新的 served-bytes digest：
 `11002087d193472110f0f21d8717a794298d818c195009d45fd4ad497ba5c025`。
+
+### 2026-08-19 Owner 更正：歷史計數退出側欄
+
+Owner 進一步澄清：「完成就應該消除」是指 completed／rejected／expired merge 不得繼續以任何數字
+留在 sidebar，並不是要刪除 audit log。前一版雖把 9 拆成 3／6，仍把 archive totals 放在任務視覺區，
+因此不足以解決混淆。修正版採兩層語意：sidebar 只顯示 active、unexpired `requested` task；其 count
+為零時整個 control `display:none`。歷史只有一個無 count、無數字 aria-label 的「Merge 紀錄」入口；
+3／0／6 只在 dialog 的 Merged／Review required／Merge never started headings 中顯示。
+
+以目前真實 durable store 在 Chrome 驗收，沒有執行 Merge 或其他 Git 寫入：
+
+| 行為 | 真實 Chrome 觀察 |
+|---|---|
+| 完成後消失 | current approvals 沒有 active requested；`#merge-active-task` computed display=`none`，sidebar 不存在 0、9、3 或 6 的 merge task/history badge |
+| 歷史入口 | 可見文字只有 `Merge 紀錄 · Merge records`；accessible name 為「durable audit records，不是待辦」，不含總數 |
+| Durable logs | 開啟 dialog 後 counts 為 Merged=3、Review=0、Never started=6；完整 promotion/approval/recovery facts 仍保留 |
+| Close | 關閉只收起 dialog 並回焦 `merge-history-open`；sidebar 仍沒有歷史數字，live status 明示 records closed, not cleared or counted as tasks |
+| 390px | viewport 390×844，document `scrollWidth=clientWidth=390`；active task 隱藏、無數字 records 入口完整可見 |
+| 直接 regression | terminal-only approvals 得到 `{count:0, visible:false}`；混入一筆 active requested 才得到 `{count:1, visible:true}` |
+
+此版保留先前已驗收的 merge write path，只更改 sidebar task/archive 呈現與相應直接 regression。新的
+served-bytes digest `09d6df28f17e0ebad7d2342ace15a41f997660d09d274d2aeb2f86f8c87eaefa`；
+它取代上方 `11002087…a025` 對 sidebar outcome controls 的描述。

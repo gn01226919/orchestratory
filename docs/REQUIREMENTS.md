@@ -126,14 +126,15 @@ checkpoint，彙整：
   target 改變時移除舊 attention 並重新計算，不得讓 screen reader 或可視焦點停在舊缺口。
 - 核准 POST 被拒絕後，即使重新讀取 live approval 也失敗，GUI 仍必須保留原拒絕原因、具名 refresh
   failure 並明示「這不是 Merge 成功」；nested read error 不得把結果變成沉默或成功。
-- 待核准區只顯示仍可回答且未逾時的 `requested` 記錄，零筆也要明示 `0`。Durable 結果檔案不是待辦
-  badge，必須分成「已 Merge」「需要檢查」「未進入 Merge」：只有 promotion=`applied`、
+- 待處理區只顯示仍可回答且未逾時的 `requested` 記錄；零筆時整個 task control 消失，不留下 `0` 或
+  歷史總數 badge。Durable 結果檔案必須是獨立、無數字徽章的「Merge 紀錄」入口，dialog 內才分成
+  「已 Merge」「需要檢查」「未進入 Merge」：只有 promotion=`applied`、
   `authorizedMergeCommit=true` 且非空 `mainHeadAfter` 才能計入綠色「已 Merge」；缺任一正向事實的
   promotion、malformed row 或沒有 promotion 的非終局 approval 都進「需要檢查」；只有 rejected／expired／
   invalidated 且沒有 promotion 的 approval 才進「未進入 Merge」。結果必須在 daemon restart 後仍可依
   Room/workspace 查核，並顯示 approval/promotion/task、前後 HEAD、candidate HEAD、recovery ref、狀態、
   時間、observation 與已觀察到的 hooks；不得包含 approval token 或秘密。關閉檔案不刪除、不歸零；
-  讀取失敗時數量顯示未知，不得沿用未標示的舊值或把讀不到說成零筆。
+  讀取失敗只在紀錄 dialog 內具名，不得在側欄重新出現數字或把讀不到說成零筆。
 
 Promotion 的 live safety gate 必須在 promotion 環境下用 Git 自己解析 clean/smudge attributes；除
 main 目前的 tracked／ignored／代表性 probe 路徑外，還必須逐一詢問完整 preview 中候選 merge 將寫入的

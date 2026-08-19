@@ -55,19 +55,18 @@
           </form>
           <div id="sidebar-managed-agent-list" class="office-presence-list managed-agent-list"></div>
         </section>
-        <section class="merge-outcome-nav" aria-labelledby="merge-outcome-nav-title">
-          <p id="merge-outcome-nav-title">合併任務 · Merge tasks</p>
-          <button id="merge-approvals-open" class="agent-requests-open merge-approvals-open" type="button" aria-haspopup="dialog" aria-controls="merge-approval" disabled>
-            <span>⑂ 待核准 · Pending approval</span><b id="merge-approval-count" aria-label="0 件待核准">0</b>
-          </button>
-          <p class="merge-outcome-nav-title">結果檔案 · Outcome archive</p>
+        <section class="merge-outcome-nav" aria-label="Merge 任務與紀錄 · Merge tasks and records">
+          <div id="merge-active-task" class="merge-active-task" hidden>
+            <p>待處理的 Merge · Merge tasks</p>
+            <button id="merge-approvals-open" class="agent-requests-open merge-approvals-open" type="button" aria-haspopup="dialog" aria-controls="merge-approval" disabled>
+              <span>⑂ 待核准 · Pending approval</span><b id="merge-approval-count" aria-label="0 件待核准">0</b>
+            </button>
+          </div>
+          <p class="merge-outcome-nav-title">稽核紀錄（不是待辦） · Audit records, not tasks</p>
           <button id="merge-history-open" class="agent-requests-open merge-history-open" type="button" aria-haspopup="dialog" aria-controls="merge-history">
-            <span>✓ 已 Merge · Merged</span><b id="merge-history-count" aria-label="已 Merge 數量尚未讀取">—</b>
+            <span>▤ Merge 紀錄 · Merge records</span>
           </button>
-          <button id="merge-history-other-open" class="agent-requests-open merge-history-other-open" type="button" aria-haspopup="dialog" aria-controls="merge-history">
-            <span>○ 需檢查／未進入 · Review / not merged</span><b id="merge-history-other-count" aria-label="非成功 Merge 結果數量尚未讀取">—</b>
-          </button>
-          <small>數字是 durable 紀錄，不是待辦徽章；關閉只收起紀錄面板。只有已驗證的 promotion 會算進「已 Merge」。</small>
+          <small>完成、拒絕或逾期後會從待處理區消失；歷史只在紀錄面板內保留，不顯示成側欄待辦數字。</small>
           <p id="merge-outcome-nav-status" class="merge-outcome-nav-status" aria-live="polite"></p>
         </section>
         <label class="field" for="room-search">搜尋帳本

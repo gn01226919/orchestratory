@@ -149,8 +149,10 @@ Orchestratory 在單一使用者的 Mac 上協調一或多個原生 TUI Agent。
   孤兒 recovery ref 已有唯讀 CLI 出口 `orchestrator candidates orphan-refs <workspace>`（只列不刪）。
 - Promotion 紀錄自 2026-08-07 起有 CLI 列出／人工釋放出口；2026-08-14 起另有本機 Owner HTTP
   grant＋promotion 出口與 GUI Merge 結果檔案。2026-08-19 起 GUI 不再把 promotions 與 rejected／expired
-  approvals 相加成一個含糊的「Merge 歷史」數字；只有完整正向 repository fact 計入「已 Merge」，其餘
-  分流至「需要檢查」或「未進入 Merge」。未知／讀不到維持未知，避免 F24/F27 的不可信 row 或 observation
+  approvals 相加成一個含糊的「Merge 歷史」數字；Owner 同日進一步裁決：sidebar 完全不顯示 archive
+  總數，active pending 為零時 task control 消失，durable counts 只存在獨立 dialog。完整正向 repository
+  fact 才計入 dialog 的「已 Merge」，其餘分流至「需要檢查」或「未進入 Merge」。未知／讀不到只在
+  dialog 具名，避免 F24/F27 的不可信 row 或 observation
   被視為收斂成功。兩種列出都會重新觀察並可能更新未結紀錄，但不會重跑 merge；
   三種 release 不殺程序、不寫 main、不決定結果。Agent MCP 仍沒有 promote 權限。
 - Dirty-state 完整內容雜湊每次 inspection 共用 30 秒 deadline；極大或極慢檔案會 fail closed，要求 Owner

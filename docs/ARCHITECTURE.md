@@ -182,8 +182,9 @@ daemon 若在 grant 與 intent 中間被殺，重啟後 exact POST retry 或 Mer
 重跑 merge、rollback、push 或 cleanup。API 保留 `promotions + unpromotedApprovals` 的舊／新相容 contract；
 GUI 再以 fail-closed classifier 分成三個互斥 bucket：完整正向 observation 的 applied row 才是「已 Merge」，
 不完整／不確定 row 是「需要檢查」，rejected／expired／invalidated 且沒有 promotion 的 approval 是
-「未進入 Merge」。Pending 僅計仍可回答且未逾時的 `requested` approvals 並明示零；archive count 是稽核
-紀錄數，不是未完成任務數。任何讀取失敗先把 badge 降為未知，保留具名錯誤，不把 cache 或空陣列當新事實。
+「未進入 Merge」。Pending 僅計仍可回答且未逾時的 `requested` approvals；一旦為零，task control 從
+sidebar DOM flow 隱藏。Archive 在 sidebar 只有無數字的「Merge 紀錄」入口，各 bucket count 只存在 dialog
+內，因此歷史總數無法再冒充未完成任務。任何讀取失敗在 dialog 內保留具名錯誤，不把 cache 或空陣列當新事實。
 
 確認輸入的 UI gate 由 DOM-free `mergeApprovalGate()` 計算同一份狀態：`blocked`、`not-scrolled`、
 `empty`、`incorrect`、`exact`、`decided` 各自回傳 controls 與 live-region copy。錯字不送 HTTP，欄位保持

@@ -66,8 +66,8 @@ bounded metadata，固定小於等於 64 KiB，使用 workspace 外的 0700 dire
 - Merge 結果檔案來自 tamper-evident promotion rows 與 audit chain，不來自 browser storage。只有
   applied＋authorized observation＋非空 main HEAD after 能標成「已 Merge」；讀不到、row malformed、
   audit chain 失效、`applying`、`needs-manual-review` 或缺少正向事實都不得折疊成「沒有紀錄」「已安全」
-  或綠色成功。關閉檔案只關閉 dialog，不刪除 durable row；讀取失敗時 badge 回到 unknown，而非沿用
-  未標示的成功數字。
+  或綠色成功。關閉檔案只關閉 dialog，不刪除 durable row；sidebar 不顯示任何 archive count，讀取失敗
+  只在 dialog 內具名，而非沿用未標示的成功數字或重新建立任務徽章。
 - 舊版已回給 browser 的 raw token 在新版沒有任何 HTTP/MCP 消耗入口；strict approve schema 也拒絕
   `approvalToken` 欄位。重啟後一筆 `approved` 且沒有 promotion intent 的列會被具名退休並清除 token
   hash；回歸測試持有真實舊 token，證明退休後直接呼叫核心也得到 `NOT_APPROVED` 且 main 不變。

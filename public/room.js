@@ -108,7 +108,6 @@ const state = {
   mergeHistory: [],
   mergeUnpromotedApprovals: [],
   mergeHistoryLoaded: false,
-  mergeHistoryFocus: "merged",
   mergeHistoryRoom: "",
   mergeHistoryReturnFocus: null,
 };
@@ -1049,7 +1048,6 @@ async function selectRoom(id) {
   state.mergeHistory = [];
   state.mergeUnpromotedApprovals = [];
   state.mergeHistoryLoaded = false;
-  state.mergeHistoryFocus = "merged";
   state.mergeHistoryRoom = "";
   renderMergeHistoryBadge();
   state.selectedPresenceId = "";
@@ -3506,6 +3504,13 @@ function mergeApprovalPending(approval) {
 }
 /* @pure-end merge-approval-pending */
 
+/* @pure-start merge-task-summary */
+function mergeTaskSummary(approvals) {
+  const pending = (Array.isArray(approvals) ? approvals : []).filter(mergeApprovalPending);
+  return { pending, count: pending.length, visible: pending.length > 0 };
+}
+/* @pure-end merge-task-summary */
+
 function mergeConfirmationPhrase() {
   return state.mergeConfirmationPhrase || MERGE_CONFIRMATION_PHRASE;
 }
@@ -3525,11 +3530,13 @@ function renderMergeApprovalBadge() {
   const button = byId("merge-approvals-open");
   const badge = byId("merge-approval-count");
   if (!button || !badge) return;
-  const pending = (state.mergeApprovals || []).filter(mergeApprovalPending);
-  badge.textContent = String(pending.length);
+  const summary = mergeTaskSummary(state.mergeApprovals);
+  const activeTask = byId("merge-active-task");
+  badge.textContent = String(summary.count);
   badge.hidden = false;
-  badge.setAttribute("aria-label", `${pending.length} 件待核准`);
-  button.disabled = pending.length === 0;
+  badge.setAttribute("aria-label", `${summary.count} 件待核准`);
+  button.disabled = !summary.visible;
+  if (activeTask) activeTask.hidden = !summary.visible;
   const label = button.querySelector("span");
   if (label) label.textContent = "⑂ 待核准 · Pending approval";
 }
@@ -3606,27 +3613,15 @@ function mergeHistoryBuckets(promotions, unpromotedApprovals) {
 /* @pure-end merge-history-buckets */
 
 function renderMergeHistoryBadge() {
-  const badge = byId("merge-history-count");
-  const otherBadge = byId("merge-history-other-count");
-  const mergedButton = byId("merge-history-open");
-  const otherButton = byId("merge-history-other-open");
-  if (!badge || !otherBadge || !mergedButton || !otherButton) return;
+  const recordsButton = byId("merge-history-open");
+  if (!recordsButton) return;
   if (!state.mergeHistoryLoaded) {
-    badge.textContent = "—";
-    otherBadge.textContent = "—";
-    badge.setAttribute("aria-label", "已 Merge 數量尚未讀取");
-    otherBadge.setAttribute("aria-label", "其他 Merge 結果數量尚未讀取");
-    mergedButton.disabled = false;
-    otherButton.disabled = false;
+    recordsButton.setAttribute("aria-label", "開啟 Merge 紀錄；紀錄數量尚未讀取");
+    recordsButton.disabled = false;
     return;
   }
-  const buckets = mergeHistoryBuckets(state.mergeHistory, state.mergeUnpromotedApprovals);
-  badge.textContent = String(buckets.mergedPromotions.length);
-  otherBadge.textContent = String(buckets.otherCount);
-  badge.setAttribute("aria-label", `${buckets.mergedPromotions.length} 筆已 Merge`);
-  otherBadge.setAttribute("aria-label", `${buckets.otherCount} 筆需檢查或未進入 Merge 的紀錄`);
-  mergedButton.disabled = buckets.mergedPromotions.length === 0;
-  otherButton.disabled = buckets.otherCount === 0;
+  recordsButton.setAttribute("aria-label", "開啟 Merge 紀錄；durable audit records，不是待辦");
+  recordsButton.disabled = false;
 }
 
 function historyFact(list, label, value) {
@@ -4477,7 +4472,7 @@ async function approveMergeIntoMain() {
       const log = document.createElement("code");
       if (mergeHistorySucceeded(promotion) && value.mainMutated === true) {
         title.textContent = "✓ Merge 成功 · Merge succeeded";
-        detail.textContent = `main HEAD ${shortSha(promotion.mainHeadBefore)} → ${shortSha(promotion.mainHeadAfter)}；候選已移出待核准並進入「已 Merge」結果區。`;
+        detail.textContent = `main HEAD ${shortSha(promotion.mainHeadBefore)} → ${shortSha(promotion.mainHeadAfter)}；候選已從待處理區消失，durable 結果保留於「Merge 紀錄」。`;
         status.textContent = "Merge 已完成並由 durable promotion observation 驗證。沒有自動 push、publish、deploy、delete 或 cleanup。 · Merge completed and durably verified; no external side effects were performed.";
       } else if (promotion.state === "rolled-back" && value.mainMutated === false) {
         result.classList.add("is-failed");
@@ -4513,10 +4508,9 @@ async function approveMergeIntoMain() {
   }
 }
 
-async function openMergeHistory(focus = "merged") {
+async function openMergeHistory() {
   const dialog = byId("merge-history");
   state.mergeHistoryReturnFocus = document.activeElement;
-  state.mergeHistoryFocus = focus === "other" ? "other" : "merged";
   dialog.hidden = false;
   document.body.classList.add("workspace-modal-open");
   byId("merge-history-status").textContent = "正在從 durable store 讀取… · Reading durable promotion records…";
@@ -4524,12 +4518,7 @@ async function openMergeHistory(focus = "merged") {
   catch (error) {
     byId("merge-history-status").textContent = `Merge 結果檔案讀取失敗：${humanError(error)}；讀不到不等於沒有紀錄。 · Outcome archive unavailable; this is not an empty archive.`;
   }
-  const buckets = mergeHistoryBuckets(state.mergeHistory, state.mergeUnpromotedApprovals);
-  const target = state.mergeHistoryFocus === "other"
-    ? (buckets.reviewPromotions.length + buckets.reviewApprovals.length > 0
-      ? byId("merge-history-review-section") : byId("merge-history-unpromoted-section"))
-    : byId("merge-history-merged-section");
-  target?.focus();
+  byId("merge-history-merged-section")?.focus();
 }
 
 function closeMergeHistory() {
@@ -4537,10 +4526,9 @@ function closeMergeHistory() {
   if (!dialog || dialog.hidden) return;
   dialog.hidden = true;
   document.body.classList.remove("workspace-modal-open");
-  const buckets = mergeHistoryBuckets(state.mergeHistory, state.mergeUnpromotedApprovals);
   const navStatus = byId("merge-outcome-nav-status");
   navStatus.textContent = state.mergeHistoryLoaded
-    ? `紀錄面板已關閉；${buckets.mergedPromotions.length} 筆仍在「已 Merge」，${buckets.otherCount} 筆仍在「需檢查／未進入」。 · Records closed, not cleared.`
+    ? "紀錄面板已關閉；歷史仍保留於「Merge 紀錄」，不會顯示成待處理數字。 · Records closed, not cleared or counted as tasks."
     : "紀錄面板已關閉；目前數量仍是未知，請重新開啟後重試。 · Records closed; counts remain unknown until a successful refresh.";
   state.mergeHistoryReturnFocus?.focus?.();
   state.mergeHistoryReturnFocus = null;
@@ -4593,8 +4581,7 @@ async function repreviewMergeApproval() {
 }
 
 byId("merge-approvals-open").addEventListener("click", () => openMergeApprovalDialog(""));
-byId("merge-history-open").addEventListener("click", () => void openMergeHistory("merged"));
-byId("merge-history-other-open").addEventListener("click", () => void openMergeHistory("other"));
+byId("merge-history-open").addEventListener("click", () => void openMergeHistory());
 byId("merge-history-close").addEventListener("click", closeMergeHistory);
 byId("merge-history-done").addEventListener("click", closeMergeHistory);
 byId("merge-history-refresh").addEventListener("click", async () => {
