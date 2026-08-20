@@ -17,6 +17,14 @@ workspace 外、64 KiB 上限、owner-only 的原子 `last-report.json`；
 只含可移植 placeholder，是 macOS launchd 每小時入口的範本；實際安裝時才以本機絕對路徑 materialize，
 不把 username、Node version 或 Obsidian vault path 發佈進 source/package。安裝仍是獨立本機作業，不等於 merge 或部署。
 
+Audit CLI 本身是 bounded coordinator：它不直接執行設定的 filesystem reads，而是把 Git、SQLite、Room、mirror
+與 metadata 稽核放進 detached child process group；hard deadline 後對 group 先 TERM、短 grace 後 KILL，關閉
+stdio 並回傳具名 timeout report，因此卡在 kernel filesystem open 的 worker 不會把 launchd job 永久吊住。
+Report persistence 也在另一個短 deadline worker 內完成。Obsidian 使用兩階段模型：互動式
+`supervisor-mirror.mjs` 從 iCloud 取得 snapshot，依序原子替換兩份 0600 mirror，最後才原子替換 manifest；
+launchd audit 只驗 manifest schema、source metadata、digest、bytes、`mirroredAt`／expiry，不讀 source。
+中途崩潰會留下 digest 不一致並 fail closed，不會被解讀成 fresh。
+
 ## 1. 系統視圖
 
 ```text

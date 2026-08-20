@@ -7,6 +7,21 @@
 > host 驗收。下表其餘舊測試保留作為 GUI Managed 回歸證據，不得拿來冒充 Native Full-Trust、
 > 已安裝 runtime 或 main merge decision 已完成。
 
+## 2026-08-20 · P0-2 supervisor bounded-read／mirror freshness candidate
+
+| Requirement | Evidence | Status |
+|---|---|---|
+| 所有設定的 filesystem read 有真正 bounded deadline | Audit coordinator 只 spawn detached worker；Git、realpath/lstat/readdir/readFile、SQLite open/query 與 mirror validation 全在該 process group。Focused regression 以假 `git` child 寫 PID 後 hang，1000 ms deadline 產生 `FILESYSTEM_READ_DEADLINE_EXCEEDED`、CLI exit 1、PID 不再存在、bounded report 含同一 code | synthetic＋launchd live pass |
+| iCloud 不可讀時固定時間具名退出 | `supervisor-mirror.mjs` 的整份 source refresh 也在可殺 process group；timeout code 固定為 `SUPERVISOR_MIRROR_SOURCE_READ_DEADLINE_EXCEEDED`。Scheduled audit 不讀 iCloud、不 fallback，只能接受 fresh manifest-bound mirror | implementation＋live launchd pass |
+| Mirror source/digest/mirroredAt/staleness | Manifest schema v1 記兩份 resolved source、mirror、SHA-256、bytes、mirroredAt、staleAfterSeconds、expiresAt；audit 重算 digest/size並計算 age/stale。Malformed、unsafe、mismatch、stale 各 fail closed；manifest-last atomic commit | focused pass |
+| 唯讀、不自動修復 | Drift/timeout/stale 只寫 workspace 外 64 KiB report；不 switch/reset/merge/push/repair Room/SQLite，不 dispatch provider。既有 branch-drift regression 再驗 HEAD/worktree 未變 | focused pass |
+| launchd 真實執行 | 最新隔離 label `com.orchestratory.supervisor.p02current`：PlistBuddy exact array、plutil OK、bootstrap＋kickstart，`runs=1`、exit 0、`SUPERVISOR PASS`、schema 2 report ok、真實 Room 790 messages chain valid、11 SQLite stores pass。隔離 label `…p02currenticloud` 直接讀真實 Mobile Documents，2 秒後 exit 2、stderr `SUPERVISOR ALERT SUPERVISOR_MIRROR_SOURCE_READ_DEADLINE_EXCEEDED`，三個 target artifacts 均不存在；兩個 label 已 bootout，fixture/log/report 保留於 `/private/tmp/orchestratory-p02-live-current.7qUdou` | live pass |
+
+目前 focused 結果：`test/supervisor-audit.test.ts` 14 pass／0 fail；typecheck、syntax、hygiene、local security scan、
+`git diff --check` 均通過。Room 唯讀 Claude 第 1 輪 #800 為 PASS，並提出一項非阻擋的 inner-worker
+diagnostic specificity 觀察；修正 prefix parsing 並加入 0755 directory regression 後，第 2 輪 #804 再次 PASS，
+未使用第 3 輪。本節不得冒充 shipped、merged 或 runtime 已安裝。
+
 ## 2026-08-13 · Phase 5-6 evidence closure candidate
 
 - [x] `GitBroker.differencesFrom()` 對 `.git/config` 的有效設定漂移有 focused regression test：寫入無害的

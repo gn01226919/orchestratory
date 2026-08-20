@@ -938,3 +938,33 @@ Owner 已在真實 promotion 畫面看到 durable「Merge 成功」，但結果 
   均不改變。
 - Durable 結果與 recovery artifacts 仍完整保留；同帳號瀏覽器擴充套件仍可竄改畫面，最終核對面是 History、
   main HEAD 與 audit chain。
+
+## ADR-039：Supervisor 讀取採 process-group deadline，iCloud 採 manifest-bound local mirror
+
+**日期：** 2026-08-20
+**狀態：** Accepted
+
+### 背景
+
+互動式終端可直接讀 Obsidian iCloud vault，但 macOS launchd 在 `Mobile Documents` filesystem open 卡住。
+把 `readFile` 包在 `Promise.race` 只讓 await 提早返回，沒有取消底層 open；Node 仍可能永不退出。既有兩份
+0600 local marker 雖避開 hang，卻沒有 source、digest、mirroredAt 或 freshness，舊 snapshot 會被當成最新。
+
+### 決策
+
+1. Audit coordinator 不直接做任何設定的 filesystem read；完整 Git／Room／SQLite／mirror 稽核在獨立 detached
+   process group 執行，hard deadline 後 TERM、短 grace 後 KILL 並關閉 pipes。父程序在固定時間內產生
+   `FILESYSTEM_READ_DEADLINE_EXCEEDED`，盡力以另一個短 deadline worker 寫 report，然後非零退出。
+2. launchd 不直接讀 iCloud，也不在 timeout 後 fallback。互動式 `supervisor-mirror.mjs` 以相同 bounded process
+   group 讀 source，產生 0600 mirrors；manifest 以 bounded schema 記錄 source、mirror、SHA-256、bytes、
+   mirroredAt 與 staleness/expiry。
+3. Mirror files 先原子替換、manifest 最後原子提交。任何 crash mixed snapshot、size/digest mismatch、unsafe mode、
+   malformed schema 或 stale expiry 都是具名 ALERT，不能轉成 pass。
+4. Supervisor 的唯一 mutation 仍是 workspace 外 bounded report 與明確執行的 mirror refresh；它不切 branch、
+   reset、merge、push、修 SQLite／Room、派模型或刪除資料。
+
+### 影響
+
+- Native Full-Trust 與 GUI Managed 的 Agent capability、candidate/main、Room/exact-seat 與 merge approval 邊界均不變。
+- Mirror 解決 availability/freshness，不提供同帳號惡意程序下的 authenticity；需要不可繞過保證仍須更高 OS 身分。
+- 沒有 foreground refresh 時 launchd 會持續回 `OBSIDIAN_MIRROR_STALE`；這是誠實失敗，不是自動修復授權。

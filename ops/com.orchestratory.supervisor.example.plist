@@ -20,6 +20,10 @@
     <string>__STATUS_FILE__</string>
     <string>--pending-file</string>
     <string>__PENDING_FILE__</string>
+    <string>--mirror-manifest</string>
+    <string>__MIRROR_MANIFEST__</string>
+    <string>--read-deadline-ms</string>
+    <string>45000</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>

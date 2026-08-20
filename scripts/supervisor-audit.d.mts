@@ -5,6 +5,8 @@ export interface SupervisorOptions {
   dataDirectory: string;
   statusFile: string;
   pendingFile: string;
+  mirrorManifest: string;
+  readDeadlineMs: number;
   reportDir: string;
   json?: boolean;
   help?: boolean;
@@ -24,7 +26,7 @@ export interface SupervisorAlert {
 }
 
 export interface SupervisorReport {
-  schemaVersion: 1;
+  schemaVersion: 2;
   supervisor: string;
   startedAt: string;
   finishedAt: string;
@@ -38,6 +40,8 @@ export interface SupervisorReport {
     mutatingCommands: false;
     providerDispatch: false;
     mergePushPublishDeployDelete: false;
+    filesystemReadDeadlineMs: number;
+    iCloudReadByLaunchd: false;
     nextStepOnDrift: string;
   };
 }
