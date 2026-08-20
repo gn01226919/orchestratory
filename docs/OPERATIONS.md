@@ -27,15 +27,45 @@ already-running workflows cannot continue into their next provider or tester bou
 
 `ops/com.orchestratory.supervisor.example.plist` is intentionally non-runnable source: materialize its placeholders
 into a separate owner-local LaunchAgent using the absolute Node executable, committed supervisor script, canonical
-workspace, expected branch, Room, data directory and Obsidian handoff paths. Never commit the materialized plist.
+workspace, expected branch, Room, data directory, owner-local handoff mirrors and mirror manifest. Never commit the materialized plist.
 Validate it with `plutil`, then bootstrap `com.orchestratory.supervisor`; `StartInterval=3600` and `RunAtLoad` provide
 the hourly cadence and initial audit.
+
+Do not point launchd at `Mobile Documents`: on macOS the same path can work in an interactive terminal yet block forever
+at filesystem open under launchd. Refresh the owner-local snapshot from an interactive session instead:
+
+```text
+node scripts/supervisor-mirror.mjs \
+  --status-source "<vault>/projects/orchestrator/status.md" \
+  --pending-source "<vault>/projects/orchestrator/PENDING_DECISIONS.md" \
+  --status-mirror "<data>/supervisor/status-marker.md" \
+  --pending-mirror "<data>/supervisor/pending-marker.md" \
+  --manifest "<data>/supervisor/mirror-manifest.json" \
+  --read-deadline-ms 10000 \
+  --stale-after-seconds 7200
+```
+
+The refresh runs source reads in a separately killable process group. It writes both 0600 mirrors before committing
+the 0600 manifest; the manifest records resolved sources, exact mirror paths, SHA-256 digests, byte counts,
+`mirroredAt`, expiry and staleness bound. A source read timeout prints
+`SUPERVISOR ALERT SUPERVISOR_MIRROR_SOURCE_READ_DEADLINE_EXCEEDED` and exits 2 without claiming freshness. The scheduled audit receives
+`--mirror-manifest` and `--read-deadline-ms`; stale, malformed or mismatched mirrors are named alerts and never trigger
+an iCloud fallback.
+
+When editing a materialized plist array, use `/usr/libexec/PlistBuddy` and re-read the exact indexed value afterward.
+Do not use `plutil -replace ProgramArguments.N`; on the validated owner machine it inserted an argument instead of
+replacing the intended array element.
 
 The supervisor uses `git --no-optional-locks` and SQLite `readOnly + query_only`; it does not start normal runtime
 migration/recovery and does not read the HMAC audit key. It atomically writes only the workspace-external bounded
 `last-report.json` (0700 directory, 0600 file) plus a one-line `/tmp` launchd log. A hot WAL that cannot be read
 without recovery fails loud as an alert. SQLite quick/foreign-key checks and the Room SHA-256 chain do not replace
 the release gate's full semantic and HMAC integrity checks.
+
+All configured audit reads execute inside one detached process group. At the configured hard deadline the coordinator
+terminates the group, closes its pipes, emits `FILESYSTEM_READ_DEADLINE_EXCEEDED`, attempts the bounded report through a
+separate five-second writer process, and exits nonzero. This is process cancellation, not `Promise.race`; an abandoned
+filesystem open cannot keep the launchd coordinator alive.
 
 These read-only diagnostics may run while the GUI daemon is active. Every SQLite store, including the main
 run store, waits up to three seconds for a short concurrent writer before failing closed. A lock that outlives

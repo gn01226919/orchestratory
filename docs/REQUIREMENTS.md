@@ -25,6 +25,14 @@ merge、push、publish、deploy、delete 或呼叫 provider。macOS launchd 範�
 提供持續排程；repository 只保存 placeholder example，安裝時才 materialize 本機絕對路徑，不得提交
 username、Node version 或 vault path。模型督導不是必要依賴，預設不得消耗 provider 額度。
 
+所有由督導觸發的 filesystem read（含 Git cwd/config、Room/SQLite open、handoff mirror、metadata 與 report
+path 驗證）必須被包含在獨立 process group 的 hard deadline 內；不得只以 `Promise.race` 包住仍在執行的
+`readFile`。Deadline 到期時父程序必須終止整個 group，在固定時間內輸出
+`FILESYSTEM_READ_DEADLINE_EXCEEDED`、盡力寫入 bounded report 並非零退出。launchd 不直接讀 iCloud；它只讀
+owner-only 本機 mirror 與 manifest。Manifest 必須以 bounded schema 記錄每份 source、mirror、SHA-256 digest、
+bytes、`mirroredAt` 與 `staleness`（期限及是否 stale）；缺檔、digest/size 不符、schema 壞掉或到期均具名 ALERT，
+且不得 fallback 回 iCloud。互動式 mirror refresh 同樣以可終止 process group bounded，manifest 最後原子提交。
+
 ## 2. 執行模式
 
 ### 2.1 Native Full-Trust

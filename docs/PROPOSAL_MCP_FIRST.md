@@ -17,6 +17,12 @@ MCP seat、不讀 HMAC key、不得偽造 sender identity、不得寫 Room ledge
 只負責排程；若未來要派遣 Claude/Codex，必須另有明確 provider、quota、identity 與 failure policy，
 因此目前保持停用。
 
+Supervisor 也不是一個可由 MCP 呼叫的 mutation tool。Audit coordinator 把所有設定的 filesystem reads
+放進 bounded process group；timeout 只產生具名 ALERT／報告，不新增 Room 訊息。iCloud snapshot 由互動式
+`supervisor-mirror.mjs` 建立；launchd 只驗 local 0600 mirrors 與 manifest 的 source／digest／mirroredAt／
+staleness，永不 fallback 讀 source。Room membership、standby、Claude review 與 main merge approval都不能
+替代 mirror freshness，也不能授權 supervisor 自行修復。
+
 ## 1. 一句話總結
 
 Codex／Claude Code 原生 TUI 是具完整能力的 Supervisor／Worker；Orchestratory MCP 提供 exact-seat

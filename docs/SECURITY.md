@@ -22,6 +22,11 @@ Room chain、SQLite quick/foreign-key integrity 與 handoff 缺口；它不能�
 資料。它以 read-only SQLite connection 避免 migration/recovery，且不碰 HMAC key。報告只保存必要的
 bounded metadata，固定小於等於 64 KiB，使用 workspace 外的 0700 directory 與原子 0600 report file；provider dispatch 預設關閉，避免把每小時稽核
 誤變成未授權的模型額度或外部副作用。
+督導的所有設定讀取在獨立 process group 內，父程序以 hard deadline 終止整組，而不是留下被
+`Promise.race` 遺棄的 filesystem open。launchd 只讀 0600 local mirror＋manifest；manifest 具名保存來源、
+digest、`mirroredAt` 與 staleness，任何不一致／過期均 fail closed 且不 fallback 到 iCloud。互動式 refresh
+以 manifest-last 原子提交，不能把混合版本冒充同一 snapshot。這些控制只保證 bounded failure 與可觀察性；
+同帳號 Full-Trust 程序仍可改寫 mirror/manifest 或停止 LaunchAgent。
 - Merge approval 綁定精確快照，main/candidate drift 即失效；
 - 保留可驗證的 recovery metadata，誠實揭露 Full-Trust 不能強制隔離同帳號程序。
 
