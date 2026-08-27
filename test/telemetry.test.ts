@@ -595,7 +595,31 @@ test("today's first start reports yesterday's complete summary and nothing about
   assert.equal(body.p_apply_backs, 1);
   assert.equal(body.p_ran_today, true);
   assert.deepEqual(body.p_error_codes, ["MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY"]);
-  assert.equal(calls[0]!.includes("99"), false, "today's in-progress counts must not be sent");
+  /*
+   * These two facts used to be checked by searching the serialised body for the characters "99" and
+   * for "TODAY_ONLY_CODE". The second search is sound; the first was not. The body also carries
+   * `p_install_id`, a randomly generated id, and a random id contains "99" about one time in ten —
+   * measured on an unmodified tree, this test failed 15 times in 130 runs with nothing wrong. A
+   * substring search cannot tell a leaked count from an id that happens to spell one.
+   *
+   * Enumerating the body is deterministic and also stricter than the search it replaces: with every
+   * key named here and every value asserted above, today's numbers have nowhere left to hide — not
+   * even in a field added later that nobody thought to search for.
+   */
+  assert.deepEqual(Object.keys(body).sort(), [
+    "p_apply_backs",
+    "p_arch",
+    "p_error_codes",
+    "p_install_id",
+    "p_os",
+    "p_promotions",
+    "p_ran_today",
+    "p_version",
+  ], "every field is accounted for, so nothing about today can travel in an unchecked one");
+  assert.equal(typeof body.p_install_id, "string");
+  assert.equal(typeof body.p_version, "string");
+  assert.equal(body.p_os, "darwin");
+  assert.equal(body.p_arch, "arm64");
   assert.equal(calls[0]!.includes("TODAY_ONLY_CODE"), false);
 });
 
