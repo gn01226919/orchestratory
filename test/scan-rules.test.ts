@@ -85,6 +85,35 @@ test("an address that reaches a person is reported, and a role address that reac
 
   // An excluded address must not cover for a real one sharing the line.
   assert.equal(detects("personal-email", `${noreply}, ${address("someone", "gmail", "com")}`), true);
+
+  // D-025. The exclusion is the whole reserved `.invalid` TLD, not one literal domain under it.
+  // The address that forced this is the product's OWN promotion identity, which every promotion
+  // merge commit carries in `%ae` — `audit:history` had been failing since the first promotion.
+  const promotionIdentity = address("promotion", "orchestratory", "invalid");
+  assert.equal(
+    detects("personal-email", promotionIdentity),
+    false,
+    "the product's own promotion identity was reported as somebody's personal address",
+  );
+  assert.equal(
+    detects("personal-email", address("anyone", "some-other-project", "invalid")),
+    false,
+    "RFC 2606 reserves .invalid so that it can never resolve; nothing there reaches a person",
+  );
+
+  // Both directions, because widening an exclusion is exactly where a suffix hole gets reopened:
+  // a hostname that merely BEGINS under `.invalid` and continues into somebody else's is reported.
+  assert.equal(detects("personal-email", `${promotionIdentity}${DOT}evil${DOT}tw`), true);
+  assert.equal(
+    detects("personal-email", address("someone", "invalid-looking", "com")),
+    true,
+    "a real domain whose label merely contains the word must still be reported",
+  );
+  // And it must not cover for a real address sharing the line.
+  assert.equal(
+    detects("personal-email", `${promotionIdentity}, ${address("someone", "gmail", "com")}`),
+    true,
+  );
 });
 
 test("a home directory that names a person is reported, and the documentation placeholders are not", () => {
