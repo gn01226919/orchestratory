@@ -120,6 +120,117 @@ npm_config_ignore_scripts=true npm_config_prefix="$HOME/.local" npm link。最�
 遇到 PATH、權限、測試或依賴問題時停止並回報，不要自行繞過。
 ```
 
+## 快速開始：從安裝到第一次 merge 核准
+
+裝完之後，這一節帶你走完一次完整的流程。**十步，每步一行指令。**
+
+先說清楚這個產品在做什麼，後面每一步才有意義：
+
+> **Agent 在一個獨立的工作區（candidate）做事，不直接動你的專案。**
+> **做完之後，系統把差異攤開給你看，問你要不要併進去。你不點頭，什麼都不會寫進你的專案。**
+
+`main` 在本文件裡一律指**你自己的專案目錄**，不是 GitHub 上的分支。
+
+---
+
+### 1. 告訴它哪個資料夾可以碰
+
+```bash
+orchestrator workspaces allow /path/to/your-project --label my-project
+```
+
+**預設是什麼都不准碰**，沒有這一步後面全部會失敗。這個指令會把**正規化後的完整路徑**印在終端機上，
+要你**親手打字確認**——因為它只接受實體 TTY 的輸入，agent 沒辦法代替你按。
+
+### 2. 啟動
+
+```bash
+orchestrator
+```
+
+會同時開終端機對話和本機網頁介面（GUI）。GUI **只綁在 loopback**，外面連不進來。
+只要 GUI 的話用 `orchestrator gui`。
+
+**GUI 是你的控制台。** 後面所有「核准」都在那裡按，不在終端機。
+
+### 3. 建立房間
+
+```bash
+orchestrator room init
+```
+
+房間是這個專案的協作單位：一份**只能往後追加、不能改寫**的共用帳本，加上一份席位名單。
+同一個資料夾重複執行會回傳原本那間，不會建第二間。
+
+### 4. 把 Orchestratory 掛給你的 coding CLI
+
+在 Codex 或 Claude Code 的 MCP 設定裡新增一個 **stdio** server，指令是：
+
+```bash
+orchestrator mcp --actor codex
+```
+
+`--actor` 是這個席位的身分，**由啟動設定決定，agent 不能自己改**。名稱只接受小寫字母開頭、
+最長 32 字元；`you` 和 `system` 一律拒絕，因為那兩個會冒充系統或你本人。
+
+### 5. 叫 agent 自己申請進房
+
+直接跟你的 agent 說：**「請呼叫 `room_join_request` 加入房間。」**
+
+**不要叫它跑 shell 指令去 join。** 進房必須由 agent 透過 MCP 提出申請，
+這樣系統才知道**是哪一個活著的程序**在要求進來——shell 指令做不到這件事。
+
+### 6. 你在 GUI 按核准
+
+GUI 會跳出加入請求，你選這個席位的協作模式後核准。
+
+**加入房間不會改變 agent 的任何權限**——它的 sandbox、工具、shell、網路全部由它自己的 host 決定，
+Orchestratory 不升權也不降權。加入只是授權「協作」。
+
+接著叫 agent 呼叫 **`room_wait`**，GUI 會再跳一次待命核准。這兩個是**不同的授權**：
+前者是「可以進來」，後者是「可以被指派工作」。
+
+### 7. 開一個任務
+
+叫 agent 呼叫 **`candidate_start`**。
+
+系統會建立一個獨立的 Git 分支與工作區，並記下你專案**當下的 HEAD**。
+**你未提交的修改會原地保留**，不會被複製進去，也不會被清掉、stash 或 reset。
+
+### 8. Agent 在 candidate 裡做事
+
+它有完整的原生能力。過程中可以隨時呼叫 **`candidate_checkpoint`** 存一個可復原的快照
+（必須是已 commit 的乾淨狀態，否則會被拒絕——這樣快照才真的救得回來）。
+
+### 9. 任務完成，系統開始問你
+
+叫 agent 呼叫 **`candidate_complete`**，接著 **`main_merge_preview`**。
+
+你會拿到：**變更的檔案、衝突、測試結果、風險、復原點**，以及**一句你必須逐字打出來的確認語**。
+
+如果預覽**顯示不完整**（檔案太多被截斷、或模擬合併有衝突），它會回報 `approvable: false`——
+**系統不會請你為你沒看過的內容簽名。**
+
+### 10. 核准，才會寫進你的專案
+
+叫 agent 呼叫 **`main_merge_request`**。**提出申請不等於核准**——它只是登記一個問題，
+而且**不帶任何 agent 能用的 token**。
+
+然後你在 GUI 裡：**把 diff 捲到底** → 逐字打出確認語 → 按核准。
+
+這時系統才會真的寫入你的專案。這份核准**只能用一次**，而且綁死在那個快照上：
+只要 candidate HEAD、你的專案 HEAD、路徑、預覽摘要**任何一個變了，核准立刻失效**，必須重新預覽再問一次。
+
+---
+
+### 三件反直覺、但刻意如此的事
+
+1. **agent 不能核准自己的 merge。** `main_merge_request` 只能「問」。
+   能核准的介面只有你的 GUI 或實體 TTY——因為 agent 摸不到那兩個地方的輸入。
+2. **拒絕不等於刪除。** 你說不要或先擱著，candidate 和它的紀錄都會留著。
+3. **candidate 不是 OS 沙箱。** 同一個 macOS 帳號下的 full-trust agent，技術上仍然可以繞過去。
+   它提供的是**可追溯、可復原、有紀錄**，不是強制隔離。這一點文件裡不會給你更好聽的說法。
+
 ## 開發
 
 Node.js 22.20+ 可直接執行此專案的可剝離型別 TypeScript。正式 typecheck 需安裝鎖定的 dev dependencies。
