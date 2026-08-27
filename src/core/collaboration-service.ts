@@ -116,10 +116,18 @@ export class CollaborationService {
   constructor(dataDirectory: string, options: {
     writerWorktrees?: WriterWorktreeLifecycle;
     maxCandidateFiles?: number;
+    /**
+     * Presence clock and lease length. `RoomPresenceStore` has always accepted these; the service
+     * simply never passed them on, so anything holding a seat through this class was bound to wall
+     * clock time whether or not that was the thing under test. Forwarding them costs nothing at
+     * runtime — omitting the field keeps the production 15s lease — and it lets a caller that is
+     * not exercising expiry stop depending on how long its own setup happens to take.
+     */
+    presence?: { now?: () => number; leaseMs?: number };
   } = {}) {
     this.#dataDirectory = dataDirectory;
     this.ledger = new RoomLedger(dataDirectory);
-    this.presence = new RoomPresenceStore(dataDirectory);
+    this.presence = new RoomPresenceStore(dataDirectory, options.presence ?? {});
     this.inbox = new RoomInboxStore(dataDirectory);
     this.managedAgents = new ManagedRoomAgentStore(dataDirectory);
     this.writerLeases = new WriterLeaseStore(dataDirectory);
