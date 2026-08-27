@@ -3,6 +3,7 @@ import { lstat, readFile } from "node:fs/promises";
 import { extname, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+import { unexplainedTestUnrefLines } from "./hygiene-rules.mjs";
 
 const execFileAsync = promisify(execFile);
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -68,6 +69,12 @@ for (const path of paths) {
       semanticCodePrefixes.some((prefix) => path.startsWith(prefix))) {
     for (const [name, pattern] of forbiddenCode) {
       if (pattern.test(content)) findings.push(`${name}:${path}`);
+    }
+  }
+  // See `scripts/hygiene-rules.mjs` for why `test/` needs its own rule and what the marker means.
+  if (path.startsWith("test/")) {
+    for (const line of unexplainedTestUnrefLines(content)) {
+      findings.push(`unexplained-test-unref:${path}:${line}`);
     }
   }
   if (extname(path) === ".json") {

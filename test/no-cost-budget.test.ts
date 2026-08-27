@@ -182,14 +182,38 @@ function eventsOfType(events: RunEvent[], type: string): RunEvent[] {
   return events.filter((event) => event.type === type);
 }
 
+/*
+ * Polls until a condition the workflow under test is expected to reach.
+ *
+ * ⛔ The timer used to be `unref()`-ed. That is what made this file fail on the Node version this
+ * project pins: an unref-ed timer does not hold the event loop open, and neither does the bare
+ * promise the scripted provider awaits while the test holds it at the gate — so at the moment this
+ * loop was sleeping there could be nothing ref-ed in the process at all. Node then considers the
+ * loop drained and reports every pending test as
+ * "Promise resolution is still pending but the event loop has already resolved".
+ *
+ * That ref-ness is the cause was isolated by experiment, not inferred: copy this file with the
+ * `unref()` still in place, add nothing but a ref-ed `setInterval` keepalive, and the failures stop.
+ * On 22.20.0, 12 runs each: 66 cancelled tests without the keepalive, 0 with it. The suspected line
+ * is untouched in both arms, so the only variable is whether anything ref-ed is alive.
+ *
+ * Rates measured on 22.20.0 with the `unref()` present, whole file: 21 of 30 runs and 11 of 12 runs
+ * had cancellations, in two independent sessions. With it removed: 0 of 30 and 0 of 12.
+ *
+ * It did not reproduce on 24.14.0 (0 of 20 runs). ⚠️ WHY the versions differ was NOT isolated — a
+ * standalone minimal repro failed to reproduce it in any unref × version combination, and a runner
+ * that itself holds a ref-ed handle would explain the same observation. Do not read the paragraph
+ * above as a claim about Node's internals; it describes this file's behaviour, which is what the
+ * measurements cover.
+ *
+ * The deadline below is what bounds a hung wait, so the unref bought nothing that the timeout does
+ * not already provide, and it cost the file its ability to stay alive while it waits.
+ */
 async function waitFor(predicate: () => boolean): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (!predicate()) {
     if (Date.now() > deadline) throw new Error("WAIT_TIMEOUT");
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 5);
-      timer.unref();
-    });
+    await new Promise<void>((resolve) => { setTimeout(resolve, 5); });
   }
 }
 

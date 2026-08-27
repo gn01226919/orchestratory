@@ -42,6 +42,7 @@ test("main store waits briefly for a concurrent maintenance lock", async (t) => 
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk: string) => { stderr += chunk; });
   await once(child.stdout, "data");
+  // hygiene-allow unref: the `once(child, "exit")` below holds a ref-ed child-process handle
   setTimeout(release, 100).unref();
   const [code, signal] = await once(child, "exit") as [number | null, NodeJS.Signals | null];
   assert.equal(signal, null, stderr);
