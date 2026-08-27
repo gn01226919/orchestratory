@@ -9,6 +9,22 @@ import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { CollaborationService } from "../src/core/collaboration-service.ts";
 
+/*
+ * A seat registered here is scaffolding, not the thing under test. The production presence lease is
+ * 15s (`DEFAULT_LEASE_MS`) and an expired seat is pruned, so a test whose setup runs long — on a
+ * loaded machine, git and worktree work easily does — loses its seat and fails at whatever it asked
+ * for next, reporting PRESENCE_NOT_FOUND instead of the thing it was asserting. Measured: inserting
+ * a deliberate 16s wait before the merge-request assertion reproduces exactly that, every time.
+ *
+ * The lease is therefore made long enough that elapsed time cannot decide the outcome. This removes
+ * no coverage: `room-presence.test.ts` asserts lease and prune behaviour directly, with an injected
+ * clock, which is where a test that is actually about expiry belongs.
+ */
+function collaborationService(data: string): CollaborationService {
+  return new CollaborationService(data, { presence: { leaseMs: 120_000 } });
+}
+
+
 const execFileAsync = promisify(execFile);
 const ROOM_FIRST_JOIN = { collaborationMode: "room-first" as const, syncTurns: true };
 /** One fresh durable idempotency key per logical candidate call. */
@@ -25,8 +41,8 @@ async function repository(prefix = "orchestratory-collaboration-source-"): Promi
 
 test("GUI, TUI and MCP service instances share one exact-seat ledger sequence", async (t) => {
   const data = await mkdtemp(join(tmpdir(), "orchestratory-collaboration-"));
-  const gui = new CollaborationService(data);
-  const mcp = new CollaborationService(data);
+  const gui = collaborationService(data);
+  const mcp = collaborationService(data);
   t.after(() => gui.close());
   t.after(() => mcp.close());
   t.after(async () => await rm(data, { recursive: true, force: true }));
@@ -117,8 +133,8 @@ test("GUI, TUI and MCP service instances share one exact-seat ledger sequence", 
 
 test("exact terminal seats exchange authenticated multi-turn threads without provider fallback", async (t) => {
   const data = await mkdtemp(join(tmpdir(), "orchestratory-peer-thread-"));
-  const codexProcess = new CollaborationService(data);
-  const claudeProcess = new CollaborationService(data);
+  const codexProcess = collaborationService(data);
+  const claudeProcess = collaborationService(data);
   t.after(() => codexProcess.close());
   t.after(() => claudeProcess.close());
   t.after(async () => await rm(data, { recursive: true, force: true }));
@@ -337,7 +353,7 @@ test("exact terminal seats exchange authenticated multi-turn threads without pro
 test("exact native seat owns a durable candidate lifecycle while main remains untouched", async (t) => {
   const source = await repository("orchestratory-candidate-service-source-");
   const data = await mkdtemp(join(tmpdir(), "orchestratory-candidate-service-data-"));
-  const service = new CollaborationService(data);
+  const service = collaborationService(data);
   t.after(() => service.close());
   t.after(async () => await rm(data, { recursive: true, force: true }));
   t.after(async () => await rm(source, { recursive: true, force: true }));
@@ -392,8 +408,8 @@ test("exact native seat owns a durable candidate lifecycle while main remains un
 
 test("target unregister races cannot leave a new exact-seat delivery active", async (t) => {
   const data = await mkdtemp(join(tmpdir(), "orchestratory-peer-offline-race-"));
-  const senderProcess = new CollaborationService(data);
-  const targetProcess = new CollaborationService(data);
+  const senderProcess = collaborationService(data);
+  const targetProcess = collaborationService(data);
   t.after(() => senderProcess.close());
   t.after(() => targetProcess.close());
   t.after(async () => await rm(data, { recursive: true, force: true }));
@@ -520,7 +536,7 @@ test("target unregister races cannot leave a new exact-seat delivery active", as
 
 test("abnormal target death is reconciled by reply wait and room visibility without presence polling", async (t) => {
   const data = await mkdtemp(join(tmpdir(), "orchestratory-peer-crash-reconcile-"));
-  const service = new CollaborationService(data);
+  const service = collaborationService(data);
   t.after(() => service.close());
   t.after(async () => await rm(data, { recursive: true, force: true }));
   service.ledger.createRoom("demo", "/tmp/project");
@@ -617,7 +633,7 @@ test("abnormal target death is reconciled by reply wait and room visibility with
 
 test("managed and external seats cannot claim the same room display identity", async (t) => {
   const data = await mkdtemp(join(tmpdir(), "orchestratory-collaboration-name-"));
-  const service = new CollaborationService(data);
+  const service = collaborationService(data);
   t.after(() => service.close());
   t.after(async () => await rm(data, { recursive: true, force: true }));
   service.ledger.createRoom("demo", "/tmp/project");
@@ -660,8 +676,8 @@ test("managed and external seats cannot claim the same room display identity", a
 
 test("a second GUI preserves a live cross-process Writer run and revokes it only after the heartbeat stops", async (t) => {
   const data = await mkdtemp(join(tmpdir(), "orchestratory-collaboration-restart-"));
-  const first = new CollaborationService(data);
-  const second = new CollaborationService(data);
+  const first = collaborationService(data);
+  const second = collaborationService(data);
   t.after(() => first.close());
   t.after(() => second.close());
   t.after(async () => await rm(data, { recursive: true, force: true }));
@@ -685,7 +701,7 @@ test("a second GUI preserves a live cross-process Writer run and revokes it only
 
 test("vNext revokes persisted external Writer capabilities and runs while preserving managed leases", async (t) => {
   const data = await mkdtemp(join(tmpdir(), "orchestratory-collaboration-legacy-external-"));
-  const service = new CollaborationService(data);
+  const service = collaborationService(data);
   t.after(() => service.close());
   t.after(async () => await rm(data, { recursive: true, force: true }));
   service.ledger.createRoom("demo", "/tmp/project");
@@ -782,7 +798,7 @@ test("vNext revokes persisted external Writer capabilities and runs while preser
 
 test("service rejects cross-room removal and delivery impersonation", async (t) => {
   const data = await mkdtemp(join(tmpdir(), "orchestratory-collaboration-guard-"));
-  const service = new CollaborationService(data);
+  const service = collaborationService(data);
   t.after(() => service.close());
   t.after(async () => await rm(data, { recursive: true, force: true }));
   service.ledger.createRoom("first", "/tmp/project");
@@ -820,7 +836,7 @@ test("service rejects cross-room removal and delivery impersonation", async (t) 
 test("service grants and switches Writer only to eligible room identities", async (t) => {
   const data = await mkdtemp(join(tmpdir(), "orchestratory-collaboration-writer-"));
   const source = await repository();
-  const service = new CollaborationService(data);
+  const service = collaborationService(data);
   t.after(() => service.close());
   t.after(async () => await rm(data, { recursive: true, force: true }));
   t.after(async () => await rm(source, { recursive: true, force: true }));
@@ -915,7 +931,7 @@ test("Writer grant explains that a repository without a base commit cannot creat
   const source = await mkdtemp(join(tmpdir(), "orchestratory-writer-empty-source-"));
   const data = await mkdtemp(join(tmpdir(), "orchestratory-writer-empty-data-"));
   await execFileAsync("git", ["init", "-b", "main"], { cwd: source });
-  const service = new CollaborationService(data);
+  const service = collaborationService(data);
   t.after(() => service.close());
   t.after(async () => await rm(data, { recursive: true, force: true }));
   t.after(async () => await rm(source, { recursive: true, force: true }));
@@ -929,7 +945,7 @@ test("Writer grant explains that a repository without a base commit cannot creat
 test("Writer serializes same-provider writable children in the task worktree and keeps cross-provider children read-only", async (t) => {
   const source = await repository("orchestratory-delegation-source-");
   const data = await mkdtemp(join(tmpdir(), "orchestratory-delegation-service-"));
-  const service = new CollaborationService(data);
+  const service = collaborationService(data);
   t.after(() => service.close());
   t.after(async () => await rm(data, { recursive: true, force: true }));
   t.after(async () => await rm(source, { recursive: true, force: true }));

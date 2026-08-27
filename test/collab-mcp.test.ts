@@ -16,6 +16,22 @@ import { WorkspacePolicy } from "../src/security/workspace-policy.ts";
 import { DEFAULT_HARD_LIMITS } from "../src/config.ts";
 import type { AgentAssignment, ProviderRequest, ProviderResult } from "../src/types.ts";
 
+/*
+ * A seat registered here is scaffolding, not the thing under test. The production presence lease is
+ * 15s (`DEFAULT_LEASE_MS`) and an expired seat is pruned, so a test whose setup runs long — on a
+ * loaded machine, git and worktree work easily does — loses its seat and fails at whatever it asked
+ * for next, reporting PRESENCE_NOT_FOUND instead of the thing it was asserting. Measured: inserting
+ * a deliberate 16s wait before the merge-request assertion reproduces exactly that, every time.
+ *
+ * The lease is therefore made long enough that elapsed time cannot decide the outcome. This removes
+ * no coverage: `room-presence.test.ts` asserts lease and prune behaviour directly, with an injected
+ * clock, which is where a test that is actually about expiry belongs.
+ */
+function collaborationService(data: string): CollaborationService {
+  return new CollaborationService(data, { presence: { leaseMs: 120_000 } });
+}
+
+
 const execFileAsync = promisify(execFile);
 /** One fresh durable idempotency key per logical candidate call. */
 const key = (): string => randomUUID();
@@ -323,8 +339,8 @@ test("room_join_request cancellation clears the stale GUI request", async (t) =>
 test("room_wait requests GUI standby approval for the exact joined session before listening", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "orchestratory-standby-root-"));
   const data = await mkdtemp(join(tmpdir(), "orchestratory-standby-data-"));
-  const gui = new CollaborationService(data);
-  const mcp = new CollaborationService(data);
+  const gui = collaborationService(data);
+  const mcp = collaborationService(data);
   t.after(() => gui.close());
   t.after(() => mcp.close());
   t.after(async () => await rm(data, { recursive: true, force: true }));
@@ -792,8 +808,8 @@ test("exact-seat MCP tools wait, acknowledge, and reply without provider fallbac
 test("MCP exact terminal seats discover, send, await, and continue threads directly", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "orchestratory-peer-mcp-root-"));
   const data = await mkdtemp(join(tmpdir(), "orchestratory-peer-mcp-data-"));
-  const codexService = new CollaborationService(data);
-  const claudeService = new CollaborationService(data);
+  const codexService = collaborationService(data);
+  const claudeService = collaborationService(data);
   t.after(() => codexService.close());
   t.after(() => claudeService.close());
   t.after(async () => await rm(data, { recursive: true, force: true }));
@@ -1013,7 +1029,7 @@ test("native MCP candidate tools preserve main and end at an owner-required merg
   await execFileAsync("git", [
     "-c", "user.name=MCP Test", "-c", "user.email=test@example.invalid", "commit", "-m", "initial",
   ], { cwd: root });
-  const service = new CollaborationService(data);
+  const service = collaborationService(data);
   t.after(() => service.close());
   t.after(async () => await rm(data, { recursive: true, force: true }));
   t.after(async () => await rm(root, { recursive: true, force: true }));
