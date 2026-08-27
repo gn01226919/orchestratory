@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -671,4 +671,126 @@ test("fallback writer takes over when the primary writer's provider process fail
     store.listEvents(result.id).some((e) => e.type === "writer.fallback-engaged"),
     "should emit fallback-engaged event",
   );
+});
+
+/*
+ * A paused run must stay alive on its own deadline.
+ *
+ * This has to run in a child process, and the child must hold nothing else open. The defect is
+ * "nothing ref-ed is alive, so Node decides the loop is drained and the process exits" — and a test
+ * runner is itself something ref-ed and alive. Asserting this in-process would pass whether or not
+ * the product is correct, which is the one thing a probe for it must not do.
+ *
+ * The child pauses the run from inside the planner call, so the pause lands while the run is in
+ * flight and the very next `#waitIfPaused` blocks. From that moment the only thing that can ever
+ * resolve the wait without a human is the workflow deadline. If that deadline does not hold the
+ * loop open, the child exits with nothing written and the run is lost silently — no error, no
+ * timeout, no record.
+ */
+async function runChildScript(
+  script: string,
+  args: readonly string[],
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return await new Promise((resolve) => {
+    const child = spawn(process.execPath, [script, ...args], { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
+    child.once("close", (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+test("a paused run is kept alive by its own deadline, not by whoever happens to be watching", async (t) => {
+  const workspace = await createRepository();
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-workflow-paused-deadline-"));
+  const scriptDir = await mkdtemp(join(tmpdir(), "orchestratory-workflow-paused-child-"));
+  t.after(async () => await rm(workspace, { recursive: true, force: true }));
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+  t.after(async () => await rm(scriptDir, { recursive: true, force: true }));
+
+  const root = new URL("..", import.meta.url).pathname;
+  const script = join(scriptDir, "paused-deadline-child.ts");
+  await writeFile(script, [
+    `import { DEFAULT_HARD_LIMITS, PROFILES } from ${JSON.stringify(`${root}src/config.ts`)};`,
+    `import { RunEvents } from ${JSON.stringify(`${root}src/core/events.ts`)};`,
+    `import { LocalStore } from ${JSON.stringify(`${root}src/core/store.ts`)};`,
+    `import { WorkflowService } from ${JSON.stringify(`${root}src/core/workflow.ts`)};`,
+    `import { ProviderRegistry } from ${JSON.stringify(`${root}src/providers/registry.ts`)};`,
+    `import { ApprovalService } from ${JSON.stringify(`${root}src/security/approval.ts`)};`,
+    `import { TesterBroker } from ${JSON.stringify(`${root}src/core/tester-broker.ts`)};`,
+    `import { WorkspacePolicy } from ${JSON.stringify(`${root}src/security/workspace-policy.ts`)};`,
+    `import type { ProviderAdapter } from ${JSON.stringify(`${root}src/providers/provider.ts`)};`,
+    `import type { ProviderId } from ${JSON.stringify(`${root}src/types.ts`)};`,
+    "",
+    "const workspace = process.argv[2] as string;",
+    "const data = process.argv[3] as string;",
+    "const store = new LocalStore(data);",
+    "const events = new RunEvents(store);",
+    "let runId = \"\";",
+    "let paused = false;",
+    "",
+    "class PausingRegistry extends ProviderRegistry {",
+    "  override get(id: ProviderId): ProviderAdapter {",
+    "    const capabilities = super.get(id).capabilities;",
+    "    return {",
+    "      capabilities,",
+    "      invoke: async (request) => {",
+    "        // Pause from inside the call, so the pause lands mid-run and the next wait point blocks.",
+    "        if (runId && !paused) paused = service.pause(runId);",
+    "        const text = \"Synthetic plan\";",
+    "        return {",
+    "          provider: id, model: request.model, text, exitCode: 0,",
+    "          durationMs: 1, outputBytes: Buffer.byteLength(text),",
+    "        };",
+    "      },",
+    "      doctor: async () => ({ ok: true }),",
+    "      listModels: async () => [...capabilities.subscriptionModels],",
+    "    };",
+    "  }",
+    "}",
+    "",
+    "const service = new WorkflowService({",
+    "  hardLimits: { ...DEFAULT_HARD_LIMITS, workflowTimeoutMs: 700 },",
+    "  providers: new PausingRegistry([]),",
+    "  store,",
+    "  events,",
+    "  approvals: new ApprovalService(),",
+    "  testers: new TesterBroker([]),",
+    "  workspaces: WorkspacePolicy.fromPaths([workspace]),",
+    "});",
+    "",
+    "const request = {",
+    "  workspace, workspaceMode: \"in-place\" as const, worktreeConfirmed: false,",
+    "  task: \"Perform a synthetic no-op review.\", profile: \"normal\" as const,",
+    "  planner: { role: \"planner\" as const, provider: \"fake\" as const, model: \"fake\", authMode: \"subscription\" as const },",
+    "  writer: { role: \"writer\" as const, provider: \"fake\" as const, model: \"fake\", authMode: \"subscription\" as const },",
+    "  reviewers: [{ role: \"reviewer\" as const, provider: \"fake\" as const, model: \"fake\", authMode: \"subscription\" as const }],",
+    "  testConfirmed: false,",
+    "  softLimits: { ...PROFILES.normal, workflowTimeoutMs: 700 },",
+    "  apiModeConfirmed: false, apiMaxCostUsdPerCall: 0, apiBudgetUsdPerRun: 0,",
+    "};",
+    "",
+    "const result = await service.run(request, (record) => { runId = record.id; });",
+    "// Reached only if something kept the process alive while the run sat paused.",
+    "process.stdout.write(JSON.stringify({",
+    "  completionResolved: true, paused, status: result.status, errorCode: result.errorCode,",
+    "}));",
+    "store.close();",
+    "",
+  ].join("\n"), { encoding: "utf8", mode: 0o600 });
+
+  const child = await runChildScript(script, [workspace, data]);
+  assert.equal(
+    child.code,
+    0,
+    `the child must not exit before the run settles (code ${child.code}); stderr: ${child.stderr}`,
+  );
+  const report: unknown = JSON.parse(child.stdout.trim());
+  assert.deepEqual(report, {
+    completionResolved: true,
+    paused: true,
+    status: "failed",
+    errorCode: "WORKFLOW_TIMEOUT",
+  });
 });

@@ -43,6 +43,12 @@ interface ActiveRun {
   pauseWaiters: Array<() => void>;
   providerStopEpoch: number;
   stopReason?: "CANCELLED_BY_USER" | "WORKFLOW_TIMEOUT";
+  /**
+   * The run's own timeout, kept here so a paused run can hold it `ref`-ed. See `#waitIfPaused`:
+   * this is the only thing that can end a pause without a human, so it is also the only thing
+   * entitled to keep the process alive across one.
+   */
+  deadline?: ReturnType<typeof setTimeout> | undefined;
 }
 
 const MAX_VOLATILE_MESSAGE_BYTES = 65_536;
@@ -423,7 +429,11 @@ export class WorkflowService {
       active.controller.abort();
       for (const resolve of active.pauseWaiters.splice(0)) resolve();
     }, Math.min(this.#hard.workflowTimeoutMs, soft.workflowTimeoutMs));
+    // Unref-ed while the run is working, because the work itself (git, providers, filesystem) keeps
+    // the loop alive and a run in progress should not be the reason a host process cannot exit.
+    // `#waitIfPaused` re-refs it for exactly as long as a pause lasts.
     workflowDeadline.unref();
+    active.deadline = workflowDeadline;
 
     try {
       record.status = "running";
@@ -649,6 +659,7 @@ export class WorkflowService {
       return structuredClone(record);
     } finally {
       clearTimeout(workflowDeadline);
+      active.deadline = undefined;
       this.#active.delete(record.id);
       const messageExpiry = setTimeout(() => this.#messages.delete(record.id), VOLATILE_MESSAGE_RETENTION_MS);
       messageExpiry.unref();
@@ -968,7 +979,41 @@ export class WorkflowService {
 
   async #waitIfPaused(active: ActiveRun): Promise<void> {
     if (!active.paused) return;
-    await new Promise<void>((resolve) => active.pauseWaiters.push(resolve));
+    /*
+     * ⛔ Do not await this bare promise without holding something `ref`-ed.
+     *
+     * Three things can resolve a pause: `resume()`, `cancel()`, and this run's own deadline. The
+     * first two need a human. So while a run is paused, the deadline is the ONLY thing that can
+     * ever end the wait on its own — and a bare promise holds nothing open. If the deadline is
+     * also unref-ed, a process whose only remaining work is this pause has, as far as Node can
+     * tell, nothing left to do: it exits, the run vanishes with no error, no timeout and no final
+     * record, and `run()` never settles.
+     *
+     * Measured on the pinned Node with nothing else alive in the process: exit code 13 in 0.24s,
+     * the completion unsettled and the deadline never fired. With the deadline `ref`-ed for the
+     * duration of the wait: the timeout fires and the run ends as WORKFLOW_TIMEOUT.
+     *
+     * This used to be safe only by accident. Every reachable caller of `pause()` today is an
+     * interactive surface that happens to hold a handle of its own — the TUI's stdin, the web
+     * server's listening socket — so the protection lived in the caller rather than here. Any
+     * non-interactive pause (a daemon, a headless API, a scheduler) would have reproduced the
+     * silent loss exactly. The run's timeout now keeps its own promise alive.
+     */
+    /*
+     * A fired timer cannot be re-`ref`-ed, so if the deadline has already gone off there is nothing
+     * left that could end this wait on its own. Waiting anyway would reintroduce exactly the loss
+     * described above, in the narrow window where the deadline fires while the run is working and a
+     * human pauses before the run reaches this point. Returning is safe rather than merely
+     * convenient: every one of the three call sites calls `#throwIfCancelled` on the next line, so
+     * an early return here leads to the abort being raised, never to the run quietly carrying on.
+     */
+    if (active.controller.signal.aborted) return;
+    active.deadline?.ref();
+    try {
+      await new Promise<void>((resolve) => active.pauseWaiters.push(resolve));
+    } finally {
+      active.deadline?.unref();
+    }
   }
 
   #throwIfCancelled(active: ActiveRun): void {
