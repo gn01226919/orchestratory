@@ -513,7 +513,19 @@ container image 與任何額外額度操作仍需 owner 明確批准。
 - `npm run repro:smoke` 會從 committed HEAD 建立 `--no-hardlinks` clean clone、跑完整 gate，並從該
   clone 產生實際 tgz、離線安裝與驗證 installed bin；不以 dirty working tree 代替發布來源。
 
+## 授權
+
+**PolyForm Noncommercial 1.0.0**（見 [`LICENSE`](LICENSE)）：原始碼公開，允許非商業用途——
+個人使用、研究、教育、非營利與政府機構皆可自由使用與修改。**本授權不含商業使用權**；
+版權人保留全部商業權利，商業授權另洽版權人（見 [`NOTICE`](NOTICE)）。
+
+依 OSI 定義這是 source-available 而非 open source——差別只在「商用是否也開放」，本專案刻意不開放。
+2026-08-29 前的歷史曾標示 Apache-2.0；該期間 repository 為 Private、從未散布，故無任何第三方
+持有 Apache-2.0 授權副本，本次變更不影響任何既得授權。
+
 ## 狀態
 
-尚未對外發布。Owner 已批准以 `gn01226919`、Apache-2.0、版本 0.1.0 建立全新 sanitized
-`orchestratory` Private GitHub repository；舊內部 Git history 不得推送。npm、公開 visibility 與其他散布仍未批准。
+尚未對外發布。Owner 已批准以 `gn01226919`、PolyForm-Noncommercial-1.0.0、版本 0.1.0 維持 sanitized
+`orchestratory` GitHub repository；舊內部 Git history 不得推送。npm 與其他散布管道仍未批准；
+公開 visibility 由 Owner 於準備完成後自行切換，並依 [`SECURITY.md`](SECURITY.md) 在同一時段啟用
+Private Vulnerability Reporting。

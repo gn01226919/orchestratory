@@ -8,7 +8,7 @@
 ## A. 人類授權
 
 - [x] 使用者明確批准建立 sanitized Private GitHub repository 並首次 push；未批准公開或 npm publish。
-- [x] Repository visibility、owner、名稱與 license 已確認：`gn01226919/orchestratory`、Private、Apache-2.0。
+- [x] Repository visibility、owner、名稱與 license 已確認：`gn01226919/orchestratory`、Private、PolyForm-Noncommercial-1.0.0（2026-08-29 自 Apache-2.0 變更；變更時 repo 為 Private、無第三方持有舊授權副本）。
 - [x] 確認沒有自動 publish 或 auto top-up；GitHub push 只限本次明確授權範圍。
 - [ ] 安全關鍵變更已由人類逐項審查；模型 review 只作輔助。
 
