@@ -106,10 +106,21 @@ try {
   // silently, because `repro:smoke` is not part of `npm run check` and nothing else runs it.
   // The release checklist meanwhile records this reproduction as verified.
   //
-  // The timeout is here to stop a hang, not to hold the suite to a schedule. Forty minutes is
-  // roughly twice the current run on an idle machine, which leaves room for a loaded one without
-  // letting a genuine hang sit forever.
-  await run("npm", ["run", "check"], clone, 2_400_000);
+  // The timeout is here to stop a hang, not to hold the suite to a schedule: twice the measured
+  // run on an idle machine leaves room for a loaded one without letting a genuine hang sit forever.
+  //
+  // It was 40 minutes, chosen when the suite took about 20. Measured 2026-08-27 on an idle machine:
+  // the test stage alone reports 40.3 minutes of wall clock (714 tests, 57 minutes of CPU across ten
+  // cores), and `check` runs seven more stages around it. So 40 minutes had stopped being twice the
+  // run and become less than the run — arithmetically unreachable, and it failed three times in a
+  // row by being SIGTERM-ed at exactly 40:02 with no test having failed.
+  //
+  // That failure is worse than a slow gate: a deadline nothing can meet reports only false hangs,
+  // and a signal that is always false is one nobody believes when it is finally true.
+  //
+  // If this fires again, measure the suite before raising it. The number is meant to track a
+  // measurement, and the previous one went stale precisely because nobody re-measured.
+  await run("npm", ["run", "check"], clone, 5_400_000);
 
   const sourcePublish = await run("npm", ["publish", "--dry-run"], clone);
   const sourcePublishOutput = `${sourcePublish.stdout}\n${sourcePublish.stderr}`;
