@@ -17,6 +17,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureOwnerOnlyDirectory, writeIdempotentArtifact } from "./release-artifact.mjs";
 import { installRuntimeArtifact } from "./install-runtime.mjs";
+import { allowedRuntimeScripts } from "./release-manifest.mjs";
 
 const execFileAsync = promisify(execFile);
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -157,10 +158,9 @@ try {
   const deniedPublishedFiles = new Set([
     "AGENTS.md", "CLAUDE.md", "tsconfig.json", "package-lock.json", ".node-version", ".npmrc",
   ]);
-  const allowedRuntimeScripts = new Set([
-    "scripts/history-scan.d.mts", "scripts/history-scan.mjs", "scripts/scan-rules.mjs",
-    "scripts/security-scan.d.mts", "scripts/security-scan.mjs",
-  ]);
+  // The exception list for the denied `scripts/` prefix lives in `release-manifest.mjs` so that
+  // `test/release-package.test.ts` can assert it matches `package.json` without importing this
+  // script (which runs the whole reproduction at top level). History and rationale live there.
   for (const path of publishedPaths) {
     const deniedPrefix = deniedPublishedPrefixes.some((prefix) => path.startsWith(prefix));
     if (deniedPublishedFiles.has(path) || (deniedPrefix && !allowedRuntimeScripts.has(path))) {
