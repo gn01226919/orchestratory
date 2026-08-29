@@ -445,9 +445,14 @@ submodule 指標變更（mode `160000`）都與一般 modify 無法區分。
 1. **改用 `git diff --raw -z --find-renames`** 保留新舊 mode，並以錨定的精確 regex 解析；不符即以
    `CANDIDATE_DIFF_INVALID` 拒絕，不做猜測。`mode` 只在兩側皆非零且相異時輸出（對 `000000` 的
    新增／刪除不是權限變更）。
-2. **新增 `#mergePreview`，執行 `git merge-tree --write-tree --name-only -z`**，cwd 設為 candidate
-   worktree（與 main 共用 object store）。它不動任何 ref、index 或工作樹，符合「preview 不得修改
-   canonical main」的規則。
+2. **新增 `#mergePreview`，執行 `git merge-tree --write-tree --name-only -z`**。它不動任何 ref、
+   index，也不 checkout，符合「preview 不得修改 canonical main」的規則。
+   **2026-08-29 修正兩點**：(a) cwd 原設為 candidate worktree，已改為 **main**——cwd 決定的不是
+   「哪個工作樹保持乾淨」，而是**哪一份 merge driver 被執行**；設在 candidate 時執行的是
+   candidate 自己那份（agent 可寫），以 Owner 身分、在任何核准之前，且產生的預覽與 promotion
+   實際結果不同（見 [[THREAT_MODEL]] F23、D-013）。(b) 原文「不動…工作樹」**在修復前就不成立**：
+   merge driver 是任意程式，git 以 cwd 為其工作目錄，會留下 `.merge_file_XXXXXX` 暫存檔；
+   逾時被砍則永久殘留。現在殘留落在 main，並在測試中以該位置斷言，產品不自行刪除。
 3. **退出碼單獨決定不了任何事。** git 對自身錯誤同樣回 exit 1（實測：`not something we can merge`），
    因此只有 stdout 形狀吻合兩種已記載格式之一才接受結果，其餘一律以
    `CANDIDATE_MERGE_PREVIEW_UNAVAILABLE` fail closed——**絕不以省略或預設值回報 `mergeable: true`**。

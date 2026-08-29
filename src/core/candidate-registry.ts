@@ -78,7 +78,9 @@ export interface CandidateCompletionPreview {
   conflicts: string[];
   /**
    * Paths that actually conflict when this candidate head is merged into the observed main head,
-   * computed with `git merge-tree --write-tree`, which writes no ref and touches no worktree.
+   * computed with `git merge-tree --write-tree`, which writes no ref and checks nothing out. It is
+   * run from main so that a configured merge driver is main's program rather than the candidate's
+   * (D-013); a driver is arbitrary code and may leave scratch files in that directory.
    * Bounded, with its own truncation flag.
    */
   mergeConflicts: string[];
@@ -5485,10 +5487,22 @@ export class CandidateRegistry {
    * Simulates merging the candidate head into the observed main head and reports the paths that
    * actually conflict.
    *
-   * `git merge-tree --write-tree` computes the merge entirely in the object database: it writes no
-   * ref, checks out nothing, and never touches either worktree, which is the only reason a real merge
-   * result can be offered as a PREVIEW at all. It runs in the candidate worktree, which shares main's
-   * object store, so main is not even the working directory of the subprocess.
+   * `git merge-tree --write-tree` computes the merge in the object database: it writes no ref and
+   * checks out nothing, which is why a real merge result can be offered as a PREVIEW at all.
+   *
+   * ⛔ It does NOT follow that nothing is written. This comment used to claim it "never touches
+   * either worktree", and that was false before D-013 as well as after: a configured merge driver
+   * is an arbitrary program, git runs it with the cwd as its working directory, and it leaves
+   * git's own `.merge_file_XXXXXX` scratch files there — permanently if the deadline kills it
+   * mid-write. What the cwd chooses is therefore not "which worktree stays clean" but WHICH COPY
+   * OF THE DRIVER RUNS, and that is the whole of D-013: run from the candidate, the program
+   * executed was the candidate's, an agent-writable file running as the owner before any approval,
+   * producing a preview the promotion would not reproduce.
+   *
+   * It now runs from main, so the driver executed is main's — the same file the promotion runs.
+   * The honest cost is that main's working directory is where any driver debris lands, asserted at
+   * that location in `a preview recompute that exceeds its deadline …`. The product does not
+   * remove it: a name-pattern match is not proof a file is git's to delete from the owner's tree.
    *
    * Exit status 1 is the documented "merged with conflicts" answer, not a failure. It is also what
    * git returns when it cannot merge the arguments at all, so the exit code alone decides nothing:
