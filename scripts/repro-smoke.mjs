@@ -226,10 +226,23 @@ try {
     .map((path) => resolve(clone, path));
   if (typeScriptSources.length < 1) throw new Error("RUNTIME_TYPESCRIPT_SOURCES_MISSING");
   await rm(resolve(packageSource, "src"), { recursive: true, force: true });
-  await Promise.all([
-    rm(resolve(packageSource, "scripts", "history-scan.d.mts"), { force: true }),
-    rm(resolve(packageSource, "scripts", "security-scan.d.mts"), { force: true }),
-  ]);
+  /*
+   * Every `.d.mts` leaves the staged package, derived from the published list rather than named
+   * one at a time. The runtime `package.json` written above drops `.d.mts` from its own `files`,
+   * so npm pack will not carry them; the inventory a few lines down walks this directory and
+   * records what it finds. If a declaration is still sitting here, the manifest claims a file the
+   * tarball does not contain, and installing it fails with DAEMON_RUNTIME_INVENTORY_MISMATCH.
+   *
+   * This was two hard-coded `rm` calls — history-scan and security-scan — and it was correct on
+   * 2026-07-21 when those were the only two declarations published. Four more arrived on 08-13 and
+   * 08-20 and one, scan-rules, had been published all along; none of them were added here, so this
+   * step silently stopped covering its own subject. Deriving it removes the second list that had
+   * to be remembered: the first was the release allowlist, which drifted for exactly the same
+   * reason and is now asserted by `test/release-package.test.ts`.
+   */
+  await Promise.all(publishedPaths
+    .filter((path) => path.endsWith(".d.mts"))
+    .map((path) => rm(resolve(packageSource, path), { force: true })));
   await run(resolve(clone, "node_modules", ".bin", "tsc"), [
     "--target", "ES2023",
     "--module", "NodeNext",
