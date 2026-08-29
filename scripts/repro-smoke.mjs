@@ -107,21 +107,24 @@ try {
   // silently, because `repro:smoke` is not part of `npm run check` and nothing else runs it.
   // The release checklist meanwhile records this reproduction as verified.
   //
-  // The timeout is here to stop a hang, not to hold the suite to a schedule: twice the measured
-  // run on an idle machine leaves room for a loaded one without letting a genuine hang sit forever.
+  // The timeout is here to stop a hang, not to hold the suite to a schedule: roughly twice the
+  // measured run on an idle machine leaves room for a loaded one without letting a genuine hang sit
+  // forever.
   //
-  // It was 40 minutes, chosen when the suite took about 20. Measured 2026-08-27 on an idle machine:
-  // the test stage alone reports 40.3 minutes of wall clock (714 tests, 57 minutes of CPU across ten
-  // cores), and `check` runs seven more stages around it. So 40 minutes had stopped being twice the
-  // run and become less than the run — arithmetically unreachable, and it failed three times in a
-  // row by being SIGTERM-ed at exactly 40:02 with no test having failed.
+  // ⚠️ On 2026-08-29 this was raised to 90 minutes and then put back, and the round trip is the
+  // useful part. Four reproductions had been SIGTERM-ed at exactly 40:02 with no test failing, and
+  // the test stage was measured at 40.3 minutes — so the deadline looked arithmetically
+  // unreachable and the constant looked stale. It was neither. Ten `while :; do :; done` loops,
+  // left behind by an earlier load experiment whose cleanup silently failed, had been saturating
+  // the machine for two days: load average 142. Killed, and re-measured twice on the same machine:
+  // 16.8 and 18.6 minutes. 40 ÷ 17.7 ≈ 2.26 — exactly what the sentence above claims, and what it
+  // claimed all along.
   //
-  // That failure is worse than a slow gate: a deadline nothing can meet reports only false hangs,
-  // and a signal that is always false is one nobody believes when it is finally true.
-  //
-  // If this fires again, measure the suite before raising it. The number is meant to track a
-  // measurement, and the previous one went stale precisely because nobody re-measured.
-  await run("npm", ["run", "check"], clone, 5_400_000);
+  // So: if this fires, measure the suite AND the machine before touching the number. The idle
+  // check that missed the loops was `grep -c "node --test"` over the process list, which matched
+  // the wrapper shells of the loops themselves — a contamination source counted as evidence of
+  // cleanliness. `pgrep -x node` and `uptime` are what actually answer the question.
+  await run("npm", ["run", "check"], clone, 2_400_000);
 
   const sourcePublish = await run("npm", ["publish", "--dry-run"], clone);
   const sourcePublishOutput = `${sourcePublish.stdout}\n${sourcePublish.stderr}`;
