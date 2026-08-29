@@ -828,14 +828,23 @@ test("a merge driver that fails during the real merge rolls main back and a retr
       const root = join(source, "..");
       const driver = join(root, "driver.sh");
       gate = join(root, "driver-should-fail");
-      // The simulation runs in the candidate's LINKED worktree, where `.git` is a file; the real
-      // merge runs in main, where `.git` is a directory. So this driver simulates cleanly and fails
-      // only where it actually matters, and only while a marker outside the repository exists —
-      // which is what makes "restore the environment and retry" a real assertion rather than a wish.
+      // The driver fails only during the real merge, and only while a marker outside the
+      // repository exists. The real merge is recognized by GIT_REFLOG_ACTION: a merge writes a ref
+      // and must announce the reflog action; a simulation writes no ref and has nothing to
+      // announce, so `merge-tree` never sets it (measured on the pinned git — unset in
+      // `merge-tree --write-tree`, `merge <sha>` in `git merge`). This used to key on `.git` being
+      // a file in the candidate's linked worktree, which worked only because the preview simulated
+      // there — and the preview simulating there was exactly the D-013 defect. Now that the
+      // preview simulates from main, place cannot tell the two apart, and time cannot either: the
+      // promotion re-verifies the preview, so an environment broken before promote changes the
+      // recomputed digest and the approval is refused before any merge starts — the drift guard
+      // doing its job, three doors before the one this test is about. What the recompute cannot
+      // see is a failure that only the ref-writing merge itself experiences; that is precisely the
+      // class the rollback path exists for, so that is what the driver models.
       await writeFile(gate, "yes\n", "utf8");
       await writeFile(
         driver,
-        `#!/bin/sh\n[ -f "$PWD/.git" ] && exit 0\n[ -f ${JSON.stringify(gate)} ] && exit 1\nexit 0\n`,
+        `#!/bin/sh\nif [ -n "$GIT_REFLOG_ACTION" ] && [ -f ${JSON.stringify(gate)} ]; then exit 1; fi\nexit 0\n`,
         { encoding: "utf8", mode: 0o700 },
       );
       await execFileAsync("git", ["config", "merge.boom.name", "test driver"], { cwd: source });
@@ -2582,14 +2591,18 @@ test("a preview recompute that exceeds its deadline is a readable state, throttl
   assert.equal(first?.bindingCheck?.unavailable, "MAIN_MERGE_PREVIEW_DEADLINE_EXCEEDED");
   assert.equal(first?.state, "approved", "a deadline must not destroy the owner's decision");
 
-  // Killing a merge driver mid-flight leaves git's own `.merge_file_XXXXXX` scratch files behind in
-  // the candidate worktree. Removing exactly those, by name, restores the state the approval was
-  // bound to — the same "put the external condition back" step every other recovery test performs,
-  // and emphatically not a `git clean`, which would take untracked and ignored files with it.
-  const debris = (await readdir(f.task.candidatePath))
-    .filter((name) => name.startsWith(".merge_file_"));
+  // Killing a merge driver mid-flight leaves git's own `.merge_file_XXXXXX` scratch files behind
+  // in the directory the simulation ran from — which, since D-013 moved the simulation to main so
+  // that it executes main's driver rather than the candidate's, is MAIN's working directory. That
+  // is an honest cost of previewing with the same cwd the promotion uses, and it is asserted here
+  // as the measured location rather than papered over: the owner's recovery is removing exactly
+  // these files, by name — the same "put the external condition back" step every other recovery
+  // test performs, and emphatically not a `git clean`, which would take untracked and ignored
+  // files with it. The product does not delete them itself: they sit in the owner's working tree,
+  // and a name-pattern match is not proof a file is git's to remove.
+  const debris = (await readdir(f.source)).filter((name) => name.startsWith(".merge_file_"));
   assert.ok(debris.length > 0, "the driver was expected to be killed mid-write");
-  for (const name of debris) await rm(join(f.task.candidatePath, name), { force: true });
+  for (const name of debris) await rm(join(f.source, name), { force: true });
 
   // The throttle: within the window the answer is reused, so a dialog that polls does not spend
   // another minute — and it still reaches an approvable, actionable state.
@@ -9593,7 +9606,7 @@ test("a forged top-level session id is not the session this process started", as
  * This test asserts the measured reality of BOTH, so neither can be lost quietly. It is deliberately
  * NOT an assertion that the behaviour is acceptable.
  */
-test("a merge driver script this merge rewrites runs as main's during promotion and as the candidate's during preview", async (t) => {
+test("a merge driver script this merge rewrites runs as main's during both preview and promotion", async (t) => {
   const marker = join(await mkdtemp(join(tmpdir(), "orchestratory-x1drv-")), "which-driver.txt");
   const f = await fixture(t, {
     beforeInitialCommit: async (source) => {
@@ -9626,10 +9639,18 @@ test("a merge driver script this merge rewrites runs as main's during promotion 
   assert.ok(preview.preview.files.some((file) => file.path === "tools/m.sh"),
     "this merge does not rewrite the driver script, so the mirror is not being tested");
   assert.equal(preview.approvable, true, preview.blockers.join(","));
-  // ⛔ Finding 2, asserted as the measured reality: the simulation already ran the CANDIDATE's file.
-  assert.ok((await readFile(marker, "utf8")).includes("CANDIDATE DRIVER"),
-    "the preview no longer executes the candidate's merge driver — if this is now fixed, delete this "
-    + "assertion and the residual-risk row that goes with it");
+  // Finding 2, RESOLVED 2026-08-29 (D-013): the simulation now runs from main, so the script it
+  // executes is main's copy — the same file the promotion will run. The assertion that used to
+  // document the defect ("the preview ran the CANDIDATE's file") now guards the fix, inverted:
+  // a preview that executes the candidate's copy is showing the owner a result the merge will not
+  // produce, and letting the candidate choose what is shown while main decides what happens.
+  const afterPreview = await readFile(marker, "utf8");
+  assert.ok(afterPreview.includes("MAIN DRIVER"),
+    "the preview stopped running the merge driver entirely — that silences legitimate drivers and "
+    + "is not the fix D-013 chose; the preview must execute main's copy, not nothing");
+  assert.equal(afterPreview.includes("CANDIDATE DRIVER"), false,
+    "the preview executed the CANDIDATE's driver script again — an agent-authored file ran as the "
+    + "owner with no approval, and the owner was shown a merge result the promotion will not produce");
 
   const approval = await raise(f);
   const token = await grant(f, approval);

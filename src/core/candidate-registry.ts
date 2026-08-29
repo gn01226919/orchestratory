@@ -5418,10 +5418,33 @@ export class CandidateRegistry {
     const mainIgnored = await this.#ignoredInventory(task.mainPath);
     const mainHead = restore.head;
     const diff = await this.#diff(task.baseMainHead, input.candidateHead, input.candidateWorkspace);
-    // Simulated in the candidate worktree against the observed main head. Nothing about main is
-    // written, checked out or refreshed; the owner is simply no longer asked to approve a merge
-    // whose conflicts are unknown until it is attempted.
-    const merge = await this.#mergePreview(input.candidateWorkspace, mainHead, input.candidateHead);
+    /*
+     * Simulated FROM MAIN, against the observed main head. Nothing about main is written, checked
+     * out or refreshed — `merge-tree --write-tree` touches no worktree — but the directory it runs
+     * in decides which files git reads, and that turns out to decide what the owner is shown.
+     *
+     * ⛔ It used to run in the candidate worktree, and that was not a neutral choice. `merge-tree`
+     * honours merge drivers, and a driver is a script named by config and resolved against the cwd.
+     * Run from the candidate, the script executed is the CANDIDATE's copy — a file an agent can
+     * rewrite through the ordinary write path, since it is neither `.git` nor a hook directory.
+     *
+     * Measured, on a repository with one `merge=custom` attribute and one driver script:
+     *
+     *   preview from the candidate worktree : x.data = HIJACKED-BY-CANDIDATE
+     *   preview from main                   : x.data = MERGED-BY-MAIN
+     *   the merge promotion actually performs: x.data = MERGED-BY-MAIN
+     *
+     * So the old preview was not merely unsafe, it was WRONG: it showed the owner content the merge
+     * would never produce, while `git merge --no-ff` resolves content before updating the worktree
+     * and therefore always ran main's copy. An approval bound to a snapshot the merge will not
+     * produce is bound to the wrong thing, and the candidate chose what was shown while main
+     * decided what happened.
+     *
+     * Running from main makes the simulation execute the same script the promotion will, which is
+     * both the honest preview and, incidentally, the end of the escalation: the only code that runs
+     * here is code the owner already had.
+     */
+    const merge = await this.#mergePreview(task.mainPath, mainHead, input.candidateHead);
     const preview: CandidateCompletionPreview = {
       baseMainHead: task.baseMainHead,
       candidateHead: input.candidateHead,
