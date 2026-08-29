@@ -5442,9 +5442,10 @@ export class CandidateRegistry {
      * produce is bound to the wrong thing, and the candidate chose what was shown while main
      * decided what happened.
      *
-     * Running from main makes the simulation execute the same script the promotion will. That ends
-     * the escalation — the only code that runs here is code the owner already had — and it is the
-     * strongest guarantee available, but it is NOT a guarantee that the preview equals the merge.
+     * Running from main makes the simulation execute the same script the promotion will. That
+     * NARROWS the escalation rather than ending it: the program is the owner's, but the candidate
+     * still supplies that program's input (see below), so what is removed is candidate-chosen code,
+     * not candidate influence. It is also NOT a guarantee that the preview equals the merge.
      * Measured: a driver that branches on `GIT_REFLOG_ACTION` (set by a ref-writing merge, never by
      * a simulation) writes PREVIEW-CONTENT into the previewed tree and REAL-MERGE-CONTENT into the
      * merged one, exiting zero both times. Same cwd and same file do not force the same behaviour.
@@ -5459,8 +5460,9 @@ export class CandidateRegistry {
      * longer supplies the program; it still supplies the program's input, which is a smaller
      * surface, not an absent one.
      *
-     * The other remainder is the owner's own program being inconsistent with itself: it can branch
-     * on GIT_REFLOG_ACTION and behave one way for the simulation and another for the merge. No
+     * The other remainder is the owner's own program being inconsistent with itself: it can tell
+     * the two apart — on the pinned git, `git merge` sets GIT_REFLOG_ACTION and `merge-tree` does
+     * not — and behave one way for the simulation and another for the merge. No
      * preview can close that — running the driver twice just asks a dishonest program twice.
      * Comparing the previewed tree against the promoted one would detect it afterwards; nothing
      * here claims to detect it before.

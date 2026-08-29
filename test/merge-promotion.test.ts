@@ -829,10 +829,12 @@ test("a merge driver that fails during the real merge rolls main back and a retr
       const driver = join(root, "driver.sh");
       gate = join(root, "driver-should-fail");
       // The driver fails only during the real merge, and only while a marker outside the
-      // repository exists. The real merge is recognized by GIT_REFLOG_ACTION: a merge writes a ref
-      // and must announce the reflog action; a simulation writes no ref and has nothing to
-      // announce, so `merge-tree` never sets it (measured on the pinned git — unset in
-      // `merge-tree --write-tree`, `merge <sha>` in `git merge`). It is an ordinary environment
+      // repository exists. The real merge is recognized by GIT_REFLOG_ACTION, which is a MEASURED
+      // property of the pinned git and not a documented guarantee: `git merge` sets it before
+      // updating refs (builtin/merge.c) and `merge-tree --write-tree` does not set it at all. A
+      // future git that set it in both would leave this test silently measuring nothing, so the
+      // claim is deliberately stated as an observation with a version attached rather than as an
+      // intrinsic difference between simulating and merging. It is an ordinary environment
       // variable and an ambient one WOULD reach the driver, so this discriminator rests on a
       // precondition worth naming: every git call here runs under `minimalGitEnvironment`, whose
       // base is an ALLOWLIST (`SAFE_ENV_KEYS` — PATH, HOME, TMPDIR, USER, ...) that does not
