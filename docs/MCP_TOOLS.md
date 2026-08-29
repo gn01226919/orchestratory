@@ -79,7 +79,7 @@ candidate_complete   → 完成，並取得預覽、測試、風險、復原點
 ### 請求 merge
 
 ```
-main_merge_preview  → 從即時狀態重算 Owner 會看到的那個快照。不寫 ref、不 checkout、不改動任何被追蹤的檔案。
+main_merge_preview  → 從即時狀態重算 Owner 會看到的那個快照。git 本身不寫 ref、不 checkout。
 main_merge_request  → 登記一個問題。這不是核准。
 ```
 
@@ -97,9 +97,11 @@ main_merge_request  → 登記一個問題。這不是核准。
 **先 `main_merge_preview`、把結果給 Owner 看過，再 `main_merge_request`**，
 並帶上剛拿到的 `previewDigest`。順序反過來的話，你是在請人簽一份他沒讀過的東西。
 
-**「不改動任何被追蹤的檔案」不等於「完全沒有副作用」**：若該 repo 設定了 merge driver，
-預覽會執行 **main 的那一份**（不是 candidate 的），而任意程式可能在 main 的工作目錄留下暫存檔。
-這是為了讓預覽與實際 merge 執行同一支程式所付的代價，已記於 [[THREAT_MODEL]] F23。
+**「git 不寫」不等於「沒有東西被寫」**：若該 repo 設定了 merge driver，預覽會執行
+**main 的那一份**（不是 candidate 的）——而那是**任意程式**，能做的事沒有上限：覆寫被追蹤的檔案、
+寫到 main 以外的地方，都在它能力範圍內，而且發生在 Owner 點頭之前。
+不只是留下暫存檔而已。跑的是 Owner 自己設定的程式，但 candidate 的內容會以 `%B` 參數餵給它。
+詳見 [[THREAT_MODEL]] F23。**沒有設 merge driver 的專案不會遇到這件事。**
 
 ---
 

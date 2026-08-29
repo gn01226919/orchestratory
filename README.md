@@ -130,10 +130,11 @@ npm_config_ignore_scripts=true npm_config_prefix="$HOME/.local" npm link。最�
 > **做完之後，系統把差異攤開給你看，問你要不要併進去。你不點頭，agent 的變更不會進入你的專案。**
 
 一個誠實的但書：**若你的專案自己設定了 merge driver**（`.gitattributes` 加 `.git/config` 裡的
-自訂合併程式），預覽為了算出真實結果會執行**你設定的那支程式**，因此它可能在你的專案目錄留下
-git 的暫存檔（`.merge_file_*`）。跑的是**你自己的程式**、不是 agent 的（見
-[`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) F23），但這確實發生在你點頭之前。
-多數專案沒有設 merge driver，也就不會遇到。
+自訂合併程式），預覽為了算出真實結果**會執行你設定的那支程式**——而那是任意程式，**它能做什麼就
+真的能做什麼**（留下暫存檔、覆寫檔案、寫到專案外），而且發生在你點頭之前。跑的是**你自己的程式**、
+不是 agent 寫的；但 agent 改動的檔案內容會被 git 當參數餵給它，所以那支程式若不謹慎處理輸入，
+agent 的內容仍可能被執行（見 [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) F23）。
+**多數專案沒有設 merge driver，也就完全不會遇到這件事。**
 
 `main` 在本文件裡一律指**你自己的專案目錄**，不是 GitHub 上的分支。
 

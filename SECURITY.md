@@ -7,8 +7,10 @@ designated as supported for security updates.
 
 ## Reporting a vulnerability
 
-While this repository is private, there is no public reporting channel and none is needed: nobody
-outside the owner can read the code.
+While this repository is private there is no public reporting channel, because GitHub offers
+Private Vulnerability Reporting only on public repositories. Private visibility limits who can read
+the code to the owner and any collaborators the owner has invited — it is not a guarantee of sole
+access, and anyone with access who finds a vulnerability should report it to the owner directly.
 
 Private Vulnerability Reporting is a public-repository feature, so it cannot be turned on in advance.
 Enabling it is therefore a step of publication, not a precondition for it: the owner enables it under

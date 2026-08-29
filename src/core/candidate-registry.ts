@@ -5449,12 +5449,21 @@ export class CandidateRegistry {
      * a simulation) writes PREVIEW-CONTENT into the previewed tree and REAL-MERGE-CONTENT into the
      * merged one, exiting zero both times. Same cwd and same file do not force the same behaviour.
      *
-     * What remains is therefore bounded rather than removed: only the OWNER's own configured driver
-     * can do this, it is the owner's code deceiving the owner, and no agent-authored file is
-     * involved. That is a different class from what this fixes, and it is not one a preview can
-     * close — a preview that ran the driver and then re-ran it to check would just be asking a
-     * dishonest program twice. Comparing the previewed tree against the promoted one would detect
-     * it after the fact; nothing here claims to detect it before.
+     * What this fixes is precisely: the PROGRAM executed is the owner's, never the candidate's.
+     *
+     * ⛔ Candidate CONTENT still reaches that program. Git hands the driver the candidate's version
+     * of the merged file as `%B`, so an owner driver that sources, evals or otherwise interprets
+     * its input executes candidate-authored text as the owner, before any approval. Measured: with
+     * a driver containing `. "$2"` and a candidate that touched only the merged data file — never
+     * the driver script — preview alone produced "CANDIDATE CODE RAN AS <owner>". The candidate no
+     * longer supplies the program; it still supplies the program's input, which is a smaller
+     * surface, not an absent one.
+     *
+     * The other remainder is the owner's own program being inconsistent with itself: it can branch
+     * on GIT_REFLOG_ACTION and behave one way for the simulation and another for the merge. No
+     * preview can close that — running the driver twice just asks a dishonest program twice.
+     * Comparing the previewed tree against the promoted one would detect it afterwards; nothing
+     * here claims to detect it before.
      */
     const merge = await this.#mergePreview(task.mainPath, mainHead, input.candidateHead);
     const preview: CandidateCompletionPreview = {
