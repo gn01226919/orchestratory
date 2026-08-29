@@ -5442,9 +5442,19 @@ export class CandidateRegistry {
      * produce is bound to the wrong thing, and the candidate chose what was shown while main
      * decided what happened.
      *
-     * Running from main makes the simulation execute the same script the promotion will, which is
-     * both the honest preview and, incidentally, the end of the escalation: the only code that runs
-     * here is code the owner already had.
+     * Running from main makes the simulation execute the same script the promotion will. That ends
+     * the escalation — the only code that runs here is code the owner already had — and it is the
+     * strongest guarantee available, but it is NOT a guarantee that the preview equals the merge.
+     * Measured: a driver that branches on `GIT_REFLOG_ACTION` (set by a ref-writing merge, never by
+     * a simulation) writes PREVIEW-CONTENT into the previewed tree and REAL-MERGE-CONTENT into the
+     * merged one, exiting zero both times. Same cwd and same file do not force the same behaviour.
+     *
+     * What remains is therefore bounded rather than removed: only the OWNER's own configured driver
+     * can do this, it is the owner's code deceiving the owner, and no agent-authored file is
+     * involved. That is a different class from what this fixes, and it is not one a preview can
+     * close — a preview that ran the driver and then re-ran it to check would just be asking a
+     * dishonest program twice. Comparing the previewed tree against the promoted one would detect
+     * it after the fact; nothing here claims to detect it before.
      */
     const merge = await this.#mergePreview(task.mainPath, mainHead, input.candidateHead);
     const preview: CandidateCompletionPreview = {

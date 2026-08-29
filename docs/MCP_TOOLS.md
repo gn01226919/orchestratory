@@ -79,7 +79,7 @@ candidate_complete   → 完成，並取得預覽、測試、風險、復原點
 ### 請求 merge
 
 ```
-main_merge_preview  → 從即時狀態重算 Owner 會看到的那個快照。唯讀。
+main_merge_preview  → 從即時狀態重算 Owner 會看到的那個快照。不寫 ref、不 checkout、不改動任何被追蹤的檔案。
 main_merge_request  → 登記一個問題。這不是核准。
 ```
 
@@ -96,6 +96,10 @@ main_merge_request  → 登記一個問題。這不是核准。
 
 **先 `main_merge_preview`、把結果給 Owner 看過，再 `main_merge_request`**，
 並帶上剛拿到的 `previewDigest`。順序反過來的話，你是在請人簽一份他沒讀過的東西。
+
+**「不改動任何被追蹤的檔案」不等於「完全沒有副作用」**：若該 repo 設定了 merge driver，
+預覽會執行 **main 的那一份**（不是 candidate 的），而任意程式可能在 main 的工作目錄留下暫存檔。
+這是為了讓預覽與實際 merge 執行同一支程式所付的代價，已記於 [[THREAT_MODEL]] F23。
 
 ---
 

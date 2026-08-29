@@ -832,7 +832,12 @@ test("a merge driver that fails during the real merge rolls main back and a retr
       // repository exists. The real merge is recognized by GIT_REFLOG_ACTION: a merge writes a ref
       // and must announce the reflog action; a simulation writes no ref and has nothing to
       // announce, so `merge-tree` never sets it (measured on the pinned git — unset in
-      // `merge-tree --write-tree`, `merge <sha>` in `git merge`). This used to key on `.git` being
+      // `merge-tree --write-tree`, `merge <sha>` in `git merge`). It is an ordinary environment
+      // variable and an ambient one WOULD reach the driver, so this discriminator rests on a
+      // precondition worth naming: every git call here runs under `minimalGitEnvironment`, whose
+      // base is an ALLOWLIST (`SAFE_ENV_KEYS` — PATH, HOME, TMPDIR, USER, ...) that does not
+      // include GIT_REFLOG_ACTION, so it cannot be inherited from whoever started the process.
+      // Adding it to that allowlist would silently make this test measure nothing. This used to key on `.git` being
       // a file in the candidate's linked worktree, which worked only because the preview simulated
       // there — and the preview simulating there was exactly the D-013 defect. Now that the
       // preview simulates from main, place cannot tell the two apart, and time cannot either: the
