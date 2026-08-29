@@ -117,8 +117,9 @@ try {
   // unreachable and the constant looked stale. It was neither. Ten `while :; do :; done` loops,
   // left behind by an earlier load experiment whose cleanup silently failed, had been saturating
   // the machine for two days: load average 142. Killed, and re-measured twice on the same machine:
-  // 16.8 and 18.6 minutes. 40 ÷ 17.7 ≈ 2.26 — exactly what the sentence above claims, and what it
-  // claimed all along.
+  // 16.8 and 18.6 minutes. 40 ÷ 17.7 ≈ 2.26 — which is what the sentence above claims. Two clean
+  // measurements say the ratio holds NOW; they cannot say it held at every point in between, and
+  // they say nothing about a suite that keeps growing. Re-measure, do not assume.
   //
   // So: if this fires, measure the suite AND the machine before touching the number. The idle
   // check that missed the loops was `grep -c "node --test"` over the process list, which matched
@@ -170,6 +171,17 @@ try {
       throw new Error(`DENIED_PACKAGE_ENTRY:${path}`);
     }
   }
+  /*
+   * A lower bound: these files MUST ship. The allowlist above is an upper bound — only these may.
+   * Written by hand on purpose, so it is a second opinion rather than a restatement of
+   * `package.json`; deriving it would make it agree with whatever `package.json` says, which is the
+   * one thing it exists to disagree with.
+   *
+   * Note what it does and does not cover. LICENSE and README.md are NOT in `package.json`'s
+   * `files`; npm includes them unconditionally. So this list asserts that they are in the ARTIFACT,
+   * not that anyone remembered to list them — which is the stronger of the two questions, and the
+   * one an owner actually cares about.
+   */
   for (const required of [
     "package.json", "README.md", "LICENSE", "NOTICE", "SECURITY.md", "sbom.cdx.json",
     "bin/orchestrator.mjs", "src/main.ts", "public/index.html",
@@ -233,12 +245,12 @@ try {
    * records what it finds. If a declaration is still sitting here, the manifest claims a file the
    * tarball does not contain, and installing it fails with DAEMON_RUNTIME_INVENTORY_MISMATCH.
    *
-   * This was two hard-coded `rm` calls — history-scan and security-scan — and it was correct on
-   * 2026-07-21 when those were the only two declarations published. Four more arrived on 08-13 and
-   * 08-20 and one, scan-rules, had been published all along; none of them were added here, so this
-   * step silently stopped covering its own subject. Deriving it removes the second list that had
-   * to be remembered: the first was the release allowlist, which drifted for exactly the same
-   * reason and is now asserted by `test/release-package.test.ts`.
+   * This was two hard-coded `rm` calls — history-scan and security-scan — and it was complete on
+   * 2026-07-21, when package.json published exactly those two declarations. Four more were added
+   * and none of them here: scan-rules on 08-12, supervisor-audit on 08-13, and supervisor-mirror
+   * and bounded-process-group both on 08-20. Deriving it removes the second list that had to be
+   * remembered: the first was the release allowlist, which drifted for exactly the same reason and
+   * is now asserted by `test/release-package.test.ts`.
    */
   await Promise.all(publishedPaths
     .filter((path) => path.endsWith(".d.mts"))
