@@ -180,9 +180,8 @@ try {
    * Note what it does and does not cover. It runs against `publishedPaths` — what `npm pack
    * --dry-run` reports for the SOURCE package — and not against the runtime artifact, which
    * deliberately differs: every `.d.mts` is dropped and `src/*.ts` becomes `.js`. `src/main.ts`
-   * appears here for exactly that reason; it does not exist in the shipped tarball. The source
-   * package is also the only stage at which these paths are still checkable, so it is the right
-   * place, not a compromise.
+   * appears here for exactly that reason; it does not exist in the shipped tarball — so checking
+   * the source package is what lets a required path be named in the form the repository uses.
    *
    * LICENSE and README.md are not in `package.json`'s `files` at all — npm includes them
    * unconditionally — so what this asserts about them is that npm did so, which is a fact about
