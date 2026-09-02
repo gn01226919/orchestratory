@@ -956,13 +956,35 @@ test("MCP exact terminal seats discover, send, await, and continue threads direc
     targetPresenceId: claude.id,
     clientRequestId: randomUUID(),
     text: "這一則刻意測 transport timeout",
-  })) as { delivery: { id: string } };
+  })) as { delivery: { id: string }; dispatch: { wakeable: boolean; immediate: boolean; note: string } };
+
+  /*
+   * The target is between waits here, so this is the case the sender most needs told: the delivery
+   * queued and nobody is holding it. `wakeable: false` already said so, in a place a sender has to
+   * know this codebase to read. The note says the consequence in the sender's own terms, and it has
+   * to include the part that is easy to get wrong -- that nothing can wake the seat from here, so
+   * blocking on a reply is a choice to wait on something that may never come.
+   */
+  assert.equal(leftPending.dispatch.wakeable, false);
+  assert.match(leftPending.dispatch.note, /NOT listening/u);
+  assert.match(leftPending.dispatch.note, /queued/u, "the sender must be told the work is waiting, not lost");
+  assert.match(leftPending.dispatch.note, /room_wait/u, "and what will actually deliver it");
+  assert.match(leftPending.dispatch.note, /cannot push/u, "and that waking it from here is not an option");
   const timeoutPromise = codexBroker.call("room_await_reply", {
     deliveryId: leftPending.delivery.id,
     timeoutMs: 1,
   });
   await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.deepEqual(JSON.parse(await timeoutPromise), { timeout: true });
+  /*
+   * A bare { timeout: true } is exactly the shape of the owner's complaint -- work went out, nothing
+   * came back, and no way to tell "busy" from "nobody was ever going to answer". The timeout has to
+   * say which one it was, because the two call for opposite next moves.
+   */
+  const timedOut = JSON.parse(await timeoutPromise) as { timeout: boolean; targetListening?: boolean; note?: string };
+  assert.equal(timedOut.timeout, true);
+  assert.equal(timedOut.targetListening, false, "the target is between waits here, and the caller must be told");
+  assert.match(String(timedOut.note), /NOT listening/u);
+  assert.match(String(timedOut.note), /queued/u, "and that the work is waiting rather than lost");
   const resumed = JSON.parse(await claudeBroker.call("room_wait", {
     room: "demo", timeoutMs: 100,
   })) as { delivery: { id: string; leaseToken: string } };

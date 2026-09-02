@@ -1162,7 +1162,7 @@ orchestrator room hooks --provider codex --install&lt;/code&gt;&lt;/pre&gt;
           &lt;tr&gt;&lt;td&gt;Writer 顯示完成但主專案沒變&lt;/td&gt;&lt;td&gt;完成只代表 retained task worktree 已待審，還沒有 apply-back&lt;/td&gt;&lt;td&gt;檢查自然語言風險與逐檔清單；確認後完整輸入 &lt;code&gt;MERGE INTO MAIN&lt;/code&gt;&lt;/td&gt;&lt;/tr&gt;
           &lt;tr&gt;&lt;td&gt;同一 taskId 無法再授予 Writer&lt;/td&gt;&lt;td&gt;該任務已成功 applied，是不可復活的終態&lt;/td&gt;&lt;td&gt;為新工作建立新的 taskId；不要嘗試重用舊 capability 或 epoch&lt;/td&gt;&lt;/tr&gt;
           &lt;tr&gt;&lt;td&gt;只看到 Room 歷史&lt;/td&gt;&lt;td&gt;目前在歷史模式&lt;/td&gt;&lt;td&gt;點「Room 即時協作」回到直播與發言模式&lt;/td&gt;&lt;/tr&gt;
-          &lt;tr&gt;&lt;td&gt;@外接終端沒有立即回覆&lt;/td&gt;&lt;td&gt;待命可能尚未由 GUI 核准、席位沒有 active &lt;code&gt;room_wait&lt;/code&gt;、已離線，或處理失敗&lt;/td&gt;&lt;td&gt;看 GUI 的「等待待命核准／待命已核准但未掛起／room-wait 待命中」精確狀態；讓該席位重新呼叫 room_wait，或改用受控即時 Agent。系統不會冒充或改派同名常駐模型&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;@外接終端沒有立即回覆&lt;/td&gt;&lt;td&gt;待命可能尚未由 GUI 核准、席位沒有 active &lt;code&gt;room_wait&lt;/code&gt;、已離線，或處理失敗&lt;/td&gt;&lt;td&gt;看該席位名字旁邊的徽章：「● 正在收聽」代表送過去會直接送到；「○ 沒在收聽」代表訊息會排隊，要到那個終端機讓它再呼叫一次 room_wait；「◌ 等你核准待命」代表按下核准即可；「– 不能收工作」代表現在送不出去，只有那個終端能自己申請回來。徽章下方會直接寫出該怎麼辦。或改用受控即時 Agent。系統不會冒充或改派同名常駐模型&lt;/td&gt;&lt;/tr&gt;
           &lt;tr&gt;&lt;td&gt;需要立刻停止&lt;/td&gt;&lt;td&gt;可能有錯誤調度或異常消耗&lt;/td&gt;&lt;td&gt;在 Room 控制室按「緊急停止」&lt;/td&gt;&lt;/tr&gt;
         &lt;/tbody&gt;&lt;/table&gt;
       &lt;/div&gt;

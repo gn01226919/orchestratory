@@ -131,6 +131,104 @@ test("GUI, TUI and MCP service instances share one exact-seat ledger sequence", 
   assert.equal(gui.reconcileExternalPresence("demo", "/tmp/project").length, 0);
 });
 
+/*
+ * The ledger has to tell "it read the task and did nothing" apart from "it never got the task".
+ *
+ * Those look identical afterwards -- no reply either way -- and they call for opposite responses:
+ * chase the agent, or go wake the terminal. The fact was already known at dispatch and already
+ * returned as `wakeable: false`, but only to the caller, in a JSON field, at a moment nobody is
+ * reading. The ledger is where the question actually gets asked later.
+ */
+test("work queued for a seat that is not listening is recorded in the ledger", async (t) => {
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-silent-seat-"));
+  const gui = collaborationService(data);
+  t.after(() => gui.close());
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+
+  gui.ledger.createRoom("demo", "/tmp/project");
+  const external = gui.registerExternal({ provider: "codex", workspace: "/tmp/project", hostPid: 7101, model: "gpt-test" });
+  gui.requestExternalJoin(external.id, "demo", "/tmp/project");
+  gui.approveExternalJoin({
+    ...ROOM_FIRST_JOIN,
+    presenceId: external.id,
+    roomId: "demo",
+    workspace: "/tmp/project",
+    label: "frontend",
+  });
+  gui.requestExternalStandby(external.id, "demo", "/tmp/project");
+  gui.approveExternalStandby(external.id, "demo", "/tmp/project");
+
+  // Approved for standby, present in the room, and not inside a room_wait: the state that used to be
+  // indistinguishable from being on duty.
+  const sent = gui.postToExternal({
+    roomId: "demo", workspace: "/tmp/project", presenceId: external.id, text: "請看一下這個",
+  });
+  assert.equal(sent.dispatch.wakeable, false);
+  assert.equal(sent.dispatch.immediate, false);
+
+  const lines = gui.ledger.listAfter("demo", 0).map((message) => String(message.text));
+  const note = lines.find((line: string) => line.includes(`#${sent.message.seq}`) && line.includes("沒有在收聽"));
+  assert.ok(note, `the ledger must record that nobody was listening, got:\n${lines.join("\n")}`);
+  // Best-effort by design, and worth being explicit about: the write is wrapped so a ledger failure
+  // cannot undo a delivery that is already committed. This asserts the ordinary path, which is the
+  // one a reader relies on; it is not a guarantee that the line exists under every failure.
+  assert.match(String(note), /排隊/u, "and must say the work is waiting, not that it failed");
+
+  // Strictly past tense. "要等它下次待命才會拿到" was in an earlier draft and is a promise about the
+  // future that is false in both directions: the seat may open a wait a second later and answer at
+  // once, or it may close and have this delivery failed as SEAT_OFFLINE and never get it. Nothing
+  // retracts a ledger line, so it may only state what was true when it was written.
+  assert.doesNotMatch(String(note), /要等|才會拿到|將會/u, "the ledger must not predict what happens next");
+
+  // The delivery itself is untouched: this is a note about it, not a failure of it.
+  assert.equal(sent.delivery.state, "queued");
+
+  /*
+   * Idempotent, because room_send promises in its own tool description that a retry with the same
+   * clientRequestId cannot duplicate anything -- and both the chat line and the delivery honour that.
+   * A non-idempotent note would have broken that promise quietly: three transport retries, one
+   * delivery, three identical ledger lines.
+   *
+   * This has to go through the PEER path with a repeated clientRequestId, which is the only way to
+   * produce the same ledger seq twice. An earlier version of this test sent a different message the
+   * second time, got a new seq and therefore a new idempotency key, and passed just as happily
+   * against a non-idempotent append -- a test that agreed with whatever the code did.
+   */
+  const peer = gui.registerExternal({ provider: "claude", workspace: "/tmp/project", hostPid: 7102, model: "claude-test" });
+  gui.requestExternalJoin(peer.id, "demo", "/tmp/project");
+  gui.approveExternalJoin({
+    ...ROOM_FIRST_JOIN, presenceId: peer.id, roomId: "demo", workspace: "/tmp/project", label: "peer",
+  });
+  gui.requestExternalStandby(peer.id, "demo", "/tmp/project");
+  gui.approveExternalStandby(peer.id, "demo", "/tmp/project");
+
+  const retryId = randomUUID();
+  const first = gui.postBetweenExternals({
+    roomId: "demo", workspace: "/tmp/project",
+    sourcePresenceId: peer.id, targetPresenceId: external.id,
+    text: "同一則，重試兩次", clientRequestId: retryId,
+  });
+  const retried = gui.postBetweenExternals({
+    roomId: "demo", workspace: "/tmp/project",
+    sourcePresenceId: peer.id, targetPresenceId: external.id,
+    text: "同一則，重試兩次", clientRequestId: retryId,
+  });
+  assert.equal(retried.message.seq, first.message.seq, "the retry must reuse the same ledger message");
+  assert.equal(retried.delivery.id, first.delivery.id, "and the same delivery");
+
+  const afterRetry = gui.ledger.listAfter("demo", 0).map((message) => String(message.text));
+  assert.equal(
+    afterRetry.filter((line: string) => line.includes(`#${first.message.seq}`) && line.includes("沒有在收聽")).length,
+    1,
+    "one delivery, one note, however many times the transport retried",
+  );
+  assert.equal(
+    afterRetry.filter((line: string) => line.includes(`#${sent.message.seq}`) && line.includes("沒有在收聽")).length,
+    1,
+    "and the earlier dispatch still has exactly its own one line",
+  );
+});
+
 test("exact terminal seats exchange authenticated multi-turn threads without provider fallback", async (t) => {
   const data = await mkdtemp(join(tmpdir(), "orchestratory-peer-thread-"));
   const codexProcess = collaborationService(data);

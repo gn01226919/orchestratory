@@ -162,6 +162,10 @@ async function api(path, options = {}, recovered = false) {
  */
 const ROOM_ERROR_MESSAGES = {
   TARGET_AGENT_STANDBY_NOT_APPROVED: "這個終端已加入房間，但 room-wait 待命還沒核准，所以收不到訊息。",
+  /* A seat that is not listening is exactly the seat that accumulates queued work -- queued deliveries
+     never expire on their own -- so this ceiling is reachable in ordinary use, and a bare error code
+     is the least helpful thing to show at the moment it is hit. */
+  ROOM_INBOX_SEAT_LIMIT_REACHED: "這個席位的收件匣已經排滿 32 則沒領走的交辦，所以這一則沒有送出。先讓那個終端重新呼叫一次 room_wait 把積壓的處理掉。",
   TARGET_AGENT_OFFLINE: "這個終端目前不在線；請等它重新連上或改選其他席位。",
   SEAT_OFFLINE: "這個席位目前不在線；請等它重新連上或改選其他席位。",
   SOURCE_SEAT_OFFLINE: "來源席位已離線，訊息沒有送出。",
@@ -352,12 +356,18 @@ function renderDeliveryReceipt(body, seq) {
   receipt.className = `delivery-receipt is-${delivery.state}`;
   const text = document.createElement("small");
   const target = state.presences.find((session) => session.id === delivery.targetPresenceId);
-  const deliveryLabel = delivery.state === "queued" && target
-    ? target.wakeable
-      ? "喚醒中"
-      : target.standbyApproved
-        ? "已排隊（待命已核准，等待終端重新掛起 room_wait）"
-        : "已排隊（room_wait 待命尚未核准）"
+  /* The receipt is read at the moment someone is deciding whether to keep waiting, so where it can, it
+     says what that means for them rather than naming the internal state. Only where it can: this
+     wording needs the target's seat to still be in the current presence list, and when it is not,
+     the plain state label is all there is to say.
+     Through seatListeningState, not a second hand-written copy of its branches: that copy existed,
+     it collapsed two states into one line, and it sat directly under a comment claiming there was
+     one answer per state "where it cannot drift". */
+  const targetState = target ? seatListeningState(target) : undefined;
+  const deliveryLabel = delivery.state === "queued" && targetState
+    ? targetState.key === "listening"
+      ? "它正在收聽，正在送過去"
+      : `已排隊：${targetState.text}`
     : DELIVERY_LABELS[delivery.state] || delivery.state;
   text.textContent = `${deliveryLabel} · ${delivery.targetDisplayName} · 嘗試 ${delivery.attempt}/${delivery.maxAttempts}`;
   receipt.append(text);
@@ -589,6 +599,112 @@ function ledgerDayGroups(messages, todayKey) {
 }
 /* @pure-end ledger-day-groups */
 
+/* @pure-start seat-listening-state */
+/**
+ * What a seat is doing right now, in the words a person would use.
+ *
+ * Every one of these facts was already on screen, spelled in the vocabulary of the mechanism:
+ * "待命已核准，但終端目前未掛起 room_wait". That sentence is exact and it is useless to anyone who
+ * has not read the source, because the reader's actual question is not which call is open -- it is
+ * "if I send this now, will anything happen?" So each state answers that question first and names
+ * the mechanism second.
+ *
+ * The distinction that matters most is the one that used to be hardest to see: JOINED and LISTENING
+ * are different things. A seat can be present, approved, and still deaf, and work sent to it just
+ * waits. Nothing here can wake it -- MCP cannot push to a terminal that is not asking -- so the
+ * honest thing is to say the message will queue, not to imply someone is about to pick it up.
+ *
+ * Each state carries a MARK as well as a colour. A row that is only ever green-or-grey says nothing
+ * to a reader who cannot separate those two, and this is the row that decides whether they wait.
+ *
+ * `send` and `fix` live here too, and that is the point. They were written twice -- once in the seat
+ * row, once in the office -- with slightly different conditions, and the two copies contradicted each
+ * other on the states nobody had thought about: the office told a seat with NO standby authority that
+ * its work "會排隊等著" when in fact the send is refused outright, and offered "go make it call
+ * room_wait again" to a seat whose standby was simply waiting for the owner to click approve. One
+ * function, one answer per state, and the difference between "queues" and "refused" stated where it
+ * cannot drift.
+ */
+function seatListeningState(session) {
+  const joined = Boolean(session?.joined);
+  if (!joined) {
+    return {
+      key: "not-joined",
+      mark: "·",
+      text: "還沒加入",
+      title: "這個終端還沒被核准進入房間。",
+      send: "還不能送。它還沒加入房間。",
+      fix: "先核准它加入房間。",
+      cls: "",
+    };
+  }
+  /* Every state below has its own mark as well as its own colour, including the two greys: the row is
+     what a reader uses to decide whether to keep waiting, and colour alone excludes anyone who cannot
+     separate these two. */
+  if (session?.listening) {
+    return {
+      key: "listening",
+      mark: "●",
+      /* "正在收聽", not "正在待命". On this screen 待命 already means "approved for standby" (stage two,
+         the approve/revoke buttons) and it is the difference between the two that this badge exists
+         to show. One word cannot carry both halves of the distinction it is drawing. */
+      text: "正在收聽",
+      send: "它正在收聽，送出後會直接送過去。",
+      fix: "",
+      /* Not "馬上收到": the liveness lease runs for up to 15s and the GUI polls every 5s, so a seat
+         killed a moment ago still reads as listening for a short while. Saying the delivery goes
+         straight to it is true of what we do; promising arrival is a claim about the other end. */
+      title: "剛才它還在收聽，交辦會直接送過去。",
+      cls: "is-listening",
+    };
+  }
+  if (session?.standbyApproved) {
+    return {
+      key: "not-listening",
+      mark: "○",
+      text: "沒在收聽",
+      send: "它現在沒在收聽，送出的訊息會進收件匣排隊（最多排 32 則，滿了就送不出去）。",
+      fix: "到那個終端機視窗，讓它再呼叫一次 room_wait。在那之前交辦不會消失，會排隊等它。"
+        + "不要按撤銷——撤銷之後只有那個終端能自己申請回來。",
+      /* This one DOES say what happens next, unlike the ledger line, which is forbidden from doing so.
+         The difference is retractability: this is a live view that re-renders every five seconds and
+         corrects itself the moment the seat starts listening. A ledger line is permanent, so a
+         prediction written there stays on the record after it stops being true. */
+      title: "它在房間裡，但現在沒有在等工作。交辦過去會先排隊，要等它下次呼叫 room_wait 才拿得到。沒有辦法從這裡叫醒它。",
+      cls: "is-silent",
+    };
+  }
+  if (session?.standbyRequested) {
+    return {
+      key: "awaiting-approval",
+      mark: "◌",
+      text: "等你核准待命",
+      /* Refused, not queued: postToExternal throws TARGET_AGENT_STANDBY_NOT_APPROVED before anything
+         is enqueued. And the fix is a button right here, not a trip to the terminal. */
+      send: "還不能送。它的待命還等你核准，在那之前交辦會被拒絕。",
+      fix: "在右邊席位清單的那一列，按「核准 room-wait 待命」就可以了。",
+      title: "它申請了待命，等你按下核准之後才能收工作。",
+      cls: "is-pending",
+    };
+  }
+  /*
+   * Deliberately not "還沒申請待命". Revoking standby clears the request and the approval together, so
+   * a seat you just revoked is indistinguishable in the data from one that never asked -- and telling
+   * the person who revoked it that it "hasn't asked yet" is simply false. This says what is true of
+   * both: there is no standby authority right now, and only the terminal can ask for it.
+   */
+  return {
+    key: "no-standby",
+    mark: "–",
+    text: "不能收工作",
+    send: "還不能送。它沒有待命授權，交辦會被拒絕。",
+    fix: "只有那個終端能自己再呼叫一次 room_wait 來申請待命，你在這裡按不回來。",
+    title: "這個席位現在沒有待命授權，所以交辦不到它。要恢復，得由那個終端自己再呼叫一次 room_wait。",
+    cls: "",
+  };
+}
+/* @pure-end seat-listening-state */
+
 /**
  * The day a message is filed under, and the group element that holds it.
  *
@@ -701,7 +817,7 @@ function renderPresencePanel() {
   ).length;
   const wakeableCount = sessions.filter((session) => session.wakeable).length;
   byId("office-presence-count").textContent =
-    `${joinedCount} 已加入 · ${wakeableCount} room-wait 待命中 · ${state.managedAgents.length} 受控`;
+    `${joinedCount} 已加入 · ${wakeableCount} 正在收聽 · ${state.managedAgents.length} 受控`;
   const room = state.rooms.find((entry) => entry.id === state.room);
   if (room) {
     room.pendingAgentRequests = pendingJoinCount;
@@ -730,21 +846,20 @@ function renderPresencePanel() {
       dot.style.background = authorColor(session.provider);
       const label = document.createElement("b");
       label.textContent = session.displayName || `${session.provider} 申請 ${index + 1}`;
+      const listening = seatListeningState(session);
+      const badge = document.createElement("span");
+      badge.className = `seat-listening ${listening.cls}`;
+      badge.title = listening.title;
+      badge.textContent = `${listening.mark} ${listening.text}`;
       const detail = document.createElement("small");
+      /* The answer first, the technical identity after it. The reader's question is what happens if
+         they send something now; five terms of provenance ahead of it is five terms of delay. */
       detail.textContent = session.joined
-        ? `Native Full-Trust · host 能力不變 · ${session.client || "MCP"} · ${session.collaborationMode === "room-first" ? "全程帳本協作" : "僅加入房間"} · ${session.syncTurns ? "終端對話同步" : "終端對話不入帳"} · ${
-            session.listening
-              ? "room-wait 待命中，可由 GUI 喚醒"
-              : session.standbyRequested && !session.standbyApproved
-                ? "已申請 room-wait，等待 Owner 核准"
-                : session.standbyApproved
-                  ? "待命已核准，但終端目前未掛起 room_wait"
-                  : "已加入，尚未申請 room-wait"
-          }`
+        ? `${listening.send} · Native Full-Trust · host 能力不變 · ${session.client || "MCP"} · ${session.collaborationMode === "room-first" ? "全程帳本協作" : "僅加入房間"} · ${session.syncTurns ? "終端對話同步" : "終端對話不入帳"}`
         : selected
           ? "已選取 · 請確認協作與對話同步模式"
           : `${session.client || "MCP"} · 點擊選取`;
-      identity.append(dot, label, detail);
+      identity.append(dot, label, badge, detail);
       identity.addEventListener("click", () => {
         state.selectedPresenceId = selected ? "" : session.id;
         renderPresencePanel();
@@ -823,7 +938,14 @@ function renderPresencePanel() {
         const standby = document.createElement("button");
         standby.type = "button";
         standby.textContent = "撤銷 room-wait 待命";
-        standby.className = "leave";
+        /* Demoted while the seat is deaf. Revoking is the one destructive action on this row and, on a
+           seat that is not listening, it is also the action a reader is most likely to reach for --
+           it is the only standby control in sight and it sounds like it addresses the problem. It does
+           the opposite and cannot be undone from the GUI. */
+        standby.className = listening.key === "not-listening" ? "leave is-demoted" : "leave";
+        standby.title = listening.key === "not-listening"
+          ? "撤銷不會讓它重新收聽，反而會拿掉它的待命授權，而且只有那個終端能自己申請回來。"
+          : "撤銷之後這個席位不能再收工作，要由該終端自己重新呼叫 room_wait。";
         standby.addEventListener("click", () => void changePresenceStandby(session, "revoke", standby));
         actions.append(standby);
       }
@@ -853,15 +975,28 @@ function renderPresencePanel() {
         ? "② 待命（加入後由終端自行申請）"
         : session.standbyApproved
           ? session.listening
-            ? "② 待命已核准 · room_wait 掛起中"
-            : "② 待命已核准 · 等終端重新掛起 room_wait"
-          : standbyPending ? "② 待命待核准" : "② 尚未申請待命";
+            ? "② 待命已核准 · 正在收聽"
+            : "② 待命已核准 · 目前沒在收聽"
+          : standbyPending ? "② 待命待核准" : "② 沒有待命授權";
       stages.append(stageOne, stageTwo);
       if (standbyPending) {
         const hint = document.createElement("small");
         hint.className = "presence-stage-hint";
-        hint.textContent = "同一個 Agent 的第二步：加入房間決定是否入帳，待命決定能否由 GUI 收件喚醒。";
+        hint.textContent = "同一個 Agent 的第二步：加入房間決定是否入帳，待命決定它能不能收工作。";
         stages.append(hint);
+      }
+      /*
+       * Telling someone a seat is deaf without telling them what to do about it leaves them with one
+       * visible button on this row -- the red "撤銷 room-wait 待命" -- which makes it worse and cannot
+       * be undone from here: revoking clears both the request and the approval, so neither standby
+       * button renders afterwards and only the terminal itself can ask again. So the row says what
+       * actually helps, in the place where the wrong action is easiest to reach.
+       */
+      if (session.joined && listening.fix) {
+        const action = document.createElement("small");
+        action.className = "presence-stage-hint is-action";
+        action.textContent = `怎麼辦：${listening.fix}`;
+        stages.append(action);
       }
       row.append(identity, actions, stages);
       if (nameInput) row.append(nameInput);
@@ -896,7 +1031,7 @@ function renderManagedAgents() {
   const joinedCount = state.presences.filter((session) => session.joined).length;
   const wakeableCount = state.presences.filter((session) => session.wakeable).length;
   byId("office-presence-count").textContent =
-    `${joinedCount} 已加入 · ${wakeableCount} room-wait 待命中 · ${state.managedAgents.length} 受控`;
+    `${joinedCount} 已加入 · ${wakeableCount} 正在收聽 · ${state.managedAgents.length} 受控`;
   for (const listId of ["sidebar-managed-agent-list", "office-managed-agent-list"]) {
     const list = byId(listId);
     if (!list) continue;
@@ -1013,6 +1148,14 @@ async function changePresenceStandby(session, action, button) {
     syncOfficeDesks();
     if (!byId("office").hidden) updateOffice(state.recent || []);
     await refreshPresence(true);
+    /*
+     * Look again sooner than the usual five seconds. The terminal picks up an approval on its own
+     * 200ms poll, so the refresh that runs immediately after the click almost always still reads
+     * "not listening" -- and the row then tells the owner to go make that terminal call room_wait
+     * again, while that terminal is already inside one. Following that advice interrupts the very
+     * thing they just enabled.
+     */
+    state.presenceNextAt = Date.now() + 800;
     await poll();
   } catch (error) {
     showRoomError(error, { prefix: "room-wait 待命變更失敗" });
@@ -1062,7 +1205,7 @@ async function refreshPresence(force = false) {
           addOfficeNotification(
             "presence",
             `${session.displayName || session.provider} 申請 room-wait 待命`,
-            "同一個 Agent 的第二步（① 已加入 → ② 待命待核准）；核准後只有這個終端 session 掛起 room_wait 時可由 GUI 喚醒。可直接在這裡核准。",
+            "同一個 Agent 的第二步（① 已加入 → ② 待命待核准）。核准只是「允許它收工作」，不代表它隨時在收聽——它要自己呼叫 room_wait 才收得到，而且沒辦法從這裡叫醒它。可直接在這裡核准。",
             false,
             { kind: "standby-approve", presenceId: session.id },
           );
@@ -1640,7 +1783,21 @@ function renderOfficeNotifications() {
         } else {
           const done = document.createElement("small");
           done.className = "office-notification-done";
-          done.textContent = session ? "② 待命已處理" : "席位已離線，不需處理";
+          /*
+           * "已處理" used to cover two opposite outcomes. room_wait's approval wait defaults to 30
+           * seconds, so an owner who does not click within half a minute leaves the seat back at
+           * no-standby -- the most ordinary human outcome there is -- and this panel, which is where
+           * the owner SAW the request, told them it had been handled while the seat's own badge said
+           * it could not receive work at all.
+           */
+          const seatState = session ? seatListeningState(session) : undefined;
+          done.textContent = !session
+            ? "席位已離線，不需處理"
+            : seatState?.key === "not-joined"
+              ? "② 這個席位已經離開房間，這則申請不需要處理了。"
+              : seatState?.key === "no-standby"
+              ? `② 這個申請已經失效，${session.displayName || session.provider} 現在收不到工作。${seatState.fix}`
+              : "② 待命已核准";
           row.append(done);
         }
       }
@@ -1975,7 +2132,7 @@ function createOfficeDesk(agent) {
     const stat = document.createElement("div");
     stat.className = "desk-stat";
     stat.id = `stat-${agent}`;
-    stat.textContent = "待命";
+    stat.textContent = "閒置";
     desk.append(orbie, stat);
     desk.addEventListener("click", () => focusAgentComposer(agent));
     floor.append(desk);
@@ -2008,6 +2165,18 @@ function syncOfficeDesks() {
     if (cube) positionOfficeSeat(agent, home);
     const desk = byId(`desk-${agent}`);
     if (desk && !desk.classList.contains("walking")) positionOfficeSeat(agent, home);
+    /* A desk whose terminal stopped asking should not look like one that is working. The figure is
+       the most glanceable thing on this screen, so leaving it bright and wandering is the strongest
+       claim the UI makes -- and for a deaf seat it is a false one. */
+    const deskSeat = presenceForAgent(agent);
+    const deskSilent = Boolean(deskSeat) && !deskSeat.listening;
+    if (desk) desk.classList.toggle("seat-not-listening", deskSilent);
+    if (desk && deskSilent) {
+      /* Stop the story, not just the colour. Dimming a figure that is still strolling to the coffee
+         machine and thinking in a speech bubble does not read as "this one cannot hear you". */
+      desk.classList.remove("walking");
+      if (desk.dataset.activity) clearIdleActivity(agent);
+    }
   }
   if (state.selectedAgent && !desired.includes(state.selectedAgent)) {
     state.selectedAgent = "";
@@ -2029,7 +2198,10 @@ function wanderAll() {
   for (const agent of OFFICE_AGENTS) {
     const desk = byId(`desk-${agent}`);
     const home = officeHome(agent);
-    if (!desk || !home || desk.dataset.activity || desk.classList.contains("real-busy")) continue;
+    /* seat-not-listening excluded: the desk itself transitions over four seconds, so dimming the
+       figure while it keeps drifting around the floor still reads as someone who is around. */
+    if (!desk || !home || desk.dataset.activity || desk.classList.contains("real-busy")
+      || desk.classList.contains("seat-not-listening")) continue;
     if (Math.random() < 0.32) {
       desk.style.left = `${home.x + (Math.random() * 7 - 3.5)}%`;
       desk.style.top = `${home.y - 2 + (Math.random() * 5 - 2.5)}%`;
@@ -2047,7 +2219,10 @@ function clearIdleActivity(agent, activityId) {
   const stat = byId(`stat-${agent}`);
   if (stat?.dataset.activity === "true") {
     delete stat.dataset.activity;
-    stat.textContent = "待命";
+    /* Not "待命": that word already means "approved for standby" one panel over and "currently
+       listening" in the header count. Three meanings on one screen is how a reader ends up unable to
+       act on any of them. */
+    stat.textContent = "閒置";
   }
   clearBubble(agent);
 }
@@ -2058,7 +2233,10 @@ function startIdleActivity() {
   if (activeCount >= 2) return;
   const candidates = OFFICE_AGENTS.filter((agent) => {
     const desk = byId(`desk-${agent}`);
-    return desk?.classList.contains("idle") && !desk.dataset.activity && !desk.classList.contains("walking");
+    return desk?.classList.contains("idle") && !desk.dataset.activity
+      && !desk.classList.contains("walking")
+      /* A seat that cannot hear you does not get to look like it is taking a coffee break. */
+      && !desk.classList.contains("seat-not-listening");
   });
   if (!candidates.length) return;
   const agent = candidates[Math.floor(Math.random() * candidates.length)];
@@ -2083,6 +2261,19 @@ function startOfficeLife() {
 
 function isJoinedPresenceAgent(agent) {
   return state.presences.some((session) => session.joined && session.displayName === agent);
+}
+
+/*
+ * The seat behind a desk, if that desk belongs to an external terminal.
+ *
+ * The office is where work actually gets handed over -- click a desk, the composer prefills @name,
+ * send. So the office is where "is anyone listening" has to be answered, and it was the one view
+ * that did not answer it. Worse, it asserted the opposite: the status line read "可對話 · 待命" for a
+ * seat whose stdio had stopped asking, and Orbie kept wandering around the floor. A person watching
+ * that screen has every reason to expect a reply.
+ */
+function presenceForAgent(agent) {
+  return state.presences.find((session) => session.joined && session.displayName === agent);
 }
 
 function isManagedAgent(agent) {
@@ -2132,8 +2323,10 @@ function focusAgentComposer(agent) {
   else delete input.dataset.presenceId;
   if (managedTarget) input.dataset.managedAgentId = managedTarget.id;
   else delete input.dataset.managedAgentId;
+  const hintSeat = presenceForAgent(agent);
+  const hintListening = hintSeat ? seatListeningState(hintSeat) : undefined;
   byId("office-chat-hint").textContent = isJoinedPresenceAgent(agent)
-    ? `已選擇 ${agent} · 訊息會進入房間收件匣，該終端同步時可讀取`
+    ? `已選擇 ${agent} · ${hintListening ? hintListening.send : "訊息會進入房間收件匣"}`
     : isManagedAgent(agent)
       ? `已選擇 ${agent} · 送出後即時喚醒，以獨立席位名稱回覆`
     : `已選擇 ${agent} · 按送出才會喚醒模型`;
@@ -2205,7 +2398,13 @@ function renderAgentCard(agent, messages = state.recent || []) {
   card.hidden = false;
   byId("office-agent-name").textContent = info.label.toUpperCase();
   byId("office-agent-dot").style.background = authorColor(agent);
-  byId("office-agent-status").textContent = work ? `⛔ ${work.label}` : "可對話 · 待命";
+  const seatBehindDesk = presenceForAgent(agent);
+  const deskListening = seatBehindDesk ? seatListeningState(seatBehindDesk) : undefined;
+  byId("office-agent-status").textContent = work
+    ? `⛔ ${work.label}`
+    : deskListening
+      ? `${deskListening.mark} ${deskListening.text}`
+      : "可對話 · 閒置";
   byId("office-agent-access").textContent = info.access;
   byId("office-agent-model").textContent = work?.model || info.model;
   byId("office-agent-last").textContent = last ? `#${last.seq} · ${last.at.slice(11, 16)}` : "尚無發言";
@@ -2214,7 +2413,9 @@ function renderAgentCard(agent, messages = state.recent || []) {
     : agent === "you"
       ? "這是你的 Owner 工位；所有高風險動作仍需要你明確批准。"
       : isJoinedPresenceAgent(agent)
-        ? `這是已加入的 ${providerForAgent(agent)} MCP 終端；點擊會預填 @${agent}，訊息進入房間收件匣，不另花模型額度。`
+        ? deskListening && deskListening.key !== "listening"
+          ? `${deskListening.send} 怎麼辦：${deskListening.fix}`
+          : `這是已加入的 ${providerForAgent(agent)} MCP 終端；點擊會預填 @${agent}，訊息進入房間收件匣，不另花模型額度。`
         : isManagedAgent(agent)
           ? `這是 Orchestratory 管理的即時子 Agent；可重複對話，每席同時只有一個進行中回覆，不會冒用外接終端。`
         : `點擊已在輸入框預填 @${agent}；仍需按送出才會喚醒模型。`;
@@ -2313,7 +2514,24 @@ function updateOffice(messages) {
       ? { kind: "room", label: `回覆 Room #${pending.seq}`, detail: pending.text }
       : workflowWork[agent];
     if ((work || agent === speaker) && desk.dataset.activity) clearIdleActivity(agent);
-    if (!desk.dataset.activity) byId(`stat-${agent}`).textContent = st ? `${st.messages} 則` : "待命";
+    /* An external seat's desk label answers the same question as its badge. Writing "待命" here every
+       poll put the word back on the most glanceable element on the floor -- and for a seat that is
+       not listening it is the exact claim this whole item exists to remove. Seats that are not
+       terminals keep the plain idle label, which for them is simply true. */
+    const deskSeatState = presenceForAgent(agent);
+    if (!desk.dataset.activity) {
+      /* State first for a seat that cannot hear you: any seat that has ever spoken has a message
+         count, so ordering the count first meant the label a reader glances at almost never carried
+         the one fact this item exists to surface. */
+      const deskLabelState = deskSeatState ? seatListeningState(deskSeatState) : undefined;
+      byId(`stat-${agent}`).textContent = deskLabelState && deskLabelState.key !== "listening"
+        ? deskLabelState.text
+        : st
+          ? `${st.messages} 則`
+          : deskLabelState
+            ? deskLabelState.text
+            : "閒置";
+    }
     desk.classList.remove("idle", "speaking", "waking", "real-busy", "workflow-busy", "mood-focused");
     if (work) {
       busyCount += 1;
@@ -2334,11 +2552,32 @@ function updateOffice(messages) {
   byId("office-live-state").classList.toggle("is-busy", busyCount > 0);
   byId("office-caption").textContent = busyCount
     ? `⛔ 請勿打擾 · ${busyCaption}${busyCount > 1 ? ` · 另有 ${busyCount - 1} 位執行中` : ""}`
-    : speaker ? `${speaker} 正在發言 · 點選工位可喚醒對話`
+    : speaker ? `${speaker} 正在發言 · 點選工位開始對話`
       : OFFICE_AGENTS.length > 4
         ? `已擴編至 ${OFFICE_AGENTS.length} 席 · 可拖曳辦公桌調整位置`
-        : "待命中 · 點選任一 agent 工位開始對話";
-  if (state.selectedAgent) renderAgentCard(state.selectedAgent, messages);
+        : "點選任一 agent 工位開始對話";
+  if (state.selectedAgent) {
+    renderAgentCard(state.selectedAgent, messages);
+    /*
+     * The hint sits beside the send button and was written once, when the seat was picked. A seat
+     * that went silent in between left that line saying the delivery would go straight over, right
+     * where the person is about to press send. It has to be re-derived on the same poll as everything
+     * else on this screen.
+     */
+    /*
+     * Bound to the composer's delivery target, NOT to the visual selection. Sending clears
+     * dataset.presenceId but leaves state.selectedAgent set, so keying off the selection kept the
+     * line saying "已選擇 codex1 · …會進收件匣排隊" next to a composer that no longer had a target --
+     * and the next thing typed there would post to the room addressed to nobody. The hint must
+     * describe the route the send will actually take.
+     */
+    const composer = byId("office-chat-input");
+    const selectedSeat = presenceForAgent(state.selectedAgent);
+    if (selectedSeat && composer?.dataset.presenceId === selectedSeat.id) {
+      byId("office-chat-hint").textContent =
+        `已選擇 ${state.selectedAgent} · ${seatListeningState(selectedSeat).send}`;
+    }
+  }
 }
 
 function switchView(view) {
@@ -3469,7 +3708,7 @@ byId("office-chat-form").addEventListener("submit", async (event) => {
     delete input.dataset.managedAgentId;
     document.querySelectorAll(".cubicle.is-selected, .desk.is-selected")
       .forEach((node) => node.classList.remove("is-selected"));
-    byId("office-chat-hint").textContent = "@codex1 等終端只入帳；@codex 才會另外喚醒模型";
+    byId("office-chat-hint").textContent = "點一個工位就能指名交辦；沒有指名的話，這則只會留在房間帳本裡，不會進任何人的收件匣";
     await poll();
   } catch (error) {
     if (error.message === "ROOM_MENTION_CANCELLED") {

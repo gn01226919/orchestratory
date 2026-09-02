@@ -276,6 +276,53 @@ export class CollaborationService {
     return left;
   }
 
+  /*
+   * A delivery that queued for a seat nobody is reading leaves a line in the ledger.
+   *
+   * The fact was already being returned to the caller as `wakeable: false`, buried in a JSON field
+   * whose meaning only someone who has read this file can recover. The ledger is where a person goes
+   * afterwards to ask why nothing happened, and without this line the two explanations look identical
+   * there: the seat read the task and ignored it, or the seat never received it at all. Those call for
+   * opposite responses -- chase the agent, or go wake the terminal.
+   *
+   * What one line can support is narrower than "which of those two happened": it is a single
+   * observation, taken once, at dispatch. The seat may open a wait a moment later and answer, and
+   * nothing retracts the line. So it is written as an observation of a moment and should be read as
+   * one -- evidence that at #N nobody was on duty, not a verdict on whether the work was ever seen.
+   *
+   * The line records what was true at dispatch and nothing else. An earlier draft ended with "要等它
+   * 下次待命才會拿到", which is a promise about the future and is false in both directions: the seat may
+   * start listening a second later and answer immediately, or it may close and have the delivery
+   * failed as SEAT_OFFLINE, in which case it never gets it at all. Nothing retracts this line, so it
+   * must only say what was true when it was written.
+   *
+   * Idempotent, keyed to the message. `room_send` promises in its own tool description that a retry
+   * with the same clientRequestId cannot duplicate anything, and both the chat line and the delivery
+   * honour that. A non-idempotent note would have quietly broken that promise: three transport
+   * retries, one delivery, three identical ledger lines.
+   */
+  #noteQueuedForSilentSeat(roomId: string, seq: number, displayName: string, deliveryId: string): void {
+    try {
+      /*
+       * `enqueue` and `isListening` are two separate observations with no transaction between them --
+       * different tables, and for the GUI versus an MCP terminal, different processes. A waiter can
+       * claim the delivery in that gap, and this line would then record "nobody was listening" about
+       * work that had already been picked up. Re-reading the delivery narrows the gap to almost
+       * nothing and fails in the safe direction: a skipped note costs a reader some context, a wrong
+       * one costs them their trust in the ledger.
+       */
+      if (this.inbox.get(deliveryId)?.state !== "queued") return;
+      this.ledger.appendSystemIdempotent(
+        roomId,
+        `ℹ #${seq} 送給 ${displayName} 時，它沒有在收聽，所以這一則進了收件匣排隊。`,
+        `silent-seat:${roomId}:${seq}`,
+      );
+    } catch {
+      /* The ledger note is a courtesy to whoever reads this later. The delivery itself is already
+         committed and must not be undone because we could not annotate it. */
+    }
+  }
+
   postToExternal(input: { roomId: string; workspace: string; presenceId: string; text: string }): {
     message: RoomMessage;
     target: PresenceInfo;
@@ -297,6 +344,7 @@ export class CollaborationService {
         targetDisplayName: target.displayName,
       });
       const wakeable = this.inbox.isListening(target.id, input.roomId);
+      if (!wakeable) this.#noteQueuedForSilentSeat(input.roomId, message.seq, target.displayName, delivery.id);
       return {
         message,
         target,
@@ -415,6 +463,7 @@ export class CollaborationService {
         throw new Error("TARGET_AGENT_OFFLINE");
       }
       const wakeable = this.inbox.isListening(target.id, input.roomId);
+      if (!wakeable) this.#noteQueuedForSilentSeat(input.roomId, message.seq, target.displayName, delivery.id);
       return {
         message,
         source,

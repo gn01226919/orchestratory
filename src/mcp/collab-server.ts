@@ -92,6 +92,27 @@ interface RoomWorkerCallResult {
   readThroughSeq: number;
 }
 
+/*
+ * A reply that did not come, explained from the two facts the server can actually check: what became
+ * of the delivery, and whether the seat is listening now. An earlier version answered from the seat
+ * alone and therefore asserted "nothing has claimed this delivery" whenever nobody was listening --
+ * but a waiter can claim work and then end, which leaves exactly that combination with the delivery
+ * taken. Each branch below says only what its two facts support.
+ */
+function describeReplyTimeout(status: { listening: boolean; state: string }): string {
+  if (status.state === "queued") {
+    return status.listening
+      ? "Still queued, and the target IS listening, so it should pick this up shortly. Waiting longer is reasonable."
+      : "Still queued and the target is NOT listening, so nothing has picked this up. It stays queued until that seat opens a room_wait, and nothing here can wake it. Continue without the reply, or ask the owner to nudge that terminal.";
+  }
+  if (status.state === "delivered" || status.state === "read" || status.state === "working") {
+    return status.listening
+      ? `The target has this delivery (state: ${status.state}) and has not answered yet. Waiting longer is reasonable.`
+      : `The target took this delivery (state: ${status.state}) but is not listening now, so it is either mid-task or its wait ended before it replied. If its lease expires the delivery returns to the queue for the next room_wait.`;
+  }
+  return `This delivery is ${status.state}, so no reply is coming for it.`;
+}
+
 function asObject(value: unknown): JsonObject {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error("INVALID_TOOL_ARGUMENTS");
@@ -846,6 +867,15 @@ export class CollabToolBroker {
       ...(typeof input.replyToDeliveryId === "string" ? { replyToDeliveryId: input.replyToDeliveryId } : {}),
       ...(typeof input.taskId === "string" ? { taskId: input.taskId } : {}),
     });
+    /*
+     * `wakeable: false` was already in this response, and it was already true. It was also unreadable:
+     * a boolean in a nested object, with no statement of what follows from it. The sender's next
+     * decision -- wait, or go find a human -- depends entirely on that, so it is spelled out here in
+     * the same words a person would use, rather than left to be inferred from a field name.
+     *
+     * The note is derived from `dispatch.wakeable` and never from a separate lookup, so it cannot
+     * drift away from the flag it explains.
+     */
     const base = {
       message: sent.message,
       delivery: sent.delivery,
@@ -854,7 +884,15 @@ export class CollabToolBroker {
         provider: sent.target.provider,
         displayName: sent.target.displayName,
       },
-      dispatch: sent.dispatch,
+      dispatch: {
+        ...sent.dispatch,
+        note: sent.dispatch.wakeable
+          ? `${sent.target.displayName} is in standby right now, so this delivery goes straight to it.`
+          /* "queued" is read back rather than inferred from `wakeable`: enqueue and the listening
+             check are two separate observations, and a cross-process waiter can claim the delivery
+             between them. Almost always it is still queued; when it is not, say what it is. */
+          : `${sent.target.displayName} has joined the room but is NOT listening right now. The delivery is ${this.#targetStatus(sent.delivery.id)?.state ?? "queued"} in its inbox; it can only CLAIM and answer it from inside a room_wait call, so no reply will arrive until it opens one. The text itself is an ordinary ledger message, so that seat can still READ it with room_read without being in standby. Nothing here can wake it: MCP cannot push to a terminal that is not asking. So do not block on a reply that may never come — continue without it, or ask the owner to nudge that terminal.`,
+      },
     };
     if (input.waitForReplyMs === undefined) return JSON.stringify(base);
     const outcome = await collaboration.waitForExternalReply({
@@ -863,9 +901,21 @@ export class CollabToolBroker {
       timeoutMs: Number(input.waitForReplyMs),
       ...(options.signal ? { signal: options.signal } : {}),
     });
+    /* The same explanation the standalone room_await_reply gives. A timeout here is the owner's
+       original complaint in its MCP shape -- work went out, nothing came back -- and it is no more
+       readable for arriving on the end of a send. */
+    if (outcome) return JSON.stringify({ ...base, replyWait: { timeout: false, ...outcome } });
+    const status = this.#targetStatus(sent.delivery.id);
     return JSON.stringify({
       ...base,
-      replyWait: outcome ? { timeout: false, ...outcome } : { timeout: true },
+      replyWait: {
+        timeout: true,
+        ...(status === undefined ? {} : {
+          targetListening: status.listening,
+          deliveryState: status.state,
+          note: describeReplyTimeout(status),
+        }),
+      },
     });
   }
 
@@ -886,7 +936,46 @@ export class CollabToolBroker {
       timeoutMs: Number(timeoutMs),
       ...(options.signal ? { signal: options.signal } : {}),
     });
-    return JSON.stringify(outcome ? { timeout: false, ...outcome } : { timeout: true });
+    if (outcome) return JSON.stringify({ timeout: false, ...outcome });
+    /*
+     * A bare `{ timeout: true }` is the MCP-side shape of the owner's original complaint: work went
+     * out and nothing came back, with nothing to distinguish "it is busy" from "nobody was ever
+     * going to answer". The listening state at the moment of timeout separates those two, and it is
+     * read here rather than at dispatch because the seat may have changed in between.
+     */
+    const status = this.#targetStatus(input.deliveryId);
+    return JSON.stringify({
+      timeout: true,
+      ...(status === undefined ? {} : {
+        targetListening: status.listening,
+        deliveryState: status.state,
+        note: describeReplyTimeout(status),
+      }),
+    });
+  }
+
+  /*
+   * Whether the seat this delivery is addressed to is inside a room_wait right now. Undefined when the
+   * delivery cannot be resolved, so the caller is told nothing rather than something invented.
+   */
+  #targetStatus(deliveryId: unknown): { listening: boolean; state: string } | undefined {
+    try {
+      const { collaboration } = this.#peerSession();
+      const delivery = collaboration.inbox.get(String(deliveryId));
+      if (!delivery) return undefined;
+      /* The delivery's own state as well as the seat's. "Nobody is listening" alone cannot support
+         "nothing has claimed this delivery" -- a waiter may have claimed it and then ended, which
+         leaves the seat silent and the delivery very much taken. The two facts answer different
+         halves of the sender's question, so both are read.
+         The delivery's OWN room, not the caller's binding: they are the same today, and using the
+         delivery's field means it stays true without depending on that. */
+      return {
+        listening: collaboration.inbox.isListening(delivery.targetPresenceId, delivery.roomId),
+        state: delivery.state,
+      };
+    } catch {
+      return undefined;
+    }
   }
 
   async #candidateStart(input: JsonObject): Promise<string> {
@@ -1342,6 +1431,23 @@ export class CollabToolBroker {
           ...(session.model ? { model: session.model } : {}),
           standbyApproved: session.standbyApproved,
           wakeable: session.wakeable,
+          /* Choosing who to send to happens HERE, before room_send. A bare boolean at the point of
+             choice is the same defect one step earlier: it is the difference between picking a seat
+             that will answer and one whose work will sit in a queue. */
+          listeningNote: session.wakeable
+            ? "In standby: work sent now goes straight to it."
+            : session.standbyApproved
+              ? "Joined and approved but NOT listening: work sent now queues until this seat opens a room_wait, and nothing can wake it from here. The queue is bounded at 32 unclaimed deliveries per seat; past that, room_send is refused with ROOM_INBOX_SEAT_LIMIT_REACHED."
+              /* Not "queues": room_send is REFUSED with TARGET_AGENT_STANDBY_NOT_APPROVED before
+                 anything is enqueued, so promising the work will wait for this seat is false.
+                 And the two refusing states have DIFFERENT remedies: one waits on the owner, the
+                 other cannot be helped by the owner at all -- approveStandby throws
+                 PRESENCE_STANDBY_NOT_REQUESTED when there is no request to approve, and the GUI does
+                 not even draw the button. Telling a peer to go ask the owner would send it after
+                 something nobody can do. */
+              : session.standbyRequested
+                ? "Joined and has REQUESTED standby, but the owner has not approved it yet: room_send to this seat is REFUSED outright, nothing is queued. It becomes reachable once the owner approves in the GUI."
+                : "Joined but has no standby request at all: room_send to this seat is REFUSED outright, nothing is queued. The owner CANNOT approve it from the GUI -- there is no request to approve. Only that terminal can call room_wait again to ask.",
           self: session.id === selfId,
           executionClass: session.executionClass,
           capabilityAuthority: session.capabilityAuthority,

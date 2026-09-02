@@ -1375,11 +1375,50 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomScript, /Native Full-Trust · host-controlled/u);
   assert.match(roomScript, /GUI Managed · 對話唯讀/u);
   assert.match(roomScript, /終端對話同步/u);
-  assert.match(roomScript, /room-wait 待命中，可由 GUI 喚醒/u);
-  assert.match(roomScript, /已申請 room-wait，等待 Owner 核准/u);
-  assert.match(roomScript, /待命已核准，但終端目前未掛起 room_wait/u);
-  assert.match(roomScript, /已加入，尚未申請 room-wait/u);
-  assert.match(roomScript, /已排隊（待命已核准，等待終端重新掛起 room_wait）/u);
+  assert.match(roomScript, /它正在收聽，送出後會直接送過去/u);
+  // 待命 means "approved for standby" everywhere else on this screen -- stage two, the approve and
+  // revoke buttons -- and the badge exists to show the gap between that and actually listening. One
+  // word cannot carry both halves of the distinction it is drawing.
+  assert.match(roomScript, /text: "正在收聽"/u);
+  assert.doesNotMatch(roomScript, /text: "正在待命"/u);
+  assert.match(roomScript, /它現在沒在收聽，送出的訊息會進收件匣排隊/u);
+  // The receipt now composes its label from the same state function instead of keeping a second
+  // hand-written copy of the branches -- that copy collapsed two states into one line, directly under
+  // a comment claiming there was one answer per state "where it cannot drift".
+  assert.match(roomScript, /已排隊：\$\{targetState\.text\}/u);
+  assert.match(roomScript, /const targetState = target \? seatListeningState\(target\) : undefined;/u);
+  // Refused, not queued. A seat without standby authority throws TARGET_AGENT_STANDBY_NOT_APPROVED
+  // before anything is enqueued, so telling the reader it will wait in a queue is simply false --
+  // and that was the shape of the contradiction the first pass shipped.
+  assert.match(roomScript, /還不能送。它的待命還等你核准/u);
+  assert.match(roomScript, /還不能送。它沒有待命授權/u);
+  // The office is where work is actually handed over, so it has to answer the same question the
+  // sidebar does. It used to say "可對話 · 待命" for a seat whose terminal had stopped asking.
+  assert.match(roomScript, /怎麼辦：\$\{deskListening\.fix\}|怎麼辦：\$\{listening\.fix\}/u);
+
+  /*
+   * Wiring anchors. The pure-function test slices seatListeningState out of this file and runs it in
+   * a bare context, so it cannot see a single caller: delete the three lines that put the state on
+   * screen and every other assertion here still passes while the feature disappears.
+   */
+  // The office desk label, which is the most glanceable element on that view.
+  assert.match(roomScript, /deskLabelState && deskLabelState\.key !== "listening"/u);
+  // The composer hint, re-derived each poll and bound to the DELIVERY target rather than the visual
+  // selection -- sending clears the target but leaves the selection, and keying off the selection
+  // left the line claiming a route the next send would not take.
+  assert.match(roomScript, /composer\?\.dataset\.presenceId === selectedSeat\.id/u);
+  // The notification panel, where "② 待命已處理" used to cover both "approved" and "the request
+  // lapsed and this seat can no longer be reached" -- opposite outcomes, and the second one is what
+  // an owner who does not click within room_wait's 30s approval window gets.
+  assert.match(roomScript, /seatState\?\.key === "no-standby"/u);
+  assert.match(roomScript, /這個申請已經失效/u);
+  assert.doesNotMatch(roomScript, /"② 待命已處理"/u);
+  // Wording: 待命 is the authority, 收聽 is actually listening. The receipt and the titles have to
+  // hold the same line the badge does.
+  assert.doesNotMatch(roomScript, /"它正在待命，正在送過去"/u);
+  // Anchored to the ASSIGNMENT, not to the words: the comment that explains why this line was
+  // removed quotes the old string, and a bare substring check would fail on the explanation itself.
+  assert.doesNotMatch(roomScript, /:\s*"可對話 · 待命";/u, "the office must not call a deaf seat 待命");
   assert.match(roomScript, /selectedPresenceId/u);
   assert.match(roomScript, /managedAgentId/u);
   assert.match(roomScript, /\/api\/rooms\/managed-agents\/mention/u);
@@ -2895,6 +2934,83 @@ test("no-cost provider selections produce no subscription-quota copy", async () 
   assert.match(cost.chatConsentMessage("codex"), /訂閱額度/u);
   assert.match(cost.chatConsentMessage("claude"), /訂閱額度/u);
   assert.match(cost.chatConsentMessage("unknown"), /訂閱額度/u);
+});
+
+/*
+ * "Joined" and "listening" are different facts, and the gap between them is the whole reason work
+ * gets sent to nobody. This asserts the seat row says which one is true in words that answer the
+ * reader's real question -- will anything happen if I send this now -- rather than naming the tool
+ * call that is or is not open.
+ */
+test("a seat row distinguishes listening from merely present, in plain words", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const start = source.indexOf("/* @pure-start seat-listening-state");
+  const end = source.indexOf("/* @pure-end seat-listening-state */");
+  assert.ok(start > 0 && end > start, "room.js must expose the DOM-free seat state");
+  const block = source.slice(start, end);
+  assert.doesNotMatch(
+    block,
+    /(?:\b(?:document|window|navigator|localStorage|state)\s*\.|\b(?:fetch|byId|api|setInterval|setTimeout|require|import)\s*\()/u,
+  );
+  const seat = runInNewContext(
+    `${block}\n({ seatListeningState });`,
+    Object.create(null) as object,
+    { timeout: 2_000 },
+  ) as {
+    seatListeningState: (session: unknown) => { key: string; mark: string; text: string; title: string; send: string; fix: string; cls: string };
+  };
+
+  const listening = seat.seatListeningState({ joined: true, standbyApproved: true, listening: true });
+  const silent = seat.seatListeningState({ joined: true, standbyApproved: true, listening: false });
+  const pending = seat.seatListeningState({ joined: true, standbyRequested: true, standbyApproved: false });
+  const noStandby = seat.seatListeningState({ joined: true });
+  const notJoined = seat.seatListeningState({ joined: false });
+
+  assert.deepEqual(
+    [listening.key, silent.key, pending.key, noStandby.key, notJoined.key],
+    ["listening", "not-listening", "awaiting-approval", "no-standby", "not-joined"],
+  );
+
+  // The one that used to be invisible: approved AND present AND still deaf. It must not read as a
+  // milder version of "listening" -- the reader's next action is different.
+  assert.notEqual(silent.text, listening.text);
+  // Refused is not queued. postToExternal throws TARGET_AGENT_STANDBY_NOT_APPROVED before anything is
+  // enqueued, so a state without standby authority must never promise the work will wait for it --
+  // the first pass said "會排隊等著" for exactly these two states, contradicting its own badge.
+  assert.match(silent.send, /排隊/u);
+  assert.doesNotMatch(pending.send, /排隊/u, "a seat awaiting approval refuses the send, it does not queue it");
+  assert.doesNotMatch(noStandby.send, /排隊/u, "and neither does one with no standby authority");
+  assert.match(pending.fix, /核准/u, "the fix for an unapproved seat is a button here, not a trip to the terminal");
+  assert.match(silent.fix, /room_wait/u, "the fix for a silent seat is at its terminal");
+  assert.equal(listening.fix, "", "a listening seat needs nothing fixed");
+
+  assert.match(silent.title, /排隊/u, "a silent seat must say the work will WAIT, not that it was delivered");
+  assert.match(silent.title, /沒有辦法從這裡叫醒/u, "and must not imply the GUI can wake it, because it cannot");
+  // Deliberately NOT a promise of arrival. The liveness lease runs up to 15s and the GUI polls every
+  // 5s, so a seat killed a moment ago still reads as listening for a short while. What we can state
+  // is what we do with the delivery, not what the other end will do with it.
+  assert.match(listening.title, /直接送過去/u);
+  assert.doesNotMatch(listening.title, /馬上收到|立刻收到|一定/u,
+    "a 15s lease cannot support a promise that the other end receives it");
+
+  // Distinguishable without colour. Every state carries its own mark, and no two share one, so the
+  // row still reads for someone who cannot separate the greens from the greys.
+  // All FIVE, including notJoined: the collision this replaced was between not-joined and
+  // no-standby, and a set that leaves one of them out cannot catch it coming back.
+  const marks = [listening.mark, silent.mark, pending.mark, noStandby.mark, notJoined.mark];
+  assert.equal(new Set(marks).size, marks.length, "each listening state needs its own mark, not just its own colour");
+  // The pure function passing proves nothing about the badge being on screen: this test slices the
+  // block out of the file and runs it in a bare context, so deleting `badge` from the row would leave
+  // every assertion here green and the state invisible. These two anchor the wiring.
+  assert.match(source, /seatListeningState\(session\)/u, "the presence row must actually consult the state");
+  assert.match(source, /identity\.append\(dot, label, badge, detail\)/u, "and must actually render the badge");
+  assert.match(source, /seatListeningState\(seatBehindDesk\)/u, "the office card must consult it too");
+
+  for (const stateValue of [listening, silent, pending, noStandby, notJoined]) {
+    assert.ok(stateValue.text.length > 0 && stateValue.title.length > 0);
+    assert.doesNotMatch(stateValue.text, /room_wait|standby|MCP/u,
+      `"${stateValue.text}" names the mechanism where it should answer the question`);
+  }
 });
 
 test("the ledger groups by LOCAL day and opens the newest one", async () => {

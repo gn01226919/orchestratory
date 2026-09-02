@@ -265,6 +265,20 @@ button.cancel-pending:hover { border-color: var(--warn); }
 }
 .desk:hover .orbie-body { box-shadow: 0 0 0 2px color-mix(in srgb, var(--orbie) 60%, transparent); }
 .desk.walking .orbie { animation: orbie-walk .5s ease-in-out infinite; }
+/*
+ * A desk whose terminal stopped asking. The figure is the most glanceable thing on this floor, so a
+ * bright, wandering one is the strongest claim the screen makes, and for a seat that is not
+ * listening it is a false one. Not "cannot receive anything" -- an approved seat still queues what it
+ * is sent, and can still read the room. What it cannot do is pick the work up. Dimmed and desaturated
+ * rather than hidden: the seat is still there and still selectable, it just is not on duty.
+ */
+.desk.seat-not-listening { opacity: .45; filter: grayscale(.7); }
+/* The second selector is what does the work: .desk.seat-not-listening.speaking .orbie outranks
+   .desk.speaking .orbie on specificity, which is what it takes, since at EQUAL specificity the later
+   declaration would win and .speaking is declared further down. The last thing a deaf seat said does
+   not make it able to hear the next one. */
+.desk.seat-not-listening .orbie,
+.desk.seat-not-listening.speaking .orbie { animation: none; }
 @keyframes orbie-walk { 0%,100% { transform: translateY(0) rotate(-4deg); } 50% { transform: translateY(-3px) rotate(4deg); } }
 .desk-plate {
   position: absolute; bottom: -6px; width: 108px; height: 26px; border-radius: 8px;
@@ -889,6 +903,25 @@ button.cancel-pending:hover { border-color: var(--warn); }
   align-items: center;
   gap: 4px;
 }
+/*
+ * The seat's listening badge. Carries a mark as well as a colour, because this is the row a reader
+ * uses to decide whether to keep waiting, and a green-or-grey-only signal says nothing to a reader
+ * who cannot tell those two apart.
+ */
+.office-presence-row .seat-listening {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid #3a4150;
+  color: #9aa4b2;
+  background: #1a1f27;
+  white-space: nowrap;
+  cursor: help;
+}
+.office-presence-row .seat-listening.is-listening { border-color: #3d7659; color: #8ce1b4; background: #16241c; }
+.office-presence-row .seat-listening.is-silent { border-color: #5a4a4a; color: #d8a5a5; background: #241a1a; }
+.office-presence-row .seat-listening.is-pending { border-color: #7a6738; color: #e7c37a; background: #241f14; }
+
 .office-presence-row .presence-stage {
   padding: 2px 5px;
   border: 1px solid #3b323e;
@@ -899,6 +932,23 @@ button.cancel-pending:hover { border-color: var(--warn); }
 }
 .office-presence-row .presence-stage.is-done { border-color: #3d7659; color: #8ce1b4; background: #16241c; }
 .office-presence-row .presence-stage.is-waiting { border-color: #7a6738; color: #e7c37a; background: #241f14; }
+/*
+ * The "what do I do about it" line. It is not a tooltip: the person reading it is deciding an action,
+ * and a title attribute is unreachable on touch, unreliable to a screen reader, and invisible to
+ * anyone not already hovering the exact right span.
+ */
+.office-presence-row .presence-stage-hint.is-action {
+  color: #e8c8a0;
+  border-left: 2px solid #7a6738;
+  padding-left: 8px;
+  line-height: 1.5;
+}
+/* Revoking is the one destructive control on this row, and on a deaf seat it is also the one a reader
+   is most likely to reach for -- it sounds like it addresses the problem and it is the only standby
+   control in sight. It does the opposite, and the GUI cannot undo it. */
+.office-presence-row button.leave.is-demoted { opacity: .55; font-weight: 400; }
+.office-presence-row button.leave.is-demoted:hover { opacity: 1; }
+
 .office-presence-row .presence-stage-hint {
   flex-basis: 100%;
   color: #857b88;
