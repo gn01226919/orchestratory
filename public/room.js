@@ -519,11 +519,131 @@ async function cancelPending(pending, button) {
   }
 }
 
+/* @pure-start ledger-day-groups
+ * Grouping a ledger by day, with no DOM and no clock of its own.
+ *
+ * The ledger is append-only and grows without bound — this room is at 816 messages — so a flat
+ * list makes the oldest and newest entries equally prominent, which is exactly backwards: what
+ * happened in the last hour is what anyone is here to read.
+ *
+ * `at` is a UTC ISO string but a day boundary is a LOCAL question: a message posted at 23:30
+ * Taipei belongs to that evening, not to the next UTC morning. The date is therefore derived
+ * through the platform's local calendar rather than by slicing the ISO string, which would silently
+ * be wrong by one day for eight hours out of every twenty-four.
+ *
+ * `todayKey` is a parameter, not `new Date()` inside: a function that reads the clock cannot be
+ * tested for what it does at a boundary, and "today" is precisely the boundary that matters here.
+ */
+function ledgerDayKey(at) {
+  /* A timestamp here is an ISO-shaped string, or a Date this module built itself (ledgerDayLabel
+     walks back a day to work out "yesterday"). `new Date(null)` is the epoch and `new Date(0)` is a
+     real instant, so a NaN check alone files a missing timestamp under 1970-01-01 -- a real day
+     bucket, presented with the same confidence as a true one. Everything else belongs in the undated
+     bucket, where it is visibly not a day. */
+  if (typeof at !== "string" && !(at instanceof Date)) return "";
+  const date = new Date(at);
+  if (Number.isNaN(date.getTime())) return "";
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+function ledgerDayLabel(key, todayKey) {
+  if (!key) return "日期不明";
+  if (key === todayKey) return "今天";
+  const [year, month, day] = key.split("-");
+  const yesterday = new Date(`${todayKey}T12:00:00`);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (key === ledgerDayKey(yesterday)) return "昨天";
+  const sameYear = todayKey.slice(0, 4) === year;
+  return sameYear ? `${Number(month)} 月 ${Number(day)} 日` : `${year} 年 ${Number(month)} 月 ${Number(day)} 日`;
+}
+
+/**
+ * Messages in, day buckets out, oldest first so the newest sits nearest the input box where the
+ * stream already scrolls. `openKey` names the one day that should be expanded: the newest, because
+ * a reader arriving at a room wants the current conversation, not the archive.
+ *
+ * Ordered by the DATE, not by the order the messages arrived. An earlier version kept insertion
+ * order and called the last bucket the newest, which is only true while the input happens to be
+ * sorted oldest-first -- and the ledger is about to be served newest-first with older pages loaded
+ * on scroll, which is exactly the case that breaks it. Keys are `YYYY-MM-DD`, so a plain string
+ * compare is a date compare.
+ *
+ * The undated bucket (`""`, from a timestamp that is not a real instant) sorts to the FRONT, and no
+ * DATED bucket ever loses `openKey` to it. Putting it last would park it next to the input box and
+ * auto-expand it, which would read as "the newest thing that happened" -- the one thing it definitely
+ * is not. If every message is undated there is no dated bucket to prefer, `openKey` is `""`, and that
+ * group opens; that is the honest answer rather than opening nothing at all.
+ */
+function ledgerDayGroups(messages, todayKey) {
+  const byKey = new Map();
+  for (const message of Array.isArray(messages) ? messages : []) {
+    const key = ledgerDayKey(message?.at);
+    if (!byKey.has(key)) byKey.set(key, { key, label: ledgerDayLabel(key, todayKey), messages: [] });
+    byKey.get(key).messages.push(message);
+  }
+  const groups = [...byKey.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  const dated = groups.filter((group) => group.key !== "");
+  return { groups, openKey: dated.length > 0 ? dated[dated.length - 1].key : "" };
+}
+/* @pure-end ledger-day-groups */
+
+/**
+ * The day a message is filed under, and the group element that holds it.
+ *
+ * Creating a group is the ONLY place its open/closed state is decided. Once a reader has collapsed
+ * a day, arriving messages must not reopen it — a stream that keeps overriding what you just did is
+ * worse than one that never grouped at all.
+ */
+function ledgerDayGroupElement(ledger, key, todayKey) {
+  const existing = ledger.querySelector(`details.day[data-day="${key}"]`);
+  if (existing) return existing;
+  const group = document.createElement("details");
+  group.className = "day";
+  group.dataset.day = key;
+  /* New groups arrive at the bottom, which is where the newest day belongs, so a group created
+   * while the room is live IS the current day and opens. Older days rendered by a history load are
+   * closed by showMessages afterwards, which knows the full set and can tell newest from older. */
+  group.open = true;
+  const summary = document.createElement("summary");
+  const label = document.createElement("span");
+  label.className = "day-label";
+  label.textContent = ledgerDayLabel(key, todayKey);
+  const count = document.createElement("span");
+  count.className = "day-count";
+  summary.append(label, count);
+  group.append(summary);
+  ledger.append(group);
+  return group;
+}
+
+function refreshLedgerDayCounts(ledger) {
+  for (const group of ledger.querySelectorAll("details.day")) {
+    const total = group.querySelectorAll("article.msg").length;
+    const count = group.querySelector(".day-count");
+    if (count) count.textContent = `${total} 則`;
+  }
+}
+
 function showMessages(messages, replace) {
   const ledger = byId("ledger");
   if (replace) ledger.textContent = "";
   ledger.querySelector(".welcome")?.remove();
-  for (const message of messages) ledger.append(renderMessage(message));
+  const todayKey = ledgerDayKey(new Date());
+  const { openKey } = ledgerDayGroups(messages, todayKey);
+  for (const message of messages) {
+    const key = ledgerDayKey(message.at);
+    ledgerDayGroupElement(ledger, key, todayKey).append(renderMessage(message));
+  }
+  if (replace) {
+    /* Only a full rebuild knows which day is newest; live appends must leave the reader's own
+     * expand/collapse decisions alone. */
+    for (const group of ledger.querySelectorAll("details.day")) {
+      group.open = group.dataset.day === openKey;
+    }
+  }
+  refreshLedgerDayCounts(ledger);
   if (!replace) ledger.scrollTop = ledger.scrollHeight;
 }
 

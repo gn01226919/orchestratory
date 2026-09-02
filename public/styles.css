@@ -2328,3 +2328,49 @@ body.workspace-modal-open { overflow: hidden; }
   .merge-history-section > header { align-items: flex-start; }
   .merge-approval-actions #merge-approval-reject { margin-right: 0; }
 }
+
+/* Ledger day grouping.
+ * The summary is the only affordance a reader has for collapsing a day, so it is styled as a row
+ * that obviously invites a click: full width, its own background, and a marker that turns. */
+#ledger details.day {
+  border-top: 1px solid var(--line, #23262c);
+  margin: 0;
+}
+#ledger details.day:first-child { border-top: 0; }
+#ledger details.day > summary {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.45rem 0.75rem;
+  cursor: pointer;
+  list-style: none;
+  background: var(--panel, #14161a);
+  border-bottom: 1px solid var(--line, #23262c);
+  user-select: none;
+}
+#ledger details.day > summary::-webkit-details-marker { display: none; }
+#ledger details.day > summary::before {
+  content: "▸";
+  display: inline-block;
+  width: 0.9em;
+  color: var(--muted, #7a808a);
+  transition: transform 0.12s ease;
+}
+#ledger details.day[open] > summary::before { transform: rotate(90deg); }
+#ledger details.day > summary:hover { background: var(--panel-hover, #1b1e24); }
+#ledger details.day > summary:focus-visible {
+  outline: 2px solid var(--accent, #7ee2a8);
+  outline-offset: -2px;
+}
+#ledger .day-label {
+  font-weight: 600;
+  color: var(--text, #e6e8ec);
+}
+#ledger .day-count {
+  font-size: 0.8rem;
+  color: var(--muted, #7a808a);
+}
+#ledger details.day > article.msg:first-of-type { margin-top: 0.4rem; }

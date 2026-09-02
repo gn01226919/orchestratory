@@ -2896,3 +2896,102 @@ test("no-cost provider selections produce no subscription-quota copy", async () 
   assert.match(cost.chatConsentMessage("claude"), /訂閱額度/u);
   assert.match(cost.chatConsentMessage("unknown"), /訂閱額度/u);
 });
+
+test("the ledger groups by LOCAL day and opens the newest one", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const start = source.indexOf("/* @pure-start ledger-day-groups");
+  const end = source.indexOf("/* @pure-end ledger-day-groups */");
+  assert.ok(start > 0 && end > start, "room.js must expose the DOM-free ledger grouper");
+  const block = source.slice(start, end);
+  assert.doesNotMatch(
+    block,
+    /(?:\b(?:document|window|navigator|localStorage|state)\s*\.|\b(?:fetch|byId|api|setInterval|setTimeout|require|import)\s*\()/u,
+  );
+  const grouper = runInNewContext(
+    `${block}\n({ ledgerDayKey, ledgerDayLabel, ledgerDayGroups });`,
+    Object.create(null) as object,
+    { timeout: 2_000 },
+  ) as {
+    ledgerDayKey: (at: unknown) => string;
+    ledgerDayLabel: (key: string, todayKey: string) => string;
+    ledgerDayGroups: (messages: unknown, todayKey: string) => {
+      groups: { key: string; label: string; messages: { seq: number }[] }[];
+      openKey: string;
+    };
+  };
+
+  // Built from LOCAL components on purpose: the assertion below is about the local calendar, and a
+  // literal ISO string would encode this machine's offset into the expectation.
+  const localIso = (y: number, m: number, d: number, h: number, min: number): string =>
+    new Date(y, m - 1, d, h, min).toISOString();
+
+  // The boundary the naive implementation gets wrong. In any zone east of UTC these two are the
+  // same UTC date, so `at.slice(0, 10)` files them together; they are different evenings to a
+  // reader, and that is whose day this is.
+  const lateNight = localIso(2026, 8, 20, 23, 30);
+  const justAfter = localIso(2026, 8, 21, 0, 10);
+  assert.notEqual(
+    grouper.ledgerDayKey(lateNight),
+    grouper.ledgerDayKey(justAfter),
+    "40 minutes across local midnight must be two days, whatever UTC says",
+  );
+  assert.equal(grouper.ledgerDayKey(lateNight), "2026-08-20");
+  assert.equal(grouper.ledgerDayKey(justAfter), "2026-08-21");
+
+  const messages = [
+    { seq: 1, at: localIso(2026, 8, 19, 9, 0) },
+    { seq: 2, at: lateNight },
+    { seq: 3, at: justAfter },
+    { seq: 4, at: localIso(2026, 8, 21, 18, 0) },
+  ];
+  const { groups, openKey } = grouper.ledgerDayGroups(messages, "2026-08-21");
+  // `[...x]` re-homes the value: the grouper runs in another vm context, so the array it builds has
+  // that context's Array prototype and deepEqual (strict) refuses it as a different kind of thing.
+  assert.deepEqual([...groups].map((group) => group.key), ["2026-08-19", "2026-08-20", "2026-08-21"]);
+  assert.deepEqual([...groups].map((group) => group.messages.length), [1, 1, 2]);
+  // Oldest first, so the newest ends up nearest the composer the stream already scrolls to.
+  assert.equal(openKey, "2026-08-21", "the newest day is the one a reader arrived for");
+  assert.deepEqual([...groups].map((group) => group.label), ["8 月 19 日", "昨天", "今天"]);
+
+  // A year that is not this one is spelled out; the same date in the current year is not.
+  assert.equal(grouper.ledgerDayLabel("2025-12-31", "2026-08-21"), "2025 年 12 月 31 日");
+
+  // Order comes from the DATE, not from the order the messages arrived. This matters because the
+  // ledger is served newest-first with older pages loaded on scroll, so the input is routinely NOT
+  // sorted oldest-first. An earlier version kept insertion order and called the last bucket the
+  // newest, which passed the sorted case above and got both the order and the open day wrong here.
+  const shuffled = grouper.ledgerDayGroups([
+    { seq: 4, at: localIso(2026, 8, 21, 18, 0) },
+    { seq: 1, at: localIso(2026, 8, 19, 9, 0) },
+    { seq: 3, at: justAfter },
+    { seq: 2, at: lateNight },
+  ], "2026-08-21");
+  assert.deepEqual([...shuffled.groups].map((group) => group.key), ["2026-08-19", "2026-08-20", "2026-08-21"]);
+  assert.equal(shuffled.openKey, "2026-08-21", "the newest DAY opens, not the day of the first message in");
+
+  // Untrusted input: a malformed timestamp becomes its own named bucket rather than throwing or
+  // silently joining a real day.
+  const broken = grouper.ledgerDayGroups([{ seq: 9, at: "not-a-date" }], "2026-08-21");
+  assert.equal(broken.groups.length, 1);
+  assert.equal(broken.groups[0]?.label, "日期不明");
+
+  // A NaN check alone is not enough: `new Date(null)` is the epoch and `new Date(0)` is a real
+  // instant, so anything that is not a parseable string used to be filed under 1970-01-01 — a real
+  // day bucket, shown with the same confidence as a true one.
+  assert.equal(grouper.ledgerDayKey(null), "");
+  assert.equal(grouper.ledgerDayKey(0), "");
+  assert.equal(grouper.ledgerDayKey(undefined), "");
+
+  // The undated bucket sorts to the front and can never be the open one. Parked last it would sit
+  // against the composer and auto-expand, reading as "the newest thing that happened".
+  const mixed = grouper.ledgerDayGroups([
+    { seq: 1, at: localIso(2026, 8, 21, 10, 0) },
+    { seq: 2, at: "not-a-date" },
+  ], "2026-08-21");
+  assert.deepEqual([...mixed.groups].map((group) => group.key), ["", "2026-08-21"]);
+  assert.equal(mixed.openKey, "2026-08-21", "an undated bucket must not be mistaken for the newest day");
+
+  const empty = grouper.ledgerDayGroups([], "2026-08-21");
+  assert.equal([...empty.groups].length, 0);
+  assert.equal(empty.openKey, "");
+});
