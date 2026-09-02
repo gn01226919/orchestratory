@@ -51,8 +51,16 @@ const NATIVE_TERMINAL_CAPABILITY = {
   hostCapabilities: "unchanged",
 } as const;
 const DEFAULT_JOIN_APPROVAL_WAIT_MS = 30_000;
+/*
+ * A ceiling for a standby wait the CALLER asks to bound. There is no default: omitting `timeoutMs`
+ * means the wait runs until stdio closes, the caller cancels, or the owner revokes standby.
+ *
+ * This layer used to default to the ceiling, which is how the store's unbounded path stayed
+ * unreachable in production while its tests passed: every `room_wait` arrived with a number
+ * already filled in, so `timeoutMs === undefined` never happened outside a test. A seat went deaf
+ * after four hours and still looked present, which is the defect this whole item exists to fix.
+ */
 const MAX_STANDBY_WAIT_MS = 4 * 60 * 60 * 1_000;
-const DEFAULT_STANDBY_WAIT_MS = MAX_STANDBY_WAIT_MS;
 const DEFAULT_PEER_REPLY_WAIT_MS = 30_000;
 const MAX_MCP_INFLIGHT_REQUESTS = 16;
 
@@ -410,7 +418,7 @@ export class CollabToolBroker {
           {
             name: "room_send",
             description:
-              "Send work directly from this authenticated terminal seat to one exact joined terminal seat. Supply one stable UUID clientRequestId per logical send so transport retries cannot duplicate it. The sender identity is server-bound and cannot be supplied or spoofed. The target must have approved standby; delivery never falls back to a resident/provider worker. New threads are server-generated; follow-ups require both threadId and replyToDeliveryId and keep the same participants/task. Threads have no fixed round limit. Optionally wait for this delivery's reply for up to four hours.",
+              "Send work directly from this authenticated terminal seat to one exact joined terminal seat. Supply one stable UUID clientRequestId per logical send so transport retries cannot duplicate it. The sender identity is server-bound and cannot be supplied or spoofed. The target must have approved standby; delivery never falls back to a resident/provider worker. New threads are server-generated; follow-ups require both threadId and replyToDeliveryId and keep the same participants/task. Threads have no fixed round limit. Optionally wait for this delivery's reply for up to four hours (waiting for a REPLY stays bounded; it blocks you, unlike standby, where being held open is the point).",
             inputSchema: {
               type: "object", additionalProperties: false,
               required: ["targetPresenceId", "text", "clientRequestId"],
@@ -542,7 +550,7 @@ export class CollabToolBroker {
         {
           name: "room_wait",
           description:
-            "Request session-scoped standby approval in the GUI, then keep this exact MCP terminal waiting for the next addressed task. Owner approval is required once per live session and never transfers to another terminal. The default standby wait is bounded to four hours; stdio close, heartbeat expiry, owner revocation, MCP cancellation, or the hard timeout ends it. While the approved long-poll is active the GUI truthfully shows this seat as wakeable. Immediately acknowledge returned work with room_ack(read), then room_ack(working), finish with room_reply or room_fail, and call room_wait again to resume standby. Never share the private lease token.",
+            "Request session-scoped standby approval in the GUI, then keep this exact MCP terminal waiting for the next addressed task. Owner approval is required once per live session and never transfers to another terminal. Standby has no time limit of its own: omit timeoutMs and it lasts until something observable ends it — stdio closing, you cancelling, the owner revoking standby, or your presence lapsing because heartbeats stopped. It does not expire on a timer, because a seat that stopped waiting cannot be reached at all until it waits again. Pass timeoutMs only when you deliberately want a bounded standby (max 4h). Opening a new room_wait from this same seat DISPLACES your previous one: the newest call takes the seat and the older call returns ROOM_WAIT_LEASE_LOST. That error means you already took over your own seat — it is the expected result of re-calling room_wait after a transport timeout, it is not a standby failure, and the correct response is to keep using the newer call rather than to stop waiting or fall back to anything else. The displaced call cannot claim work, so no task is delivered into a call nobody is reading. While the approved long-poll is active the GUI truthfully shows this seat as wakeable. Immediately acknowledge returned work with room_ack(read), then room_ack(working), finish with room_reply or room_fail, and call room_wait again to resume standby. Never share the private lease token.",
           inputSchema: {
             type: "object",
             additionalProperties: false,
@@ -1023,18 +1031,32 @@ export class CollabToolBroker {
     const roomId = this.#resolveRoomId(input.room);
     const { inbox, collaboration, presenceId } = this.#seatInbox();
     const actor = this.#messageAuthor(undefined, roomId);
-    const timeoutMs = input.timeoutMs === undefined ? DEFAULT_STANDBY_WAIT_MS : input.timeoutMs;
+    const timeoutMs = input.timeoutMs;
     const approvalTimeoutMs = input.approvalTimeoutMs === undefined
       ? DEFAULT_JOIN_APPROVAL_WAIT_MS
       : input.approvalTimeoutMs;
+    /* Absent is legal and means unbounded; only a supplied value is range-checked. */
     if (
-      !Number.isSafeInteger(timeoutMs) || Number(timeoutMs) < 1 ||
-      Number(timeoutMs) > MAX_STANDBY_WAIT_MS
+      timeoutMs !== undefined && (
+        !Number.isSafeInteger(timeoutMs) || Number(timeoutMs) < 1 ||
+        Number(timeoutMs) > MAX_STANDBY_WAIT_MS
+      )
     ) throw new Error("INVALID_ROOM_WAIT_TIMEOUT");
     if (
       !Number.isSafeInteger(approvalTimeoutMs) || Number(approvalTimeoutMs) < 1 ||
       Number(approvalTimeoutMs) > MAX_JOIN_APPROVAL_WAIT_MS
     ) throw new Error("INVALID_ROOM_STANDBY_APPROVAL_TIMEOUT");
+    /*
+     * Unbounded standby is the point of this tool, but it needs SOME way out. In the MCP server the
+     * request's AbortController always supplies one, so this never fires in production. It is here
+     * because `CollabCallOptions` defaults to `{}`: any future caller that omits both a signal and a
+     * timeout would open a loop with no exit at all, and since the poll timer stopped being unref-ed
+     * that loop also holds the process open. Fail closed rather than rely on every caller remembering.
+     *
+     * Ordered AFTER argument validation on purpose: what the caller passed in is their mistake to hear
+     * about first, and putting this ahead of it masked INVALID_ROOM_STANDBY_APPROVAL_TIMEOUT.
+     */
+    if (timeoutMs === undefined && options.signal === undefined) throw new Error("ROOM_WAIT_NEEDS_CANCELLATION");
     if (collaboration) {
       const binding = this.#resolveSessionRoom?.();
       if (!binding || binding.roomId !== roomId) throw new Error("PRESENCE_NOT_JOINED");
@@ -1075,13 +1097,13 @@ export class CollabToolBroker {
       ? await collaboration.waitExternal({
         presenceId,
         roomId,
-        timeoutMs: Number(timeoutMs),
+        ...(timeoutMs === undefined ? {} : { timeoutMs: Number(timeoutMs) }),
         ...(options.signal ? { signal: options.signal } : {}),
       })
       : await inbox!.wait({
         presenceId,
         roomId,
-        timeoutMs: Number(timeoutMs),
+        ...(timeoutMs === undefined ? {} : { timeoutMs: Number(timeoutMs) }),
         ledger: this.#requireLedger(),
         ...(options.signal ? { signal: options.signal } : {}),
       });
@@ -1705,7 +1727,7 @@ export async function handleCollabMcpMessage(
           "   that command does not identify or admit this MCP terminal.",
           "   Room membership does not itself start duty. Immediately call room_wait after joining;",
           "   that exact live session then submits a separate standby request for GUI approval.",
-          "   Once approved, room_wait stays open for a bounded maximum of four hours. For each exact-seat",
+          "   Once approved, room_wait stays open until stdio closes, you cancel, or the owner revokes it. For each exact-seat",
           "   delivery call room_ack(read), room_ack(working), then room_reply or room_fail.",
           "   list_agents includes authenticated terminalSeats for the joined Room. Use room_send with the",
           "   exact targetPresenceId and one stable UUID clientRequestId per logical send to collaborate with",
@@ -1714,11 +1736,15 @@ export async function handleCollabMcpMessage(
           "   follow-ups; new thread IDs are server-generated. Threads have no fixed round limit, and exact-seat",
           "   delivery never falls back to a worker.",
           "   Normally pass only room to both tools. Join and standby approval each wait 30 seconds;",
-          "   the standby wait has a four-hour hard maximum and is never infinite.",
+          "   the standby wait has no time limit of its own; pass timeoutMs to bound one deliberately.",
           "   When a standby wait ends, immediately call room_wait again while the owner expects duty;",
           "   after room_reply or room_fail, immediately call room_wait again for the next assignment.",
           "   Closing the terminal or stdio removes the session and its standby approval. If the host",
-          "   cancels the tool call, the GUI truthfully stops showing this exact seat as wakeable.",
+          "   sends notifications/cancelled for the tool call, the GUI truthfully stops showing this exact",
+          "   seat as wakeable. A host that merely stops waiting for the response, without sending that",
+          "   notification or closing stdio, does NOT end standby here: the seat keeps advertising itself",
+          "   while nobody is reading, and work sent to it goes unanswered. Re-call room_wait to take your",
+          "   own seat back.",
           "   For a modifying task, call candidate_start with the exact bound mainPath, then work in the",
           "   returned candidatePath using the terminal's unchanged native tools. Commit candidate changes",
           "   before candidate_checkpoint or candidate_complete. Candidate completion returns the exact",

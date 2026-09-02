@@ -445,6 +445,19 @@ test("room_wait requests GUI standby approval for the exact joined session befor
     broker.call("room_wait", { room: "demo", timeoutMs: 14_400_001 }),
     /INVALID_ROOM_WAIT_TIMEOUT/u,
   );
+
+  // Standby with neither a timeout nor a cancellation signal is a loop with no exit at all, and since
+  // the poll timer stopped being unref-ed it is also a loop that holds the process open. The MCP
+  // request always supplies a signal, so this can only be reached by an in-process caller relying on
+  // the `options = {}` default — which is exactly the caller that would not think to pass one.
+  //
+  // The two assertions above double as the ordering guard: this check has to stay BEHIND argument
+  // validation, because when it sat in front of it, it silently swallowed
+  // INVALID_ROOM_STANDBY_APPROVAL_TIMEOUT and the caller was told the wrong thing about their input.
+  await assert.rejects(
+    broker.call("room_wait", { room: "demo" }),
+    /ROOM_WAIT_NEEDS_CANCELLATION/u,
+  );
 });
 
 test("coding workflow tool only queues an owner-reviewed proposal without provider calls", async (t) => {

@@ -230,7 +230,7 @@ executor，而不是 UI 名稱或 provider 類型，才能兼顧彈性、可追�
 
 ## ADR-024：外接 MCP 席位使用精確 pull inbox，不做 provider fallback
 
-**狀態：** pull inbox 與 no-fallback 決策仍有效；「加入後直接開始首輪收件」已由 ADR-027 取代。
+**狀態：** pull inbox 與 no-fallback 決策仍有效；「加入後直接開始首輪收件」已由 ADR-027 取代；下文的「bounded `room_wait`」自 2026-09-02 起失效——待命預設沒有時間上限，只有明確傳入的 `timeoutMs` 是有界的（見 ADR-027 的 2026-09-02 修正）。
 
 **決策：** Owner 對外接席位的 GUI 訊息同時進 Room Ledger 與該 presence 的 owner-only inbox。
 外接終端以 bounded `room_wait` 收件；
@@ -288,7 +288,7 @@ inbox／席位，standalone worker call 不宣稱入帳。
 **決策：** `room_join_request` 只提出並等待 Room membership 核准，核准後返回。已加入的精確
 MCP session 呼叫 `room_wait` 時，控制面建立另一筆 GUI 待命申請；Owner 核准後，同一個 open
 tool call 才能成為 `wakeable: true`。核准綁定 exact presence＋Room＋canonical workspace，Owner
-可撤銷；client cancellation、stdio EOF、presence lease 過期或四小時 hard timeout 都會終止 active
+可撤銷；client cancellation、stdio EOF、presence lease 過期，或呼叫端自行指定的 `timeoutMs` 都會終止 active
 wait。待命未核准時拒絕新的精確席位交辦。終端必須在每次 timeout、回覆或失敗後再次呼叫
 `room_wait` 才持續待命，系統不建立 managed proxy 或 provider fallback。
 
@@ -297,8 +297,48 @@ wait。待命未核准時拒絕新的精確席位交辦。終端必須在每次 
 在線或只是加入的 Agent 誤報成可喚醒。一次 session-scoped 核准保留低摩擦，active wait 則提供
 可驗證的精確喚醒路徑。
 
-**風險與回滾：** 部分 MCP client 可能自行施加低於四小時的 request timeout；此時 active wait
-結束後 GUI 必須立即顯示不可喚醒，不能延長或冒充。若需回滾，只能縮短 bounded wait 或恢復每次
+**2026-09-02 修正（甲項）：** 待命原有 4 小時預設上限，到期後 wait 靜默返回、席位停止收聽卻仍
+顯示在線——而 MCP over stdio 無法從伺服器喚醒未提問的 client，所以停止收聽的席位在它自己重新
+等待之前完全無法觸達。上限因此不是保護，而是「送出去沒人回應」的最大單一成因，已移除；
+`timeoutMs` 保留為呼叫端可自選的界線。連帶：wait lease 由「固定在 deadline」改為 15 秒滾動續約
+（對齊 `room-presence` 的 `DEFAULT_LEASE_MS`），並在租約被並行 sweep 刪除時重新取得而非拋錯
+（**此句描述的是第一版行為，已由下一段的第三輪修正完全取代**）——
+審查實測，筆電睡眠 20 秒加上任一並行讀取即會誤殺存活中的待命。
+
+**2026-09-02 第三輪審查修正：** 上述滾動租約的第一版讓「租約列被並行 sweep 刪除」時重新取得，
+結果反而讓被位移的舊迴圈能把席位搶回去——兩個停滯的等待者都找不到自己的列，先醒的那個先重插，
+於是 client 正在讀的那個 wait 以 `ROOM_WAIT_LEASE_LOST` 結束，席位落到沒人讀的殭屍迴圈手上，
+正是本項要消滅的「看起來在線、實際不可觸達」被它自己的修正重新引進。根因是把**身分**和**存活**
+混為一談：`isListening` 本來就以 `expires_at_ms > now` 判斷，所以刪除過期列對正確性毫無貢獻，
+卻抹掉了「client 最後開的是哪一個等待者」這個唯一紀錄。現行做法是過期列**保留**，只在過期超過
+24 小時後才回收；續約單純是 `UPDATE ... WHERE presence_id AND waiter_token`，沒有重新取得分支，
+「沒有列」重新只有一個意思——這個等待者不再持有席位。`#claim` 的守衛同步改成「列不存在也算失去」，
+因為原本的 `held &&` 在列被回收的窗口內是空的。回收窗口過長的代價是舊列多佔磁碟，
+過短的代價是席位被搶——刻意偏向前者。
+
+**2026-09-02 第四輪確認：** 程式面確認無新缺陷（審查員逐行核對三處 `room_wait_leases` 的 DELETE、
+schema 的 `presence_id TEXT PRIMARY KEY`、以及 `isListening` 只影響 `wakeable` 旗標而不擋 `enqueue`）。
+文件面改正一條**錯在核心命題上**的宣稱：README 原本把「MCP client 自己的 request timeout」列為會結束
+待命，但伺服器只認得 `notifications/cancelled` 與 stdio EOF。client 靜默逾時卻不取消時，伺服器這一側
+不會知道，等待迴圈持續續約、GUI 持續顯示可喚醒——**移除四小時上限之前這種狀態最多維持四小時，
+之後不會自己結束**。這是本次改動唯一的殘留風險，已改為明寫在 README 而非宣稱它不存在。收回席位的
+方式是該終端重新呼叫 `room_wait`（newest-wins 接手）或關閉終端。另補：`#claim` 的 `waiterToken` 改為
+必填（原為 optional，未來新呼叫點漏傳就會靜默失去防護）；新增 `ROOM_WAIT_NEEDS_CANCELLATION` 與
+24 小時回收各自的測試——本輪所有保護都偏向「不要刪」，因此「最終仍會刪」需要獨立證明。
+
+**2026-09-02 第五輪（最終輪）結案：** 審查判定可結案，無阻擋級缺陷。八項第四輪修正逐一核對成立，
+未引進新缺陷。結案時的證據：`test/room-inbox.test.ts` 25/25、`test/collab-mcp.test.ts` 29/29、
+`test/web.test.ts` 12/12、全套 814/814（乾淨執行，期間無檔案變更）。五個變異體皆驗證會使對應測試變紅——
+放回 `timer.unref()`、移除 `#claim` 的 waiter-token 守衛、移除 newest-wins 位移、把租約續約改成字面值、
+把 `WAIT_LEASE_GC_MS` 設為永不回收。全 repo 已無任何一處宣稱四小時預設待命上限；殘留的四小時全數
+屬於明確 `timeoutMs` 上限、回覆等待上限或 PTY session 上限。
+
+未在本項處理、已記入待辦：孤兒 `room_wait` 靠 newest-wins 釋放 `MAX_MCP_INFLIGHT_REQUESTS` 名額，
+是移除上限後 16 席上限唯一的保護，目前無測試守護；`VERIFICATION.md` 該列的 live smoke 仍只涵蓋
+2026-07-23 的 bounded 行為，新行為尚無 Chrome 實測。
+
+**風險與回滾：** 部分 MCP client 可能自行施加 request timeout（待命本身自 2026-09-02 起不再有預設上限）；此時 active wait
+結束後 GUI 必須立即顯示不可喚醒，不能延長或冒充。若需回滾，只能恢復明確的 `timeoutMs` 預設值或恢復每次
 `room_wait` 的核准；不得回到「加入即待命」或用同 provider 新回合代收。
 
 ## ADR-028：Native Full-Trust、Peer Thread 與 Candidate → Main Merge Decision

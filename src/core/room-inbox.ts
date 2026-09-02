@@ -94,7 +94,44 @@ const AUTHOR_PATTERN = /^(?:[a-z][a-z0-9-]{0,31}|(?:codex|claude|grok)（[\p{L}\
 const MAX_PENDING_PER_SEAT = 32;
 const DEFAULT_MAX_ATTEMPTS = 3;
 const DEFAULT_DELIVERY_LEASE_MS = 60_000;
-const MAX_WAIT_MS = 4 * 60 * 60 * 1_000;
+/*
+ * Standby has no deadline of its own.
+ *
+ * It used to stop after four hours, and the number had no reasoning beside it because there was no
+ * reasoning: a terminal that is still running, still connected and still approved has not stopped
+ * being available just because the clock passed a mark. What the owner experienced instead was a
+ * seat that looked present and answered nothing — the send succeeded, the delivery queued, and
+ * nobody was listening, because the listener had timed out silently hours earlier.
+ *
+ * MCP over stdio gives the server no way to wake a client that is not asking, so a seat that stops
+ * waiting cannot be reached at all until it waits again. The wait ending on a timer was therefore
+ * not a safety bound; it was the single largest cause of unreachable seats.
+ *
+ * What still ends a wait, all of them observable rather than silent: stdio closing, the caller
+ * cancelling, the owner revoking standby (`canContinue`), and an explicit `timeoutMs` from a caller
+ * that wants a bounded one. `WAIT_LEASE_MS` below is a liveness lease, not a deadline — it is
+ * re-extended once past its half-life, so `isListening` stays true as long as the loop is running and
+ * goes false within `WAIT_LEASE_MS` of the process disappearing. That window is a real cost — a
+ * dead seat reads as wakeable until it lapses — so it is matched to `DEFAULT_LEASE_MS` in
+ * room-presence, the interval this product already uses to mean "is this still alive". Making it
+ * longer would buy nothing and would widen exactly the gap this change exists to close.
+ */
+const WAIT_LEASE_MS = 15_000;
+/*
+ * A wait-lease row is the seat's IDENTITY, not just a liveness flag: `isListening` already filters on
+ * `expires_at_ms > now`, so deleting an expired row buys nothing for correctness. It costs something,
+ * though. Once the row is gone the database no longer records WHICH waiter the client last opened, so
+ * a displaced-but-stalled loop that wakes up can re-insert itself and take the seat back from the loop
+ * the client is actually reading -- review round 3 walked exactly that timing. Expired rows are
+ * therefore kept as evidence and only collected long after any stall could plausibly still be live.
+ * A loop that has been gone longer than this loses its row and ends with ROOM_WAIT_LEASE_LOST at its
+ * next CLAIM attempt, which is the safe direction: the stale loop dies instead of stealing the seat.
+ * (Claim, not renewal: the loop order is claim -> poll -> renew, so the guard in `#claim` always
+ * reaches a displaced loop first. Renewal answers the same way; it is simply never the first to.)
+ */
+const WAIT_LEASE_GC_MS = 24 * 60 * 60 * 1_000;
+/* A ceiling for EXPLICIT timeouts only. Nothing applies it by default. */
+const MAX_EXPLICIT_WAIT_MS = 4 * 60 * 60 * 1_000;
 const WAIT_POLL_MS = 150;
 const SQLITE_STARTUP_RETRY_MS = 3_000;
 const SQLITE_STARTUP_POLL_MS = 25;
@@ -230,7 +267,15 @@ function wait(ms: number, signal?: AbortSignal): Promise<void> {
       signal?.removeEventListener("abort", onAbort);
       resolve();
     }, ms);
-    timer.unref();
+    /* Deliberately NOT unref-ed. An active standby is real work: while a seat is waiting, the process
+       has a reason to stay alive, and the timer is what says so. This used to be unref-ed, which was
+       harmless only because standby had a 4h cap and therefore always ended on its own. Once the cap
+       was removed (ADR-027, 2026-09-02 amendment), an unref-ed poll leaves an endless loop that holds
+       nothing open -- the process can exit out from under a seat that is still supposed to be
+       listening. In the MCP server the stdin read loop happened to hold the process up, so the defect
+       was invisible there and surfaced only under node:test as 'event loop has already resolved'.
+       Borrowing someone else's handle to stay alive is not a guarantee we own. The abort signal, not
+       the garbage collector, is what ends a wait. */
     signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
@@ -868,15 +913,20 @@ export class RoomInboxStore {
   }): Promise<ClaimedRoomDelivery | undefined> {
     const presenceId = validId(input.presenceId, "INVALID_PRESENCE_ID");
     const roomId = validRoom(input.roomId);
-    const timeoutMs = input.timeoutMs ?? MAX_WAIT_MS;
-    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_WAIT_MS) throw new Error("INVALID_ROOM_WAIT_TIMEOUT");
+    const timeoutMs = input.timeoutMs;
+    if (timeoutMs !== undefined
+      && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_EXPLICIT_WAIT_MS)) {
+      throw new Error("INVALID_ROOM_WAIT_TIMEOUT");
+    }
     const waiterToken = randomUUID();
-    const deadline = this.#now() + timeoutMs;
-    this.#beginWait(presenceId, roomId, waiterToken, deadline + 2_000);
+    /* Undefined means "until something ends it", not "until a number runs out". */
+    const deadline = timeoutMs === undefined ? undefined : this.#now() + timeoutMs;
+    this.#beginWait(presenceId, roomId, waiterToken, this.#now() + WAIT_LEASE_MS);
+    let renewAfter = this.#now() + Math.floor(WAIT_LEASE_MS / 2);
     try {
       while (true) {
         if (input.canContinue && !input.canContinue()) throw new Error("ROOM_STANDBY_REVOKED");
-        const claimed = this.#claim(presenceId, roomId);
+        const claimed = this.#claim(presenceId, roomId, waiterToken);
         if (claimed) {
           const message = input.ledger.getRange(roomId, claimed.ledgerSeq, claimed.ledgerSeq)[0];
           if (!message || message.hash !== claimed.ledgerHash) {
@@ -885,11 +935,27 @@ export class RoomInboxStore {
           }
           return { ...claimed, message };
         }
-        const remaining = deadline - this.#now();
-        if (remaining <= 0) return undefined;
-        await wait(Math.min(WAIT_POLL_MS, remaining), input.signal);
+        if (deadline !== undefined) {
+          const remaining = deadline - this.#now();
+          if (remaining <= 0) return undefined;
+          await wait(Math.min(WAIT_POLL_MS, remaining), input.signal);
+        } else {
+          await wait(WAIT_POLL_MS, input.signal);
+        }
         if (input.canContinue && !input.canContinue()) throw new Error("ROOM_STANDBY_REVOKED");
-        this.#refreshWait(presenceId, waiterToken, deadline + 2_000);
+        /* Rolling, not fixed: the lease says "this loop ran recently", which is the only thing a
+         * sender needs to know. Anchoring it to a deadline would make a live seat read as deaf the
+         * moment that deadline passed.
+         *
+         * Renewed past half-life rather than every poll. Writing a lease row every 150ms to keep a
+         * 15s lease alive is ~100x more often than the lease needs, and it is a COMMIT each time:
+         * measured during review at ~27 KB/s of SQLite writes per idle seat — about 2.3 GB a day,
+         * now that standby has no end. Half-life keeps the same `isListening` semantics (a live
+         * loop can never let it lapse) at a fraction of the traffic. */
+        if (this.#now() >= renewAfter) {
+          this.#refreshWait(presenceId, waiterToken, this.#now() + WAIT_LEASE_MS);
+          renewAfter = this.#now() + Math.floor(WAIT_LEASE_MS / 2);
+        }
       }
     } finally {
       this.#endWait(presenceId, waiterToken);
@@ -906,8 +972,11 @@ export class RoomInboxStore {
   }): Promise<RoomDeliveryOutcome | undefined> {
     const sourcePresenceId = validId(input.sourcePresenceId, "INVALID_SOURCE_PRESENCE_ID");
     const deliveryId = validId(input.deliveryId, "INVALID_DELIVERY_ID");
-    const timeoutMs = input.timeoutMs ?? MAX_WAIT_MS;
-    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_WAIT_MS) {
+    /* Waiting for a REPLY keeps its bound: the sender is blocked while it waits, and a thread that
+     * never answers should hand control back rather than hold a caller forever. That is the
+     * opposite of standby, where being held open IS the service. */
+    const timeoutMs = input.timeoutMs ?? MAX_EXPLICIT_WAIT_MS;
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_EXPLICIT_WAIT_MS) {
       throw new Error("INVALID_ROOM_REPLY_WAIT_TIMEOUT");
     }
     const deadline = this.#now() + timeoutMs;
@@ -1106,10 +1175,30 @@ export class RoomInboxStore {
     }
   }
 
-  #claim(presenceId: string, roomId: string): (RoomDelivery & { leaseToken: string }) | undefined {
+  /*
+   * `waiterToken` is not optional bookkeeping: it is what stops a DISPLACED loop from eating a
+   * message. A newer `room_wait` takes the seat immediately, but the old loop only learns on its
+   * next `#refreshWait` up to WAIT_POLL_MS later, and its order is claim-then-renew. Without this
+   * guard that window is long enough to claim a delivery into a caller nobody is reading, which is
+   * worse than the stall it replaced: a stuck seat is visible, a swallowed message is not.
+   *
+   * Checked inside the same transaction as the claim, so the seat cannot change hands between the
+   * check and the update.
+   */
+  #claim(presenceId: string, roomId: string, waiterToken: string): (RoomDelivery & { leaseToken: string }) | undefined {
     const now = this.#now();
     this.#db.exec("BEGIN IMMEDIATE");
     try {
+      {
+        const held = this.#db.prepare("SELECT waiter_token FROM room_wait_leases WHERE presence_id = ?")
+          .get(presenceId) as { waiter_token?: string } | undefined;
+        /* Throw only; the surrounding catch owns the rollback. Rolling back here as well made the
+         * second attempt fail with "no transaction is active", which replaced the real reason with
+         * a SQLite internal and left every caller waiting for an error that never arrived. */
+        /* A MISSING row is loss too, not permission. `held &&` used to let a waiter whose row had been
+         collected claim work as if it still held the seat -- the same hole that let it re-take one. */
+      if (!held || held.waiter_token !== waiterToken) throw new Error("ROOM_WAIT_LEASE_LOST");
+      }
       this.#sweep(now, true);
       const row = this.#db.prepare("SELECT * FROM room_deliveries WHERE target_presence_id = ? AND room_id = ? AND state = 'queued' ORDER BY created_at_ms, rowid LIMIT 1")
         .get(presenceId, roomId) as unknown as DeliveryRow | undefined;
@@ -1263,7 +1352,7 @@ export class RoomInboxStore {
   }
 
   #sweepRows(now: number): void {
-    this.#db.prepare("DELETE FROM room_wait_leases WHERE expires_at_ms <= ?").run(now);
+    this.#db.prepare("DELETE FROM room_wait_leases WHERE expires_at_ms <= ?").run(now - WAIT_LEASE_GC_MS);
     const expired = this.#db.prepare("SELECT * FROM room_deliveries WHERE state IN ('delivered','read','working') AND lease_expires_at_ms <= ?").all(now) as unknown as DeliveryRow[];
     for (const row of expired) {
       this.#assertRow(row);
@@ -1287,17 +1376,59 @@ export class RoomInboxStore {
     }
   }
 
+  /*
+   * Begin a wait for this seat, displacing any earlier one.
+   *
+   * A second `room_wait` for the SAME presence used to be refused as ROOM_WAIT_ALREADY_ACTIVE. That
+   * was safe while waits expired: an abandoned one cleared itself within four hours. Unbounded, it
+   * is not. A client that stops reading a long-poll without sending `notifications/cancelled`
+   * leaves a loop that keeps renewing its lease, so the seat reports `wakeable: true` forever, the
+   * client can never re-take its own seat, and sends are CLAIMED by a loop nobody reads. Measured
+   * during review: still listening after six simulated hours, retries refused permanently. That is
+   * the owner's original complaint — present-looking and unreachable — made permanent.
+   *
+   * The displaced-waiter signal was in the error all along: a fresh `room_wait` from the same
+   * presence IS the client saying the previous one is gone. So the newest waiter takes the seat.
+   * The old loop learns at its next claim — `#claim` sees a row it does not hold and throws
+   * ROOM_WAIT_LEASE_LOST — and its `finally` deletes by (presence, token), which no longer matches,
+   * so it cannot take the new lease down with it.
+   *
+   * Newest-wins is decided HERE and nowhere else, which is why expired rows are kept rather than
+   * collected on expiry: the row is the record of who the client opened last. If rows vanished on
+   * expiry, two stalled waiters would both find nothing and "whoever polls first" would beat "whoever
+   * the client actually wants".
+   */
   #beginWait(presenceId: string, roomId: string, token: string, expires: number): void {
     this.#db.exec("BEGIN IMMEDIATE");
     try {
-      this.#db.prepare("DELETE FROM room_wait_leases WHERE expires_at_ms <= ?").run(this.#now());
-      const existing = this.#db.prepare("SELECT 1 found FROM room_wait_leases WHERE presence_id = ?").get(presenceId);
-      if (existing) throw new Error("ROOM_WAIT_ALREADY_ACTIVE");
+      this.#db.prepare("DELETE FROM room_wait_leases WHERE expires_at_ms <= ?").run(this.#now() - WAIT_LEASE_GC_MS);
+      this.#db.prepare("DELETE FROM room_wait_leases WHERE presence_id = ?").run(presenceId);
       this.#db.prepare("INSERT INTO room_wait_leases (presence_id, room_id, waiter_token, expires_at_ms) VALUES (?, ?, ?, ?)").run(presenceId, roomId, token, expires);
       this.#db.exec("COMMIT");
     } catch (error) { this.#db.exec("ROLLBACK"); throw error; }
   }
 
+  /*
+   * Renew this waiter's lease. Renewal only -- a waiter never re-takes a seat it no longer holds.
+   *
+   * An earlier version of this change did re-take, because a rolling lease made "row missing" mean two
+   * different things: another waiter displaced me, or a sweep collected my row while I stalled longer
+   * than WAIT_LEASE_MS (a laptop asleep, a starved event loop). Re-taking made the second case
+   * survivable and the FIRST case unsound: two stalled waiters both lose their row, and whichever
+   * polls first re-inserts itself, so a displaced loop can take the seat back from the loop the client
+   * is actually reading. That is the "present-looking and unreachable" defect this whole item exists
+   * to remove, reintroduced by its own fix.
+   *
+   * Expired rows are no longer collected on expiry (see WAIT_LEASE_GC_MS), so a stalled waiter still
+   * finds its own row and this UPDATE renews it. "No row matched" now means one thing again: this
+   * waiter no longer holds the seat, either displaced by a newer `room_wait` from the same presence or
+   * gone long enough to be collected. Both answers are the same, and both are ROOM_WAIT_LEASE_LOST.
+   *
+   * In practice `#claim` reaches that conclusion first, because the loop claims before it renews. This
+   * stays as a second, independent statement of the same rule rather than being deleted: a renewal
+   * that silently succeeded for a seat this waiter no longer holds would put the lease back under the
+   * wrong token, and that is the exact failure this whole round was spent removing.
+   */
   #refreshWait(presenceId: string, token: string, expires: number): void {
     const result = this.#db.prepare("UPDATE room_wait_leases SET expires_at_ms = ? WHERE presence_id = ? AND waiter_token = ?").run(expires, presenceId, token);
     if (Number(result.changes) !== 1) throw new Error("ROOM_WAIT_LEASE_LOST");

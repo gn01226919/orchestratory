@@ -353,15 +353,39 @@ MCP 終端必須先呼叫 `room_join_request`，才會在 Room 辦公室右側�
 並獨立決定是否用已安裝的 structured hooks 同步該終端的可見 user／assistant turns；Agent 自己不能
 選擇或變更。之後才分配 `codex1`、`codex2` 等不回收身分、建立人物與辦公桌。
 加入房間本身不等於待命授權。加入完成後，該精確終端必須呼叫 `room_wait`，GUI 才會顯示另一筆
-session-scoped 待命申請；Owner 核准後，同一個 open tool call 才開始 bounded 收件。每次 timeout、
-取消或回覆後，若要繼續待命，終端必須立即再次呼叫 `room_wait`。未加入完全不記錄；終端正常
-關閉會立即移除，crash 最遲在約十五秒 lease 到期後移除。不同 workspace 不能互相加入，GUI 也
+session-scoped 待命申請；Owner 核准後，同一個 open tool call 才開始收件等待，且預設沒有時間上限。回覆、取消，或你自己
+指定 `timeoutMs` 時的逾時之後，若要繼續待命，終端必須立即再次呼叫 `room_wait`。未加入完全不
+記錄；終端正常關閉會立即移除，crash 最遲在約十五秒 lease 到期後移除。不同 workspace 不能互相加入，GUI 也
 看不到 PID 或 raw provider session id。
 
 一般呼叫 `room_join_request` 只需傳 `room`；它只等待加入核准，預設 30 秒、明確上限 120 秒。
 加入後立即呼叫 `room_wait`；第一次呼叫先等待 GUI 待命核准（預設 30 秒、上限 120 秒），核准後
-在同一個 tool call 進入 bounded 收件（預設與上限皆為四小時）。Owner 撤銷、終端關閉、client
-取消或 hard timeout 都會結束待命並把 GUI 改回不可喚醒，不會產生替身 Agent。
+在同一個 tool call 進入收件等待（**預設沒有時間上限**；要限時才傳 `timeoutMs`，該值上限四小時）。
+
+待命沒有預設 hard timeout。它會因為下列情況結束：
+
+- Owner 在 GUI 撤銷
+- 終端關閉，或 MCP client 自己取消這個 tool call
+- 該終端的 presence 心跳停止（`ROOM_STANDBY_REVOKED`）
+- 同一席位開了更新的 `room_wait`：**後到的接手**，舊迴圈以 `ROOM_WAIT_LEASE_LOST` 結束
+- 收到的訊息與帳本 hash 對不上（`DELIVERY_LEDGER_MISMATCH`）
+- 你自己傳了 `timeoutMs` 而且時間到了
+
+除了「後到的接手」以外，以上都會把 GUI 改回不可喚醒；後到的接手不會，因為席位仍有人在聽。
+任何一種結束都不會產生替身 Agent。
+
+**client 端逾時不在上面這張清單裡，這是刻意的。** Orchestratory 只認得兩種取消：MCP 的
+`notifications/cancelled`，以及 stdio 關閉。如果你的 client 自己逾時、放棄讀取，卻沒有送出
+cancelled、也沒有關掉連線，那麼**伺服器這一側完全不知道**：等待迴圈繼續續約，GUI 會一直顯示
+這個席位可喚醒。**你看到的症狀會是：交辦過去，一直沒人回。** 移除四小時上限之前，這種狀態最多
+維持四小時；移除之後它不會自己結束。
+要收回席位，請讓那個終端重新呼叫一次 `room_wait`（後到的接手會取代它），或關掉它。
+這是本次改動已知的殘留風險，寫在這裡而不是留給你自己踩。
+
+關於「後到的接手」還有一個誠實的邊界：舊迴圈**在被接手之後**不能認領任何訊息，所以同名終端
+重開不會偷走新終端的交辦。但如果舊迴圈在被接手**之前**就已經認領了某一筆，那一筆會停在
+`delivered` 狀態，最長 60 秒（delivery lease）之後才退回佇列讓新迴圈收到，而且不會消耗重試次數。
+最壞情況是延遲，不是訊息消失。
 
 自動記錄原生 host 的 user/assistant turn 另需 structured hooks。先用下列命令只看預覽；它不會
 修改任何設定：

@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { readFile } from "node:fs/promises";
 import { RoomInboxStore } from "../src/core/room-inbox.ts";
 import { RoomLedger } from "../src/core/room-ledger.ts";
 
@@ -822,16 +823,241 @@ test("listening is true only during an active room_wait", async (t) => {
   assert.equal(inbox.isListening(firstSeat, "demo"), false);
 });
 
-test("a crashed waiter lease stops looking wakeable after its bounded TTL", async (t) => {
+test("a crashed waiter stops looking wakeable once its rolling lease lapses", async (t) => {
   const { inbox, ledger, advance } = await fixture(t);
   const controller = new AbortController();
-  const pending = inbox.wait({ presenceId: firstSeat, roomId: "demo", timeoutMs: 1_000, ledger, signal: controller.signal });
+  // No timeoutMs: standby is unbounded, so what makes a seat stop looking wakeable can no longer be
+  // a deadline. It is the lease going unrenewed — which is what a crashed process looks like, and
+  // the only thing that distinguishes it from one that is simply waiting quietly.
+  const pending = inbox.wait({ presenceId: firstSeat, roomId: "demo", ledger, signal: controller.signal });
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(inbox.isListening(firstSeat, "demo"), true);
-  advance(3_001);
-  assert.equal(inbox.isListening(firstSeat, "demo"), false);
+  // Jumping the clock past the lease without letting the loop run IS the crash: a live waiter would
+  // have re-extended it several times over this span.
+  advance(15_001);
+  assert.equal(inbox.isListening(firstSeat, "demo"), false,
+    "a waiter that stopped renewing must stop advertising itself as reachable");
   controller.abort();
   await assert.rejects(pending, /ROOM_WAIT_CANCELLED/u);
+});
+
+test("the standby liveness lease stays on the presence heartbeat scale", async () => {
+  // Asserted against the SOURCE, not against behaviour, and the distinction is the point. A live
+  // waiter re-extends its lease every poll, so a behavioural test that lets the loop run before
+  // advancing the clock passes for a lease of fifteen seconds and equally for one of a day.
+  //
+  // Honest scope, corrected again in review round 3: the crashed-waiter test above hard-codes
+  // advance(15_001), so it already catches ANY lease longer than that, not just an absurd one. The
+  // earlier version of this comment claimed a whole uncovered band that does not exist. What this
+  // guard actually adds is the LOWER bound and the coupling to room-presence — neither of which any
+  // behavioural test asserts — plus the check below that the constant is the one the code uses.
+  //
+  // Standby no longer ends on a timer, so this lease is now the ONLY signal that a terminal died.
+  // Its length is therefore a real bound, and a bound that nothing checks is one that drifts. It
+  // belongs at the scale room-presence already uses to mean "still alive"; longer, and a crashed
+  // seat advertises itself as reachable for exactly that much longer.
+  const source = await readFile(new URL("../src/core/room-inbox.ts", import.meta.url), "utf8");
+  const match = /const WAIT_LEASE_MS = ([0-9_]+);/u.exec(source);
+  assert.ok(match, "room-inbox must define the standby liveness lease as a named constant");
+  const leaseMs = Number((match[1] ?? "").replaceAll("_", ""));
+
+  const presenceSource = await readFile(new URL("../src/core/room-presence.ts", import.meta.url), "utf8");
+  const presenceMatch = /const DEFAULT_LEASE_MS = ([0-9_]+);/u.exec(presenceSource);
+  assert.ok(presenceMatch, "room-presence must define its heartbeat lease as a named constant");
+  const presenceLeaseMs = Number((presenceMatch[1] ?? "").replaceAll("_", ""));
+
+  // Renewal is at half-life, not per poll, so a short lease does not drop a live waiter — the earlier
+  // reason given here was wrong. The real cost of a short lease is write amplification: every seat
+  // renews twice per lease, forever, against an owner-only SQLite file shared with delivery traffic.
+  assert.ok(leaseMs >= 5_000,
+    `a lease of ${leaseMs}ms makes every standby seat rewrite its row more than twice a ${leaseMs}ms window`);
+
+  // And the constant has to be the one the code actually uses. Without this, changing only the
+  // renewal interval to a literal — leaving the declaration untouched — passes every test here:
+  // the crashed-waiter test never lets the loop reach a renewal, and the regex above only reads the
+  // declaration. That was the one lease regression nothing guarded.
+  assert.match(source, /#beginWait\([^)]*\)[\s\S]{0,400}?WAIT_LEASE_MS|this\.#beginWait\([^;]*WAIT_LEASE_MS/u,
+    "the initial standby lease must come from WAIT_LEASE_MS, not a literal");
+  assert.match(source, /#refreshWait\([^;]*WAIT_LEASE_MS/u,
+    "the standby lease RENEWAL must come from WAIT_LEASE_MS, not a literal");
+  assert.ok(leaseMs <= presenceLeaseMs,
+    `standby lease ${leaseMs}ms outlives the presence heartbeat ${presenceLeaseMs}ms, so a dead `
+    + "seat would keep looking reachable after presence itself has given up on it");
+});
+
+test("a waiter whose lease lapsed while it stalled keeps its standby", async (t) => {
+  const { inbox, ledger, advance } = await fixture(t);
+  const controller = new AbortController();
+  const pending = inbox.wait({ presenceId: firstSeat, roomId: "demo", ledger, signal: controller.signal })
+    .then(() => "returned", (error: Error) => error.message);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(inbox.isListening(firstSeat, "demo"), true);
+
+  // A laptop sleeping is a loop that stops polling while the clock keeps moving, so a concurrent
+  // reader runs the sweep while this waiter is still very much alive.
+  //
+  // Renamed after review: this test used to say "swept", and that word stopped being true when rows
+  // began to survive expiry by WAIT_LEASE_GC_MS. Twenty seconds no longer sweeps anything, so the
+  // old name described a mechanism the test no longer exercises — a green test standing guard over
+  // behaviour that had moved. What it asserts now is the thing that matters to a sleeping laptop:
+  // a LAPSED lease is not a lost seat. The collected-row case has its own test below.
+  advance(20_000);
+  inbox.list("demo");
+  await new Promise((resolve) => setTimeout(resolve, 400));
+
+  const race = await Promise.race([
+    pending,
+    new Promise((resolve) => { setTimeout(() => resolve("still-waiting"), 50); }),
+  ]);
+  assert.equal(race, "still-waiting", "a stall must not end standby; the loop running is the fact");
+  assert.equal(inbox.isListening(firstSeat, "demo"), true, "and the seat re-advertises itself");
+
+  controller.abort();
+  assert.match(String(await pending), /ROOM_WAIT_CANCELLED/u);
+});
+
+/*
+ * The round-3 hole, and the reason expired lease rows are kept instead of collected.
+ *
+ * Collecting a row on expiry erases the only record of WHICH waiter the client opened last. Two
+ * stalled waiters then both find nothing on wake, and whichever polls first re-inserts itself -- so
+ * the displaced loop can take the seat back from the loop the client is actually reading, and the
+ * seat goes back to looking present while being unreachable. That is the exact defect this item
+ * exists to remove, reintroduced by an earlier version of its own fix.
+ */
+/*
+ * The other half of "expired rows are kept". Every guard added this round pushes the same way -- do
+ * not delete, do not let a stale loop lose its seat -- so the direction that needs its own proof is
+ * that rows are still collected eventually. Without this, setting WAIT_LEASE_GC_MS to Infinity, or
+ * deleting the sweep's DELETE outright, passes the entire file.
+ */
+test("a lease row is collected once it is far past the GC window, and its loop loses the seat", { timeout: 30_000 }, async (t) => {
+  const { inbox, ledger, advance } = await fixture(t);
+  const controller = new AbortController();
+  const abandoned = inbox.wait({ presenceId: firstSeat, roomId: "demo", ledger, signal: controller.signal })
+    .then(() => "returned", (error: Error) => error.message);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(inbox.isListening(firstSeat, "demo"), true);
+
+  // Twenty-five hours: past the lease by a day, and past the GC window. A stall this long is no
+  // longer a laptop asleep; whatever was holding this seat is not coming back to read anything.
+  advance(25 * 60 * 60 * 1_000);
+  inbox.list("demo");
+  await new Promise((resolve) => setTimeout(resolve, 400));
+
+  assert.match(String(await abandoned), /ROOM_WAIT_LEASE_LOST/u,
+    "a loop whose row was collected must end, not carry on holding a seat nobody can reach");
+  assert.equal(inbox.isListening(firstSeat, "demo"), false, "and the seat must stop advertising itself");
+  controller.abort();
+});
+
+test("a displaced waiter cannot take the seat back after a sweep", { timeout: 30_000 }, async (t) => {
+  const { inbox, ledger, advance } = await fixture(t);
+  const displaced = new AbortController();
+  const current = new AbortController();
+
+  const old = inbox.wait({ presenceId: firstSeat, roomId: "demo", ledger, signal: displaced.signal })
+    .then(() => "returned", (error: Error) => error.message);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const held = inbox.wait({ presenceId: firstSeat, roomId: "demo", ledger, signal: current.signal })
+    .then((value) => ({ ok: true as const, value }), (error: Error) => ({ ok: false as const, value: error.message }));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  // Both loops stall past their lease, then any concurrent reader runs the sweep. The displaced loop
+  // wakes FIRST -- it was created first, so its poll timer fires first -- which is precisely the
+  // ordering that let it win when a missing row meant "free seat".
+  advance(20_000);
+  inbox.list("demo");
+  await new Promise((resolve) => setTimeout(resolve, 400));
+
+  assert.match(String(await old), /ROOM_WAIT_LEASE_LOST/u, "the displaced loop must learn it lost the seat");
+  assert.equal(inbox.isListening(firstSeat, "demo"), true, "and the seat the client is reading stays listening");
+
+  inbox.enqueue({
+    message: ledger.append("demo", "you", "@codex1 \u4efb\u52d9"),
+    targetPresenceId: firstSeat,
+    targetDisplayName: "codex1",
+  });
+  const claimed = await held;
+  assert.equal(claimed.ok, true, `the current waiter must receive the work, got ${String(claimed.value)}`);
+
+  displaced.abort();
+  current.abort();
+});
+
+/* Bounded on purpose. If the takeover guard regresses, the abandoned loop eats the delivery and the
+   fresh wait -- which no longer has a default cap -- never settles. Without this timeout that shows up
+   as a CI job that hangs until the runner kills it, which reads as "infrastructure was slow" rather
+   than "the guard is gone". The timeout turns a hang into a named failure. */
+test("a fresh room_wait takes the seat from an abandoned one, and the old loop cannot eat a message", { timeout: 30_000 }, async (t) => {
+  const { inbox, ledger, advance } = await fixture(t);
+  const first = new AbortController();
+  // An MCP client that stops reading a long-poll without sending notifications/cancelled leaves
+  // this loop running server-side. While standby was capped it cleared itself within four hours;
+  // unbounded, it would hold the seat forever — reporting wakeable, refusing the client's own
+  // retry, and claiming deliveries into a response nobody reads.
+  const abandoned = inbox.wait({ presenceId: firstSeat, roomId: "demo", ledger, signal: first.signal })
+    .then(() => "returned", (error: Error) => error.message);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(inbox.isListening(firstSeat, "demo"), true);
+
+  // The client comes back and waits again. That request IS the statement that the old one is gone.
+  const second = new AbortController();
+  // Both outcomes attached at creation. A bare promise that rejects before anything awaits it is an
+  // unhandled rejection, and node:test reports that by cancelling the rest of the FILE — so the
+  // symptom appears three tests away from the cause.
+  const fresh = inbox.wait({ presenceId: firstSeat, roomId: "demo", ledger, signal: second.signal })
+    .then((value) => ({ ok: true as const, value }), (error: Error) => ({ ok: false as const, value: error.message }));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  // The delivery must reach the waiter the client is actually reading.
+  inbox.enqueue({
+    message: ledger.append("demo", "you", "@codex1 任務"),
+    targetPresenceId: firstSeat,
+    targetDisplayName: "codex1",
+  });
+  const claimed = await fresh;
+  assert.equal(claimed.ok, true, `the newest waiter must receive the work, got ${String(claimed.value)}`);
+  assert.match(String((claimed.value as { message: { text: string } })?.message?.text), /任務/u);
+
+  // And the displaced loop ended rather than lingering as a second claimant. It finds out at its
+  // next CLAIM attempt, not at its next renewal — the guard is inside `#claim`, one poll away — so
+  // no clock movement is needed here. An earlier draft advanced the fake clock first and hung the
+  // whole file: the sweep it triggered expired the delivery before either loop could take it.
+  assert.match(String(await abandoned), /ROOM_WAIT_LEASE_LOST/u);
+  // Both controllers, even though the first loop already ended: an un-aborted signal keeps its
+  // listener attached, and with nothing ref-ed alive Node cancels the rest of the file rather than
+  // failing here — the same shape as the unref-ed timer in [[PITFALLS]] #173.
+  first.abort();
+  second.abort();
+});
+
+test("standby with no timeout never ends on its own", { timeout: 30_000 }, async (t) => {
+  const { inbox, ledger, advance } = await fixture(t);
+  const controller = new AbortController();
+  // The property under test is the ABSENCE of a deadline, so the assertion is about how the promise
+  // ends — not about the lease, which the crashed-waiter test above already owns. Under the old
+  // default this resolved to `undefined` once four hours elapsed, and the caller's standby was over
+  // without anything having happened.
+  const pending = inbox.wait({ presenceId: firstSeat, roomId: "demo", ledger, signal: controller.signal })
+    .then((value) => ({ settled: true, value }), (error: Error) => ({ settled: true, value: error.message }));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  advance(5 * 60 * 60 * 1_000);
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  const race = await Promise.race([
+    pending,
+    new Promise((resolve) => { setTimeout(() => resolve({ settled: false }), 50); }),
+  ]) as { settled: boolean; value?: unknown };
+  assert.equal(race.settled, false,
+    "five hours passed and standby is still waiting; a timer must not be what ends it");
+
+  // And it is still reachable: the loop kept renewing across that span, so a sender is told the
+  // truth rather than being handed a seat that quietly stopped listening an hour ago.
+  assert.equal(inbox.isListening(firstSeat, "demo"), true);
+
+  controller.abort();
+  assert.match(String((await pending).value), /ROOM_WAIT_CANCELLED/u);
 });
 
 test("inbox storage is owner-only and rejects tampered rows on reopen", async (t) => {
