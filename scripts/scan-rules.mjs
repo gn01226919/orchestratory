@@ -1,7 +1,21 @@
 export const scanRules = [
   ["private-key", /-----BEGIN [A-Z ]*PRIVATE KEY-----/u],
   ["authorization-secret", /Authorization:\s*(?:Bearer|Basic)\s+[A-Za-z0-9._~+\/-]{12,}/u],
-  ["provider-secret", /\b(?:sk|xai|ant|ghp|github_pat)-[A-Za-z0-9_-]{12,}\b/u],
+  [
+    // The separator is per-vendor because it is not the same one. OpenAI, Anthropic and xAI put a
+    // hyphen after the prefix; every GitHub token uses an underscore. This rule named `ghp` and
+    // `github_pat` from the day it was written and required a hyphen after both, so neither entry
+    // could ever fire — on the gate whose whole job is to clear a push to GitHub. Verified against
+    // synthetic tokens of each shape rather than by reading, because the test that was supposed to
+    // cover this built its sample with the same wrong separator as the rule and passed.
+    //
+    // `gh[pousr]_` is the whole classic family (personal, OAuth, user-to-server, server-to-server,
+    // refresh), not just the one that was named; they are issued by the same service and leak the
+    // same way. AWS, Slack and Google keys are still not covered — see the assertions in
+    // test/scan-rules.test.ts, which record that as a known gap rather than implying it is closed.
+    "provider-secret",
+    /\b(?:(?:sk|xai|ant)-|(?:gh[pousr]|github_pat)_)[A-Za-z0-9_-]{12,}\b/u,
+  ],
   ["secret-assignment", /\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret)\s*[:=]\s*["'][^"']{8,}["']/iu],
   ["personal-home-path", /\/Users\/(?!example\b|alice\b|bob\b)[^/\s]+\//u],
   [

@@ -21,6 +21,7 @@ import { scanRules } from "../scripts/scan-rules.mjs";
 
 const AT = "@";
 const DOT = ".";
+const UNDER = "_";
 
 function rule(name: string): RegExp {
   const found = scanRules.find(([id]) => id === name);
@@ -161,10 +162,48 @@ test("an Authorization header carrying a credential is reported, one carrying no
 
 test("a provider token prefix is reported, and prose that merely mentions one is not", () => {
   const body = "0123456789abcdef";
-  for (const prefix of ["sk", "xai", "ant", "ghp", "github_pat"]) {
-    assert.equal(detects("provider-secret", `${prefix}-${body}`), true, `${prefix} prefix`);
+
+  // Separators are per-vendor and this is the whole point of the test. The previous version built
+  // every sample as `prefix + "-" + body`, which is the separator the rule happened to require
+  // rather than the one the vendor actually issues, so the two GitHub entries were asserted in a
+  // shape no GitHub token has ever had. It passed, and both entries were dead.
+  const hyphen = (prefix: string) => `${prefix}-${body}`;
+  const underscore = (prefix: string) => `${prefix}${UNDER}${body}`;
+
+  for (const prefix of ["sk", "xai", "ant"]) {
+    assert.equal(detects("provider-secret", hyphen(prefix)), true, `${prefix} prefix`);
   }
+  // The classic family is issued by one service and leaks the same way, so all five are covered.
+  for (const prefix of ["gh" + "p", "gh" + "o", "gh" + "u", "gh" + "s", "gh" + "r"]) {
+    assert.equal(detects("provider-secret", underscore(prefix)), true, `${prefix} prefix`);
+  }
+  assert.equal(detects("provider-secret", underscore("github" + UNDER + "pat")), true);
+
+  // The other direction: the separator must stay per-vendor rather than becoming "either one",
+  // which is the cheapest way to make the assertions above pass while widening the rule.
+  assert.equal(
+    detects("provider-secret", underscore("sk")),
+    false,
+    "an underscore after an OpenAI-style prefix is not a token shape anyone issues",
+  );
+  assert.equal(detects("provider-secret", hyphen("gh" + "p")), false);
   assert.equal(detects("provider-secret", "keys start with sk- and are never logged"), false);
+
+  // Written down rather than fixed, following the Authorization-header precedent above: these are
+  // credential shapes this gate does not look for at all. Nothing in this project uses them, so
+  // adding them widens a release gate for a risk it does not carry — that is a decision for
+  // whoever owns the gate, not for the change that was repairing the GitHub entries. The
+  // assertions exist so the gap is visible instead of being assumed closed.
+  assert.equal(
+    detects("provider-secret", "AKIA" + "IOSFODNN7EXAMPLE"),
+    false,
+    "known gap: AWS access key ids are not scanned",
+  );
+  assert.equal(
+    detects("provider-secret", "xox" + "b-1234-5678-" + body),
+    false,
+    "known gap: Slack tokens are not scanned",
+  );
 });
 
 test("a secret being assigned a literal is reported, and one read from the environment is not", () => {
