@@ -770,9 +770,7 @@ export class CollabToolBroker {
   #seatWroteSince(mark: { roomId: string; seq: number; actor: string } | undefined): boolean {
     if (!mark) return false;
     try {
-      return this.#requireLedger()
-        .listAfter(mark.roomId, mark.seq)
-        .some((message) => message.author === mark.actor);
+      return this.#requireLedger().hasAuthorMessageAfter(mark.roomId, mark.seq, mark.actor);
     } catch {
       return false;
     }

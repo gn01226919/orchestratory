@@ -85,12 +85,19 @@ test("every CI action is pinned to a full commit SHA with the version it names",
   const uses: Array<[string, string, string]> = [];
   for (const name of files) {
     const workflow = await readFile(new URL(name, dir), "utf8");
-    /* The `- ` is not optional decoration: `- uses: actions/foo@v1` is the ordinary way to write a
-       step, and the first version of this pattern required `uses:` to be the first non-space on the
-       line. Both entries in this repository happen to sit under a `- name:`, so the guard read as
-       green while being blind to the commonest form -- found by a mutant that added an unpinned
-       action and was not caught. */
-    for (const [, reference, trailer] of workflow.matchAll(/^\s*(?:-\s+)?uses:\s*(\S+)(.*)$/gmu)) {
+    /*
+     * Not anchored to the start of a line, and that is the second correction to this pattern.
+     * It first required `uses:` to be the first non-space on its line, which cannot see
+     * `- uses: actions/foo@v1` -- the ordinary way to write a step. Both entries here happen to sit
+     * under a `- name:`, so it read green while blind to the commonest form. Anchoring was then
+     * relaxed to allow a leading `- `, which still cannot see the flow mapping
+     * `- { uses: actions/foo@v1 }`.
+     *
+     * Two blind spots in one expression is the signal that line shapes are the wrong thing to
+     * enumerate: `uses:` is a key, and its value ends at whitespace or at the punctuation that
+     * closes a flow mapping. Matching that instead has no list of forms to keep up to date.
+     */
+    for (const [, reference, trailer] of workflow.matchAll(/\buses:\s*([^\s,}]+)([^\n]*)/gu)) {
       uses.push([name, reference!, trailer ?? ""]);
     }
   }

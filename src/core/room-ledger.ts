@@ -384,6 +384,29 @@ export class RoomLedger {
     return Boolean(row);
   }
 
+  /*
+   * Whether this author wrote anything after `afterSeq`.
+   *
+   * Narrow on purpose, and specifically NOT `listAfter(...).some(...)`. `listAfter` takes the FIRST
+   * `MAX_RANGE_MESSAGES` after the sequence and clamps any larger limit down to it, so in a room
+   * with several live seats another seat writing that many messages between a mark and this seat's
+   * own line pushes that line out of the window -- and the caller, asking "did I write", gets told
+   * no. That is a wrong answer, not a truncated one.
+   *
+   * The primary key is (room_id, seq), so the range is an index seek and the author is a filter
+   * over exactly the rows after the mark. No limit is involved, which is why none can be exceeded.
+   */
+  hasAuthorMessageAfter(roomId: string, afterSeq: number, author: string): boolean {
+    if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new Error("INVALID_ROOM_SEQ");
+    if (typeof author !== "string" || author.length === 0) throw new Error("INVALID_ROOM_AUTHOR");
+    const row = this.#db
+      .prepare(
+        "SELECT 1 AS found FROM room_messages WHERE room_id = ? AND seq > ? AND author = ? LIMIT 1",
+      )
+      .get(roomId, afterSeq, author) as { found: number } | undefined;
+    return Boolean(row);
+  }
+
   appendSystem(roomId: string, text: string): RoomMessage {
     return this.#append(roomId, "system", text, "system");
   }

@@ -93,7 +93,14 @@ test("every surface that shows a merge decision declines to claim an OS sandbox"
   const names = /full-trust|application-level|應用層邊界/u;
 
   for (const [label, url] of surfaces) {
-    const text = await readFile(url, "utf8");
+    let text = await readFile(url, "utf8");
+    /*
+     * For the markup surface, strip comments before matching. A grep over the whole file cannot tell
+     * a sentence the owner reads from one only a maintainer reads, so the comment explaining WHY the
+     * line is there would have satisfied the assertion on its own -- and the obvious tidy-up, moving
+     * the sentence into the comment beside it, would have passed while removing it from the screen.
+     */
+    if (url.pathname.endsWith(".html")) text = text.replaceAll(/<!--[\s\S]*?-->/gu, "");
     assert.match(text, disclaims, `${label} no longer says a worktree is not an OS sandbox`);
     assert.match(text, names, `${label} disclaims the sandbox without saying what can cross the boundary`);
   }

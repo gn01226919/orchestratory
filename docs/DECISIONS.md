@@ -1245,5 +1245,13 @@ Owner 原話的第二句（「新終端即使同名，因為 id 不一樣也不�
 - `recording=off` 時仍可宣告，未測。
 - 「隔離 worktree 不是 OS 沙箱」的**更強位置**（scroll-gate 量測區內，Owner 必經）需要重跑一次真人
   瀏覽器驗收，那是刻意保留給 Owner 的手動動作；目前放在對話框頭部，同一頁可見但不在量測區內。
-- `#seatWroteSince` 的 `listAfter` 用預設上限 100 則，超過會靜默截斷；實務上這席位自己那一行永遠是
-  mark 之後的第一筆，但措辭與實作的範圍不完全相等。
+- **已修正（2026-09-04 巡檢）：** `#seatWroteSince` 原本用 `listAfter` 的預設上限 100 則。那不是措辭問題——
+  `listAfter` 取的是 mark 之後的**前** 100 則且會把更大的 limit 夾回 100，所以別的席位在窗口內寫滿 100 則
+  就會把本席位的行擠出視窗，回答變成「你沒寫」。已改為 `hasAuthorMessageAfter()`：走 (room_id, seq) 主鍵
+  的索引區間、沒有任何 limit，因此沒有可被超過的上限。
+- `#seatRoomMark` 與 `#seatWroteSince` 都把讀取錯誤吞成「沒有證據」。這是刻意的（「看不到」不等於
+  「有變」），但代價是：帳本讀取失敗時，一個**確實寫過**的席位不會被標記。與 `#hasStartDeclaration`
+  的空 catch 同族，一併列在這裡。
+- `test/shipped-docs.test.ts` 對四個 surface 只做全檔字串比對，不驗證那段文字位於合併決策附近、
+  是否可見、是否在註解裡。目前四個檔案都是可見文字（`room.html` 的免責在 `<p>` 裡，刪掉它測試會紅），
+  但這道守衛擋不住「有人把它移進註解」。

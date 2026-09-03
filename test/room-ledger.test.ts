@@ -205,3 +205,37 @@ test("a key prefix matches exactly what it spells, case included", async (t) => 
   assert.throws(() => ledger.hasIdempotencyKeyPrefix(""), /INVALID_ROOM_IDEMPOTENCY_KEY/u);
   assert.throws(() => ledger.hasIdempotencyKeyPrefix("has space"), /INVALID_ROOM_IDEMPOTENCY_KEY/u);
 });
+
+/*
+ * The question "did this author write since then" cannot be answered by reading a window.
+ *
+ * `listAfter` returns the FIRST MAX_RANGE_MESSAGES after a sequence and clamps a larger limit back
+ * down to it, so `listAfter(...).some(byAuthor)` — which is what the seat mark used — answers no
+ * once anyone else has written that many rows in between. In a room whose premise is several live
+ * seats sharing one ledger, that is reachable, and the failure is silent: the caller is told it
+ * wrote nothing.
+ */
+test("an author's own message is found however much other traffic came first", async (t) => {
+  const ledger = await ledgerFixture(t);
+  const room = ledger.createRoom("crowded", "/tmp/crowded");
+  const mark = ledger.getRoom(room.id)!.messages;
+
+  /* One more than the window, so the seat's own line cannot be inside it. */
+  for (let i = 0; i < 101; i += 1) ledger.append(room.id, "other-seat", `別人第 ${i} 則`);
+  ledger.append(room.id, "codex1", "我自己寫的那一行");
+
+  assert.equal(
+    ledger.listAfter(room.id, mark).some((message) => message.author === "codex1"),
+    false,
+    "the window genuinely cannot see it — this is the shape being replaced, asserted so it stays visible",
+  );
+  assert.equal(ledger.hasAuthorMessageAfter(room.id, mark, "codex1"), true);
+
+  assert.equal(ledger.hasAuthorMessageAfter(room.id, mark, "never-wrote"), false);
+  /* And it is bounded by the mark, not just by the author: a line written BEFORE it does not count. */
+  const later = ledger.getRoom(room.id)!.messages;
+  assert.equal(ledger.hasAuthorMessageAfter(room.id, later, "codex1"), false);
+
+  assert.throws(() => ledger.hasAuthorMessageAfter(room.id, -1, "codex1"), /INVALID_ROOM_SEQ/u);
+  assert.throws(() => ledger.hasAuthorMessageAfter(room.id, 0, ""), /INVALID_ROOM_AUTHOR/u);
+});
