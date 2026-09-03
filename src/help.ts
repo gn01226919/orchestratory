@@ -30,5 +30,9 @@ export function helpText(): string {
     "",
     "Destructive, billed, worktree, test and restore actions remain approval-gated.",
     "",
+    "A worktree is a record and a recovery point, not an OS sandbox: a full-trust agent running under",
+    "your own account can bypass an application-level boundary. Use a container or a separate account",
+    "if you need enforced isolation.",
+    "",
   ].join("\n");
 }

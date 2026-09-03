@@ -57,3 +57,40 @@ test("every shipped runtime script travels with its declaration file", () => {
     );
   }
 });
+
+/*
+ * Every third-party action the CI runs is pinned to a commit, and the version comment next to it
+ * says which release that commit is.
+ *
+ * Both actions are pinned correctly today; nothing held them there. A tag is a movable pointer, so
+ * `@v6` means "whatever that owner publishes next", and a workflow with `contents: read`, an
+ * unpersisted checkout token and `--ignore-scripts` is only as tight as the code it runs before any
+ * of that applies. The two SHAs here were checked against the upstream tags on 2026-09-04 and both
+ * matched -- but a person doing that by hand is the thing this replaces, because the fourth action
+ * someone adds is the one nobody re-checks.
+ *
+ * This asserts the SHAPE offline: forty hex characters plus a version comment. It cannot tell you
+ * that a SHA belongs to the tag beside it, because that needs the network and a release gate must
+ * run without one. The comment is what a human compares against upstream; requiring it means there
+ * is always something to compare.
+ */
+test("every CI action is pinned to a full commit SHA with the version it names", async () => {
+  const workflow = await readFile(new URL("../.github/workflows/security.yml", import.meta.url), "utf8");
+  const uses = [...workflow.matchAll(/^\s*uses:\s*(\S+)(.*)$/gmu)];
+
+  assert.ok(uses.length >= 2, "no `uses:` entries were parsed; this guard has stopped guarding");
+
+  for (const [, reference, trailer] of uses) {
+    const [action, pin] = reference!.split("@");
+    assert.match(
+      pin ?? "",
+      /^[0-9a-f]{40}$/u,
+      `${action} is not pinned to a full commit SHA — a tag or branch moves under you`,
+    );
+    assert.match(
+      trailer ?? "",
+      /#\s*v\d+\.\d+\.\d+/u,
+      `${action} is pinned but does not say which release that commit is, so nobody can check it`,
+    );
+  }
+});

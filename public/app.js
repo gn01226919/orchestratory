@@ -933,6 +933,12 @@ function beginMonitoring(card, runId, soft) {
          * 幾乎一定逾時；而且最高風險動作不該在沒人要求時自己跳出來。
          */
         appendNote("要寫回主專案時按「套用回主專案」：對話框會逐條列出風險、顯示要寫回的內容，捲到底並輸入 MERGE INTO MAIN 才會解鎖。");
+        /*
+         * 這句話出現在核准入口旁邊，不是設定頁深處。介面到處寫「隔離 worktree」「檔案隔離」，
+         * 那些字容易被讀成作業系統層級的保證；實際上同帳號的 full-trust agent 技術上仍可繞過
+         * 應用層邊界。要在人決定按下去的地方講，不是在他找得到的地方講。
+         */
+        appendNote("隔離 worktree 提供的是紀錄與復原點，不是 OS 沙箱：同一個帳號下的 full-trust agent 技術上仍可繞過應用層邊界。需要強制隔離請用容器或另一個帳號。");
       }
     } else if (terminalType === "workflow.cancelled") {
       card.stateLabel.className = "state failed";

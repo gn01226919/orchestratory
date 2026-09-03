@@ -14,12 +14,12 @@
 
 ## B. 資料與個資
 
-- [ ] `git ls-files` 中只有預期公開檔案。
-- [ ] `.env`、DB、logs、sessions、cache、coverage、screenshots、private fixtures 未被追蹤。
-- [ ] Working tree、staged content、完整 history、branches、tags 均完成 secret scan。
+- [x] `git ls-files` 中只有預期公開檔案。 ✅ 2026-09-04：追蹤中共 187 檔，全部落在 src/test/scripts/docs/public/config/bin 與根目錄公開檔。
+- [x] `.env`、DB、logs、sessions、cache、coverage、screenshots、private fixtures 未被追蹤。 ✅ 2026-09-04：以 `git ls-files` 比對 `.env`／`.sqlite`／`.db`／logs／sessions／coverage／screenshots，命中 0 筆。
+- [x] Working tree、staged content、完整 history、branches、tags 均完成 secret scan。 ✅ 2026-09-04：`audit:local` 通過；`audit:history` 以 `rev-list --objects --all` 掃過全 ref 共 1893 個物件通過。同日修正 provider-secret 規則：原本 `ghp`／`github_pat` 後面要求連字號，而 GitHub token 一律用底線，兩個條目從未能命中；已改為逐 vendor 的分隔符並加上雙向測試。
 - [ ] Build output、source maps、archives、SBOM、provenance 均完成 secret/PII scan。
-- [ ] 無私人 email、使用者名稱、本機絕對路徑、私有 repository URL 或 session ID。
-- [ ] Git author email 符合使用者的公開隱私偏好。
+- [x] 無私人 email、使用者名稱、本機絕對路徑、私有 repository URL 或 session ID。 ✅ 2026-09-04：由 personal-email／personal-home-path 規則涵蓋，全歷史掃描通過。
+- [x] Git author email 符合使用者的公開隱私偏好。 ✅ 2026-09-04：全歷史 author email 僅三個值，皆為 GitHub noreply 或 `.invalid` 的 promotion 身分。
 - [ ] 若曾發現秘密，已先撤銷/輪替，再清理 history 並重新掃描。
 
 ## C. 程式安全與 Native Full-Trust 誠實性
@@ -40,26 +40,26 @@
 - [ ] TUI control-sequence sanitization 測試通過。
 - [ ] TUI setup fail-closed、bounded dashboard render 與二次取消確認測試通過。
 - [ ] Log/DB/UI secret canary 測試通過。
-- [ ] GUI、README 與 help 明示 Full-Trust 同帳號程序可繞過應用層 main 邊界，不宣稱 OS sandbox。
+- [x] GUI、README 與 help 明示 Full-Trust 同帳號程序可繞過應用層 main 邊界，不宣稱 OS sandbox。 ✅ 2026-09-04：README 與 SECURITY 已有；本日補上 `orchestrator --help` 末段，以及 GUI 核准入口旁的說明（介面多處使用「隔離」字樣，容易被讀成 OS 層保證）。
 
 ## D. 品質與供應鏈
 
-- [ ] Formatting、lint、typecheck、unit、integration、security、fuzz smoke tests 全部通過。
+- [x] Formatting、lint、typecheck、unit、integration、security、fuzz smoke tests 全部通過。 ✅ 2026-09-04 `npm run check` exit=0：source hygiene 189 檔、`node --check`、strict typecheck、834/834 測試（line 96.18／branch 87.13／function 96.90，門檻 90／85／90）、fuzz smoke、SBOM 驗證、`audit:local`、`audit:history`（1899 物件）。註：本專案沒有獨立的 formatter／linter，對應的是 `check:hygiene` 與 `check:syntax`，不是 prettier／eslint。
 - [ ] Dependency vulnerability、license、malware/typosquat 檢查通過。
-- [ ] Lockfile 與 runtime/package-manager versions 已 pin。
-- [ ] CI actions pin 到 commit SHA，permissions 最小化。
+- [x] Lockfile 與 runtime/package-manager versions 已 pin。 ✅ 2026-09-04：`.node-version` 22.20.0、`packageManager` npm@10.9.3、lockfileVersion 3。
+- [x] CI actions pin 到 commit SHA，permissions 最小化。 ✅ 2026-09-04：兩個 action 均為 40 字元 SHA，且已向上游確認 SHA 與註解版本相符；`permissions: contents: read`、`persist-credentials: false`、`npm ci --ignore-scripts`。另新增守衛測試，未 pin 或缺版本註解的 action 會讓測試變紅。
 - [ ] Fork PR 無法取得 secrets 或高權限 token。
 - [x] 乾淨、隔離的 committed-HEAD clone 可離線重現安裝、型別、完整測試、SBOM 與安全掃描。
-- [ ] 產生 SBOM、checksums 與 provenance；簽章流程無長期 secret。
+- [ ] 產生 SBOM、checksums 與 provenance；簽章流程無長期 secret。 ⏳ SBOM 已產生並可驗證（CycloneDX，3 components，`sbom:check` 通過）；checksums／provenance／簽章仍等待實際發布授權。
 
 ## E. 文件與操作
 
-- [ ] README 清楚標示 local-first、資料流、限制與非保證事項。
+- [x] README 清楚標示 local-first、資料流、限制與非保證事項。 ✅ 2026-09-04：README 已重寫，開頭即為「保證與邊界」；telemetry 段落改為描述實際狀態（`TELEMETRY_HOST` 為 null、建立請求即被拒），取代原本不準確的「無 telemetry」。
 - [ ] SECURITY、THREAT_MODEL、AGENTS 與架構文件反映實際行為。
 - [ ] 安裝文件不鼓勵 pipe-to-shell 或跳過權限。
 - [ ] API/訂閱模式、成本限制與資料 retention 有清楚說明。
 - [ ] 提供安全 uninstall、資料清除與 credential revocation 指引。
-- [ ] 已列出已知限制與殘餘風險。
+- [x] 已列出已知限制與殘餘風險。 ✅ 2026-09-04：README「已知限制」與 SECURITY「不在範圍內」兩節，後者逐條說明哪些是設計屬性而非缺陷。
 
 ## F. 發布後
 
@@ -107,6 +107,10 @@
   oversized 與 0644 負向測試均 fail closed，且不修改 target。
 - [ ] Release artifact checksum、signature/provenance 等待實際發布授權。
 - [ ] GitHub Private Vulnerability Reporting、secret scanning、dependency alerts 與 branch protection 需在建立 repository 後啟用。
+      **PVR 是公開 repo 才有的功能，無法預先開啟**，所以它是「發布的一個步驟」而不是「發布的前置條件」：
+      Owner 必須在切換為 Public 的**同一個操作時段**於 Settings → Security 開啟，並且在**公開連結或宣傳之前**完成。
+      已公開但 PVR 未開的 repo 不是「少設一個選項」，而是**發布尚未完成**——那正是可能有人找到漏洞、
+      卻沒有私密管道可以送的時間窗。`SECURITY.md` 是給回報者看的說明，不能代替一個真的存在的私密回報管道。
 - [ ] Codex／Claude 最小 live smoke 已完成；Grok、API 與 container smoke 仍等待額度、runtime／image 與逐次授權。
 - [ ] 2026-07-22 受控 Chrome 已驗證 Room 精確切換、external join/approve、exact-seat 與常駐
   Codex／Claude 喚醒回覆、bounded wait timeout、雙 Enter、Writer grant/run/checkpoint 與零變更
