@@ -298,7 +298,7 @@ Remote Room 是不同裝置與不同信任邊界；目前 roadmap 保留為待�
 TypeScript typecheck、附覆蓋率門檻的完整測試、deterministic fuzz smoke、SBOM 一致性、工作樹密鑰
 掃描、以及**全歷史所有 ref 的密鑰掃描**。
 
-- **834 個 deterministic tests，分佈在 63 個測試檔**（2026-09-04 `npm run check` 實測，834/834 通過）。
+- **63 個測試檔的 deterministic tests 全數通過**，由 `npm run check` 阻擋。這裡刻意不寫條數——兩行之下才說過「快照會在下一次有人加一行時就過期」，然後我在這裡放了一個一模一樣性質的快照：先寫 290（舊了三代），改成 834 時，同一次提交正好加了兩支測試，所以寫下去的當下就是錯的。要當下數字請自己跑 `npm run check`，它每次都會印出來。
 - 覆蓋率門檻由指令強制：line ≥ 90、branch ≥ 85、function ≥ 90。**分母排除 `src/ui/tui.ts`**（`--test-coverage-exclude`，993 行），所以這個門檻不涵蓋 TUI 那一塊。這裡刻意只寫**門檻**不寫當下
   百分比——門檻是保證，百分比是快照，而快照會在下一次有人加一行時就過期。要當下數字請自己跑
   `npm run test:coverage`。

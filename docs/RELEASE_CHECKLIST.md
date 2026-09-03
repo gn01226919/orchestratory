@@ -16,9 +16,9 @@
 
 - [x] `git ls-files` 中只有預期公開檔案。 ✅ 2026-09-04：追蹤中共 189 檔，全部落在 src/test/scripts/docs/public/config/bin 與根目錄公開檔。
 - [x] `.env`、DB、logs、sessions、cache、coverage、screenshots、private fixtures 未被追蹤。 ✅ 2026-09-04：以 `git ls-files` 比對 `.env`／`.sqlite`／`.db`／logs／sessions／coverage／screenshots，命中 0 筆。
-- [x] Working tree、staged content、完整 history、branches、tags 均完成 secret scan。 ✅ 2026-09-04：`audit:local` 通過；`audit:history` 以 `rev-list --objects --all` 掃過全 ref 共 1893 個物件通過。同日修正 provider-secret 規則：原本 `ghp`／`github_pat` 後面要求連字號，而 GitHub token 一律用底線，兩個條目從未能命中；已改為逐 vendor 的分隔符並加上雙向測試。
+- [x] Working tree、staged content、完整 history、branches、tags 均完成 secret scan。 ✅ 2026-09-04：`audit:local` 通過；`audit:history` 以 `rev-list --objects --all` 掃過全 ref 的所有物件通過（物件數每次提交都會變，故不記錄；重跑即知）。同日修正 provider-secret 規則：原本 `ghp`／`github_pat` 後面要求連字號，而 GitHub token 一律用底線，兩個條目從未能命中；已改為逐 vendor 的分隔符並加上雙向測試。
 - [ ] Build output、source maps、archives、SBOM、provenance 均完成 secret/PII scan。
-- [ ] 無私人 email、使用者名稱、本機絕對路徑、私有 repository URL 或 session ID。 ⏳ 2026-09-04：**只有兩項有掃描器背書**——`personal-email` 與 `personal-home-path`（home 目錄下帶人名的絕對路徑；規則本身只放行 example／alice／bob 這幾個佔位符，所以連這一行想寫出真實形狀都會被自己擋下——2026-09-04 實際發生過一次），全歷史 1899 物件通過。**使用者名稱、私有 repository URL、session ID 沒有任何規則在找**，AWS／Slack／Google 金鑰形狀也不在掃描範圍（見 `test/scan-rules.test.ts` 的已知缺口斷言）。先前勾為 ✅ 是把「兩項有證據」當成「五項都有」，已退回。
+- [ ] 無私人 email、使用者名稱、本機絕對路徑、私有 repository URL 或 session ID。 ⏳ 2026-09-04：**只有兩項有掃描器背書**——`personal-email` 與 `personal-home-path`（home 目錄下帶人名的絕對路徑；規則本身只放行 example／alice／bob 這幾個佔位符，所以連這一行想寫出真實形狀都會被自己擋下——2026-09-04 實際發生過一次），全歷史掃描通過。**使用者名稱、私有 repository URL、session ID 沒有任何規則在找**，AWS／Slack／Google 金鑰形狀也不在掃描範圍（見 `test/scan-rules.test.ts` 的已知缺口斷言）。先前勾為 ✅ 是把「兩項有證據」當成「五項都有」，已退回。
 - [x] Git author email 符合使用者的公開隱私偏好。 ✅ 2026-09-04：全歷史 author email 僅三個值，皆為 GitHub noreply 或 `.invalid` 的 promotion 身分。
 - [ ] 若曾發現秘密，已先撤銷/輪替，再清理 history 並重新掃描。
 
@@ -44,7 +44,7 @@
 
 ## D. 品質與供應鏈
 
-- [x] Formatting、lint、typecheck、unit、integration、security、fuzz smoke tests 全部通過。 ✅ 2026-09-04 `npm run check` exit=0：source hygiene 189 檔、`node --check`、strict typecheck、834/834 測試（line 96.18／branch 87.13／function 96.90，門檻 90／85／90）、fuzz smoke、SBOM 驗證、`audit:local`、`audit:history`（1899 物件）。註：本專案沒有獨立的 formatter／linter，對應的是 `check:hygiene` 與 `check:syntax`，不是 prettier／eslint。
+- [x] Formatting、lint、typecheck、unit、integration、security、fuzz smoke tests 全部通過。 ✅ 2026-09-04 `npm run check` exit=0：source hygiene、`node --check`、strict typecheck、全套測試（覆蓋率門檻 line 90／branch 85／function 90，實測高於門檻）、fuzz smoke、SBOM 驗證、`audit:local`、`audit:history`。**條數與百分比刻意不記在這裡**——它們每加一支測試就過期，而本檔已經因此錯過兩次（290、834）。以 `npm run check` 的輸出為準。註：本專案沒有獨立的 formatter／linter，對應的是 `check:hygiene` 與 `check:syntax`。
 - [ ] Dependency vulnerability、license、malware/typosquat 檢查通過。
 - [x] Lockfile 與 runtime/package-manager versions 已 pin。 ✅ 2026-09-04：`.node-version` 22.20.0、`packageManager` npm@10.9.3、lockfileVersion 3。
 - [x] CI actions pin 到 commit SHA，permissions 最小化。 ✅ 2026-09-04：兩個 action 均為 40 字元 SHA，且已向上游確認 SHA 與註解版本相符；`permissions: contents: read`、`persist-credentials: false`、`npm ci --ignore-scripts`。另新增守衛測試，未 pin 或缺版本註解的 action 會讓測試變紅。
@@ -85,7 +85,7 @@
 
 - [x] Dependency-free repository-source format/hygiene lint 通過：UTF-8/LF、tab/trailing-space/final-newline、
   JSON、regular/executable mode 與 debugger/eval/dynamic Function/`shell: true` 規則均由 release gate 阻擋。
-- [x] 834/834 deterministic tests 通過；line 96.18%、branch 87.13%、functions 96.80%→96.90%，門檻 90／85／90 由 `npm run test:coverage` 阻擋。 ✅ 2026-09-04 重新量測。原文寫的是 290/95.23/85.13/96.80，那是舊量測值；同一次改動修正了 README 的同一個數字卻漏了這一行，而發布時真的有人照著走的是這一份。
+- [x] Deterministic 測試全數通過，覆蓋率高於 90／85／90 門檻，由 `npm run test:coverage` 阻擋。 ✅ 2026-09-04。**此處不再記錄條數與百分比**：先前寫 290/95.23/85.13/96.80（舊了三代），改成 834 時同一次提交加了兩支測試、寫下去就已經是 836。一個沒有任何東西維護的數字會反覆變錯，而這份文件的價值在於發布時有人照著走——照著一個過期的數字走比沒有數字更糟。
   固定 90%／85%／90% 覆蓋率門檻。
 - [x] CycloneDX 1.5 SBOM 已驗證；3 個 components，dependency/lockfile 無 drift。
 - [x] Working-tree 與完整 Git history 掃描通過。

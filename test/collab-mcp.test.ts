@@ -145,7 +145,17 @@ async function fixture(options: {
           resolveSessionRoom: () => ({
             roomId: "demo",
             workspace: workspaces.roots()[0]!.path,
-            actor: "codex1",
+            /*
+             * Resolved the way production resolves it, not a literal. `actor: "codex1"` modelled a
+             * state the product cannot produce -- the binding and `#resolveActor` both read
+             * `agent_presence.display_name`, so they never disagree in a running system. A fixture
+             * that made them disagree left the `ask_*`-failed-after-writing path with no possible
+             * test, and set a trap: the first person to write that test would get a red bar and the
+             * quickest way out would be to loosen the assertion.
+             */
+            actor: collaboration && fixtureSeat
+              ? collaboration.externalActor(fixtureSeat.id, "demo")
+              : "codex1",
             collaborationMode: options.sessionRoomMode!,
             syncTurns: true,
           }),
@@ -1958,4 +1968,41 @@ test("a concurrent write by another seat does not mark this seat", async (t) => 
     0,
     "the room changed, but not because of this seat",
   );
+});
+
+/*
+ * `ask_*` writes its question to the ledger and then calls the provider, so one that fails has
+ * already changed the room and must be marked.
+ *
+ * This path had no test. The failure case that existed used `room_mention`, which resolves the
+ * author through `#messageAuthor`, while `ask_*` read it off the session binding -- two sources for
+ * one column, agreeing in production and disagreeing in the fixture, which hardcoded `codex1`. So
+ * the assertion below would have been red for a reason that had nothing to do with the behaviour,
+ * and the quickest way to a green bar would have been to weaken it.
+ */
+test("asking a provider, writing the question, and then failing still marks the seat", async (t) => {
+  const { broker, ledger, cleanup } = await fixture({
+    failProvider: "grok",
+    withCollaboration: true,
+    sessionRoomMode: "room-first",
+  });
+  t.after(cleanup);
+  await broker.call("room_init", { room: "demo" });
+
+  await assert.rejects(
+    broker.call("ask_grok", { question: "這段程式在做什麼？" }),
+    /SYNTHETIC_PROVIDER_FAILURE/u,
+  );
+
+  const messages = ledger.listAfter("demo", 0);
+  assert.ok(
+    messages.some((message) => message.text.includes("這段程式在做什麼？")),
+    "the question reached the ledger, so the room changed before the provider was called",
+  );
+  assert.equal(
+    messages.filter((message) => message.text.includes("還沒說明是接續現有工作還是開始新任務")).length,
+    1,
+    "a reader will see this seat asking; the mark belongs with it",
+  );
+  assert.equal(ledger.verifyChain("demo"), true);
 });

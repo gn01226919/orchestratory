@@ -844,6 +844,26 @@ export class CollabToolBroker {
     }
   }
 
+  /*
+   * The author this seat's own ledger lines carry.
+   *
+   * `room_mention` resolves it through `#messageAuthor` while `ask_*` and `compare_agents` read
+   * `binding.actor`, and nothing required those to agree -- while `#seatRoomMark` compares against
+   * the resolved one. In production they are the same string, both being
+   * `agent_presence.display_name`, so a divergence would never look like a broken feature; it would
+   * look like an `ask_*` that failed after writing and left no mark.
+   *
+   * They are not simply unified, because the two are not interchangeable: without presence wiring
+   * `#messageAuthor(undefined, …)` has nothing to resolve and refuses, which is correct -- it is the
+   * guard that stops a tool call naming its own author. The binding's own value is the right answer
+   * in exactly that configuration, and it is safe there for a reason worth stating: `#seatRoomMark`
+   * also returns undefined without `#resolveActor`, so nothing is marked and the two cannot
+   * disagree about anything. Where a mark IS possible, this returns the same string the mark reads.
+   */
+  #seatAuthor(binding: SessionRoomBinding): string {
+    return this.#resolveActor ? this.#messageAuthor(undefined, binding.roomId) : binding.actor;
+  }
+
   #messageAuthor(value: unknown, roomId?: string): string {
     if (this.#resolveActor) {
       if (!roomId) throw new Error("ROOM_SELECTION_REQUIRED");
@@ -1810,7 +1830,12 @@ export class CollabToolBroker {
       const result = await this.#callRoomWorker({
         roomId: binding.roomId,
         workspace,
-        author: binding.actor,
+        /*
+         * See `#seatAuthor`: `room_mention` reaches this same `#callRoomWorker` through a different
+         * resolution of the `author` column, and the mark left on a failure compares against one of
+         * them.
+         */
+        author: this.#seatAuthor(binding),
         provider,
         model,
         text: question,
@@ -1864,7 +1889,7 @@ export class CollabToolBroker {
           const result = await this.#callRoomWorker({
             roomId: binding.roomId,
             workspace,
-            author: binding.actor,
+            author: this.#seatAuthor(binding),   /* see #ask */
             provider: target.provider,
             model: target.model,
             text: question,
