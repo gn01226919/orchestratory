@@ -1139,8 +1139,11 @@ test("work still waiting twelve hours after it was asked for expires, and keeps 
  * then every place that already enumerated "the states that end a delivery" had to be found by hand.
  *
  * `fail()` was the third such guard and it is deliberately not exercised here: it runs
- * `#authorizedLease` first, and an expired row is by definition queued, which the schema requires to
- * have no lease token. The guard is defence in depth against a future path, not a hole that was open.
+ * `#authorizedLease` first, which refuses anything without a live lease token, and every transition
+ * into `queued` -- the only state expiry acts on -- clears that token. That is an implementation
+ * convention, not a schema constraint: the schema only requires the two lease columns to be null or
+ * non-null together. So the guard is defence in depth against a future path, not a hole that was
+ * open.
  */
 test("an expired delivery is terminal everywhere, not just in the sweep that made it", async (t) => {
   const { inbox, ledger, advance } = await fixture(t);
@@ -1272,15 +1275,20 @@ test("work that keeps being picked up and dropped still ages out", async (t) => 
     "../src/mcp/collab-server.ts", "../public/room.js", "../docs/DECISIONS.md",
     "../docs/VERIFICATION.md", "./room-inbox.test.ts", "./collaboration-service.test.ts"];
   /*
-   * Written as the CONCEPT, not as the strings that were fixed last time.
+   * A list of phrasings, kept deliberately wider than the ones already corrected.
    *
-   * The first version listed exactly the five phrasings that had already been corrected, so it could
-   * only catch someone reverting them. Four live instances of the same claim sat inside the files it
-   * scanned and it stayed green (WORDING-EXCEPTION: this paragraph quotes the phrasings it missed):
-   * "沒領走" missed the other by one character (WORDING-EXCEPTION), "has picked this up" and
-     * "nobody ever collected this" (WORDING-EXCEPTION) were the same sentence in other words, and the
-   * docs were not scanned
-   * at all -- including the ADR's own title.
+   * Honest about what that is: still a string match, over the files named below and no others. A
+   * genuinely new synonym, or the same claim in an unlisted file, passes. It is a tripwire against
+   * the way this particular sentence keeps coming back, not a guarantee that nothing anywhere says
+   * it -- an earlier version of this comment claimed both "CONCEPT" and "anywhere", and neither was
+   * true.
+   *
+   * The first version listed exactly the five phrasings already corrected, so it could only catch a
+   * revert. Four live instances sat inside the files it scanned and it stayed green
+   * (WORDING-EXCEPTION: this paragraph quotes the phrasings it missed): "沒領走" missed the other by
+   * one character (WORDING-EXCEPTION), "has picked this up" and "nobody ever collected this"
+   * (WORDING-EXCEPTION) were the same sentence in other words, and the docs were not scanned at all
+   * -- including the ADR's own title. Widening it caught a fifth on the first run.
    */
   /* GUARD-PATTERN-START -- this block necessarily contains every phrasing it forbids, so the scan
      skips it rather than reporting itself. */

@@ -69,6 +69,18 @@ export type WriterCandidate =
  */
 const DELIVERY_EXPIRY_MS = 12 * 60 * 60 * 1_000;
 
+/*
+ * How much of the ledger a joining agent is shown by default, and the most it can ask for.
+ *
+ * Fifty is the owner's number and it is the same slice the GUI shows: enough to see what the room is
+ * currently doing, small enough that it is a briefing rather than the archive. The ceiling exists so
+ * that "give me the context" cannot quietly become "give me everything".
+ */
+const BRIEFING_MESSAGES = 50;
+/* Matched to the ledger's own range cap. Asking for more would silently return less, which is the
+   kind of gap between a stated bound and a real one this codebase keeps having to correct. */
+const MAX_BRIEFING_MESSAGES = 100;
+
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 function ledgerSummary(value: string, maxLength = 320): string {
@@ -1295,6 +1307,78 @@ export class CollaborationService {
            undo that, and must not stop the rest of the batch from being annotated. */
       }
     }
+  }
+
+  /*
+   * What is going on in this room right now, for an agent that is about to join it.
+   *
+   * Joining used to hand back a capability declaration -- what this terminal is allowed to do -- and
+   * nothing about what the room is in the middle of. An agent then faced a screenful of history and
+   * had to guess whether any of it was its business, which fails in two directions: it picks up
+   * someone else's half-finished task, or it ignores a conclusion the room already reached and builds
+   * the same thing again.
+   *
+   * Bounded on purpose. The point is a briefing, not the archive: the newest `messages` entries, the
+   * seats and what they are doing, and who is holding write access. `totalMessages` is included so a
+   * reader can see how much it is NOT being shown rather than mistaking the slice for the whole.
+   *
+   * What this does NOT do is read the code. That step is the owner's to ask for: the ledger says why
+   * things became this way and the code says what is actually true now, and deciding which to believe
+   * when they disagree is not a decision to hand to a process that just walked in.
+   */
+  roomBriefing(input: { roomId: string; workspace: string; messages?: number }): {
+    room: string;
+    totalMessages: number;
+    shown: number;
+    recent: RoomMessage[];
+    seats: Array<{ displayName: string; provider: string; listening: boolean; standbyApproved: boolean; pending: number }>;
+    writing: Array<{ displayName: string; taskId: string; state: string }>;
+  } {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    const limit = input.messages ?? BRIEFING_MESSAGES;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_BRIEFING_MESSAGES) {
+      throw new Error("INVALID_ROOM_BRIEFING_SIZE");
+    }
+    const info = this.ledger.getRoom(input.roomId);
+    if (!info) throw new Error("ROOM_NOT_FOUND");
+    /*
+     * Read from the END, not from the beginning.
+     *
+     * `listAfter(roomId, 0)` is itself capped at 100, so taking the last `limit` of THAT returns
+     * messages 51-100 of a 126-message room -- the middle, presented as "recent". Any room past a
+     * hundred messages would have been briefed on a slice that could never include what was just
+     * said, which is the one thing this is for. Asking for the range that ends at the newest sequence
+     * is the same query without the trap.
+     */
+    const from = Math.max(1, info.messages - limit + 1);
+    const recent = info.messages > 0 ? this.ledger.getRange(input.roomId, from, info.messages) : [];
+    const deliveries = this.inbox.list(input.roomId);
+    const seats = this.presence.list(input.workspace, input.roomId)
+      .filter((session) => session.joined && session.displayName)
+      .map((session) => ({
+        displayName: String(session.displayName),
+        provider: session.provider,
+        listening: session.standbyApproved && this.inbox.isListening(session.id, input.roomId),
+        standbyApproved: session.standbyApproved,
+        /* Work already addressed to that seat and not yet finished -- the clearest signal of a thread
+           somebody else is in the middle of. */
+        pending: deliveries.filter((delivery) => delivery.targetPresenceId === session.id
+          && ["queued", "delivered", "read", "working"].includes(delivery.state)).length,
+      }));
+    /* Write access, not "candidates": a lease is the thing that actually says someone is changing
+       files right now. A candidate with no lease is not in flight, and claiming this lists every
+       candidate would be claiming more than it looks at. */
+    const writing = this.writerLeases.list(input.roomId)
+      .filter((lease) => lease.state === "active")
+      .map((lease) => ({ displayName: lease.writer.displayName, taskId: lease.taskId, state: lease.state }));
+    return {
+      room: input.roomId,
+      totalMessages: info.messages,
+      shown: recent.length,
+      recent,
+      seats,
+      writing,
+    };
   }
 
   #reconcileUnavailableDeliveries(roomId: string, workspace: string, reason: string): RoomDelivery[] {

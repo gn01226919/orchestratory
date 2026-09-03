@@ -454,6 +454,64 @@ test("work still in the queue ages out on view, is recorded, and is kept rather 
   );
 });
 
+/*
+ * Joining used to hand back only a capability declaration -- what this terminal may do -- and nothing
+ * about what the room is in the middle of. The agent then had a screenful of history and no way to
+ * tell whether any of it was its business, which fails in both directions: picking up someone else's
+ * half-finished task, or rebuilding something the room already settled.
+ */
+test("a joining agent is briefed on the room, in a slice that says how much it is not showing", async (t) => {
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-briefing-"));
+  const gui = collaborationService(data);
+  t.after(() => gui.close());
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+
+  gui.ledger.createRoom("demo", "/tmp/project");
+  for (let i = 1; i <= 120; i += 1) gui.ledger.append("demo", "you", `第 ${i} 則`);
+
+  const busy = gui.registerExternal({ provider: "codex", workspace: "/tmp/project", hostPid: 7501, model: "gpt-test" });
+  gui.requestExternalJoin(busy.id, "demo", "/tmp/project");
+  gui.approveExternalJoin({
+    ...ROOM_FIRST_JOIN, presenceId: busy.id, roomId: "demo", workspace: "/tmp/project", label: "frontend",
+  });
+  gui.requestExternalStandby(busy.id, "demo", "/tmp/project");
+  gui.approveExternalStandby(busy.id, "demo", "/tmp/project");
+  gui.postToExternal({ roomId: "demo", workspace: "/tmp/project", presenceId: busy.id, text: "這件還沒完成" });
+
+  const briefing = gui.roomBriefing({ roomId: "demo", workspace: "/tmp/project" });
+
+  // Bounded, and honest about the bound: a slice presented without its denominator reads as the whole.
+  assert.equal(briefing.shown, 50);
+  assert.equal(briefing.recent.length, 50);
+  assert.ok(briefing.totalMessages > briefing.shown,
+    "the briefing must say how much of the room it is not showing");
+  /* Ends at the present. Asserted on the sequence number rather than on a remembered string: the last
+     line is the system note the dispatch itself produced, not the dispatch, and picking the wrong one
+     to look for is how a test ends up agreeing with whatever the code did. */
+  assert.equal(briefing.recent[briefing.recent.length - 1]?.seq, briefing.totalMessages,
+    "the slice must end at the newest message, not at an arbitrary window");
+  assert.ok(briefing.recent.some((message) => String(message.text).includes("這件還沒完成")),
+    "and must contain the work that is currently outstanding");
+
+  // The seat and what it is in the middle of. Work already addressed to someone else is the clearest
+  // sign of a thread a newcomer should not simply take over.
+  const seat = briefing.seats.find((entry) => entry.displayName === "codex（frontend）");
+  assert.ok(seat, `the briefing must list joined seats, got ${JSON.stringify(briefing.seats)}`);
+  assert.equal(seat?.pending, 1, "including how much work is already waiting on them");
+  assert.equal(seat?.listening, false);
+  assert.equal(seat?.standbyApproved, true);
+
+  // Nothing is being written, and the briefing says so rather than omitting the field.
+  assert.deepEqual(briefing.writing, []);
+
+  // Asking for more than the ceiling is refused rather than quietly served the whole archive.
+  assert.throws(
+    () => gui.roomBriefing({ roomId: "demo", workspace: "/tmp/project", messages: 5_000 }),
+    /INVALID_ROOM_BRIEFING_SIZE/u,
+  );
+  assert.equal(gui.roomBriefing({ roomId: "demo", workspace: "/tmp/project", messages: 3 }).shown, 3);
+});
+
 test("exact terminal seats exchange authenticated multi-turn threads without provider fallback", async (t) => {
   const data = await mkdtemp(join(tmpdir(), "orchestratory-peer-thread-"));
   const codexProcess = collaborationService(data);

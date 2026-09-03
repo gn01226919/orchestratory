@@ -1153,9 +1153,10 @@ export class RoomInboxStore {
   fail(input: { presenceId: string; deliveryId: string; leaseToken: string; reason: string }): RoomDelivery {
     if (typeof input.reason !== "string" || input.reason.trim().length < 1 || input.reason.length > 240 || input.reason.includes("\0")) throw new Error("INVALID_DELIVERY_FAILURE_REASON");
     const row = this.#authorizedLease(input);
-    /* Every terminal state, including `expired`. Leaving it out let a cancel rewrite "this was still
-       waiting when its time ran out" into "the owner cancelled it" -- and not rewriting the record is
-       the entire reason this state exists rather than a `failed` with a reason attached. */
+    /* Every terminal state, including `expired`. Defence in depth here rather than a hole that was
+       open: `#authorizedLease` above already refuses anything without a live lease token, and every
+       transition into `queued` clears that token, so an expired row cannot reach this line today.
+       The equivalent guard in `cancel()` WAS reachable, and that is the one that mattered. */
     if (["replied", "failed", "cancelled", "expired"].includes(row.state)) return publicDelivery(row);
     if (row.reply_key !== null) return publicDelivery(row);
     if (row.cancel_requested === 1) {

@@ -118,7 +118,17 @@ function describeReplyTimeout(status: { listening: boolean; state: RoomDeliveryS
   if (status.state === "expired" || status.state === "failed" || status.state === "cancelled") {
     return `This delivery is ${status.state}, so no reply is coming for this attempt. The owner can usually requeue it on the same delivery id, which reopens it without telling you, so treat this as "not now" rather than "never" if you are keeping a thread. (One exception: a failure recorded as REPLY_COMMIT_UNCERTAIN cannot be requeued and needs the owner to resolve it.)`;
   }
-  return `This delivery is ${status.state}, so no reply is coming for it.`;
+  if (status.state === "replied") {
+    return "This delivery has already been answered; read the reply rather than waiting for another.";
+  }
+  /*
+   * Exhaustive on purpose. The ADR claimed that narrowing `state` from `string` to RoomDeliveryState
+   * would make the next new state a compile error, and it would not have: a catch-all `return` gives
+   * the compiler no reason to complain, so a ninth state would have slipped into a sentence written
+   * for the eight that existed. Assigning to `never` is what actually makes that claim true.
+   */
+  const exhaustive: never = status.state;
+  return `This delivery is ${String(exhaustive)}, so no reply is coming for it.`;
 }
 
 function asObject(value: unknown): JsonObject {
