@@ -329,7 +329,7 @@ export class CollabToolBroker {
       {
         name: "room_start",
         description:
-          "Say which of two things you are here to do, before doing either. `continue` means you are picking up the work the room is already doing -- read the briefing room_join_request returned, and the ledger, first. `new-task` means you are starting something separate, and writes a divider into the ledger so a later reader can see where one line of work ended and yours began. Pass a one-line note saying what you are taking on. Calling this again with the same mode and note returns the same recorded line rather than adding another. Changing your mind is allowed and is recorded as its own line -- declaring `continue`, reading the briefing, and then declaring `new-task` leaves both, which is what a later reader needs. Nothing forces you to call it: if you open a candidate, post, mention a provider, or send work to another seat first, the room records once that you acted without saying which you were doing, and that line is what somebody reads when two efforts collide.",
+          "Say which of two things you are here to do, before doing either. `continue` means you are picking up the work the room is already doing -- read the briefing room_join_request returned, and the ledger, first. `new-task` means you are starting something separate, and writes a divider into the ledger so a later reader can see where one line of work ended and yours began. Pass a one-line note saying what you are taking on. Calling this again with the same mode and note returns the same recorded line rather than adding another. Changing your mind is allowed and is recorded as its own line -- declaring `continue`, reading the briefing, and then declaring `new-task` leaves both, which is what a later reader needs. Nothing forces you to call it: any tool that starts work -- asking or comparing providers, posting, mentioning, sending to another seat, requesting a workflow, opening a candidate -- records once, after it succeeds, that you acted without saying which you were doing. Answering work you were already given does not. That line is what somebody reads when two efforts collide.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
@@ -663,7 +663,38 @@ export class CollabToolBroker {
     return { calls: this.#calls, maxCalls: this.#maxCalls };
   }
 
+  /*
+   * Tools that START work, as opposed to answering for work already handed to you.
+   *
+   * `room_reply`, `room_ack` and `room_fail` are responses to something a seat was given, so they are
+   * not on this list. Everything here is a seat deciding to do something, which is what the fork in
+   * the join response asks about.
+   */
+  static readonly #INITIATING_TOOLS: ReadonlySet<string> = new Set([
+    "ask_codex", "ask_claude", "ask_grok", "compare_agents",
+    "room_post", "room_mention", "room_send", "request_coding_workflow", "candidate_start",
+  ]);
+
   async call(name: string, input: unknown, options: CollabCallOptions = {}): Promise<string> {
+    /*
+     * The undeclared-start note lives HERE, at the dispatch, and only after the tool returns.
+     *
+     * Two things went wrong when it was sprinkled through the handlers. It was missed on `ask_*`,
+     * which reaches exactly the same `#callRoomWorker` as `room_mention` -- one effect, two entry
+     * points, one of them recorded -- so the promise in the join response was smaller than it sounded.
+     * And it was written BEFORE the work, so a post refused because recording was paused still left a
+     * permanent line saying the seat had acted, when the room had turned it away.
+     *
+     * One place, after success, is also the only version that stays true when the next tool is added:
+     * a name goes in the set above or it does not, rather than someone having to remember a call.
+     */
+    if (!CollabToolBroker.#INITIATING_TOOLS.has(name)) return await this.#dispatch(name, input, options);
+    const result = await this.#dispatch(name, input, options);
+    this.#noteUndeclaredSeatAction();
+    return result;
+  }
+
+  async #dispatch(name: string, input: unknown, options: CollabCallOptions = {}): Promise<string> {
     if (name === "list_agents") return this.#listAgents(asObject(input));
     if (name === "ask_codex" || name === "ask_claude" || name === "ask_grok") {
       return await this.#ask(name.slice(4) as ProviderId, asObject(input), options);
@@ -836,9 +867,12 @@ export class CollabToolBroker {
      * -- the newest fifty lines, the seats, what is waiting on them -- and reports the total so the
      * slice cannot be read as the whole.
      *
-     * Reading the CODE is deliberately not part of this and is not suggested here. The ledger says how
-     * things came to be this way and the code says what is true now; when they disagree, deciding
-     * which to believe is the owner's call, not a newcomer's.
+     * On the code: this sets an ORDER, not a prohibition. Read the room first, and when the ledger and
+     * the codebase disagree about the current state, bring it to the owner instead of picking one --
+     * the ledger says how things came to be this way, the code says what is true now, and choosing
+     * between them is the owner's call. An earlier version of this comment said reading the code was
+     * "deliberately not suggested here", which stopped being true five lines below it when thenWhat
+     * was corrected, and would have led the next reader to change the text back.
      */
     let briefing: unknown;
     try {
@@ -876,7 +910,7 @@ export class CollabToolBroker {
           { mode: "new-task", meaning: "Start something separate. A divider is written into the ledger so a later reader can see where one line of work ended and yours began." },
         ],
         how: "Call room_start with that mode, and a one-line note saying what you are taking on.",
-        ifYouSkipIt: "Nothing stops you working first. If you open a candidate, post to the room, mention another provider, or send work to another seat before answering, the room records once that you acted without saying which you were doing -- and whoever untangles two overlapping efforts later reads that line. Other tools do not write it.",
+        ifYouSkipIt: "Nothing stops you working first. Any tool that STARTS work -- asking a provider, comparing them, posting, mentioning, sending to another seat, requesting a workflow, opening a candidate -- records once, after it succeeds, that you acted without saying which you were doing. Answering a delivery you were already given does not. Whoever untangles two overlapping efforts later reads that line.",
         thenWhat: "Read the room before the code, and if the ledger and the codebase disagree about the current state, stop and ask the owner rather than picking one. If you were given a task, get on with it -- this is about the order you look at things and who resolves a contradiction, not a ban on reading source.",
       },
     });
@@ -1092,12 +1126,6 @@ export class CollabToolBroker {
     if (typeof input.mainPath !== "string" || input.mainPath !== binding.workspace) {
       throw new Error("CANDIDATE_MAIN_PATH_BINDING_MISMATCH");
     }
-    /*
-     * The highest-stakes place to act without having said which of the two you are doing: a seat that
-     * has just arrived, has not answered the fork, and opens a worktree to start writing code. It was
-     * also the one place with no record, while the join response promised there would be one.
-     */
-    this.#noteUndeclaredSeatAction(binding.roomId);
     if (input.room !== undefined && input.room !== binding.roomId) throw new Error("CANDIDATE_ROOM_BINDING_MISMATCH");
     const task = requireQuestion(input.task);
     const acceptanceCriteria = input.acceptanceCriteria === undefined
@@ -1382,10 +1410,12 @@ export class CollabToolBroker {
    * callers with no presence at all, and a briefing promise that only holds for one tool is exactly
    * the kind of gap this codebase keeps finding. No presence, nothing to record, no error.
    */
-  #noteUndeclaredSeatAction(roomId: string): void {
+  #noteUndeclaredSeatAction(): void {
     try {
+      const binding = this.#resolveSessionRoom?.();
+      if (!binding) return;
       const { collaboration, presenceId } = this.#seatInbox();
-      collaboration?.noteUndeclaredSeatAction(roomId, presenceId);
+      collaboration?.noteUndeclaredSeatAction(binding.roomId, presenceId);
     } catch {
       /* Not a seat, or no collaboration service wired: there is nothing to say about a declaration
          that was never owed. */
@@ -1401,7 +1431,6 @@ export class CollabToolBroker {
     if (ROOM_WAKE_PREFIX_PATTERN.test(input.text.trimStart())) {
       throw new Error("ROOM_POST_MENTION_REQUIRES_ROOM_MENTION");
     }
-    this.#noteUndeclaredSeatAction(roomId);
     return JSON.stringify(this.#requireLedger().append(roomId, this.#messageAuthor(input.author, roomId), input.text));
   }
 
@@ -1529,7 +1558,6 @@ export class CollabToolBroker {
     }
     const match = input.target.trim().match(TARGET_PATTERN);
     if (!match) throw new Error("INVALID_ROOM_MENTION_TARGET");
-    this.#noteUndeclaredSeatAction(roomId);
     const provider = match[1] as ProviderId;
     const model = this.#resolveModel(provider, match[2]);
     const room = this.#requireLedger().getRoom(roomId)!;

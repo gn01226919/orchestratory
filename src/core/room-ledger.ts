@@ -336,6 +336,28 @@ export class RoomLedger {
     return row ? this.#row(row) : undefined;
   }
 
+  /*
+   * Whether any message was recorded under a key starting with this prefix.
+   *
+   * Narrow on purpose: it answers "has this happened at all", not "give me the rows". Added because
+   * the alternative in use was to write a SECOND ledger line as a marker, keyed differently, which
+   * produced two identical lines the first time -- and for a divider whose whole job is to show a
+   * reader where one line of work ended, two of them is worse than none. `idempotency_key` is the
+   * primary key, so a prefix match uses that index rather than scanning messages.
+   */
+  hasIdempotencyKeyPrefix(prefix: string): boolean {
+    if (typeof prefix !== "string" || !IDEMPOTENCY_KEY_PATTERN.test(prefix)) {
+      throw new Error("INVALID_ROOM_IDEMPOTENCY_KEY");
+    }
+    /* LIKE with an escaped prefix: the key alphabet excludes % and _ is legal in it, so `_` must be
+       escaped or it would match any single character. */
+    const escaped = prefix.replaceAll("_", "\\_");
+    const row = this.#db
+      .prepare("SELECT 1 AS found FROM room_message_idempotency WHERE idempotency_key LIKE ? ESCAPE '\\' LIMIT 1")
+      .get(`${escaped}%`) as { found: number } | undefined;
+    return Boolean(row);
+  }
+
   appendSystem(roomId: string, text: string): RoomMessage {
     return this.#append(roomId, "system", text, "system");
   }

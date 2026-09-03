@@ -87,6 +87,19 @@ async function fixture(options: {
   const workflowRequests = new WorkflowRequestStore(data);
   const calls: BrokerFixture["calls"] = [];
   const workspaces = WorkspacePolicy.fromPaths(directories);
+  const collaboration = options.withCollaboration ? collaborationService(data) : undefined;
+  let fixtureSeat: { id: string } | undefined;
+  if (collaboration) {
+    collaboration.ledger.createRoom("demo", workspaces.roots()[0]!.path);
+    fixtureSeat = collaboration.registerExternal({
+      provider: "codex", workspace: workspaces.roots()[0]!.path, hostPid: 8_101,
+    });
+    collaboration.requestExternalJoin(fixtureSeat.id, "demo", workspaces.roots()[0]!.path);
+    collaboration.approveExternalJoin({
+      presenceId: fixtureSeat.id, roomId: "demo", workspace: workspaces.roots()[0]!.path,
+      label: "fixture", collaborationMode: "room-first", syncTurns: true,
+    });
+  }
   const broker = new CollabToolBroker({
     providers: new ProviderRegistry([]),
     workspaces,
@@ -110,7 +123,19 @@ async function fixture(options: {
       readFiles: async () => "File: src/app.ts\nexport const app = true;",
     }),
     ledger,
-    ...(options.withCollaboration ? { collaboration: collaborationService(data) } : {}),
+    /*
+     * A collaboration service AND the seat wiring that makes it usable. Supplying only the service
+     * left `#seatInbox()` throwing, so every seat-scoped path -- the briefing's seat list, the
+     * undeclared-start note -- silently did nothing and a test could assert against an empty result
+     * without noticing the feature had not run.
+     */
+    ...(collaboration
+      ? {
+          collaboration,
+          resolvePresenceId: () => fixtureSeat!.id,
+          resolveActor: (roomId: string) => collaboration.externalActor(fixtureSeat!.id, roomId),
+        }
+      : {}),
     workflowRequests,
     ...(options.requestRoomJoin ? { requestRoomJoin: options.requestRoomJoin } : {}),
     ...(options.waitForRoomJoin ? { waitForRoomJoin: options.waitForRoomJoin } : {}),
@@ -289,6 +314,60 @@ test("room_join_request returns after membership approval without silently start
  * happening here", and an agent with only the first either takes over a thread someone else is
  * running or rebuilds something the room already settled.
  */
+/*
+ * Two properties of the undeclared-start note that only hold because it is written at the dispatch,
+ * after the tool returns, rather than inside each handler before the work:
+ *
+ *   - a REFUSED action leaves nothing, because nothing was done;
+ *   - `ask_*` leaves one, because it reaches the same #callRoomWorker as room_mention -- one effect
+ *     with two entry points, and instrumenting handlers one at a time missed the second.
+ *
+ * Both need a seat with no note yet, so they cannot be checked inside a test that has already
+ * triggered one: the note is written once per seat per session, and a second attempt is a no-op
+ * whether or not the code is correct.
+ */
+test("the undeclared-start note follows the work, not the attempt", async (t) => {
+  const { broker, ledger, cleanup } = await fixture({
+    requestRoomJoin: () => undefined,
+    waitForRoomJoin: async () => true,
+    withCollaboration: true,
+    sessionRoomMode: "room-first",
+  });
+  t.after(cleanup);
+  const notes = () => ledger.listAfter("demo", 0)
+    .filter((message: { text: string }) => String(message.text).includes("還沒說明")).length;
+  assert.equal(notes(), 0);
+
+  // Refused before it does anything: no work happened, so nothing is recorded about having worked.
+  await assert.rejects(broker.call("room_post", { author: "codex", text: "@codex 這會被擋下來" }), /ROOM_POST_MENTION_REQUIRES_ROOM_MENTION/u);
+  assert.equal(notes(), 0, "a refused action must not be recorded as having acted");
+
+  // Succeeds: recorded once.
+  await broker.call("room_post", { author: "codex", text: "我先發了一則" });
+  assert.equal(notes(), 1);
+  await broker.call("room_post", { author: "codex", text: "再發一則" });
+  assert.equal(notes(), 1, "once per seat per session, not once per action");
+});
+
+/*
+ * `ask_*` reaches the same #callRoomWorker as `room_mention` in a bound room -- one effect, two entry
+ * points. Instrumenting handlers one at a time covered the second and missed the first, while the
+ * join response promised both. This is the entry point that was missed, on its own, so a regression
+ * cannot hide behind the one that was not.
+ */
+test("asking a provider counts as starting work", async (t) => {
+  const { broker, ledger, cleanup } = await fixture({
+    withCollaboration: true,
+    sessionRoomMode: "room-first",
+  });
+  t.after(cleanup);
+  const notes = () => ledger.listAfter("demo", 0)
+    .filter((message: { text: string }) => String(message.text).includes("還沒說明")).length;
+  assert.equal(notes(), 0);
+  await broker.call("ask_codex", { question: "幫我看一下這段" });
+  assert.equal(notes(), 1, "ask_* starts work, so it is recorded like every other way of starting it");
+});
+
 test("joining hands back what the room is in the middle of, and the question that has to be answered", async (t) => {
   /* Wired with a collaboration service, because that is what produces the briefing -- and because a
      fixture without one is exactly how this path stayed untested: the response quietly omits the
@@ -1243,10 +1322,13 @@ test("native MCP candidate tools preserve main and end at an owner-required merg
    * the join response promises is recorded. It was the one path with no record while the promise was
    * already being made, so it needs a nail of its own.
    */
-  const undeclared = service.ledger.listAfter("demo", 0)
+  const undeclaredLines = () => service.ledger.listAfter("demo", 0)
     .filter((message: { text: string }) => String(message.text).includes("還沒說明"));
-  assert.equal(undeclared.length, 1, "opening a candidate before answering must leave exactly one line");
-  assert.match(String(undeclared[0]?.text), /先動手/u);
+  assert.equal(undeclaredLines().length, 1, "opening a candidate before answering must leave exactly one line");
+  assert.match(String(undeclaredLines()[0]?.text), /先動手/u);
+
+  /* The refused-action case needs a seat with no note yet, so it lives in its own test below --
+     asserting it here proves nothing, because one line already exists and the note is written once. */
   await writeFile(join(started.candidate.candidatePath, "candidate.txt"), "candidate\n", "utf8");
   await execFileAsync("git", ["add", "candidate.txt"], { cwd: started.candidate.candidatePath });
   await execFileAsync("git", [

@@ -564,6 +564,16 @@ test("a seat declares which of the two it is doing, and acting without saying so
   });
   assert.equal(started.alreadyDeclared, false);
   assert.match(String(started.message.text), /開始新任務/u);
+  /*
+   * COUNTED, not just matched. The first version wrote a second row under a separate key so lookups
+   * would be easy, which put two identical dividers in the ledger on the very first declaration --
+   * and every assertion here passed, because they all compared sequence numbers or matched text and
+   * none of them asked how many lines existed. For a marker whose whole job is to show a reader where
+   * one line of work ended, two of them is worse than none.
+   */
+  const dividers = () => gui.ledger.listAfter("demo", 0)
+    .filter((message) => String(message.text).includes("開始新任務")).length;
+  assert.equal(dividers(), 1, "one declaration writes exactly one line");
   assert.match(String(started.message.text), /改帳本分頁/u);
   // A divider, so a later reader can see where one line of work stopped and another began.
   assert.match(String(started.message.text), /──/u);
@@ -575,6 +585,7 @@ test("a seat declares which of the two it is doing, and acting without saying so
   });
   assert.equal(again.alreadyDeclared, true);
   assert.equal(again.message.seq, started.message.seq);
+  assert.equal(dividers(), 1, "and repeating it adds none");
 
   /*
    * And the seat that never answered. The send is NOT refused -- MCP returns text and cannot make an

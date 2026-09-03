@@ -15,7 +15,14 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Measured 2026-09-03 on a 10-core machine: the top-level test durations sum to 22.1 minutes, which
+    # is the floor for a serial run and excludes per-file process startup. A free runner has two cores,
+    # and `--test-concurrency` was unset, so the gate defaulted to near-serial there and could not have
+    # finished inside twenty minutes -- a red tick that says "timed out", which reads to a first-time
+    # contributor as "your change broke it". The suite now pins concurrency rather than inheriting the
+    # core count, and this ceiling is deliberately generous: it is a runaway backstop, not a target, and
+    # the number was not verified on a real runner from here.
+    timeout-minutes: 45
     env:
       CI: "true"
       npm_config_ignore_scripts: "true"

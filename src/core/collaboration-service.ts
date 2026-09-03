@@ -1426,7 +1426,7 @@ export class CollaborationService {
     }
     const note = input.note === undefined ? "" : safeSummary(String(input.note), 200);
     const name = seat.displayName ?? seat.provider;
-    const already = this.#startDeclaration(input.roomId, input.presenceId) !== undefined;
+    const already = this.#hasStartDeclaration(input.roomId, input.presenceId);
     const text = input.mode === "continue"
       ? `▶ ${name} 接續房間現有的工作${note ? `：${note}` : ""}`
       /* A divider, so a later reader can see where one line of work stopped and another began. */
@@ -1447,19 +1447,6 @@ export class CollaborationService {
     const message = this.ledger.appendSystemIdempotent(
       input.roomId, text, this.#startKey(input.roomId, input.presenceId, text),
     );
-    /* The first declaration of the session is what `#startDeclaration` looks for, so mark this one as
-       the anchor if there was not one already. Recorded under the stable key with the same text, so
-       re-declaring the same thing collapses into it rather than adding a line. */
-    if (!already) {
-      try {
-        this.ledger.appendSystemIdempotent(
-          input.roomId, text, this.#startKey(input.roomId, input.presenceId),
-        );
-      } catch {
-        /* Anchoring is bookkeeping for "has this seat answered at all"; the declaration itself is
-           already on the record and must not be undone because the marker could not be written. */
-      }
-    }
     return { message, mode: input.mode, alreadyDeclared: already };
   }
 
@@ -1501,22 +1488,27 @@ export class CollaborationService {
 
   /* Whether this seat has said which of the two it is doing, in THIS session. */
   hasDeclaredRoomStart(roomId: string, presenceId: string): boolean {
-    return this.#startDeclaration(roomId, presenceId) !== undefined;
+    return this.#hasStartDeclaration(roomId, presenceId);
   }
 
-  #startKey(roomId: string, presenceId: string, text?: string): string {
-    if (text === undefined) return `room-start:${roomId}:${presenceId}`;
-    /* A short digest of the sentence, so the same answer twice is one line and a different answer is
-       its own. Hex only, which the ledger's key pattern accepts. */
+  /*
+   * One key per DECLARATION, digested from the sentence, so the same answer twice collapses into one
+   * line and a genuine change of mind gets its own. There is no separate "anchor" key: writing a
+   * second row under a stable key to make lookups easy produced two identical lines on the first
+   * declaration -- two consecutive dividers, from the feature whose only job is to mark where one
+   * line of work ended.
+   */
+  #startKey(roomId: string, presenceId: string, text: string): string {
     const digest = createHash("sha256").update(text, "utf8").digest("hex").slice(0, 16);
     return `room-start:${roomId}:${presenceId}:${digest}`;
   }
 
-  #startDeclaration(roomId: string, presenceId: string): RoomMessage | undefined {
+  /* Any declaration at all for this seat this session, found by prefix rather than by a marker row. */
+  #hasStartDeclaration(roomId: string, presenceId: string): boolean {
     try {
-      return this.ledger.getByIdempotencyKey(this.#startKey(roomId, presenceId));
+      return this.ledger.hasIdempotencyKeyPrefix(`room-start:${roomId}:${presenceId}:`);
     } catch {
-      return undefined;
+      return false;
     }
   }
 
