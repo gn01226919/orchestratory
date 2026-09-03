@@ -95,12 +95,26 @@ test("every surface that shows a merge decision declines to claim an OS sandbox"
   for (const [label, url] of surfaces) {
     let text = await readFile(url, "utf8");
     /*
-     * For the markup surface, strip comments before matching. A grep over the whole file cannot tell
-     * a sentence the owner reads from one only a maintainer reads, so the comment explaining WHY the
-     * line is there would have satisfied the assertion on its own -- and the obvious tidy-up, moving
-     * the sentence into the comment beside it, would have passed while removing it from the screen.
+     * For the markup surface, two narrowings, and the limit of both said out loud.
+     *
+     * Comments are removed first: a grep over the whole file cannot tell a sentence the owner reads
+     * from one only a maintainer reads, so the comment explaining WHY the line is there satisfied the
+     * assertion by itself -- and the obvious tidy-up, folding the sentence into that comment, would
+     * have passed while taking it off the screen. Then the search is narrowed to the merge approval
+     * dialog, because "somewhere in a 200-element page" is not the same as "where the decision is
+     * made", and this file has other places the words could drift to.
+     *
+     * What this still does NOT establish is that the text renders. Markup inside `<script>` or
+     * `<template>`, or on a node the CSS hides, would satisfy it. Deciding that properly needs a DOM,
+     * which is a new dependency and therefore the owner's call (D-006). Until then this is a guard
+     * against deletion and drift, not a proof of visibility, and it is written down that way rather
+     * than named after the stronger property.
      */
-    if (url.pathname.endsWith(".html")) text = text.replaceAll(/<!--[\s\S]*?-->/gu, "");
+    if (url.pathname.endsWith(".html")) {
+      const dialog = text.match(/<section id="merge-approval"[\s\S]*?<\/section>/u)?.[0];
+      assert.ok(dialog, `${label}: the merge approval dialog was not found, so this guard cannot run`);
+      text = dialog.replaceAll(/<!--[\s\S]*?-->/gu, "");
+    }
     assert.match(text, disclaims, `${label} no longer says a worktree is not an OS sandbox`);
     assert.match(text, names, `${label} disclaims the sandbox without saying what can cross the boundary`);
   }

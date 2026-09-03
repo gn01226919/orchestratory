@@ -397,8 +397,18 @@ export class RoomLedger {
    * over exactly the rows after the mark. No limit is involved, which is why none can be exceeded.
    */
   hasAuthorMessageAfter(roomId: string, afterSeq: number, author: string): boolean {
+    /*
+     * `listAfter` throws ROOM_NOT_FOUND for an unknown room and this deliberately does not, which is
+     * a difference worth stating rather than leaving to be discovered. The question here is "is there
+     * evidence this author wrote", and a room that is not there is an absence of evidence, not a
+     * different kind of answer -- the caller marking a seat treats "could not look" and "nothing
+     * found" the same on purpose. Validating the arguments still matters: a malformed sequence or a
+     * blank author is a caller bug, and answering `false` for it would hide the bug behind a
+     * plausible result.
+     */
+    if (typeof roomId !== "string" || roomId.length === 0) throw new Error("INVALID_ROOM_ID");
     if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new Error("INVALID_ROOM_SEQ");
-    if (typeof author !== "string" || author.length === 0) throw new Error("INVALID_ROOM_AUTHOR");
+    if (typeof author !== "string" || author.trim().length === 0) throw new Error("INVALID_ROOM_AUTHOR");
     const row = this.#db
       .prepare(
         "SELECT 1 AS found FROM room_messages WHERE room_id = ? AND seq > ? AND author = ? LIMIT 1",

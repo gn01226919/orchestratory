@@ -237,5 +237,19 @@ test("an author's own message is found however much other traffic came first", a
   assert.equal(ledger.hasAuthorMessageAfter(room.id, later, "codex1"), false);
 
   assert.throws(() => ledger.hasAuthorMessageAfter(room.id, -1, "codex1"), /INVALID_ROOM_SEQ/u);
+  assert.throws(() => ledger.hasAuthorMessageAfter(room.id, 1.5, "codex1"), /INVALID_ROOM_SEQ/u);
   assert.throws(() => ledger.hasAuthorMessageAfter(room.id, 0, ""), /INVALID_ROOM_AUTHOR/u);
+  /* Blank is not a name. Accepting it would let a caller bug return a plausible `false` instead of
+     saying it passed nothing. */
+  assert.throws(() => ledger.hasAuthorMessageAfter(room.id, 0, "   "), /INVALID_ROOM_AUTHOR/u);
+  assert.throws(() => ledger.hasAuthorMessageAfter("", 0, "codex1"), /INVALID_ROOM_ID/u);
+
+  /* An unknown room answers `false` where `listAfter` throws. Asserted rather than left implicit,
+     because the two siblings disagreeing is the kind of thing a reader assumes is an oversight. */
+  assert.equal(ledger.hasAuthorMessageAfter("no-such-room", 0, "codex1"), false);
+  assert.throws(() => ledger.listAfter("no-such-room", 0), /ROOM_NOT_FOUND/u);
+
+  /* Author matching is exact: SQLite compares TEXT with BINARY unless told otherwise, and a seat
+     whose name differs only in case is a different seat. */
+  assert.equal(ledger.hasAuthorMessageAfter(room.id, mark, "CODEX1"), false);
 });

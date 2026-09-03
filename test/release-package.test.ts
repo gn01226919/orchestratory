@@ -74,6 +74,58 @@ test("every shipped runtime script travels with its declaration file", () => {
  * run without one. The comment is what a human compares against upstream; requiring it means there
  * is always something to compare.
  */
+/*
+ * Where a workflow names a third-party action.
+ *
+ * Corrected three times, which is the reason it is a named constant with its own test rather than a
+ * literal inside the one that reads the workflow. It first required `uses:` to be the first
+ * non-space on its line and could not see `- uses: actions/foo@v1`, the ordinary way to write a
+ * step; then allowed a leading `- ` and could not see the flow mapping `- { uses: … }`; then matched
+ * `\buses:` and could not see `"uses":`, `'uses':` or `uses :`, while a comment congratulated it for
+ * having "no list of forms to keep up to date" -- which is precisely the claim-beyond-the-guarantee
+ * this repository keeps finding, written into the comment that thought it had transcended it.
+ *
+ * What it does now: `uses` optionally quoted, not preceded by a word character or hyphen (so
+ * `reuses:` and `foo-uses:` are not it), any spacing around the colon, value ending at whitespace or
+ * at the punctuation closing a flow mapping.
+ *
+ * What it still does NOT do, stated because the previous version pretended otherwise: it is not a
+ * YAML parser. It matches inside comments and inside string values, so a workflow that writes
+ * `echo "uses: actions/x@v1"` fails this test. That direction is noise, not silence -- it demands a
+ * pin for something that is not an action, which is visible and arguable. The direction that would
+ * be dangerous is the other one, and every correction above closed a case of exactly that.
+ */
+const USES = /(?<![\w-])(?:"uses"|'uses'|uses)\s*:\s*([^\s,}]+)([^\n]*)/gu;
+
+/*
+ * The spellings, as literals. Without this the pattern is only ever exercised against this
+ * repository's own workflow, which uses one form -- so reverting any of the three corrections above
+ * leaves the suite green and the repair unguarded. That was true of the previous version: the flow
+ * mapping it had just been fixed to see appears nowhere in the repository.
+ */
+test("the action matcher sees every way a step can name one, and nothing else", () => {
+  const sees = (line: string): boolean => {
+    USES.lastIndex = 0;
+    return USES.test(line);
+  };
+
+  for (const line of [
+    "        uses: actions/checkout@abc",
+    "      - uses: actions/checkout@abc",
+    "      - { uses: actions/checkout@abc }",
+    "      - { name: x, uses: actions/checkout@abc }",
+    '      - "uses": actions/checkout@abc',
+    "      - 'uses': actions/checkout@abc",
+    "      - uses : actions/checkout@abc",
+  ]) {
+    assert.equal(sees(line), true, `a step spelled as \`${line.trim()}\` is invisible to the pin guard`);
+  }
+
+  for (const line of ["      reuses: something@v1", "      foo-uses: something@v1", "      run: npm ci"]) {
+    assert.equal(sees(line), false, `\`${line.trim()}\` is not a step naming an action`);
+  }
+});
+
 test("every CI action is pinned to a full commit SHA with the version it names", async () => {
   /* Every workflow, not one named file. The first version read `security.yml` only -- which is the
      whole directory today, so it passed while the comment beside it promised to catch "the fourth
@@ -85,19 +137,7 @@ test("every CI action is pinned to a full commit SHA with the version it names",
   const uses: Array<[string, string, string]> = [];
   for (const name of files) {
     const workflow = await readFile(new URL(name, dir), "utf8");
-    /*
-     * Not anchored to the start of a line, and that is the second correction to this pattern.
-     * It first required `uses:` to be the first non-space on its line, which cannot see
-     * `- uses: actions/foo@v1` -- the ordinary way to write a step. Both entries here happen to sit
-     * under a `- name:`, so it read green while blind to the commonest form. Anchoring was then
-     * relaxed to allow a leading `- `, which still cannot see the flow mapping
-     * `- { uses: actions/foo@v1 }`.
-     *
-     * Two blind spots in one expression is the signal that line shapes are the wrong thing to
-     * enumerate: `uses:` is a key, and its value ends at whitespace or at the punctuation that
-     * closes a flow mapping. Matching that instead has no list of forms to keep up to date.
-     */
-    for (const [, reference, trailer] of workflow.matchAll(/\buses:\s*([^\s,}]+)([^\n]*)/gu)) {
+    for (const [, reference, trailer] of workflow.matchAll(USES)) {
       uses.push([name, reference!, trailer ?? ""]);
     }
   }
