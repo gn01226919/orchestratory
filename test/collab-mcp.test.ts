@@ -66,6 +66,9 @@ async function fixture(options: {
   maxProviderCalls?: number;
   roots?: number;
   requestRoomJoin?: (roomId: string, workspace: string) => void;
+  /* Wire a collaboration service, which is what produces the join briefing. Off by default so the
+     existing tests keep their narrow surface. */
+  withCollaboration?: boolean;
   waitForRoomJoin?: (input: {
     roomId: string;
     workspace: string;
@@ -107,6 +110,7 @@ async function fixture(options: {
       readFiles: async () => "File: src/app.ts\nexport const app = true;",
     }),
     ledger,
+    ...(options.withCollaboration ? { collaboration: collaborationService(data) } : {}),
     workflowRequests,
     ...(options.requestRoomJoin ? { requestRoomJoin: options.requestRoomJoin } : {}),
     ...(options.waitForRoomJoin ? { waitForRoomJoin: options.waitForRoomJoin } : {}),
@@ -152,6 +156,7 @@ test("collab broker exposes only the fixed bounded tool registry", async (t) => 
       "room_init",
       "room_status",
       "room_post",
+      "room_start",
       "room_read",
       "room_get",
       "room_search",
@@ -274,6 +279,52 @@ test("room_join_request returns after membership approval without silently start
   assert.equal((result as Record<string, unknown>).hostCapabilities, "unchanged");
   assert.equal(inbox.list("demo")[0]?.ledgerSeq, mention.seq);
   assert.deepEqual(calls, []);
+});
+
+/*
+ * The half of this feature that faces the joining agent, and it had no test at all: deleting the
+ * briefing and the whole mustAnswer block from the join response left the suite green.
+ *
+ * What it is for: a capability declaration answers "what may I do here", not "what is already
+ * happening here", and an agent with only the first either takes over a thread someone else is
+ * running or rebuilds something the room already settled.
+ */
+test("joining hands back what the room is in the middle of, and the question that has to be answered", async (t) => {
+  /* Wired with a collaboration service, because that is what produces the briefing -- and because a
+     fixture without one is exactly how this path stayed untested: the response quietly omits the
+     briefing rather than failing, so a test that did not supply one would have asserted nothing. */
+  const { broker, ledger, cleanup } = await fixture({
+    requestRoomJoin: () => undefined,
+    waitForRoomJoin: async () => true,
+    withCollaboration: true,
+  });
+  t.after(cleanup);
+  await broker.call("room_init", { room: "demo" });
+  for (let i = 1; i <= 6; i += 1) ledger.append("demo", "you", `先前的第 ${i} 則`);
+
+  const joined = JSON.parse(await broker.call("room_join_request", { room: "demo" })) as {
+    joined: boolean;
+    briefing?: { totalMessages: number; shown: number; recent: Array<{ seq: number }>; seats: unknown[]; writing: unknown[] };
+    mustAnswer?: { question: string; options: Array<{ mode: string; meaning: string }>; how: string; ifYouSkipIt: string; thenWhat: string };
+  };
+  assert.equal(joined.joined, true);
+
+  // The briefing, and the denominator that stops the slice reading as the whole room.
+  assert.ok(joined.briefing, "joining must hand back what the room is in the middle of");
+  assert.equal(joined.briefing?.shown, joined.briefing?.recent.length);
+  assert.ok((joined.briefing?.totalMessages ?? 0) >= (joined.briefing?.shown ?? 0));
+  assert.equal(joined.briefing?.recent[joined.briefing.recent.length - 1]?.seq, joined.briefing?.totalMessages,
+    "and it must end at the newest message, not at an arbitrary window");
+
+  // The fork. All five fields, because each answers a different question the agent actually has.
+  assert.ok(joined.mustAnswer, "and the question that has to be answered before working");
+  assert.deepEqual(joined.mustAnswer?.options.map((option) => option.mode), ["continue", "new-task"]);
+  assert.match(String(joined.mustAnswer?.how), /room_start/u, "it must name the tool that answers it");
+  assert.match(String(joined.mustAnswer?.ifYouSkipIt), /candidate/u,
+    "and say which actions are recorded if it is skipped, rather than implying all of them are");
+  assert.match(String(joined.mustAnswer?.thenWhat), /before the code/u,
+    "reading order is the owner's rule; a ban on reading source is not");
+  assert.doesNotMatch(String(joined.mustAnswer?.thenWhat), /Do not start reading/u);
 });
 
 test("room_join_request times out fail-closed and validates both bounded waits", async (t) => {
@@ -900,6 +951,89 @@ test("MCP exact terminal seats discover, send, await, and continue threads direc
     taskId: "peer-task",
   })) as { delivery: { id: string; threadId: string; sourcePresenceId: string } };
   assert.equal(sent.delivery.sourcePresenceId, codex.id);
+
+  /*
+   * Saying which of the two things this seat is here to do. The tool exists because the alternative --
+   * an agent that never distinguishes "pick up what is running" from "start something beside it" --
+   * produces either a hijacked thread or a rebuilt wheel, and neither is visible until it is expensive.
+   */
+  const startTool = codexBroker.tools().find((tool) => tool.name === "room_start");
+  assert.ok(startTool, "the fork has to be answerable, not only asked");
+  // The tool must not claim to gate anything: nothing downstream refuses work from a seat that skipped
+  // it, and a description that implied otherwise would be the usual defect in its purest form.
+  assert.match(String(startTool?.description ?? ""), /Nothing forces you to call it/u);
+  /*
+   * Names the tools it actually covers. The first version asserted a generic "records that you acted",
+   * which was true of one path -- room_send -- and false of the one that matters most, a seat that
+   * opens a worktree before saying anything. The assertion protected the sentence's existence rather
+   * than its truth, which is how a test turns an overclaim into a specification.
+   */
+  for (const covered of [/candidate/u, /post/u, /mention/u, /another seat/u]) {
+    assert.match(String(startTool?.description ?? ""), covered);
+  }
+  assert.match(String(startTool?.description ?? ""), /records once/u,
+    "one line per seat per session, not a column");
+
+  const declared = JSON.parse(await codexBroker.call("room_start", {
+    mode: "new-task", note: "改一段跟現有討論無關的樣式",
+  })) as { mode: string; alreadyDeclared: boolean; ledgerSeq: number; next: string };
+  assert.equal(declared.mode, "new-task");
+  assert.equal(declared.alreadyDeclared, false);
+  /*
+   * The owner's rule is about ORDER and about who resolves a contradiction -- read the room first, and
+   * bring a disagreement between ledger and code to them -- not a ban on reading source. An earlier
+   * version of this text said "do not start reading the codebase on your own initiative", which would
+   * stop an agent that had already been given a task.
+   */
+  assert.match(declared.next, /Read the room before the code/u);
+  assert.match(declared.next, /owner/u, "and a contradiction is resolved by the owner, not by the agent");
+  assert.doesNotMatch(declared.next, /Do not start reading/u);
+
+  const dividerLine = codexService.ledger.getRange("demo", declared.ledgerSeq, declared.ledgerSeq)[0];
+  assert.match(String(dividerLine?.text), /開始新任務/u);
+  assert.match(String(dividerLine?.text), /──/u, "a new task writes a divider a later reader can see");
+
+  // Answering again with the same words is the same answer, not a second divider.
+  const again = JSON.parse(await codexBroker.call("room_start", {
+    mode: "new-task", note: "改一段跟現有討論無關的樣式",
+  })) as { alreadyDeclared: boolean; ledgerSeq: number };
+  assert.equal(again.alreadyDeclared, true);
+  assert.equal(again.ledgerSeq, declared.ledgerSeq);
+
+  /*
+   * Changing your mind is allowed, and is its own line.
+   *
+   * A single key per session made the same answer dedupe and a CHANGED one throw
+   * ROOM_IDEMPOTENCY_CONFLICT -- an opaque code, reaching the agent on the most natural sequence
+   * there is: declare one thing, read the briefing, realise it is the other. The flow this feature
+   * exists to support was the flow it refused.
+   */
+  const changed = JSON.parse(await codexBroker.call("room_start", {
+    mode: "continue", note: "看完帳本後改成接續原本那條",
+  })) as { mode: string; alreadyDeclared: boolean; ledgerSeq: number };
+  assert.equal(changed.mode, "continue");
+  assert.equal(changed.alreadyDeclared, true, "the seat had answered before; this is a revision");
+  assert.notEqual(changed.ledgerSeq, declared.ledgerSeq, "and the revision is its own line");
+  assert.match(
+    String(codexService.ledger.getRange("demo", changed.ledgerSeq, changed.ledgerSeq)[0]?.text),
+    /接續房間現有的工作/u,
+  );
+  // Both stay on the record: "they started out splitting off and then rejoined" is the thing a later
+  // reader needs, and neither line is rewritten.
+  assert.match(
+    String(codexService.ledger.getRange("demo", declared.ledgerSeq, declared.ledgerSeq)[0]?.text),
+    /開始新任務/u,
+  );
+
+  // Binding and membership are fail-closed, and both are asserted rather than assumed.
+  await assert.rejects(
+    codexBroker.call("room_start", { mode: "continue", room: "another-room" }),
+    /ROOM_START_BINDING_MISMATCH/u,
+  );
+  await assert.rejects(
+    codexBroker.call("room_start", { mode: "sideways" }),
+    /INVALID_ROOM_START_MODE/u,
+  );
   const claimed = JSON.parse(await claudeBroker.call("room_wait", {
     room: "demo", timeoutMs: 100,
   })) as { delivery: { id: string; leaseToken: string; threadId: string; sourcePresenceId: string } };
@@ -1102,6 +1236,17 @@ test("native MCP candidate tools preserve main and end at an owner-required merg
   assert.equal(started.mainMutation, false);
   assert.equal(started.mainMutationScope, "canonical-main-branch-and-worktree");
   assert.equal(started.sharedGitMetadataMutation, true);
+
+  /*
+   * This seat opened a worktree without ever saying whether it was continuing the room's work or
+   * starting something separate -- the highest-stakes version of skipping that question, and the one
+   * the join response promises is recorded. It was the one path with no record while the promise was
+   * already being made, so it needs a nail of its own.
+   */
+  const undeclared = service.ledger.listAfter("demo", 0)
+    .filter((message: { text: string }) => String(message.text).includes("還沒說明"));
+  assert.equal(undeclared.length, 1, "opening a candidate before answering must leave exactly one line");
+  assert.match(String(undeclared[0]?.text), /先動手/u);
   await writeFile(join(started.candidate.candidatePath, "candidate.txt"), "candidate\n", "utf8");
   await execFileAsync("git", ["add", "candidate.txt"], { cwd: started.candidate.candidatePath });
   await execFileAsync("git", [

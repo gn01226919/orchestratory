@@ -327,6 +327,21 @@ export class CollabToolBroker {
         },
       },
       {
+        name: "room_start",
+        description:
+          "Say which of two things you are here to do, before doing either. `continue` means you are picking up the work the room is already doing -- read the briefing room_join_request returned, and the ledger, first. `new-task` means you are starting something separate, and writes a divider into the ledger so a later reader can see where one line of work ended and yours began. Pass a one-line note saying what you are taking on. Calling this again with the same mode and note returns the same recorded line rather than adding another. Changing your mind is allowed and is recorded as its own line -- declaring `continue`, reading the briefing, and then declaring `new-task` leaves both, which is what a later reader needs. Nothing forces you to call it: if you open a candidate, post, mention a provider, or send work to another seat first, the room records once that you acted without saying which you were doing, and that line is what somebody reads when two efforts collide.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["mode"],
+          properties: {
+            mode: { type: "string", enum: ["continue", "new-task"] },
+            note: { type: "string", minLength: 1, maxLength: 200 },
+            room: { type: "string", minLength: 1, maxLength: 48 },
+          },
+        },
+      },
+      {
         name: "room_read",
         description: "Read numbered room-ledger messages newer than a sequence cursor.",
         inputSchema: {
@@ -657,6 +672,7 @@ export class CollabToolBroker {
     if (name === "room_init") return await this.#roomInit(asObject(input));
     if (name === "room_status") return this.#roomStatus(asObject(input));
     if (name === "room_post") return this.#roomPost(asObject(input));
+    if (name === "room_start") return this.#roomStart(asObject(input));
     if (name === "room_read") return this.#roomRead(asObject(input));
     if (name === "room_get") return this.#roomGet(asObject(input));
     if (name === "room_search") return this.#roomSearch(asObject(input));
@@ -811,6 +827,26 @@ export class CollabToolBroker {
     if (binding && (binding.roomId !== roomId || binding.workspace !== workspace)) {
       throw new Error("ROOM_JOIN_BINDING_MISMATCH");
     }
+    /*
+     * Hand back what the room is in the middle of, not only what this terminal may do.
+     *
+     * A capability declaration answers "what am I allowed to do here". It does not answer "what is
+     * already happening here", and an agent that only has the first will either take over a thread
+     * someone else is running or rebuild something the room already settled. The briefing is bounded
+     * -- the newest fifty lines, the seats, what is waiting on them -- and reports the total so the
+     * slice cannot be read as the whole.
+     *
+     * Reading the CODE is deliberately not part of this and is not suggested here. The ledger says how
+     * things came to be this way and the code says what is true now; when they disagree, deciding
+     * which to believe is the owner's call, not a newcomer's.
+     */
+    let briefing: unknown;
+    try {
+      briefing = this.#collaboration?.roomBriefing({ roomId, workspace });
+    } catch {
+      /* A room that cannot be summarised is still a room that was joined. */
+      briefing = undefined;
+    }
     return JSON.stringify({
       requested: true,
       joined: true,
@@ -821,6 +857,28 @@ export class CollabToolBroker {
         : {}),
       room: roomId,
       duty: "standby-approval-required",
+      ...(briefing === undefined ? {} : { briefing }),
+      /*
+       * The fork, in the response rather than in a tool description, because this is the moment it has
+       * to be answered. Stated as a requirement and enforced by nothing: MCP returns text and cannot
+       * make anyone read it. What IS enforced is the record -- work sent before answering leaves a
+       * line in the ledger saying so, which is the honest half of "you must answer first".
+       */
+      mustAnswer: {
+        question: "Before doing any work here, say which of these you are doing.",
+        options: [
+          /* Phrased so it still reads correctly when `briefing` is absent -- this response omits it if
+             the room cannot be summarised, and an option that pointed at a field that is not there
+             would send the agent looking for something it was never given. */
+          { mode: "continue", meaning: briefing === undefined
+            ? "Pick up the work this room is already doing. Read the ledger with room_read first; no briefing came with this response."
+            : "Pick up the work this room is already doing, as shown in the briefing. A line saying so goes into the ledger." },
+          { mode: "new-task", meaning: "Start something separate. A divider is written into the ledger so a later reader can see where one line of work ended and yours began." },
+        ],
+        how: "Call room_start with that mode, and a one-line note saying what you are taking on.",
+        ifYouSkipIt: "Nothing stops you working first. If you open a candidate, post to the room, mention another provider, or send work to another seat before answering, the room records once that you acted without saying which you were doing -- and whoever untangles two overlapping efforts later reads that line. Other tools do not write it.",
+        thenWhat: "Read the room before the code, and if the ledger and the codebase disagree about the current state, stop and ask the owner rather than picking one. If you were given a task, get on with it -- this is about the order you look at things and who resolves a contradiction, not a ban on reading source.",
+      },
     });
   }
 
@@ -996,6 +1054,37 @@ export class CollabToolBroker {
     }
   }
 
+  /*
+   * Record which of the two this seat is doing. See the tool description for why this is asked at all;
+   * what matters here is that it is a record, not a gate -- nothing downstream refuses work from a
+   * seat that skipped it, because a gate would only teach the next agent to route around the question.
+   */
+  #roomStart(input: JsonObject): string {
+    this.#allowedKeys(input, ["mode", "note", "room"], "UNKNOWN_ROOM_START_ARGUMENT");
+    const { collaboration, presenceId, binding } = this.#peerSession();
+    if (input.room !== undefined && input.room !== binding.roomId) throw new Error("ROOM_START_BINDING_MISMATCH");
+    if (input.mode !== "continue" && input.mode !== "new-task") throw new Error("INVALID_ROOM_START_MODE");
+    if (input.note !== undefined && (typeof input.note !== "string" || input.note.trim().length < 1)) {
+      throw new Error("INVALID_ROOM_START_NOTE");
+    }
+    const declared = collaboration.declareRoomStart({
+      roomId: binding.roomId,
+      workspace: binding.workspace,
+      presenceId,
+      mode: input.mode,
+      ...(typeof input.note === "string" ? { note: input.note } : {}),
+    });
+    return JSON.stringify({
+      mode: declared.mode,
+      alreadyDeclared: declared.alreadyDeclared,
+      ledgerSeq: declared.message.seq,
+      /* Said once here so it is not only in the tool description, which a caller may never re-read. */
+      next: declared.mode === "continue"
+        ? "Work from what the room already has. If the ledger and the code disagree about the current state, stop and ask the owner rather than picking one."
+        : "Your divider is in the ledger. Read the room before the code, and bring any contradiction between them to the owner rather than resolving it yourself.",
+    });
+  }
+
   async #candidateStart(input: JsonObject): Promise<string> {
     this.#allowedKeys(input, ["clientRequestId", "mainPath", "task", "acceptanceCriteria", "room"], "UNKNOWN_CANDIDATE_START_ARGUMENT");
     const clientRequestId = requireCandidateRequestId(input.clientRequestId);
@@ -1003,6 +1092,12 @@ export class CollabToolBroker {
     if (typeof input.mainPath !== "string" || input.mainPath !== binding.workspace) {
       throw new Error("CANDIDATE_MAIN_PATH_BINDING_MISMATCH");
     }
+    /*
+     * The highest-stakes place to act without having said which of the two you are doing: a seat that
+     * has just arrived, has not answered the fork, and opens a worktree to start writing code. It was
+     * also the one place with no record, while the join response promised there would be one.
+     */
+    this.#noteUndeclaredSeatAction(binding.roomId);
     if (input.room !== undefined && input.room !== binding.roomId) throw new Error("CANDIDATE_ROOM_BINDING_MISMATCH");
     const task = requireQuestion(input.task);
     const acceptanceCriteria = input.acceptanceCriteria === undefined
@@ -1280,6 +1375,23 @@ export class CollabToolBroker {
     return JSON.stringify({ delivery: collaboration ? collaboration.failExternal(request) : inbox!.fail(request) });
   }
 
+  /*
+   * Record that a seat acted before answering the fork, wherever it acted.
+   *
+   * Defensive because these tools are not seat-only: `room_post` and `room_mention` can be reached by
+   * callers with no presence at all, and a briefing promise that only holds for one tool is exactly
+   * the kind of gap this codebase keeps finding. No presence, nothing to record, no error.
+   */
+  #noteUndeclaredSeatAction(roomId: string): void {
+    try {
+      const { collaboration, presenceId } = this.#seatInbox();
+      collaboration?.noteUndeclaredSeatAction(roomId, presenceId);
+    } catch {
+      /* Not a seat, or no collaboration service wired: there is nothing to say about a declaration
+         that was never owed. */
+    }
+  }
+
   #roomPost(input: JsonObject): string {
     this.#allowedKeys(input, ["author", "text", "room"], "UNKNOWN_ROOM_POST_ARGUMENT");
     const roomId = this.#resolveRoomId(input.room);
@@ -1289,6 +1401,7 @@ export class CollabToolBroker {
     if (ROOM_WAKE_PREFIX_PATTERN.test(input.text.trimStart())) {
       throw new Error("ROOM_POST_MENTION_REQUIRES_ROOM_MENTION");
     }
+    this.#noteUndeclaredSeatAction(roomId);
     return JSON.stringify(this.#requireLedger().append(roomId, this.#messageAuthor(input.author, roomId), input.text));
   }
 
@@ -1416,6 +1529,7 @@ export class CollabToolBroker {
     }
     const match = input.target.trim().match(TARGET_PATTERN);
     if (!match) throw new Error("INVALID_ROOM_MENTION_TARGET");
+    this.#noteUndeclaredSeatAction(roomId);
     const provider = match[1] as ProviderId;
     const model = this.#resolveModel(provider, match[2]);
     const room = this.#requireLedger().getRoom(roomId)!;

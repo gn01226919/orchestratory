@@ -976,9 +976,12 @@ function renderPresencePanel() {
            conspicuous character in the row -- the text would say "record" while the icon said "ring",
            and the icon is what gets believed. */
         wake.textContent = "📝 在帳本記一筆：我找過它";
-        /* Does not promise the seat will see it. Nothing here delivers the ledger to it: room_wait
-           and room_join_request return no ledger tail, and the guidance agents are given is to
-           re-enter room_wait rather than to call room_read. What we can state is what we do. */
+        /* Does not promise the seat will see it, and the reason has narrowed rather than gone away.
+           There is now exactly one path that would show it: a terminal that REJOINS gets a briefing
+           with the newest fifty ledger lines, so a note still inside that window would be in front of
+           it. A seat that simply resumes standby gets no tail, and agents are told to re-enter
+           room_wait rather than to call room_read. So: possible on a rejoin, not otherwise, and never
+           something to count on. What we can state is what we do. */
         /* Says what it is FOR, not only what it is not. The disclaimer was clean and the value
            proposition was missing entirely, which leaves a reader with no answer to "then why would I
            press this". The honest answer is small and it is real: a timestamped record, for you. */
@@ -1229,10 +1232,12 @@ async function changePresenceMembership(session, button) {
  * to be listening and therefore says nothing was recorded at all.
  *
  * What it does do is real, and smaller than it first sounds: the line lands in the ledger, where that
- * seat CAN read it with room_read. Nothing hands it over -- room_wait and room_join_request return no
- * ledger tail, and agents are told to re-enter room_wait rather than to read -- so being seen is an
- * opportunity, not a guarantee. The part that does not depend on the other end is the owner's own
- * timestamped record of having looked for it.
+ * seat CAN read it with room_read, and one path now puts it in front of them without being asked: a
+ * terminal that REJOINS receives a briefing carrying the newest fifty ledger lines. That is narrow --
+ * it needs a rejoin, and the note has to still be inside that window -- and a seat that merely resumes
+ * standby gets no tail at all, while agents are told to re-enter room_wait rather than to read. So
+ * being seen is a possibility with one real route, not a guarantee. The part that does not depend on
+ * the other end is still the owner's own timestamped record of having looked for it.
  */
 async function requestPresenceWake(session, button) {
   if (!state.room) return;

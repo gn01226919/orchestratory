@@ -510,6 +510,109 @@ test("a joining agent is briefed on the room, in a slice that says how much it i
     /INVALID_ROOM_BRIEFING_SIZE/u,
   );
   assert.equal(gui.roomBriefing({ roomId: "demo", workspace: "/tmp/project", messages: 3 }).shown, 3);
+
+  /*
+   * The briefing ages the room before counting, the same way roomView does -- otherwise it reports
+   * deliveries the GUI has already retired and the two panels disagree. Ageing appends system lines
+   * of its own, so every number here has to come from one read taken AFTER that, or the slice ends
+   * before a total that counted them.
+   */
+  gui.removeExternal({ presenceId: busy.id, roomId: "demo", workspace: "/tmp/project" });
+  const afterSweep = gui.roomBriefing({ roomId: "demo", workspace: "/tmp/project" });
+  assert.equal(
+    afterSweep.recent[afterSweep.recent.length - 1]?.seq,
+    afterSweep.totalMessages,
+    "the slice must still end at the newest message once the sweeps have written their own lines",
+  );
+  assert.deepEqual(
+    afterSweep.seats.map((entry) => entry.displayName),
+    [],
+    "and a seat removed from the room is no longer briefed as present",
+  );
+});
+
+/*
+ * The briefing tells a joining agent what the room is in the middle of; this is where it says what it
+ * intends to do about that. The owner's complaint was an agent that never distinguishes "pick up the
+ * thread already running" from "start something beside it" -- one produces a hijacked task, the other
+ * a rebuilt wheel.
+ */
+test("a seat declares which of the two it is doing, and acting without saying so is visible", async (t) => {
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-start-"));
+  const gui = collaborationService(data);
+  t.after(() => gui.close());
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+
+  gui.ledger.createRoom("demo", "/tmp/project");
+  const seat = (label: string, pid: number): string => {
+    const registered = gui.registerExternal({ provider: "codex", workspace: "/tmp/project", hostPid: pid, model: "gpt-test" });
+    gui.requestExternalJoin(registered.id, "demo", "/tmp/project");
+    gui.approveExternalJoin({
+      ...ROOM_FIRST_JOIN, presenceId: registered.id, roomId: "demo", workspace: "/tmp/project", label,
+    });
+    gui.requestExternalStandby(registered.id, "demo", "/tmp/project");
+    gui.approveExternalStandby(registered.id, "demo", "/tmp/project");
+    return registered.id;
+  };
+  const declaring = seat("declaring", 7601);
+  const silent = seat("silent", 7602);
+
+  assert.equal(gui.hasDeclaredRoomStart("demo", declaring), false, "a fresh seat has not answered yet");
+
+  const started = gui.declareRoomStart({
+    roomId: "demo", workspace: "/tmp/project", presenceId: declaring, mode: "new-task", note: "改帳本分頁",
+  });
+  assert.equal(started.alreadyDeclared, false);
+  assert.match(String(started.message.text), /開始新任務/u);
+  assert.match(String(started.message.text), /改帳本分頁/u);
+  // A divider, so a later reader can see where one line of work stopped and another began.
+  assert.match(String(started.message.text), /──/u);
+  assert.equal(gui.hasDeclaredRoomStart("demo", declaring), true);
+
+  // Answering twice is the same answer, not a second line.
+  const again = gui.declareRoomStart({
+    roomId: "demo", workspace: "/tmp/project", presenceId: declaring, mode: "new-task", note: "改帳本分頁",
+  });
+  assert.equal(again.alreadyDeclared, true);
+  assert.equal(again.message.seq, started.message.seq);
+
+  /*
+   * And the seat that never answered. The send is NOT refused -- MCP returns text and cannot make an
+   * agent read a question, and a gate here would only teach the next one to route around it. What is
+   * true instead is that the room shows it happened.
+   */
+  const sent = gui.postBetweenExternals({
+    roomId: "demo", workspace: "/tmp/project",
+    sourcePresenceId: silent, targetPresenceId: declaring,
+    text: "我直接開始做了", clientRequestId: randomUUID(),
+  });
+  assert.equal(sent.delivery.state, "queued", "the work goes through; only the record changes");
+
+  const lines = gui.ledger.listAfter("demo", 0).map((message) => String(message.text));
+  const flagged = lines.find((line: string) => line.includes("codex（silent）") && line.includes("還沒說明"));
+  assert.ok(flagged, `acting before declaring must be visible, got:\n${lines.join("\n")}`);
+
+  // One line per seat per session, so a talkative agent leaves a note rather than a column.
+  gui.postBetweenExternals({
+    roomId: "demo", workspace: "/tmp/project",
+    sourcePresenceId: silent, targetPresenceId: declaring,
+    text: "還有這個", clientRequestId: randomUUID(),
+  });
+  assert.equal(
+    gui.ledger.listAfter("demo", 0).filter((message) => String(message.text).includes("還沒說明")).length,
+    1,
+  );
+
+  // A seat that HAS answered is not flagged.
+  gui.postBetweenExternals({
+    roomId: "demo", workspace: "/tmp/project",
+    sourcePresenceId: declaring, targetPresenceId: silent,
+    text: "我先前已經說明過了", clientRequestId: randomUUID(),
+  });
+  assert.equal(
+    gui.ledger.listAfter("demo", 0).filter((message) => String(message.text).includes("codex（declaring）") && String(message.text).includes("還沒說明")).length,
+    0,
+  );
 });
 
 test("exact terminal seats exchange authenticated multi-turn threads without provider fallback", async (t) => {

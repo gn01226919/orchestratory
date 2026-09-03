@@ -22,7 +22,7 @@ import {
 } from "./room-inbox.ts";
 import { safeSummary } from "../security/redact.ts";
 import { realpathSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   WriterLeaseStore,
   type GrantedWriterLease,
@@ -605,6 +605,7 @@ export class CollaborationService {
       }
       const wakeable = this.inbox.isListening(target.id, input.roomId);
       if (!wakeable) this.#noteQueuedForSilentSeat(input.roomId, message.seq, target.displayName, delivery.id);
+      this.#noteUndeclaredStart(input.roomId, source.id, source.displayName ?? source.provider);
       return {
         message,
         source,
@@ -1339,6 +1340,22 @@ export class CollaborationService {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_BRIEFING_MESSAGES) {
       throw new Error("INVALID_ROOM_BRIEFING_SIZE");
     }
+    if (!this.ledger.getRoom(input.roomId)) throw new Error("ROOM_NOT_FOUND");
+    /*
+     * Age the room the same way `roomView` does, BEFORE reading anything that will be reported.
+     *
+     * Without the sweeps the briefing counts deliveries the GUI has already retired -- a seat shown
+     * with three things waiting while `list_agents` beside it says one, because two were past twelve
+     * hours and nothing had triggered the sweep yet. Neither number is invented; they answer the same
+     * question at different points in one tick, which is worse than either being wrong alone, because
+     * a reader cannot tell which to believe.
+     *
+     * And every count below is taken after them, from one read. Sweeping and then reporting a total
+     * captured beforehand would be the same inconsistency moved inside this function: the sweeps
+     * append their own system lines, so the slice would end before a total that had counted them.
+     */
+    this.#reconcileUnavailableDeliveries(input.roomId, input.workspace, "SEAT_OFFLINE");
+    this.#expireStaleDeliveries(input.roomId);
     const info = this.ledger.getRoom(input.roomId);
     if (!info) throw new Error("ROOM_NOT_FOUND");
     /*
@@ -1379,6 +1396,128 @@ export class CollaborationService {
       seats,
       writing,
     };
+  }
+
+  /*
+   * A seat saying which of the two things it is here to do.
+   *
+   * The briefing tells a joining agent what the room is in the middle of; this is where it says what
+   * it intends to do about that. The two answers lead to different work -- picking up the thread that
+   * is already running, or starting something beside it -- and the failure the owner described is an
+   * agent that never distinguishes them.
+   *
+   * Recorded in the ledger and nowhere else, deliberately: `presence_id` is a fresh UUID per
+   * registration, so the idempotency key is already unique to this session, and a seat that reconnects
+   * is a new seat that has not answered rather than one inheriting an old answer. No new column, and
+   * the answer lives where the next reader is already looking.
+   */
+  declareRoomStart(input: {
+    roomId: string;
+    workspace: string;
+    presenceId: string;
+    mode: "continue" | "new-task";
+    note?: string;
+  }): { message: RoomMessage; mode: "continue" | "new-task"; alreadyDeclared: boolean } {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    if (input.mode !== "continue" && input.mode !== "new-task") throw new Error("INVALID_ROOM_START_MODE");
+    const seat = this.presence.get(input.presenceId);
+    if (!seat || seat.workspace !== input.workspace || !seat.joined || seat.roomId !== input.roomId) {
+      throw new Error("PRESENCE_NOT_JOINED");
+    }
+    const note = input.note === undefined ? "" : safeSummary(String(input.note), 200);
+    const name = seat.displayName ?? seat.provider;
+    const already = this.#startDeclaration(input.roomId, input.presenceId) !== undefined;
+    const text = input.mode === "continue"
+      ? `▶ ${name} 接續房間現有的工作${note ? `：${note}` : ""}`
+      /* A divider, so a later reader can see where one line of work stopped and another began. */
+      : `── ${name} 從這裡開始新任務${note ? `：${note}` : ""} ──`;
+    /*
+     * Keyed by what was said, not merely by who said it.
+     *
+     * A single key per session meant the SAME answer deduped correctly and a CHANGED one threw
+     * ROOM_IDEMPOTENCY_CONFLICT -- the ledger comparing payload hashes and finding a different
+     * sentence under the same key. That error reached the agent as an opaque code, and it fired on
+     * the most natural sequence there is: declare `continue`, read the briefing, realise this is
+     * actually a separate task. The flow this feature exists to support was the flow it refused.
+     *
+     * So a genuine change of mind is a genuine second line, and identical repeats -- transport
+     * retries -- still collapse. Both declarations stay on the record, which is the point: "they
+     * started out continuing and then split off" is exactly what a later reader needs.
+     */
+    const message = this.ledger.appendSystemIdempotent(
+      input.roomId, text, this.#startKey(input.roomId, input.presenceId, text),
+    );
+    /* The first declaration of the session is what `#startDeclaration` looks for, so mark this one as
+       the anchor if there was not one already. Recorded under the stable key with the same text, so
+       re-declaring the same thing collapses into it rather than adding a line. */
+    if (!already) {
+      try {
+        this.ledger.appendSystemIdempotent(
+          input.roomId, text, this.#startKey(input.roomId, input.presenceId),
+        );
+      } catch {
+        /* Anchoring is bookkeeping for "has this seat answered at all"; the declaration itself is
+           already on the record and must not be undone because the marker could not be written. */
+      }
+    }
+    return { message, mode: input.mode, alreadyDeclared: already };
+  }
+
+  /*
+   * A seat that started working before saying which of the two things it was doing.
+   *
+   * This does NOT block the send, and that is not a compromise -- it is the only honest option. MCP
+   * returns text; it cannot make an agent read the question, and a gate that refused the work would
+   * only teach the next agent to route around it. What can be true is that the room shows what
+   * happened: someone acted without saying whether they were continuing or starting something new,
+   * and a reader wondering why two lines of work collided has that in front of them.
+   *
+   * One line per seat per session, so a talkative agent leaves a note, not a column.
+   */
+  /*
+   * Public so the MCP layer can call it at the other places a seat acts on its own initiative --
+   * opening a candidate, posting, mentioning. Those go through different service methods, and putting
+   * the note at each ACTION rather than inside one of them is what keeps the promise in the join
+   * response ("the room records that you acted") the same size as the code.
+   */
+  noteUndeclaredSeatAction(roomId: string, presenceId: string): void {
+    const seat = this.presence.get(presenceId);
+    if (!seat || seat.roomId !== roomId || !seat.joined) return;
+    this.#noteUndeclaredStart(roomId, presenceId, seat.displayName ?? seat.provider);
+  }
+
+  #noteUndeclaredStart(roomId: string, presenceId: string, displayName: string): void {
+    if (this.hasDeclaredRoomStart(roomId, presenceId)) return;
+    try {
+      this.ledger.appendSystemIdempotent(
+        roomId,
+        `⚠ ${displayName} 還沒說明是接續現有工作還是開始新任務，就先動手了。`,
+        `room-start-missing:${roomId}:${presenceId}`,
+      );
+    } catch {
+      /* The work is already committed; a missing annotation must not undo it. */
+    }
+  }
+
+  /* Whether this seat has said which of the two it is doing, in THIS session. */
+  hasDeclaredRoomStart(roomId: string, presenceId: string): boolean {
+    return this.#startDeclaration(roomId, presenceId) !== undefined;
+  }
+
+  #startKey(roomId: string, presenceId: string, text?: string): string {
+    if (text === undefined) return `room-start:${roomId}:${presenceId}`;
+    /* A short digest of the sentence, so the same answer twice is one line and a different answer is
+       its own. Hex only, which the ledger's key pattern accepts. */
+    const digest = createHash("sha256").update(text, "utf8").digest("hex").slice(0, 16);
+    return `room-start:${roomId}:${presenceId}:${digest}`;
+  }
+
+  #startDeclaration(roomId: string, presenceId: string): RoomMessage | undefined {
+    try {
+      return this.ledger.getByIdempotencyKey(this.#startKey(roomId, presenceId));
+    } catch {
+      return undefined;
+    }
   }
 
   #reconcileUnavailableDeliveries(roomId: string, workspace: string, reason: string): RoomDelivery[] {
