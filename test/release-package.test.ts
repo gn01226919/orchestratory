@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { allowedRuntimeScripts } from "../scripts/release-manifest.mjs";
 
 /*
@@ -75,22 +75,40 @@ test("every shipped runtime script travels with its declaration file", () => {
  * is always something to compare.
  */
 test("every CI action is pinned to a full commit SHA with the version it names", async () => {
-  const workflow = await readFile(new URL("../.github/workflows/security.yml", import.meta.url), "utf8");
-  const uses = [...workflow.matchAll(/^\s*uses:\s*(\S+)(.*)$/gmu)];
+  /* Every workflow, not one named file. The first version read `security.yml` only -- which is the
+     whole directory today, so it passed while the comment beside it promised to catch "the fourth
+     action someone adds". A second workflow file was the way past it. */
+  const dir = new URL("../.github/workflows/", import.meta.url);
+  const files = (await readdir(dir)).filter((name) => /\.ya?ml$/u.test(name)).sort();
+  assert.ok(files.length >= 1, "no workflow files were found; this guard has stopped guarding");
+
+  const uses: Array<[string, string, string]> = [];
+  for (const name of files) {
+    const workflow = await readFile(new URL(name, dir), "utf8");
+    /* The `- ` is not optional decoration: `- uses: actions/foo@v1` is the ordinary way to write a
+       step, and the first version of this pattern required `uses:` to be the first non-space on the
+       line. Both entries in this repository happen to sit under a `- name:`, so the guard read as
+       green while being blind to the commonest form -- found by a mutant that added an unpinned
+       action and was not caught. */
+    for (const [, reference, trailer] of workflow.matchAll(/^\s*(?:-\s+)?uses:\s*(\S+)(.*)$/gmu)) {
+      uses.push([name, reference!, trailer ?? ""]);
+    }
+  }
 
   assert.ok(uses.length >= 2, "no `uses:` entries were parsed; this guard has stopped guarding");
 
-  for (const [, reference, trailer] of uses) {
-    const [action, pin] = reference!.split("@");
+  for (const [file, reference, trailer] of uses) {
+    if (reference.startsWith("./")) continue;   /* a local action in this repository, nothing to pin */
+    const [action, pin] = reference.split("@");
     assert.match(
       pin ?? "",
       /^[0-9a-f]{40}$/u,
-      `${action} is not pinned to a full commit SHA — a tag or branch moves under you`,
+      `${file}: ${action} is not pinned to a full commit SHA — a tag or branch moves under you`,
     );
     assert.match(
-      trailer ?? "",
+      trailer,
       /#\s*v\d+\.\d+\.\d+/u,
-      `${action} is pinned but does not say which release that commit is, so nobody can check it`,
+      `${file}: ${action} is pinned but does not say which release that commit is, so nobody can check it`,
     );
   }
 });

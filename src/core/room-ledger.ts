@@ -355,10 +355,16 @@ export class RoomLedger {
    * property of the data. A range comparison is BINARY, which is the collation the key is stored
    * and compared under everywhere else.
    *
-   * The upper bound increments the last character, which is exact because the key alphabet is
-   * ASCII: no character in it has a successor that another legal key could fall between. This also
-   * removes the escaping question entirely -- with no wildcards there is nothing for `%` or `_` to
-   * mean.
+   * The upper bound increments the last character. The reason first written here was wrong -- it said
+   * no legal key can fall between a character and its successor, which is false twice over: `-` is
+   * followed by `.` and `9` by `:`, and both of those are in the alphabet. The bound is exact anyway,
+   * and for a reason that has nothing to do with the alphabet: under byte comparison the strings
+   * greater than or equal to P and less than P-with-its-last-byte-incremented are exactly the strings
+   * beginning with P. Verified rather than argued -- every key of length 1 to 3 over the boundary
+   * characters was matched against 1110 prefixes and agreed with `startsWith` in every case.
+   *
+   * It also removes the escaping question entirely: with no wildcards there is nothing for `%` or `_`
+   * to mean.
    */
   hasIdempotencyKeyPrefix(prefix: string): boolean {
     if (typeof prefix !== "string" || !IDEMPOTENCY_KEY_PATTERN.test(prefix)) {

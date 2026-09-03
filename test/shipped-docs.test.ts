@@ -59,3 +59,42 @@ test("the guide's embedded demo compares against the same phrase the product doe
     "the demo's expected value is no longer the phrase the product compares against",
   );
 });
+
+/**
+ * Release checklist item 43 asks that the GUI, the README and the help output all decline to claim
+ * an OS sandbox. Nothing held that up, and the gap it left was not theoretical: the sentence went
+ * into `public/app.js` — the legacy apply-back entry — and the item was ticked, while the path the
+ * README actually teaches (candidate_start → main_merge_preview → approve in the room view) runs
+ * through `public/room.js`, which says "isolated worktree" ten times and carried no caveat at all.
+ *
+ * Each surface is asserted separately rather than as a total count, because that is how the gap
+ * happened: two of three is a passing sum and a failing promise. The match is on the property being
+ * disclaimed, not on a sentence, so rewording stays free and deleting does not.
+ */
+test("every surface that shows a merge decision declines to claim an OS sandbox", async () => {
+  const surfaces: Array<[string, URL]> = [
+    ["help output", new URL("../src/help.ts", import.meta.url)],
+    ["README", new URL("../README.md", import.meta.url)],
+    /* The room view's markup, not its script. The stronger placement -- inside the scroll-gated
+       disclosure, where the owner cannot reach the confirmation without passing it -- lives in
+       `renderMergePromotionDisclosure`, which `merge-dialog-acceptance` digests against a real
+       browser pass. Putting it there invalidated that recorded acceptance, and re-running the
+       pass is a manual owner action by design. So it sits in the dialog head instead: on the
+       same page as the confirmation phrase, visible whenever the dialog opens, but not inside
+       the measured region. That is a weaker property, and it is written down rather than
+       rounded up. */
+    ["room view (the path the README teaches)", new URL("../public/room.html", import.meta.url)],
+    ["workflow apply-back (legacy path)", new URL("../public/app.js", import.meta.url)],
+  ];
+
+  /* The claim being refused, in either language, however it is phrased around. */
+  const disclaims = /not an OS sandbox|OS-level isolation|不是 OS 沙箱|作業系統層級的隔離|不是強制隔離/u;
+  /* And the reason, so that a bare "not a sandbox" cannot stand in for telling the reader why. */
+  const names = /full-trust|application-level|應用層邊界/u;
+
+  for (const [label, url] of surfaces) {
+    const text = await readFile(url, "utf8");
+    assert.match(text, disclaims, `${label} no longer says a worktree is not an OS sandbox`);
+    assert.match(text, names, `${label} disclaims the sandbox without saying what can cross the boundary`);
+  }
+});

@@ -12,9 +12,14 @@ Use **Security → Report a vulnerability** in this GitHub repository. That rout
 Private Vulnerability Reporting, so the report and any proof of concept stay private until there is
 something to disclose. **Do not open a public issue for an unpatched vulnerability.**
 
-If that option is not visible, Private Vulnerability Reporting has not been enabled yet — it is a
-public-repository feature and cannot be switched on in advance. In that case contact the owner
-through the GitHub profile in [`NOTICE`](NOTICE) rather than opening an issue.
+**If that option is not visible, there is currently no private channel, and this file cannot conjure
+one.** Private Vulnerability Reporting is a public-repository feature and cannot be enabled in
+advance, so before publication it is genuinely absent. Saying "contact the owner instead" would be
+the comfortable answer and it would be wrong: the profile linked from [`NOTICE`](NOTICE) offers no
+private message, and no address is published anywhere in this repository. Until the owner enables
+PVR or publishes an address, the honest instruction is to **wait rather than disclose** — and, if
+waiting is not reasonable for what you found, to say publicly only that you have something to report
+and nowhere to send it, without the details.
 
 Please include:
 
@@ -28,8 +33,12 @@ Please include:
 attachment. A redacted reproduction is more useful than a real one, because a real one turns the
 report itself into a second exposure.
 
-Maintainers aim to acknowledge a private report within 5 business days. Remediation and disclosure
-timing depend on severity, and on whether users need time to rotate credentials or update safely.
+**There is no response-time commitment yet.** This is a single-maintainer project that has not
+published a release, and the release checklist still carries "establish a security reporting channel
+and handling SLA" as an open item. Promising five business days here while that line is unticked
+would be a number with nothing behind it. What is committed to instead: remediation and disclosure
+timing follow severity, and users get time to rotate credentials or update safely before details go
+public.
 
 ## What this project does and does not defend against
 
@@ -63,7 +72,11 @@ Reading this first will tell you whether something is a vulnerability or a docum
 - **A merge driver you configured is your program.** Computing a real merge preview runs it, before
   you approve anything. Most projects configure none. See F23 in
   [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
-- Attacks that assume the attacker already has your operating-system account.
+- Attacks that need a foothold this product did not provide — an interactive shell you already
+  granted, or another program running as you. This exclusion is narrow on purpose: the whole
+  threat model here is a full-trust agent running *under* your account, so "the attacker is on
+  your account" does not by itself put something out of scope. What matters is whether the path
+  runs through Orchestratory's approval, identity, or workspace boundaries. If it does, report it.
 
 [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) carries the full analysis, including the residual
 risks that are accepted rather than closed.

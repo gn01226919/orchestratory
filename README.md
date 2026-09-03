@@ -18,6 +18,12 @@ Security-first、local-first 的多模型 coding-agent orchestrator。它透過�
 測試與復原點，然後要求一次**只能用一次、綁死該快照**的核准；快照任一處改變，核准立刻失效。
 Agent 呼叫 `main_merge_request` 只是**登記一個問題**，它拿不到任何可以自己核准的 token。
 
+這句保證有一個例外，寫在這裡而不是留給你自己踩：**如果你的專案自己設定了 merge driver**
+（`.gitattributes` 加 `.git/config` 裡的自訂合併程式），預覽為了算出真實結果**會執行你設定的
+那支程式**——在你點頭之前。跑的是你自己的程式，但 agent 改動的內容會被 git 當參數餵給它。
+多數專案沒有設 merge driver，也就完全不會遇到；細節見下方快速開始與
+[`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) F23。
+
 **邊界（同樣重要）：** candidate **不是 OS 沙箱**。同一個作業系統帳號下的 full-trust agent，技術上
 仍然可以繞過應用層邊界。這個產品提供的是**可追溯、可復原、有紀錄**，不是強制隔離——文件裡不會
 給你更好聽的說法。真正的隔離請用容器或另一個帳號。
@@ -29,17 +35,30 @@ Claude Code）決定，Orchestratory 不升權也不降權；加入只授權「�
 [`docs/DECISIONS.md`](docs/DECISIONS.md)，逐項 runtime 行為見
 [`docs/RUNTIME_REFERENCE.md`](docs/RUNTIME_REFERENCE.md)。
 
-## 本機以外，什麼都不送
+## 這個產品會連到哪裡
+
+先前這一節的標題是「本機以外，什麼都不送」。那句話是假的，而且是這份文件裡最不該說錯的一句。
+下面是**全部**的網路出口，逐條列出比一句漂亮的總結有用：
+
+- **你的 provider CLI 本來就會連它自己的廠商。** 這是整個產品的運作前提——它用你已經登入的
+  Codex／Claude Code／Grok，那些 CLI 的流量不歸 Orchestratory 管，也不該被說成不存在。
+- **API 模式會把你的 prompt 送到 provider 官方 endpoint。** `src/providers/api.ts` 裡有三個寫死的
+  位址（`api.openai.com`／`api.anthropic.com`／`api.x.ai`），request body 直接含 prompt。
+  它**預設關閉**、必須逐 provider 明確啟用、不接受自訂 URL、不自動 fallback、不自動加值——
+  但它啟用之後就是一條真實的資料出口，而不是「什麼都不送」。
+- **Telemetry：出貨狀態送不出任何東西。** `TELEMETRY_HOST` 與 `TELEMETRY_ANON_KEY` 在原始碼裡是
+  `null`，建立請求會直接以 `TELEMETRY_ENDPOINT_NOT_PROVISIONED` 被拒（可自行呼叫
+  `assertTelemetryUrl` 驗證）。目的地寫在原始碼裡而不是設定檔、環境變數、資料庫或模型輸出，
+  所以要改它去哪，得改原始碼——注意這是「改起來看得見」，不是「改不了」：同帳號的 agent
+  技術上仍可改原始碼再重啟。同意狀態預設是 `unanswered` 而非 false，因為「還沒問」和
+  「問過說不要」不是同一件事。
+
+本機端的性質則是可以斷言的：
 
 - GUI **只綁 loopback**，外面連不進來；沒有帳號、沒有雲端後端。
 - **不讀取、不複製 provider token。** 你的 CLI 怎麼登入的，它就怎麼登入。
 - 不保存完整 prompt、reasoning、raw output 或秘密。
 - 不自動 commit、push、建立 GitHub repository 或發布。
-- **Telemetry：出貨狀態送不出任何東西。** 產品內有一個 telemetry 邊界與 `orchestrator telemetry`
-  命令，但 `TELEMETRY_HOST` 與 `TELEMETRY_ANON_KEY` 在原始碼裡是 `null`，建立請求會直接以
-  `TELEMETRY_ENDPOINT_NOT_PROVISIONED` 被拒。目的地是**編譯期常數**，不是設定檔、環境變數、
-  資料庫或模型輸出——要改它去哪，只能改原始碼並經過審查。同意狀態預設是 `unanswered`
-  而非 false，因為「還沒問」和「問過說不要」不是同一件事。
 
 ## 命令列介面
 
@@ -280,7 +299,7 @@ TypeScript typecheck、附覆蓋率門檻的完整測試、deterministic fuzz sm
 掃描、以及**全歷史所有 ref 的密鑰掃描**。
 
 - **834 個 deterministic tests，分佈在 63 個測試檔**（2026-09-04 `npm run check` 實測，834/834 通過）。
-- 覆蓋率門檻由指令強制：line ≥ 90、branch ≥ 85、function ≥ 90。這裡刻意只寫**門檻**不寫當下
+- 覆蓋率門檻由指令強制：line ≥ 90、branch ≥ 85、function ≥ 90。**分母排除 `src/ui/tui.ts`**（`--test-coverage-exclude`，993 行），所以這個門檻不涵蓋 TUI 那一塊。這裡刻意只寫**門檻**不寫當下
   百分比——門檻是保證，百分比是快照，而快照會在下一次有人加一行時就過期。要當下數字請自己跑
   `npm run test:coverage`。
 - Fake-provider 端到端 workflow；loopback Web session、CSRF、Origin、Host 與 CSP。
@@ -324,8 +343,9 @@ container image 與任何額外額度操作仍需 owner 明確批准。
 版權人保留全部商業權利，商業授權另洽版權人（見 [`NOTICE`](NOTICE)）。
 
 依 OSI 定義這是 source-available 而非 open source——差別只在「商用是否也開放」，本專案刻意不開放。
-2026-08-29 前的歷史曾標示 Apache-2.0；該期間 repository 為 Private、從未散布，故無任何第三方
-持有 Apache-2.0 授權副本，本次變更不影響任何既得授權。
+2026-08-29 前的歷史曾標示 Apache-2.0；該期間 repository 為 Private，未曾公開發布。
+Private 只證明 visibility，不證明沒有任何人 clone 過——若當時有人取得副本，那份副本仍受
+當時的授權條款拘束，本次變更不追溯。就本專案所知未曾對外散布，但這是陳述，不是保證。
 
 ## 狀態
 

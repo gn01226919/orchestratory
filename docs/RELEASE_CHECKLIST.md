@@ -14,11 +14,11 @@
 
 ## B. 資料與個資
 
-- [x] `git ls-files` 中只有預期公開檔案。 ✅ 2026-09-04：追蹤中共 187 檔，全部落在 src/test/scripts/docs/public/config/bin 與根目錄公開檔。
+- [x] `git ls-files` 中只有預期公開檔案。 ✅ 2026-09-04：追蹤中共 189 檔，全部落在 src/test/scripts/docs/public/config/bin 與根目錄公開檔。
 - [x] `.env`、DB、logs、sessions、cache、coverage、screenshots、private fixtures 未被追蹤。 ✅ 2026-09-04：以 `git ls-files` 比對 `.env`／`.sqlite`／`.db`／logs／sessions／coverage／screenshots，命中 0 筆。
 - [x] Working tree、staged content、完整 history、branches、tags 均完成 secret scan。 ✅ 2026-09-04：`audit:local` 通過；`audit:history` 以 `rev-list --objects --all` 掃過全 ref 共 1893 個物件通過。同日修正 provider-secret 規則：原本 `ghp`／`github_pat` 後面要求連字號，而 GitHub token 一律用底線，兩個條目從未能命中；已改為逐 vendor 的分隔符並加上雙向測試。
 - [ ] Build output、source maps、archives、SBOM、provenance 均完成 secret/PII scan。
-- [x] 無私人 email、使用者名稱、本機絕對路徑、私有 repository URL 或 session ID。 ✅ 2026-09-04：由 personal-email／personal-home-path 規則涵蓋，全歷史掃描通過。
+- [ ] 無私人 email、使用者名稱、本機絕對路徑、私有 repository URL 或 session ID。 ⏳ 2026-09-04：**只有兩項有掃描器背書**——`personal-email` 與 `personal-home-path`（home 目錄下帶人名的絕對路徑；規則本身只放行 example／alice／bob 這幾個佔位符，所以連這一行想寫出真實形狀都會被自己擋下——2026-09-04 實際發生過一次），全歷史 1899 物件通過。**使用者名稱、私有 repository URL、session ID 沒有任何規則在找**，AWS／Slack／Google 金鑰形狀也不在掃描範圍（見 `test/scan-rules.test.ts` 的已知缺口斷言）。先前勾為 ✅ 是把「兩項有證據」當成「五項都有」，已退回。
 - [x] Git author email 符合使用者的公開隱私偏好。 ✅ 2026-09-04：全歷史 author email 僅三個值，皆為 GitHub noreply 或 `.invalid` 的 promotion 身分。
 - [ ] 若曾發現秘密，已先撤銷/輪替，再清理 history 並重新掃描。
 
@@ -40,7 +40,7 @@
 - [ ] TUI control-sequence sanitization 測試通過。
 - [ ] TUI setup fail-closed、bounded dashboard render 與二次取消確認測試通過。
 - [ ] Log/DB/UI secret canary 測試通過。
-- [x] GUI、README 與 help 明示 Full-Trust 同帳號程序可繞過應用層 main 邊界，不宣稱 OS sandbox。 ✅ 2026-09-04：README 與 SECURITY 已有；本日補上 `orchestrator --help` 末段，以及 GUI 核准入口旁的說明（介面多處使用「隔離」字樣，容易被讀成 OS 層保證）。
+- [x] GUI、README 與 help 明示 Full-Trust 同帳號程序可繞過應用層 main 邊界，不宣稱 OS sandbox。 ✅ 2026-09-04：四個 surface 都有——README、`orchestrator --help` 末段、`public/room.html` 合併對話框頭部（README 教的主線核准，開啟對話框即可見）、`public/app.js`（legacy apply-back 入口）。**當日兩次修正**：先只加在 app.js 那條 legacy 路徑就勾完成（README 教的主線走 room 這條，該處有十處「隔離 worktree」卻零免責）；接著把它放進 scroll-gate 量測區內的 `renderMergePromotionDisclosure`——位置更強（Owner 必經），但那是 `merge-dialog-acceptance` 以真人瀏覽器驗收雜湊涵蓋的函式，改它會讓那次驗收失效，而重跑驗收是刻意保留給 Owner 的手動動作。因此改放對話框頭部：同一頁、開啟即見，但**不在**量測區內。**更強的位置列為待辦，等下一次瀏覽器驗收**。四個 surface 由 `test/shipped-docs.test.ts` 逐一守住，任一處被刪即紅（四個變異體全部驗過）。
 
 ## D. 品質與供應鏈
 
@@ -85,7 +85,7 @@
 
 - [x] Dependency-free repository-source format/hygiene lint 通過：UTF-8/LF、tab/trailing-space/final-newline、
   JSON、regular/executable mode 與 debugger/eval/dynamic Function/`shell: true` 規則均由 release gate 阻擋。
-- [x] 290/290 deterministic tests 通過；line 95.23%、branch 85.13%、functions 96.80%，通過
+- [x] 834/834 deterministic tests 通過；line 96.18%、branch 87.13%、functions 96.80%→96.90%，門檻 90／85／90 由 `npm run test:coverage` 阻擋。 ✅ 2026-09-04 重新量測。原文寫的是 290/95.23/85.13/96.80，那是舊量測值；同一次改動修正了 README 的同一個數字卻漏了這一行，而發布時真的有人照著走的是這一份。
   固定 90%／85%／90% 覆蓋率門檻。
 - [x] CycloneDX 1.5 SBOM 已驗證；3 個 components，dependency/lockfile 無 drift。
 - [x] Working-tree 與完整 Git history 掃描通過。

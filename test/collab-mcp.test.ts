@@ -1781,20 +1781,28 @@ test("collab call ceiling is enforced and never resets", async (t) => {
 test("every dispatched tool is classified as initiating work or not", async () => {
   const source = await readFile(new URL("../src/mcp/collab-server.ts", import.meta.url), "utf8");
 
+  /* `[a-z_]+` was the first pattern here and it could not see a tool whose name carries a digit --
+     `room_v2` was simply absent from the set, so it was never unclassified and never reported. The
+     class of name the product actually allows is the class this must read. */
+  const NAME = '"([a-z][a-z0-9_]*)"';
+
   const dispatchBody = source.slice(source.indexOf("async #dispatch("));
   const dispatched = new Set(
-    [...dispatchBody.slice(0, dispatchBody.indexOf("UNKNOWN_COLLAB_TOOL")).matchAll(/name === "([a-z_]+)"/gu)]
-      .map((match) => match[1]!),
+    [...dispatchBody.slice(0, dispatchBody.indexOf("UNKNOWN_COLLAB_TOOL"))
+      .matchAll(new RegExp("name === " + NAME, "gu"))].map((match) => match[1]!),
   );
 
   const setBlock = source.slice(source.indexOf("static readonly #INITIATING_TOOLS"));
   const initiating = new Set(
-    [...setBlock.slice(0, setBlock.indexOf("]")).matchAll(/"([a-z_]+)"/gu)].map((match) => match[1]!),
+    [...setBlock.slice(0, setBlock.indexOf("]")).matchAll(new RegExp(NAME, "gu"))].map((match) => match[1]!),
   );
 
-  assert.ok(dispatched.size >= 25, `parsed only ${dispatched.size} dispatched tools; the extraction broke`);
+  /* Exact, not a floor. A floor two below the real count let a rewrite that hid two tools stay green
+     on this assertion and fail only on the documentation count -- whose message points at the
+     documentation, so the natural fix is to edit the document down and shrink the guard for good. */
+  assert.equal(dispatched.size, 27, "the dispatch no longer parses to the tools this guard classifies");
+  assert.equal(initiating.size, 9, "the initiating set no longer parses to the size this guard checks");
   assert.ok(dispatched.has("room_wait") && dispatched.has("list_agents"), "extraction missed known tools");
-  assert.ok(initiating.size >= 5, `parsed only ${initiating.size} initiating tools; the extraction broke`);
 
   /*
    * Every tool that does NOT start work, with the reason it does not. A new tool belongs here or in
@@ -1906,5 +1914,48 @@ test("a seat whose tool was refused before touching the room is not marked", asy
     messages.filter((message) => message.text.includes("還沒說明是接續現有工作還是開始新任務")).length,
     0,
     "the room turned the post away, so there is no work for a reader to trace",
+  );
+});
+
+/*
+ * Another seat writing during a failing call is not this seat acting.
+ *
+ * The first version of the failure check compared the room's whole message count before and after,
+ * which is every seat's writes, not this one's. A room with several live seats is the product's
+ * ordinary mode -- each seat is its own MCP process against one shared ledger -- so any concurrent
+ * post made the counts differ and marked a seat that had touched nothing. The window is the length
+ * of the failing call, which for a provider round-trip is seconds to minutes, not microseconds.
+ *
+ * The other seat here writes directly through the ledger rather than through a second broker,
+ * because what is being reproduced is a row appearing in the room mid-call, and its author is the
+ * only part that matters.
+ */
+test("a concurrent write by another seat does not mark this seat", async (t) => {
+  const { broker, ledger, cleanup } = await fixture({
+    withCollaboration: true,
+    sessionRoomMode: "room-first",
+  });
+  t.after(cleanup);
+  await broker.call("room_init", { room: "demo" });
+
+  const before = ledger.listAfter("demo", 0).length;
+
+  await assert.rejects(
+    /* Refused before touching the room, exactly as in the test above -- the only thing added is
+       somebody else writing while it happens. */
+    (async () => {
+      const attempt = broker.call("room_post", { text: "@claude 幫我看看" });
+      ledger.append("demo", "you", "另一個席位在這段時間講了一句話");
+      return await attempt;
+    })(),
+    /ROOM_POST_MENTION_REQUIRES_ROOM_MENTION/u,
+  );
+
+  const messages = ledger.listAfter("demo", 0);
+  assert.equal(messages.length, before + 1, "the other seat's line is there, so the room did change");
+  assert.equal(
+    messages.filter((message) => message.text.includes("還沒說明是接續現有工作還是開始新任務")).length,
+    0,
+    "the room changed, but not because of this seat",
   );
 });

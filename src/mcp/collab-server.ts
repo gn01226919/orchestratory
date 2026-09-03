@@ -677,8 +677,14 @@ export class CollabToolBroker {
 
   async call(name: string, input: unknown, options: CollabCallOptions = {}): Promise<string> {
     /*
-     * The undeclared-start note lives HERE, at the dispatch, and the condition is whether the room
-     * CHANGED -- not whether the tool returned.
+     * The undeclared-start note lives HERE, at the dispatch. The condition is
+     *
+     *     the tool returned  OR  this seat wrote to the room before it threw
+     *
+     * and it is written out like that because two earlier versions each described a rule the code
+     * did not implement. Read it as: a tool that finished did what it does, so the seat acted. A
+     * tool that threw might have acted anyway, and the one effect that can be checked first-hand
+     * afterwards is a line in the ledger carrying this seat's own author.
      *
      * Two things went wrong when it was sprinkled through the handlers. It was missed on `ask_*`,
      * which reaches exactly the same `#callRoomWorker` as `room_mention` -- one effect, two entry
@@ -694,36 +700,81 @@ export class CollabToolBroker {
      * previous round set out to remove, moved to the other side. `room_send` has the same shape when
      * the reply wait aborts after delivery.
      *
-     * The ledger's own message count answers the real question. If it advanced, the seat acted and a
-     * reader will see it; whether the tool then returned or threw is not what the mark is about. If
-     * it did not advance, nothing happened and nothing is recorded -- which is still the refused-post
-     * case. This is one small read per initiating call, on a table already open.
+     * What the failure half can and cannot see is worth being plain about. It sees a ledger line this
+     * seat wrote -- the mention, the post, the message to another seat. It does NOT see quota that a
+     * provider already consumed, so an `ask_*` that reached the model and then failed leaves no mark
+     * unless it also wrote. That is a known gap, not a claim of completeness: it is the boundary of
+     * what one read can establish after the fact, and the alternative that was tried -- watching the
+     * whole room -- marked seats that had done nothing at all.
+     *
+     * Cost is one bounded range read per failing initiating call, over only the messages added while
+     * that call ran.
      */
     if (!CollabToolBroker.#INITIATING_TOOLS.has(name)) return await this.#dispatch(name, input, options);
-    const before = this.#roomMessageCount();
+    const mark = this.#seatRoomMark();
     try {
       const result = await this.#dispatch(name, input, options);
       this.#noteUndeclaredSeatAction();
       return result;
     } catch (error) {
-      if (before !== undefined && this.#roomMessageCount() !== before) this.#noteUndeclaredSeatAction();
+      if (this.#seatWroteSince(mark)) this.#noteUndeclaredSeatAction();
       throw error;
     }
   }
 
   /*
-   * The bound room's message count, or undefined when there is no room to count -- not a seat, no
-   * ledger, or a binding that no longer resolves. Undefined is deliberately NOT folded into 0: zero
-   * would compare equal to a real empty room and unequal to everything else, turning "we could not
-   * look" into "it changed".
+   * Where this seat's own line in the room had reached when a call started, so that a failure can be
+   * asked whether THIS seat left anything behind.
+   *
+   * The previous version compared `getRoom().messages` before and after, which is
+   * `SELECT COUNT(*) ... WHERE room_id = ?` -- the whole room, every seat. A room with several live
+   * seats is not an edge case here, it is the product: each seat is its own MCP process writing to
+   * one shared SQLite ledger. So any other seat posting during a failing call made the count differ,
+   * and a tool that never touched the room got marked. The window was not microseconds either: the
+   * worst shape is `ask_*` against a workspace with no room binding, which calls the provider without
+   * writing anything and can fail minutes later.
+   *
+   * `seq` is the room's message count, which for an append-only ledger with no deletes is also the
+   * highest sequence number.
+   *
+   * `actor` comes from `#resolveActor`, the same call `#messageAuthor` makes, and NOT from the
+   * binding's own `actor` field. Those two are not required to agree: the binding carries the name
+   * the session was configured with, while what lands in the `author` column is whatever presence
+   * resolves for this seat in this room. Reading the binding instead compiled, looked right, and
+   * silently never matched -- caught only because a test asserted a mark that then failed to appear.
    */
-  #roomMessageCount(): number | undefined {
+  #seatRoomMark(): { roomId: string; seq: number; actor: string } | undefined {
     try {
       const binding = this.#resolveSessionRoom?.();
-      if (!binding) return undefined;
-      return this.#requireLedger().getRoom(binding.roomId)?.messages;
+      if (!binding || !this.#resolveActor) return undefined;
+      const room = this.#requireLedger().getRoom(binding.roomId);
+      if (!room) return undefined;
+      return { roomId: binding.roomId, seq: room.messages, actor: this.#resolveActor(binding.roomId) };
     } catch {
       return undefined;
+    }
+  }
+
+  /*
+   * Whether this seat wrote to the room since the mark.
+   *
+   * Both halves treat "could not look" as "no evidence". The earlier version stated that principle in
+   * a comment and then broke it four lines later by comparing `undefined !== before`, which is true,
+   * so an unreadable read marked the seat.
+   *
+   * Stated plainly because it is not tested: with no binding the note itself already returns early,
+   * so flipping this `false` to `true` changes nothing any test can observe. It is a guard against a
+   * future caller, not a behaviour under warranty -- and saying so is the difference between this
+   * comment and the one it replaces.
+   */
+  #seatWroteSince(mark: { roomId: string; seq: number; actor: string } | undefined): boolean {
+    if (!mark) return false;
+    try {
+      return this.#requireLedger()
+        .listAfter(mark.roomId, mark.seq)
+        .some((message) => message.author === mark.actor);
+    } catch {
+      return false;
     }
   }
 

@@ -15,15 +15,17 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    # Measured 2026-09-03 on a 10-core machine: the top-level test durations sum to 22.1 minutes. That
-    # is the floor for a fully SERIAL run and excludes per-file process startup, so it is the worst
-    # case regardless of how much parallelism the runner turns out to have -- which is the point of
-    # quoting it. How many cores a runner actually has was NOT measured from here, and an earlier
-    # version of this comment asserted a number anyway and drew a conclusion from it ("the twenty
-    # minute budget was impossible"). It might have been generous; nobody here knows. This ceiling is
-    # set so that the answer does not matter: even a serial run finishes well inside it. It is a
-    # runaway backstop, not a target, and a red tick here should mean something hung, not that a
-    # first-time contributor's change was slow.
+    # The only measurement behind this number: on 2026-09-03, on a 10-core machine, the top-level test
+    # durations summed to 22.1 minutes. Note what that is and is not. It is a LOWER bound for a serial
+    # run on THAT machine -- it excludes per-file process startup, and a slower runner core makes it
+    # larger, not smaller. It is not a worst case, and two earlier versions of this comment each
+    # claimed it was something it is not: first that a two-core runner made twenty minutes
+    # "impossible" (a core count nobody here measured), then that 22.1 minutes was the worst case
+    # "regardless of parallelism" (a floor read as a ceiling). Neither the runner's core count nor its
+    # per-core speed has been measured from here, so no honest conclusion of the form "a serial run
+    # fits" is available. 45 is chosen as roughly twice the only number we have, as a runaway
+    # backstop. A red tick here means the job exceeded that budget -- which may be a hang, or may be a
+    # legitimately slower runner; it is not by itself evidence of either.
     timeout-minutes: 45
     env:
       CI: "true"

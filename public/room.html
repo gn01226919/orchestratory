@@ -233,6 +233,12 @@
             <code id="merge-approval-task">—</code>
           </div>
           <p id="merge-approval-route" class="merge-approval-route">候選 worktree → 目標分支 · candidate worktree → target branch</p>
+          <!-- 這個檔案與 room.js 有十處「隔離 worktree」，而這是 README 教的主線核准。字面容易被讀成
+               作業系統層級的保證，所以邊界寫在 Owner 打確認語的同一頁，不是設定頁深處。
+               它刻意放在 scroll-gate 量測區域「之外」：放進去才是更強的位置（Owner 必經），但那會改到
+               merge-dialog-acceptance 雜湊涵蓋的 renderMergePromotionDisclosure，讓一次真人瀏覽器驗收失效。
+               重跑那次驗收是 Owner 的動作，所以更強的位置留給下一次瀏覽器驗收，這裡先讓它出現在畫面上。 -->
+          <p class="merge-approval-route">「隔離 worktree」保證的是可追溯、可復原、有紀錄，<b>不是作業系統層級的隔離</b>：同一個帳號下的 full-trust agent 技術上仍可繞過應用層邊界。需要強制隔離請用容器或另一個帳號。 · An isolated worktree is a record and a recovery point, <b>not an OS sandbox</b>: a full-trust agent under this same account can bypass an application-level boundary.</p>
           <label class="field merge-approval-switch" for="merge-approval-select" id="merge-approval-switch" hidden>其他待核准項目 · Other pending approvals
             <select id="merge-approval-select"></select>
           </label>
