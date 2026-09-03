@@ -15,13 +15,15 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    # Measured 2026-09-03 on a 10-core machine: the top-level test durations sum to 22.1 minutes, which
-    # is the floor for a serial run and excludes per-file process startup. A free runner has two cores,
-    # and `--test-concurrency` was unset, so the gate defaulted to near-serial there and could not have
-    # finished inside twenty minutes -- a red tick that says "timed out", which reads to a first-time
-    # contributor as "your change broke it". The suite now pins concurrency rather than inheriting the
-    # core count, and this ceiling is deliberately generous: it is a runaway backstop, not a target, and
-    # the number was not verified on a real runner from here.
+    # Measured 2026-09-03 on a 10-core machine: the top-level test durations sum to 22.1 minutes. That
+    # is the floor for a fully SERIAL run and excludes per-file process startup, so it is the worst
+    # case regardless of how much parallelism the runner turns out to have -- which is the point of
+    # quoting it. How many cores a runner actually has was NOT measured from here, and an earlier
+    # version of this comment asserted a number anyway and drew a conclusion from it ("the twenty
+    # minute budget was impossible"). It might have been generous; nobody here knows. This ceiling is
+    # set so that the answer does not matter: even a serial run finishes well inside it. It is a
+    # runaway backstop, not a target, and a red tick here should mean something hung, not that a
+    # first-time contributor's change was slow.
     timeout-minutes: 45
     env:
       CI: "true"

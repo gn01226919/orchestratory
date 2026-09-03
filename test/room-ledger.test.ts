@@ -166,3 +166,42 @@ test("room ledger rejects foreign-key corruption and unsupported schemas at star
   raw.close();
   assert.throws(() => new RoomLedger(futureData), /ROOM_LEDGER_SCHEMA_UNSUPPORTED/u);
 });
+
+/*
+ * `hasIdempotencyKeyPrefix` had no direct test: its only caller reads one prefix shape, so every
+ * property below was true by accident of that shape rather than by anything holding it there.
+ */
+test("a key prefix matches exactly what it spells, case included", async (t) => {
+  const ledger = await ledgerFixture(t);
+  const room = ledger.createRoom("prefixes", "/tmp/prefixes");
+
+  ledger.appendSystemIdempotent(room.id, "declared", "room-start:r1:seat-a:abc123");
+
+  assert.equal(ledger.hasIdempotencyKeyPrefix("room-start:r1:seat-a:"), true);
+  assert.equal(ledger.hasIdempotencyKeyPrefix("room-start:r1:seat-b:"), false);
+
+  /*
+   * The reason this is a range comparison and not LIKE. SQLite's LIKE is ASCII case-insensitive
+   * unless `case_sensitive_like` is set, which nothing here sets, so the LIKE version answered
+   * true for a seat whose id differed only in case -- while being named "prefix" and documented as
+   * if it compared bytes. IDEMPOTENCY_KEY_PATTERN admits A-Z, so this is reachable by any caller
+   * that ever mixes case, not a hypothetical.
+   */
+  assert.equal(
+    ledger.hasIdempotencyKeyPrefix("ROOM-START:R1:SEAT-A:"),
+    false,
+    "an upper-case prefix must not match a lower-case key",
+  );
+
+  /* The upper bound increments the last character. A longer key under the same prefix is still
+     inside the range; the prefix whose last character is one greater is outside it. Both are
+     spelled with characters the key alphabet actually admits -- `:` increments to `;`, which is not
+     one of them, and passing that gets rejected as a malformed key rather than silently answering. */
+  assert.equal(ledger.hasIdempotencyKeyPrefix("room-start:r1:seat-a:abc123"), true);
+  assert.equal(ledger.hasIdempotencyKeyPrefix("room-start:r1:seat-a"), true);
+  assert.equal(ledger.hasIdempotencyKeyPrefix("room-start:r1:seat-b"), false);
+  assert.throws(() => ledger.hasIdempotencyKeyPrefix("room-start:r1:seat-a;"), /INVALID_ROOM_IDEMPOTENCY_KEY/u);
+
+  assert.throws(() => ledger.hasIdempotencyKeyPrefix(""), /INVALID_ROOM_IDEMPOTENCY_KEY/u);
+  assert.throws(() => ledger.hasIdempotencyKeyPrefix("has space"), /INVALID_ROOM_IDEMPOTENCY_KEY/u);
+});

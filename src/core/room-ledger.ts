@@ -342,19 +342,39 @@ export class RoomLedger {
    * Narrow on purpose: it answers "has this happened at all", not "give me the rows". Added because
    * the alternative in use was to write a SECOND ledger line as a marker, keyed differently, which
    * produced two identical lines the first time -- and for a divider whose whole job is to show a
-   * reader where one line of work ended, two of them is worse than none. `idempotency_key` is the
-   * primary key, so a prefix match uses that index rather than scanning messages.
+   * reader where one line of work ended, two of them is worse than none.
+   *
+   * Expressed as a half-open range rather than LIKE, for two measured reasons. `EXPLAIN QUERY PLAN`
+   * reports SCAN for the LIKE form and SEARCH ... (key>? AND key<?) for this one: SQLite disables
+   * its LIKE optimization whenever an ESCAPE clause is present, so the earlier version walked the
+   * whole primary-key index while a comment above it claimed the opposite. And LIKE is ASCII
+   * case-insensitive by default, which made a method named "prefix" quietly answer true for a key
+   * differing only in case -- confirmed by inserting an upper-case row and matching it with a
+   * lower-case prefix. Today's keys are all lower-case so nothing mis-matched, but
+   * IDEMPOTENCY_KEY_PATTERN admits A-Z, so that was a trap left for the next caller rather than a
+   * property of the data. A range comparison is BINARY, which is the collation the key is stored
+   * and compared under everywhere else.
+   *
+   * The upper bound increments the last character, which is exact because the key alphabet is
+   * ASCII: no character in it has a successor that another legal key could fall between. This also
+   * removes the escaping question entirely -- with no wildcards there is nothing for `%` or `_` to
+   * mean.
    */
   hasIdempotencyKeyPrefix(prefix: string): boolean {
     if (typeof prefix !== "string" || !IDEMPOTENCY_KEY_PATTERN.test(prefix)) {
       throw new Error("INVALID_ROOM_IDEMPOTENCY_KEY");
     }
-    /* LIKE with an escaped prefix: the key alphabet excludes % and _ is legal in it, so `_` must be
-       escaped or it would match any single character. */
-    const escaped = prefix.replaceAll("_", "\\_");
+    const last = prefix.charCodeAt(prefix.length - 1);
+    /* The pattern already guarantees this, so it can only fail if the pattern is widened later --
+       at which point the upper bound below would silently start excluding legal keys. */
+    if (!Number.isInteger(last) || last >= 0x7f) throw new Error("INVALID_ROOM_IDEMPOTENCY_KEY");
+    const upperBound = `${prefix.slice(0, -1)}${String.fromCharCode(last + 1)}`;
     const row = this.#db
-      .prepare("SELECT 1 AS found FROM room_message_idempotency WHERE idempotency_key LIKE ? ESCAPE '\\' LIMIT 1")
-      .get(`${escaped}%`) as { found: number } | undefined;
+      .prepare(
+        `SELECT 1 AS found FROM room_message_idempotency
+         WHERE idempotency_key >= ? AND idempotency_key < ? LIMIT 1`,
+      )
+      .get(prefix, upperBound) as { found: number } | undefined;
     return Boolean(row);
   }
 

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
@@ -160,6 +160,10 @@ async function fixture(options: {
     workflowRequests,
     cleanup: async () => {
       workflowRequests.close();
+      /* The collaboration service opens its own SQLite handles. Closing only the ledger and the
+         request store left one whole set open per test that asked for one, and then removed the
+         directory underneath them. */
+      collaboration?.close();
       ledger.close();
       await rm(data, { recursive: true, force: true });
       for (const directory of directories) await rm(directory, { recursive: true, force: true });
@@ -390,6 +394,14 @@ test("joining hands back what the room is in the middle of, and the question tha
 
   // The briefing, and the denominator that stops the slice reading as the whole room.
   assert.ok(joined.briefing, "joining must hand back what the room is in the middle of");
+  /* The seat list was permanently empty behind a passing test, because the fixture supplied a
+     collaboration service without the wiring that fills it. The fixture supplies both now, so this
+     asserts the list rather than merely its type -- the previous round made it reachable, which is
+     not the same as covered. */
+  assert.ok(
+    (joined.briefing?.seats.length ?? 0) >= 1,
+    "the briefing must name who is in the room, not just how many messages there are",
+  );
   assert.equal(joined.briefing?.shown, joined.briefing?.recent.length);
   assert.ok((joined.briefing?.totalMessages ?? 0) >= (joined.briefing?.shown ?? 0));
   assert.equal(joined.briefing?.recent[joined.briefing.recent.length - 1]?.seq, joined.briefing?.totalMessages,
@@ -1749,4 +1761,150 @@ test("collab call ceiling is enforced and never resets", async (t) => {
   await broker.call("ask_codex", { question: "two" });
   await assert.rejects(broker.call("ask_grok", { question: "three" }), /COLLAB_CALL_LIMIT_REACHED/u);
   assert.deepEqual(broker.status(), { calls: 2, maxCalls: 2 });
+});
+
+/*
+ * The classification guard.
+ *
+ * The undeclared-start note is driven by a set of tool names, and the comment above that set says
+ * adding a tool means putting a name in it "rather than someone having to remember a call". Nothing
+ * held that up: the previous round's defect was exactly someone forgetting `ask_*`, and moving the
+ * call to one place moved the forgetting too -- the two assertions that touch the registry check a
+ * fixed count for an unseated broker and the last twelve entries, so a tool inserted anywhere in the
+ * middle goes unnoticed by both.
+ *
+ * This reads the two lists out of the source rather than importing them, because the set is a
+ * private static field and the dispatch is a private method. That makes the extraction itself
+ * load-bearing, so both parses are asserted for shape before being used: a regex that quietly stops
+ * matching would otherwise make this test pass by comparing nothing to nothing.
+ */
+test("every dispatched tool is classified as initiating work or not", async () => {
+  const source = await readFile(new URL("../src/mcp/collab-server.ts", import.meta.url), "utf8");
+
+  const dispatchBody = source.slice(source.indexOf("async #dispatch("));
+  const dispatched = new Set(
+    [...dispatchBody.slice(0, dispatchBody.indexOf("UNKNOWN_COLLAB_TOOL")).matchAll(/name === "([a-z_]+)"/gu)]
+      .map((match) => match[1]!),
+  );
+
+  const setBlock = source.slice(source.indexOf("static readonly #INITIATING_TOOLS"));
+  const initiating = new Set(
+    [...setBlock.slice(0, setBlock.indexOf("]")).matchAll(/"([a-z_]+)"/gu)].map((match) => match[1]!),
+  );
+
+  assert.ok(dispatched.size >= 25, `parsed only ${dispatched.size} dispatched tools; the extraction broke`);
+  assert.ok(dispatched.has("room_wait") && dispatched.has("list_agents"), "extraction missed known tools");
+  assert.ok(initiating.size >= 5, `parsed only ${initiating.size} initiating tools; the extraction broke`);
+
+  /*
+   * Every tool that does NOT start work, with the reason it does not. A new tool belongs here or in
+   * the set in the source; leaving it out of both is what this test exists to catch.
+   */
+  const notInitiating = new Map([
+    ["room_ack", "answers work already handed to this seat"],
+    ["room_reply", "answers work already handed to this seat"],
+    ["room_fail", "answers work already handed to this seat"],
+    ["list_agents", "read-only"],
+    ["room_status", "read-only"],
+    ["room_read", "read-only"],
+    ["room_get", "read-only"],
+    ["room_search", "read-only"],
+    ["candidate_status", "read-only"],
+    ["main_merge_preview", "read-only"],
+    ["room_wait", "waits to be given work; being handed some is not starting it"],
+    ["room_await_reply", "waits for a reply to work this seat already started"],
+    ["room_init", "entering; returns the existing room for an already-bound seat"],
+    ["room_join_request", "entering"],
+    ["room_start", "IS the declaration, so it cannot be what goes unrecorded"],
+    ["candidate_checkpoint", "continues a candidate only candidate_start could have opened"],
+    ["candidate_complete", "continues a candidate only candidate_start could have opened"],
+    ["main_merge_request", "continues a candidate only candidate_start could have opened"],
+  ]);
+
+  const unclassified = [...dispatched].filter((name) => !initiating.has(name) && !notInitiating.has(name));
+  assert.deepEqual(
+    unclassified,
+    [],
+    "a tool was added without deciding whether it starts work; put it in #INITIATING_TOOLS or in the list above",
+  );
+
+  const bothWays = [...initiating].filter((name) => notInitiating.has(name));
+  assert.deepEqual(bothWays, [], "a tool is listed as both initiating and not");
+
+  const undispatched = [...initiating, ...notInitiating.keys()].filter((name) => !dispatched.has(name));
+  assert.deepEqual(undispatched, [], "a classified tool is no longer dispatched; remove it from both lists");
+
+  /*
+   * The tool map opens by telling a joining agent how many tools it is about to read about. That
+   * number was wrong before `room_start` was added and became right by adding one -- the count had
+   * drifted and the correction was a coincidence, which is the same as having no check at all. The
+   * document is the first thing an agent reads on entering, so a number it states about itself
+   * should not be something a person has to remember to update.
+   */
+  const map = await readFile(new URL("../docs/MCP_TOOLS.md", import.meta.url), "utf8");
+  const claimed = map.match(/這\s*(\d+)\s*個工具/u);
+  assert.ok(claimed, "docs/MCP_TOOLS.md no longer states a tool count; this guard has stopped guarding");
+  assert.equal(
+    Number(claimed[1]),
+    dispatched.size,
+    "docs/MCP_TOOLS.md states a different number of tools than the server dispatches",
+  );
+});
+
+/*
+ * A tool that fails AFTER changing the room is still a seat that acted.
+ *
+ * `#callRoomWorker` appends the mention, then "response in progress", then "response failed", and
+ * only then throws. Keying the note on the tool returning meant those three lines went into the
+ * ledger with no mark against the seat, while a `room_post` refused before touching anything carried
+ * one -- the same asymmetry the previous round set out to remove, pointing the other way. The
+ * question the mark answers is whether a later reader will see this seat working, and here they will.
+ */
+test("a seat that changed the room and then failed is still marked as having started work", async (t) => {
+  const { broker, ledger, cleanup } = await fixture({
+    failProvider: "grok",
+    withCollaboration: true,
+    sessionRoomMode: "room-first",
+  });
+  t.after(cleanup);
+  await broker.call("room_init", { room: "demo" });
+
+  await assert.rejects(
+    broker.call("room_mention", { target: "grok", text: "請檢查" }),
+    /SYNTHETIC_PROVIDER_FAILURE/u,
+  );
+
+  const messages = ledger.listAfter("demo", 0);
+  assert.equal(
+    messages.filter((message) => message.text.includes("還沒說明是接續現有工作還是開始新任務")).length,
+    1,
+    "the provider was called and three lines were written; the seat acted",
+  );
+  assert.equal(ledger.verifyChain("demo"), true);
+});
+
+/*
+ * The other direction, and the one the previous round got right: a tool refused before it touched
+ * the room leaves nothing behind. Without this, "mark it when it failed too" collapses into "mark it
+ * always", which is the defect that was removed.
+ */
+test("a seat whose tool was refused before touching the room is not marked", async (t) => {
+  const { broker, ledger, cleanup } = await fixture({
+    withCollaboration: true,
+    sessionRoomMode: "room-first",
+  });
+  t.after(cleanup);
+  await broker.call("room_init", { room: "demo" });
+
+  await assert.rejects(
+    broker.call("room_post", { text: "@claude 幫我看看" }),
+    /ROOM_POST_MENTION_REQUIRES_ROOM_MENTION/u,
+  );
+
+  const messages = ledger.listAfter("demo", 0);
+  assert.equal(
+    messages.filter((message) => message.text.includes("還沒說明是接續現有工作還是開始新任務")).length,
+    0,
+    "the room turned the post away, so there is no work for a reader to trace",
+  );
 });

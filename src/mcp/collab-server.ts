@@ -677,7 +677,8 @@ export class CollabToolBroker {
 
   async call(name: string, input: unknown, options: CollabCallOptions = {}): Promise<string> {
     /*
-     * The undeclared-start note lives HERE, at the dispatch, and only after the tool returns.
+     * The undeclared-start note lives HERE, at the dispatch, and the condition is whether the room
+     * CHANGED -- not whether the tool returned.
      *
      * Two things went wrong when it was sprinkled through the handlers. It was missed on `ask_*`,
      * which reaches exactly the same `#callRoomWorker` as `room_mention` -- one effect, two entry
@@ -685,13 +686,45 @@ export class CollabToolBroker {
      * And it was written BEFORE the work, so a post refused because recording was paused still left a
      * permanent line saying the seat had acted, when the room had turned it away.
      *
-     * One place, after success, is also the only version that stays true when the next tool is added:
-     * a name goes in the set above or it does not, rather than someone having to remember a call.
+     * Keying it on success alone fixed the second one by reversing it rather than removing it.
+     * `#callRoomWorker` appends the mention, then "response in progress", then -- when the provider
+     * fails -- "response failed", and THEN throws. Three permanent lines of this seat working, real
+     * quota spent, and a rethrow that skipped the note. So the ledger read "this seat acted" with no
+     * mark for `room_mention`/`ask_*`, while carrying one for `room_post`: the same asymmetry the
+     * previous round set out to remove, moved to the other side. `room_send` has the same shape when
+     * the reply wait aborts after delivery.
+     *
+     * The ledger's own message count answers the real question. If it advanced, the seat acted and a
+     * reader will see it; whether the tool then returned or threw is not what the mark is about. If
+     * it did not advance, nothing happened and nothing is recorded -- which is still the refused-post
+     * case. This is one small read per initiating call, on a table already open.
      */
     if (!CollabToolBroker.#INITIATING_TOOLS.has(name)) return await this.#dispatch(name, input, options);
-    const result = await this.#dispatch(name, input, options);
-    this.#noteUndeclaredSeatAction();
-    return result;
+    const before = this.#roomMessageCount();
+    try {
+      const result = await this.#dispatch(name, input, options);
+      this.#noteUndeclaredSeatAction();
+      return result;
+    } catch (error) {
+      if (before !== undefined && this.#roomMessageCount() !== before) this.#noteUndeclaredSeatAction();
+      throw error;
+    }
+  }
+
+  /*
+   * The bound room's message count, or undefined when there is no room to count -- not a seat, no
+   * ledger, or a binding that no longer resolves. Undefined is deliberately NOT folded into 0: zero
+   * would compare equal to a real empty room and unequal to everything else, turning "we could not
+   * look" into "it changed".
+   */
+  #roomMessageCount(): number | undefined {
+    try {
+      const binding = this.#resolveSessionRoom?.();
+      if (!binding) return undefined;
+      return this.#requireLedger().getRoom(binding.roomId)?.messages;
+    } catch {
+      return undefined;
+    }
   }
 
   async #dispatch(name: string, input: unknown, options: CollabCallOptions = {}): Promise<string> {
