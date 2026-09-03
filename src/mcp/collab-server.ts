@@ -10,6 +10,7 @@ import type {
   ProviderResult,
 } from "../types.ts";
 import type { ProviderRegistry } from "../providers/registry.ts";
+import type { RoomDeliveryState } from "../core/room-inbox.ts";
 import type { WorkspacePolicy } from "../security/workspace-policy.ts";
 import { safeSummary } from "../security/redact.ts";
 import { SessionContextBroker, type SessionContext } from "../core/session-context.ts";
@@ -99,16 +100,23 @@ interface RoomWorkerCallResult {
  * but a waiter can claim work and then end, which leaves exactly that combination with the delivery
  * taken. Each branch below says only what its two facts support.
  */
-function describeReplyTimeout(status: { listening: boolean; state: string }): string {
+function describeReplyTimeout(status: { listening: boolean; state: RoomDeliveryState }): string {
   if (status.state === "queued") {
     return status.listening
       ? "Still queued, and the target IS listening, so it should pick this up shortly. Waiting longer is reasonable."
-      : "Still queued and the target is NOT listening, so nothing has picked this up. It stays queued until that seat opens a room_wait, and nothing here can wake it. Continue without the reply, or ask the owner to nudge that terminal.";
+      : "Still queued and the target is NOT listening, so nothing is holding it right now. It stays queued until that seat opens a room_wait -- or until twelve hours have passed since it was last asked for AND someone opens the room -- expiry is evaluated on view, not on a timer -- after which it expires and no reply will arrive for THIS attempt. That is not permanent: the owner can requeue an expired delivery, which starts a fresh window on the same delivery id, and you would have no way of knowing they had. Nothing here can wake that seat. Continue without the reply, or ask the owner to nudge that terminal.";
   }
   if (status.state === "delivered" || status.state === "read" || status.state === "working") {
     return status.listening
       ? `The target has this delivery (state: ${status.state}) and has not answered yet. Waiting longer is reasonable.`
       : `The target took this delivery (state: ${status.state}) but is not listening now, so it is either mid-task or its wait ended before it replied. If its lease expires the delivery returns to the queue for the next room_wait.`;
+  }
+  /* The branch an EXPIRED delivery actually lands in. The queued branch above was given the "the
+     owner can requeue this" caveat and this one was not, which put the caveat everywhere except the
+     one place it applies. `failed` and `cancelled` are retryable by the owner too, on the same
+     delivery id, so the caveat is theirs as well. */
+  if (status.state === "expired" || status.state === "failed" || status.state === "cancelled") {
+    return `This delivery is ${status.state}, so no reply is coming for this attempt. The owner can usually requeue it on the same delivery id, which reopens it without telling you, so treat this as "not now" rather than "never" if you are keeping a thread. (One exception: a failure recorded as REPLY_COMMIT_UNCERTAIN cannot be requeued and needs the owner to resolve it.)`;
   }
   return `This delivery is ${status.state}, so no reply is coming for it.`;
 }
@@ -958,7 +966,7 @@ export class CollabToolBroker {
    * Whether the seat this delivery is addressed to is inside a room_wait right now. Undefined when the
    * delivery cannot be resolved, so the caller is told nothing rather than something invented.
    */
-  #targetStatus(deliveryId: unknown): { listening: boolean; state: string } | undefined {
+  #targetStatus(deliveryId: unknown): { listening: boolean; state: RoomDeliveryState } | undefined {
     try {
       const { collaboration } = this.#peerSession();
       const delivery = collaboration.inbox.get(String(deliveryId));
@@ -1437,7 +1445,7 @@ export class CollabToolBroker {
           listeningNote: session.wakeable
             ? "In standby: work sent now goes straight to it."
             : session.standbyApproved
-              ? "Joined and approved but NOT listening: work sent now queues until this seat opens a room_wait, and nothing can wake it from here. The queue is bounded at 32 unclaimed deliveries per seat; past that, room_send is refused with ROOM_INBOX_SEAT_LIMIT_REACHED."
+              ? "Joined and approved but NOT listening: work sent now queues until this seat opens a room_wait, and expires if twelve hours pass without it being asked for again. Expiry is evaluated when someone views the room, so a room nobody opens keeps its backlog. Nothing can wake the seat from here. The queue is bounded at 32 pending deliveries per seat; past that, room_send is refused with ROOM_INBOX_SEAT_LIMIT_REACHED."
               /* Not "queues": room_send is REFUSED with TARGET_AGENT_STANDBY_NOT_APPROVED before
                  anything is enqueued, so promising the work will wait for this seat is false.
                  And the two refusing states have DIFFERENT remedies: one waits on the owner, the

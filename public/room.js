@@ -174,10 +174,12 @@ async function api(path, options = {}, recovered = false) {
  */
 const ROOM_ERROR_MESSAGES = {
   TARGET_AGENT_STANDBY_NOT_APPROVED: "這個終端已加入房間，但 room-wait 待命還沒核准，所以收不到訊息。",
-  /* A seat that is not listening is exactly the seat that accumulates queued work -- queued deliveries
-     never expire on their own -- so this ceiling is reachable in ordinary use, and a bare error code
-     is the least helpful thing to show at the moment it is hit. */
-  ROOM_INBOX_SEAT_LIMIT_REACHED: "這個席位的收件匣已經排滿 32 則沒領走的交辦，所以這一則沒有送出。先讓那個終端重新呼叫一次 room_wait 把積壓的處理掉。",
+  /* A seat that is not listening is exactly the seat that accumulates queued work, so this ceiling is
+     reachable in ordinary use and a bare error code is the least helpful thing to show when it is hit.
+     Queued work does age out twelve hours after the last ask, but that is far too slow to help here:
+     by the time the ceiling is hit, whether those thirty-two are live or merely recent is not
+     something this message can tell -- what it can say is that they are all still waiting. */
+  ROOM_INBOX_SEAT_LIMIT_REACHED: "這個席位已經有 32 則交辦還沒結束（排隊中或處理中都算），所以這一則沒有送出。先讓那個終端把手上的做完或回覆掉。",
   TARGET_AGENT_OFFLINE: "這個終端目前不在線；請等它重新連上或改選其他席位。",
   SEAT_OFFLINE: "這個席位目前不在線；請等它重新連上或改選其他席位。",
   SOURCE_SEAT_OFFLINE: "來源席位已離線，訊息沒有送出。",
@@ -352,6 +354,10 @@ const DELIVERY_LABELS = {
   read: "終端已確認取件",
   working: "處理中",
   replied: "已回覆",
+  /* Not "失敗". Nothing went wrong here -- it sat in the inbox long enough that it stopped being
+     worth doing, most often because the owner did it themselves. Calling that a failure puts it in
+     the same colour as things that broke, and a list where everything is red is a list nobody reads. */
+  expired: "已過期（排隊太久）",
   failed: "投遞失敗",
   cancelled: "已取消",
 };
@@ -389,7 +395,10 @@ function renderDeliveryReceipt(body, seq) {
     cancel.textContent = delivery.state === "working" ? "請求取消" : "取消";
     cancel.addEventListener("click", () => void changeDelivery(delivery, "cancel", cancel));
     receipt.append(cancel);
-  } else if (["failed", "cancelled"].includes(delivery.state)) {
+  /* `expired` too. Ageing work out removed the path it used to have -- it would have sat queued until
+     the seat came back -- so without a way to send it again the owner's only option is to retype the
+     request. Retrying records a fresh ask, which is what the expiry clock counts from. */
+  } else if (["failed", "cancelled", "expired"].includes(delivery.state)) {
     const retry = document.createElement("button");
     retry.type = "button";
     retry.textContent = "重新排隊";
@@ -685,8 +694,8 @@ function seatListeningState(session) {
       key: "not-listening",
       mark: "○",
       text: "沒在收聽",
-      send: "它現在沒在收聽，送出的訊息會進收件匣排隊（最多排 32 則，滿了就送不出去）。",
-      fix: "到那個終端機視窗，讓它再呼叫一次 room_wait。在那之前交辦不會消失，會排隊等它。"
+      send: "它現在沒在收聽，送出的訊息會進收件匣排隊（每席最多 32 則還沒結束的交辦，滿了就送不出去）。",
+      fix: "到那個終端機視窗，讓它再呼叫一次 room_wait。在那之前交辦會排隊等它，但距離你上次要求超過 12 小時、而且還在排隊的話就會過期（紀錄留著，也可以再按一次重新排隊）。"
         + "不要按撤銷——撤銷之後只有那個終端能自己申請回來。",
       /* This one DOES say what happens next, unlike the ledger line, which is forbidden from doing so.
          The difference is retractability: this is a live view that re-renders every five seconds and

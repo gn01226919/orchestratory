@@ -105,7 +105,7 @@ thread，也不代表每位 Agent 已即時讀完所有訊息。
 
 ### 3.3 Exact-seat Inbox and Thread Service
 
-在既有 queued → delivered → read → working → replied/failed/cancelled 狀態機上增加：
+在既有 queued → delivered → read → working → replied/expired/failed/cancelled 狀態機上增加：
 
 - authenticated source seat；
 - target exact seat；

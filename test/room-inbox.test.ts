@@ -178,7 +178,7 @@ test("schema v3 deliveries migrate transactionally into v5 threads", async (t) =
 
   const migrated = new RoomInboxStore(data);
   t.after(() => migrated.close());
-  assert.deepEqual(migrated.integrity(), { schemaVersion: 5, quickCheck: "ok", stateValid: true });
+  assert.deepEqual(migrated.integrity(), { schemaVersion: 6, quickCheck: "ok", stateValid: true });
   assert.equal(migrated.get(delivery.id)?.threadId, delivery.id);
   assert.equal(migrated.get(delivery.id)?.sourcePresenceId, undefined);
   const migratedSchema = new DatabaseSync(path, { readOnly: true });
@@ -279,7 +279,7 @@ test("interim v4 inbox migrates transactionally without discarding exact-seat ro
 
   const migrated = new RoomInboxStore(data);
   t.after(() => migrated.close());
-  assert.deepEqual(migrated.integrity(), { schemaVersion: 5, quickCheck: "ok", stateValid: true });
+  assert.deepEqual(migrated.integrity(), { schemaVersion: 6, quickCheck: "ok", stateValid: true });
   assert.equal(migrated.get(delivery.id)?.sourcePresenceId, firstSeat);
   assert.equal(migrated.get(delivery.id)?.sourceDisplayName, "codex1");
   assert.equal(migrated.get(delivery.id)?.targetPresenceId, secondSeat);
@@ -295,7 +295,7 @@ test("interim v4 inbox migrates transactionally without discarding exact-seat ro
     "SELECT COUNT(*) AS count FROM room_wait_leases WHERE waiter_token = 'interim-waiter'",
   ).get() as { count: number }).count);
   migratedSchema.close();
-  assert.equal(version.user_version, 5);
+  assert.equal(version.user_version, 6);
   assert.equal(columns.some((column) => column.name === "client_request_id"), true);
   assert.equal(eventCountAfter, eventCountBefore);
   assert.equal(waitCountAfter, 1);
@@ -312,10 +312,33 @@ test("canonical v4 rebuilds into v5 while unknown v4 variants roll back fail-clo
   const canonical = new RoomInboxStore(canonicalData);
   canonical.close();
   const canonicalRaw = new DatabaseSync(join(canonicalData, "room-inbox.sqlite"));
-  canonicalRaw.exec("PRAGMA user_version = 4;");
+  /*
+   * Build a table that is actually v4-shaped, not just a current one with the version re-stamped.
+   *
+   * The fixture used to do only the re-stamp, which worked while the schema had not moved since. It
+   * stopped being a v4 database the moment v6 widened the state CHECK to admit `expired`, and
+   * #migrateV5's recogniser rightly refused it -- the recogniser was correct and the stand-in had
+   * gone stale. Deriving the old shape by removing exactly what v6 added keeps this honest without
+   * copying a schema literal that would then need maintaining in two places.
+   */
+  const currentSql = (canonicalRaw.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'room_deliveries'",
+  ).get() as { sql: string }).sql;
+  const v4Sql = currentSql
+    .replace("room_deliveries", "room_deliveries_v4")
+    .replace("'replied','expired','failed'", "'replied','failed'");
+  assert.notEqual(v4Sql.includes("'expired'"), true, "the v4 stand-in must not accept a state v4 never had");
+  canonicalRaw.exec(`
+    ${v4Sql};
+    INSERT INTO room_deliveries_v4 SELECT * FROM room_deliveries;
+    DROP TABLE room_deliveries;
+    ALTER TABLE room_deliveries_v4 RENAME TO room_deliveries;
+    CREATE INDEX room_deliveries_target_queue ON room_deliveries(target_presence_id, room_id, state, created_at_ms);
+    PRAGMA user_version = 4;
+  `);
   canonicalRaw.close();
   const upgraded = new RoomInboxStore(canonicalData);
-  assert.deepEqual(upgraded.integrity(), { schemaVersion: 5, quickCheck: "ok", stateValid: true });
+  assert.deepEqual(upgraded.integrity(), { schemaVersion: 6, quickCheck: "ok", stateValid: true });
   upgraded.close();
 
   const unknown = new RoomInboxStore(unknownData);
@@ -409,10 +432,10 @@ test("two OS processes can migrate the exact interim v4 inbox concurrently", asy
     execFileAsync(process.execPath, ["--input-type=module", "-e", script, data]),
     execFileAsync(process.execPath, ["--input-type=module", "-e", script, data]),
   ]);
-  assert.deepEqual(results.map(({ stdout }) => stdout), ["5", "5"]);
+  assert.deepEqual(results.map(({ stdout }) => stdout), ["6", "6"]);
   const migrated = new RoomInboxStore(data);
   assert.equal(migrated.get(delivery.id)?.threadId, expected.thread_id);
-  assert.deepEqual(migrated.integrity(), { schemaVersion: 5, quickCheck: "ok", stateValid: true });
+  assert.deepEqual(migrated.integrity(), { schemaVersion: 6, quickCheck: "ok", stateValid: true });
   migrated.close();
 });
 
@@ -461,10 +484,10 @@ test("two OS processes can open and migrate the same v3 inbox concurrently", asy
     execFileAsync(process.execPath, ["--input-type=module", "-e", script, data]),
     execFileAsync(process.execPath, ["--input-type=module", "-e", script, data]),
   ]);
-  assert.deepEqual(results.map(({ stdout }) => stdout), ["5", "5"]);
+  assert.deepEqual(results.map(({ stdout }) => stdout), ["6", "6"]);
   const migrated = new RoomInboxStore(data);
   t.after(() => migrated.close());
-  assert.deepEqual(migrated.integrity(), { schemaVersion: 5, quickCheck: "ok", stateValid: true });
+  assert.deepEqual(migrated.integrity(), { schemaVersion: 6, quickCheck: "ok", stateValid: true });
 });
 
 test("exact-seat delivery moves through every receipt state and reply is idempotent", async (t) => {
@@ -1060,6 +1083,284 @@ test("standby with no timeout never ends on its own", { timeout: 30_000 }, async
   assert.match(String((await pending).value), /ROOM_WAIT_CANCELLED/u);
 });
 
+/*
+ * Queued work had no time bound at all -- only the 32-per-seat ceiling -- so a seat that is present
+ * but rarely on duty builds a backlog nobody will ever get through. The owner's own account of the
+ * problem was that the list grows and that they usually end up doing the thing themselves, which is
+ * why this is `expired` rather than `failed`: nothing broke, the moment passed.
+ */
+test("work still waiting twelve hours after it was asked for expires, and keeps everything except its state", async (t) => {
+  const { inbox, ledger, advance } = await fixture(t);
+
+  const stale = inbox.enqueue({
+    message: ledger.append("demo", "you", "@codex1 明天以前看一下"),
+    targetPresenceId: firstSeat,
+    targetDisplayName: "codex1",
+  });
+  advance(11 * 60 * 60 * 1_000);
+  assert.deepEqual(inbox.expireStaleQueued("demo", 12 * 60 * 60 * 1_000), [], "eleven hours is not twelve");
+
+  advance(70 * 60 * 1_000);
+  const expired = inbox.expireStaleQueued("demo", 12 * 60 * 60 * 1_000);
+  assert.equal(expired.length, 1);
+  assert.equal(expired[0]?.id, stale.id);
+  assert.equal(expired[0]?.state, "expired");
+
+  // Preserved, not deleted: everything a reader might come back for is still on the row.
+  const kept = inbox.get(stale.id);
+  assert.equal(kept?.state, "expired");
+  assert.equal(kept?.ledgerSeq, stale.ledgerSeq);
+  assert.equal(kept?.targetDisplayName, stale.targetDisplayName);
+  assert.equal(kept?.threadId, stale.threadId);
+  assert.equal(kept?.createdAtMs, stale.createdAtMs);
+  // And it is not a failure, so it carries no failure reason to be read as one.
+  assert.equal(kept?.failReason ?? null, null);
+
+  // Idempotent: a second sweep has nothing left to do rather than re-expiring what it already did.
+  assert.deepEqual(inbox.expireStaleQueued("demo", 12 * 60 * 60 * 1_000), []);
+
+  // An expired delivery is out of the running: it does not hold a slot against the per-seat ceiling,
+  // and no wait can claim it. Otherwise ageing work out would achieve nothing.
+  assert.equal(inbox.list("demo").filter((delivery) => delivery.state === "expired").length, 1);
+  const fresh = inbox.enqueue({
+    message: ledger.append("demo", "you", "@codex1 這是新的"),
+    targetPresenceId: firstSeat,
+    targetDisplayName: "codex1",
+  });
+  const controller = new AbortController();
+  const claimed = await inbox.wait({ presenceId: firstSeat, roomId: "demo", ledger, signal: controller.signal, timeoutMs: 1_000 });
+  assert.equal(claimed?.id, fresh.id, "a wait must pick up the new work, not the expired row");
+  controller.abort();
+});
+
+/*
+ * Two of the places a new terminal state gets missed, both of which were actually missed on the first
+ * attempt at this feature. They share one cause: `expired` was added to the type and the schema, and
+ * then every place that already enumerated "the states that end a delivery" had to be found by hand.
+ *
+ * `fail()` was the third such guard and it is deliberately not exercised here: it runs
+ * `#authorizedLease` first, and an expired row is by definition queued, which the schema requires to
+ * have no lease token. The guard is defence in depth against a future path, not a hole that was open.
+ */
+test("an expired delivery is terminal everywhere, not just in the sweep that made it", async (t) => {
+  const { inbox, ledger, advance } = await fixture(t);
+  const window = 12 * 60 * 60 * 1_000;
+
+  /* Sent seat-to-seat, because waiting for a reply is something a SENDER does and it is bound to that
+     sender's identity. */
+  const stale = inbox.enqueue({
+    message: ledger.append("demo", "you", "@codex1 這筆會過期"),
+    sourcePresenceId: secondSeat,
+    sourceDisplayName: "codex2",
+    targetPresenceId: firstSeat,
+    targetDisplayName: "codex1",
+    clientRequestId: "11111111-2222-4333-8444-555555555555",
+  });
+  advance(window + 60_000);
+  assert.equal(inbox.expireStaleQueued("demo", window)[0]?.id, stale.id);
+
+  // 1. Waiting for its reply must end at once. It used to keep polling for an answer that could not
+  //    come, up to the four-hour ceiling, because only failed and cancelled counted as terminal.
+  const waited = await inbox.waitForReply({
+    sourcePresenceId: secondSeat, deliveryId: stale.id, ledger, timeoutMs: 60_000,
+  });
+  assert.equal(waited?.delivery.state, "expired", "awaiting a reply for expired work must return, not hang");
+
+  // 2. Cancelling must not rewrite the record. "Still waiting when its time ran out" and "the owner
+  //    cancelled it"
+  //    are different facts, and keeping them apart is why this is its own state.
+  assert.equal(inbox.cancel(stale.id).state, "expired");
+  assert.equal(inbox.get(stale.id)?.state, "expired");
+
+  // 3. Terminal is not the same as a dead end. Before this feature, work still in the queue waited for
+  //    the seat to come back; ageing it out removes that path, so it has to offer another one or the
+  //    owner's only option is to retype the request.
+  assert.equal(inbox.retry(stale.id).state, "queued", "an expired delivery must be sendable again");
+  assert.deepEqual(
+    inbox.expireStaleQueued("demo", window),
+    [],
+    "and the retry must start a fresh clock, not be aged out again on the next sweep",
+  );
+});
+
+/*
+ * The owner's retry starts a new wait, and the age that decides expiry has to start with it.
+ * Otherwise pressing retry on anything older than the window is undone on the next poll -- about two
+ * seconds in this GUI -- and the ledger recorded twelve hours of waiting (WORDING-EXCEPTION: quoting
+ * the first version) about an attempt two seconds
+ * old.
+ */
+test("retrying old work gives it a fresh clock, not the original one", async (t) => {
+  const { inbox, ledger, advance } = await fixture(t);
+  const window = 12 * 60 * 60 * 1_000;
+
+  const old = inbox.enqueue({
+    message: ledger.append("demo", "you", "@codex1 這筆很舊"),
+    targetPresenceId: firstSeat,
+    targetDisplayName: "codex1",
+  });
+  inbox.failDeliveryIfTargetUnavailable({
+    deliveryId: old.id, targetPresenceId: firstSeat, reason: "SEAT_OFFLINE",
+  });
+  advance(30 * 60 * 60 * 1_000);
+
+  assert.equal(inbox.retry(old.id).state, "queued");
+  assert.deepEqual(
+    inbox.expireStaleQueued("demo", window),
+    [],
+    "a delivery requeued a moment ago has not been waiting for twelve hours",
+  );
+  assert.equal(inbox.get(old.id)?.state, "queued");
+
+  // And it does expire once the NEW wait is long enough, so the fresh clock is a clock, not an exemption.
+  advance(window + 60_000);
+  assert.equal(inbox.expireStaleQueued("demo", window)[0]?.id, old.id);
+});
+
+/*
+ * The case that defeats both timestamp columns, and the reason the age is read from the event log.
+ *
+ * A seat that claims work and then ends without acknowledging it -- a client timeout, a crash, a
+ * long-poll nobody is reading -- has the delivery handed back by the lease sweep, which does not
+ * consume an attempt. So it can bounce between queued and delivered indefinitely: `attempt` never
+ * exhausts, and any column the sweep touches has its clock reset every lap. That is precisely the
+ * seat this feature exists for, so "it never expires" would have been a hole in the shape of the
+ * problem.
+ */
+test("work that keeps being picked up and dropped still ages out", async (t) => {
+  const { inbox, ledger, advance } = await fixture(t);
+  const window = 12 * 60 * 60 * 1_000;
+  const bouncing = inbox.enqueue({
+    message: ledger.append("demo", "you", "@codex1 一直被撿起又放下"),
+    targetPresenceId: firstSeat,
+    targetDisplayName: "codex1",
+  });
+
+  for (let lap = 0; lap < 8; lap += 1) {
+    const controller = new AbortController();
+    const claimed = await inbox.wait({
+      presenceId: firstSeat, roomId: "demo", ledger, signal: controller.signal, timeoutMs: 1_000,
+    });
+    assert.equal(claimed?.id, bouncing.id, `lap ${lap}: the delivery must still be deliverable`);
+    controller.abort();
+    /* Never acknowledged, so the lease lapses and the sweep hands it back without spending a retry. */
+    advance(3 * 60 * 60 * 1_000);
+    inbox.list("demo");
+    assert.equal(inbox.get(bouncing.id)?.state, "queued", `lap ${lap}: the sweep returns it to the queue`);
+  }
+
+  // Twenty-four hours of being picked up and dropped, and not one of them was someone deciding to ask
+  // again. The ask is still the one from the beginning.
+  const expired = inbox.expireStaleQueued("demo", window);
+  assert.equal(expired.length, 1, "a delivery that has bounced for a day must not be exempt from ageing");
+  assert.equal(expired[0]?.id, bouncing.id);
+
+  /*
+   * And nothing anywhere may still describe this as work nobody picked up.
+   *
+   * It did, in nine places, after the rule changed underneath them -- including the label the owner
+   * reads on the receipt and a detail string written into the permanent event log. The behaviour was
+   * corrected and the words for the old behaviour stayed, which is the quietest way this codebase goes
+   * wrong.
+   *
+   * The first version of this guard sliced two thousand characters after the method signature. It
+   * covered one of the nine, and would have passed silently if the method were ever renamed, because
+   * indexOf returns -1 and slice(-1) yields a single character. A guard has to be checked against the
+   * thing it is guarding against; this one is, by the list below.
+   */
+  const guarded = ["../src/core/room-inbox.ts", "../src/core/collaboration-service.ts",
+    "../src/mcp/collab-server.ts", "../public/room.js", "../docs/DECISIONS.md",
+    "../docs/VERIFICATION.md", "./room-inbox.test.ts", "./collaboration-service.test.ts"];
+  /*
+   * Written as the CONCEPT, not as the strings that were fixed last time.
+   *
+   * The first version listed exactly the five phrasings that had already been corrected, so it could
+   * only catch someone reverting them. Four live instances of the same claim sat inside the files it
+   * scanned and it stayed green (WORDING-EXCEPTION: this paragraph quotes the phrasings it missed):
+   * "沒領走" missed the other by one character (WORDING-EXCEPTION), "has picked this up" and
+     * "nobody ever collected this" (WORDING-EXCEPTION) were the same sentence in other words, and the
+   * docs were not scanned
+   * at all -- including the ADR's own title.
+   */
+  /* GUARD-PATTERN-START -- this block necessarily contains every phrasing it forbids, so the scan
+     skips it rather than reporting itself. */
+  const stale = new RegExp([
+    "never claimed", "nobody claimed", "unclaimed", "has picked this up", "ever collected",
+    "nobody (?:ever )?(?:took|collected)", "沒人領走", "沒領走", "沒人領取", "未領取", "未被領取",
+    "從未被領取", "沒人接手", "沒有人接手", "無人接手",
+  ].join("|"), "iu");
+  /* GUARD-PATTERN-END */
+  for (const relative of guarded) {
+    const raw = await readFile(new URL(relative, import.meta.url), "utf8");
+    /* The pattern's own definition is cut out, because it necessarily contains every phrasing it
+       forbids. This is a marker too -- anything written between the two markers is exempt, which is
+       the same escape hatch as WORDING-EXCEPTION and no stronger. Its one advantage is that the
+       region is small and its whole contents are the pattern; its one safeguard is that `replace` is
+       not global, so a second START/END pair leaves the first block in place and the guard goes red
+       rather than quietly widening. */
+    const text = raw.replace(/\/\* GUARD-PATTERN-START[\s\S]*?GUARD-PATTERN-END \*\//u, "");
+    const offenders = text.split("\n")
+      .map((line, index) => ({ line, number: index + 1 }))
+      .filter((entry) => stale.test(entry.line))
+      /* One deliberate negation is allowed, and has to say so out loud. */
+      .filter((entry) => !entry.line.includes("WORDING-EXCEPTION"));
+    assert.deepEqual(
+      offenders.map((entry) => `${relative}:${entry.number}`),
+      [],
+      `expiry no longer requires that work was never picked up, so nothing may say it does:\n${
+        offenders.map((entry) => `  ${relative}:${entry.number} ${entry.line.trim()}`).join("\n")}`,
+    );
+  }
+});
+
+/* Ageing work out has to free the room it was occupying, or the ceiling stays full of things nobody
+   will ever do and the seat can never be given anything new. */
+test("expired work stops counting against the per-seat ceiling", async (t) => {
+  const { inbox, ledger, advance } = await fixture(t);
+  const window = 12 * 60 * 60 * 1_000;
+  for (let i = 0; i < 32; i += 1) {
+    inbox.enqueue({
+      message: ledger.append("demo", "you", `@codex1 第 ${i + 1} 筆`),
+      targetPresenceId: firstSeat,
+      targetDisplayName: "codex1",
+    });
+  }
+  assert.throws(() => inbox.enqueue({
+    message: ledger.append("demo", "you", "@codex1 滿了"),
+    targetPresenceId: firstSeat,
+    targetDisplayName: "codex1",
+  }), /ROOM_INBOX_SEAT_LIMIT_REACHED/u);
+
+  advance(window + 60_000);
+  assert.equal(inbox.expireStaleQueued("demo", window).length, 32);
+
+  const accepted = inbox.enqueue({
+    message: ledger.append("demo", "you", "@codex1 現在有位置了"),
+    targetPresenceId: firstSeat,
+    targetDisplayName: "codex1",
+  });
+  assert.equal(accepted.state, "queued");
+});
+
+/* Work that is being handled, or already finished, is none of this sweep's business. */
+test("expiry touches only work that is still in the queue", async (t) => {
+  const { inbox, ledger, advance } = await fixture(t);
+  const taken = inbox.enqueue({
+    message: ledger.append("demo", "you", "@codex1 這筆已經被領走"),
+    targetPresenceId: firstSeat,
+    targetDisplayName: "codex1",
+  });
+  const controller = new AbortController();
+  const claimed = await inbox.wait({ presenceId: firstSeat, roomId: "demo", ledger, signal: controller.signal, timeoutMs: 1_000 });
+  assert.equal(claimed?.id, taken.id);
+  controller.abort();
+
+  advance(24 * 60 * 60 * 1_000);
+  assert.deepEqual(inbox.expireStaleQueued("demo", 12 * 60 * 60 * 1_000), [],
+    "a delivery someone is holding must not be aged out from under them");
+  assert.notEqual(inbox.get(taken.id)?.state, "expired");
+});
+
 test("inbox storage is owner-only and rejects tampered rows on reopen", async (t) => {
   const { data, inbox, ledger } = await fixture(t);
   assert.equal((await stat(inbox.path)).mode & 0o777, 0o600);
@@ -1266,7 +1567,7 @@ test("public inbox boundaries reject malformed or ambiguous delivery operations"
     /THREAD_CONTINUATION_FIELDS_MISMATCH/u,
   );
   assert.equal(inbox.inventory().deliveries, 2);
-  assert.deepEqual(inbox.integrity(), { schemaVersion: 5, quickCheck: "ok", stateValid: true });
+  assert.deepEqual(inbox.integrity(), { schemaVersion: 6, quickCheck: "ok", stateValid: true });
 
   await assert.rejects(
     inbox.wait({ presenceId: firstSeat, roomId: "demo", timeoutMs: 0, ledger }),

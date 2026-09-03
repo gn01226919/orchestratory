@@ -59,6 +59,16 @@ export type WriterCandidate =
   | { origin: "resident"; provider: WriterProvider }
   | { origin: "managed"; actorId: string };
 
+/*
+ * How long a delivery stays worth doing after the last time someone asked for it.
+ *
+ * Twelve hours is the owner's number, and the reasoning behind it is not about machines: a task still
+ * waiting the next morning has usually either been done by hand or stopped mattering, and a list that
+ * keeps both kinds is a list that stops being read. Nothing is deleted when this elapses -- the row
+ * moves to `expired`, keeps everything else, and can be asked for again.
+ */
+const DELIVERY_EXPIRY_MS = 12 * 60 * 60 * 1_000;
+
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 function ledgerSummary(value: string, maxLength = 320): string {
@@ -124,11 +134,18 @@ export class CollaborationService {
      * not exercising expiry stop depending on how long its own setup happens to take.
      */
     presence?: { now?: () => number; leaseMs?: number };
+    /**
+     * Inbox clock. Same reasoning as the presence one, and it became necessary the moment deliveries
+     * grew an age: expiry reads the INBOX's clock, so a caller that moved only the presence clock
+     * would watch twelve simulated hours pass and nothing age out — the two stores would be living in
+     * different days. Passing one function to both is how a test gets a single timeline.
+     */
+    inbox?: { now?: () => number };
   } = {}) {
     this.#dataDirectory = dataDirectory;
     this.ledger = new RoomLedger(dataDirectory);
     this.presence = new RoomPresenceStore(dataDirectory, options.presence ?? {});
-    this.inbox = new RoomInboxStore(dataDirectory);
+    this.inbox = new RoomInboxStore(dataDirectory, options.inbox ?? {});
     this.managedAgents = new ManagedRoomAgentStore(dataDirectory);
     this.writerLeases = new WriterLeaseStore(dataDirectory);
     this.writerDelegations = new WriterDelegationStore(dataDirectory);
@@ -145,6 +162,7 @@ export class CollaborationService {
   roomView(roomId: string, workspace: string): CollaborationRoomView {
     this.#assertRoomWorkspace(roomId, workspace);
     this.#reconcileUnavailableDeliveries(roomId, workspace, "SEAT_OFFLINE");
+    this.#expireStaleDeliveries(roomId);
     const sessions = this.presence.list(workspace, roomId);
     return {
       sessions: sessions
@@ -253,6 +271,18 @@ export class CollaborationService {
    * seat is already listening, so a click that races a seat coming back on duty does not leave a
    * line implying it was absent.
    */
+  /*
+   * The timestamp of an ask already on the record for this seat in this minute. Undefined only if it
+   * genuinely cannot be found, so the receipt falls back to saying nothing rather than to a guess.
+   */
+  #existingWakeNoteAt(roomId: string, presenceId: string, bucket: number): string | undefined {
+    try {
+      return this.ledger.getByIdempotencyKey(`wake-request:${roomId}:${presenceId}:${bucket}`)?.at;
+    } catch {
+      return undefined;
+    }
+  }
+
   requestExternalWake(input: { roomId: string; workspace: string; presenceId: string }): {
     session: PresenceInfo;
     listening: boolean;
@@ -293,8 +323,14 @@ export class CollaborationService {
        * different-text write, and the ledger correctly refuses it. There is nothing wrong here -- an
        * ask for this seat in this minute is already on the record -- so it is reported as recorded
        * rather than surfaced to the owner as a failure.
+       *
+       * The earlier line is then read back, because `recordedAt` exists precisely so the receipt can
+       * name the time on the record instead of implying it is now. Swallowing the conflict without
+       * recovering it left `recordedAt` undefined on the one path that most needed it, and the UI
+       * showed an em dash where the whole point was to show a time.
        */
       if (!(error instanceof Error) || error.message !== "ROOM_IDEMPOTENCY_CONFLICT") throw error;
+      recordedAt = this.#existingWakeNoteAt(input.roomId, target.id, bucket);
     }
     /* Read back rather than inferred from which branch ran: a deduped append returns the EARLIER
        message, and the rename conflict returns nothing at all, so neither path can tell the caller on
@@ -1228,6 +1264,37 @@ export class CollaborationService {
     };
     if (!approved()) throw new Error("PRESENCE_STANDBY_NOT_APPROVED");
     return await this.inbox.wait({ ...input, ledger: this.ledger, canContinue: approved });
+  }
+
+  /*
+   * Retire deliveries still waiting to be taken on, and say so in the ledger.
+   *
+   * Driven from `roomView` for the same reason the offline reconciliation is: this product has no
+   * background scheduler, so the honest place to age things out is the moment someone looks. That
+   * means expiry happens on the next view rather than exactly at twelve hours, which is fine for
+   * something whose whole point is that it stopped being urgent -- but it does mean a room nobody
+   * opens keeps its backlog until someone does.
+   */
+  #expireStaleDeliveries(roomId: string): void {
+    let expired: RoomDelivery[];
+    try {
+      expired = this.inbox.expireStaleQueued(roomId, DELIVERY_EXPIRY_MS);
+    } catch {
+      /* Ageing out old work must never be the reason a room fails to open. */
+      return;
+    }
+    for (const delivery of expired) {
+      try {
+        this.ledger.appendSystemIdempotent(
+          roomId,
+          `⌛ #${delivery.ledgerSeq} 給 ${delivery.targetDisplayName} 的交辦已過期：距離上一次有人要求它已超過 12 小時，而它還在等人接手。紀錄保留，沒有刪除。`,
+          `delivery-expired:${delivery.id}`,
+        );
+      } catch {
+        /* The delivery is already expired and recorded as such; a missing courtesy line must not
+           undo that, and must not stop the rest of the batch from being annotated. */
+      }
+    }
   }
 
   #reconcileUnavailableDeliveries(roomId: string, workspace: string, reason: string): RoomDelivery[] {

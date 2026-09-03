@@ -11,6 +11,22 @@ export type RoomDeliveryState =
   | "read"
   | "working"
   | "replied"
+  /*
+   * Still waiting to be picked up, and long enough since anyone last asked for it that it has stopped
+   * being worth doing.
+   *
+   * Not "never claimed" (WORDING-EXCEPTION) -- that was the first description and it stopped being true:
+   * a seat can pick work up and drop it repeatedly without ever acknowledging it, and such a delivery
+   * still ages out.
+   * What the clock measures is the gap since the last ASK (`enqueue` or `owner-retry`), not since the
+   * last time a machine touched the row.
+   *
+   * Its own state rather than `failed` with a reason, because the two call for different reactions: a
+   * failure is something that went wrong and may be worth retrying, while this one went stale -- most
+   * often because the owner did the thing themselves in the meantime. A wall of red "failed" rows that
+   * were only ever ignored teaches people to ignore the red.
+   */
+  | "expired"
   | "failed"
   | "cancelled";
 
@@ -86,7 +102,7 @@ type LegacyV1DeliveryRow = Omit<LegacyV3DeliveryRow,
 >;
 type InterimV4DeliveryRow = Omit<DeliveryRow, "client_request_id">;
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 const ROOM_PATTERN = /^[a-z][a-z0-9-]{0,47}$/u;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const HASH_PATTERN = /^[0-9a-f]{64}$/u;
@@ -325,6 +341,7 @@ export class RoomInboxStore {
         else if (version === 2) this.#migrateV3();
         else if (version === 3) this.#migrateV4();
         else if (version === 4) this.#migrateV5();
+        else if (version === 5) this.#migrateV6();
       }
       if (this.#db.prepare("PRAGMA foreign_key_check").all().length > 0) throw new Error("ROOM_INBOX_FOREIGN_KEY_VIOLATION");
       this.#verifyRows();
@@ -377,7 +394,7 @@ export class RoomInboxStore {
           thread_id TEXT NOT NULL,
           reply_to_delivery_id TEXT,
           client_request_id TEXT,
-          state TEXT NOT NULL CHECK (state IN ('queued','delivered','read','working','replied','failed','cancelled')),
+          state TEXT NOT NULL CHECK (state IN ('queued','delivered','read','working','replied','expired','failed','cancelled')),
           attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt BETWEEN 0 AND 100),
           max_attempts INTEGER NOT NULL CHECK (max_attempts BETWEEN 1 AND 10),
           lease_token TEXT,
@@ -413,7 +430,7 @@ export class RoomInboxStore {
           waiter_token TEXT NOT NULL,
           expires_at_ms INTEGER NOT NULL
         );
-        PRAGMA user_version = 5;
+        PRAGMA user_version = 6;
       `);
       this.#db.exec("COMMIT");
     } catch (error) {
@@ -748,6 +765,78 @@ export class RoomInboxStore {
     }
   }
 
+  /*
+   * Widen the state CHECK to admit `expired`.
+   *
+   * Only the constraint changes. No row is rewritten, so every `row_hash` written under v5 stays
+   * valid -- which is the point of copying values across verbatim rather than recomputing anything:
+   * a migration that touched the hashes would make it impossible to tell a migration apart from
+   * tampering, and this database's integrity check cannot afford that ambiguity.
+   *
+   * SQLite has no ALTER for a CHECK constraint, so this is the standard rebuild: create beside, copy,
+   * drop, rename, re-index. Inside one transaction, so a crash leaves v5 intact rather than a
+   * half-copied table.
+   */
+  #migrateV6(): void {
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      if (this.#schemaVersion() !== 5) {
+        this.#db.exec("COMMIT");
+        return;
+      }
+      this.#db.exec(`
+        CREATE TABLE room_deliveries_v6 (
+          id TEXT PRIMARY KEY,
+          room_id TEXT NOT NULL,
+          ledger_seq INTEGER NOT NULL,
+          ledger_hash TEXT NOT NULL,
+          source_presence_id TEXT,
+          source_display_name TEXT,
+          target_presence_id TEXT NOT NULL,
+          target_display_name TEXT NOT NULL,
+          thread_id TEXT NOT NULL,
+          reply_to_delivery_id TEXT,
+          client_request_id TEXT,
+          state TEXT NOT NULL CHECK (state IN ('queued','delivered','read','working','replied','expired','failed','cancelled')),
+          attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt BETWEEN 0 AND 100),
+          max_attempts INTEGER NOT NULL CHECK (max_attempts BETWEEN 1 AND 10),
+          lease_token TEXT,
+          lease_expires_at_ms INTEGER,
+          cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0,1)),
+          reply_key TEXT,
+          reply_author TEXT,
+          reply_input_hash TEXT,
+          completion_token_hash TEXT,
+          reply_ledger_seq INTEGER,
+          fail_reason TEXT,
+          task_id TEXT,
+          created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          row_hash TEXT NOT NULL,
+          UNIQUE(room_id, ledger_seq, target_presence_id),
+          UNIQUE(source_presence_id, client_request_id),
+          CHECK ((lease_token IS NULL) = (lease_expires_at_ms IS NULL)),
+          CHECK ((source_presence_id IS NULL) = (source_display_name IS NULL))
+        );
+        INSERT INTO room_deliveries_v6 SELECT
+          id, room_id, ledger_seq, ledger_hash, source_presence_id, source_display_name,
+          target_presence_id, target_display_name, thread_id, reply_to_delivery_id,
+          client_request_id, state, attempt, max_attempts, lease_token, lease_expires_at_ms,
+          cancel_requested, reply_key, reply_author, reply_input_hash, completion_token_hash,
+          reply_ledger_seq, fail_reason, task_id, created_at_ms, updated_at_ms, row_hash
+          FROM room_deliveries;
+        DROP TABLE room_deliveries;
+        ALTER TABLE room_deliveries_v6 RENAME TO room_deliveries;
+        CREATE INDEX room_deliveries_target_queue ON room_deliveries(target_presence_id, room_id, state, created_at_ms);
+        PRAGMA user_version = 6;
+        COMMIT;
+      `);
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
@@ -1003,7 +1092,10 @@ export class RoomInboxStore {
         if (!reply) throw new Error("DELIVERY_REPLY_RECEIPT_MISSING");
         return { delivery: publicDelivery(row), reply };
       }
-      if (row.state === "failed" || row.state === "cancelled") {
+      /* Terminal states, all of them. `expired` was added without being listed here, so a caller
+         awaiting a reply for an expired delivery kept polling -- up to the four-hour ceiling -- for an
+         answer that could not arrive. A state that ends a delivery has to end the wait for it too. */
+      if (row.state === "failed" || row.state === "cancelled" || row.state === "expired") {
         return { delivery: publicDelivery(row) };
       }
       const remaining = deadline - this.#now();
@@ -1061,7 +1153,10 @@ export class RoomInboxStore {
   fail(input: { presenceId: string; deliveryId: string; leaseToken: string; reason: string }): RoomDelivery {
     if (typeof input.reason !== "string" || input.reason.trim().length < 1 || input.reason.length > 240 || input.reason.includes("\0")) throw new Error("INVALID_DELIVERY_FAILURE_REASON");
     const row = this.#authorizedLease(input);
-    if (["replied", "failed", "cancelled"].includes(row.state)) return publicDelivery(row);
+    /* Every terminal state, including `expired`. Leaving it out let a cancel rewrite "this was still
+       waiting when its time ran out" into "the owner cancelled it" -- and not rewriting the record is
+       the entire reason this state exists rather than a `failed` with a reason attached. */
+    if (["replied", "failed", "cancelled", "expired"].includes(row.state)) return publicDelivery(row);
     if (row.reply_key !== null) return publicDelivery(row);
     if (row.cancel_requested === 1) {
       return this.#update(row, "cancelled", {
@@ -1077,7 +1172,10 @@ export class RoomInboxStore {
     const row = this.#row(validId(deliveryId, "INVALID_DELIVERY_ID"));
     if (!row) throw new Error("DELIVERY_NOT_FOUND");
     this.#assertRow(row);
-    if (["replied", "failed", "cancelled"].includes(row.state)) return publicDelivery(row);
+    /* Every terminal state, including `expired`. Leaving it out let a cancel rewrite "this was still
+       waiting when its time ran out" into "the owner cancelled it" -- and not rewriting the record is
+       the entire reason this state exists rather than a `failed` with a reason attached. */
+    if (["replied", "failed", "cancelled", "expired"].includes(row.state)) return publicDelivery(row);
     if (row.reply_key !== null) return publicDelivery(row);
     if (row.state === "working") return this.#update(row, row.state, { cancel_requested: 1 }, "cancel-requested");
     return this.#update(row, "cancelled", { cancel_requested: 1, lease_token: null, lease_expires_at_ms: null }, "owner-cancel");
@@ -1087,7 +1185,16 @@ export class RoomInboxStore {
     const row = this.#row(validId(deliveryId, "INVALID_DELIVERY_ID"));
     if (!row) throw new Error("DELIVERY_NOT_FOUND");
     this.#assertRow(row);
-    if (row.state !== "failed" && row.state !== "cancelled") throw new Error("DELIVERY_NOT_RETRYABLE");
+    /*
+     * `expired` is retryable, and it has to be. Before this feature existed, work that had not been
+     * taken on simply stayed queued until the seat next came on duty; ageing it out removes that path, so
+     * without a way back the owner's only option is to retype the whole request. Retrying writes an
+     * `owner-retry` event, which is what the expiry clock counts from -- so the returned delivery gets
+     * a fresh twelve hours rather than being aged out again on the next poll.
+     */
+    if (row.state !== "failed" && row.state !== "cancelled" && row.state !== "expired") {
+      throw new Error("DELIVERY_NOT_RETRYABLE");
+    }
     if (row.fail_reason === "REPLY_COMMIT_UNCERTAIN") throw new Error("DELIVERY_REPLY_RECOVERY_REQUIRED");
     return this.#update(row, "queued", { attempt: 0, cancel_requested: 0, lease_token: null, lease_expires_at_ms: null, fail_reason: null, reply_key: null, reply_author: null, reply_input_hash: null, completion_token_hash: null, reply_ledger_seq: null }, "owner-retry");
   }
@@ -1143,6 +1250,78 @@ export class RoomInboxStore {
       }, this.#now()), "seat-offline"));
       this.#db.exec("COMMIT");
       return failed;
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /*
+   * Retire work that is still waiting to be picked up and is now too old to be wanted.
+   *
+   * Queued deliveries had no time bound at all -- the only thing holding the inbox down was the
+   * 32-per-seat ceiling -- so a seat that is present but rarely on duty accumulates a backlog that
+   * nobody will ever work through. The owner's own description of the problem was that the list grows
+   * and that they often just did the thing themselves in the meantime, which is exactly why these are
+   * `expired` and not `failed`: nothing went wrong, the moment passed.
+   *
+   * Deliberately NOT conditioned on the target seat having disappeared. That case is already handled,
+   * and handled immediately: `roomView` reconciles every queued delivery whose presence is gone into
+   * `failed`/SEAT_OFFLINE on the next poll, so a delivery cannot sit queued for twelve hours with a
+   * dead target and reach this at all. Requiring both would have produced a feature that almost never
+   * fires, against the accumulation it was asked to stop.
+   *
+   * Nothing is deleted. The row keeps its text, its thread, its timestamps and its hash chain; only
+   * the state moves, so "what did we ask it to do last Tuesday" still has an answer.
+   */
+  expireStaleQueued(roomId: string, olderThanMs: number): RoomDelivery[] {
+    const room = validRoom(roomId);
+    if (!Number.isSafeInteger(olderThanMs) || olderThanMs < 60_000) {
+      throw new Error("INVALID_DELIVERY_EXPIRY_WINDOW");
+    }
+    const now = this.#now();
+    const cutoff = now - olderThanMs;
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      /*
+       * Age counted from the last time a PERSON asked for this, which neither timestamp column can
+       * tell us. Both were tried and both were wrong in opposite directions:
+       *
+       *   `created_at_ms` ignores the owner pressing retry, so a day-old failed delivery requeued by
+       *   hand was expired again within one GUI poll -- about two seconds -- and the ledger recorded
+       *   twelve hours of nobody taking it on (WORDING-EXCEPTION: describing the old rule) about an
+       *   attempt two seconds old.
+       *
+       *   `updated_at_ms` is reset by machinery, not just by people. A seat that claims work and then
+       *   ends without acknowledging it has the delivery returned to the queue by the lease sweep,
+       *   which bumps the column and does not consume an attempt. Such a delivery can bounce between
+       *   queued and delivered forever and never age at all -- and that is exactly the seat this
+       *   feature exists for.
+       *
+       * The event log already records the distinction: `enqueue` and `owner-retry` are asks, while
+       * `lease-expired` is the machinery handing work back. Reading the newest ask is the question
+       * actually being answered, and it needs no new column and no rewritten row hashes.
+       * COALESCE covers rows migrated from a schema old enough to predate their own events.
+       */
+      const rows = this.#db.prepare(`
+        SELECT d.* FROM room_deliveries d
+        WHERE d.room_id = ? AND d.state = 'queued' AND d.reply_key IS NULL
+          AND COALESCE((
+            SELECT MAX(e.at_ms) FROM room_delivery_events e
+            WHERE e.delivery_id = d.id AND e.detail IN ('enqueue','owner-retry')
+          ), d.created_at_ms) <= ?
+      `).all(room, cutoff) as unknown as DeliveryRow[];
+      const expired: RoomDelivery[] = [];
+      for (const row of rows) {
+        this.#assertRow(row);
+        expired.push(publicDelivery(this.#replace(row, this.#mutated(row, "expired", {
+          lease_token: null,
+          lease_expires_at_ms: null,
+          fail_reason: null,
+        }, now), "expired-stale")));
+      }
+      this.#db.exec("COMMIT");
+      return expired;
     } catch (error) {
       this.#db.exec("ROLLBACK");
       throw error;

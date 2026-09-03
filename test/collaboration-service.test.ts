@@ -346,11 +346,111 @@ test("asking for a seat's attention records the intention and never claims to ha
   onDuty.abort();
   assert.match(String(await duty), /ROOM_WAIT_CANCELLED/u);
 
+  /*
+   * The renamed-inside-the-same-minute path, which had handling written for it and no test.
+   *
+   * The idempotency key is room + seat + minute, but the stored payload hash also covers the seat's
+   * display name. Leaving and rejoining under a different label keeps the presence id, so pressing
+   * again in the same minute is a same-key different-text write and the ledger refuses it -- correctly,
+   * an ask for this seat in this minute is already on the record. The catch for that swallowed the
+   * refusal but did not read the earlier line back, so `recordedAt` came out undefined on the one path
+   * where naming the recorded time matters most, and the receipt showed an em dash.
+   */
+  const beforeRename = gui.requestExternalWake({ roomId: "demo", workspace: "/tmp/project", presenceId: external.id });
+  assert.equal(beforeRename.fresh, true, "a fresh minute records a line under the current name");
+
+  /* Renamed without moving the clock, so the next press falls in the SAME minute -- same key, and a
+     payload hash that now covers a different display name. */
+  gui.removeExternal({ presenceId: external.id, roomId: "demo", workspace: "/tmp/project" });
+  gui.requestExternalJoin(external.id, "demo", "/tmp/project");
+  gui.approveExternalJoin({
+    ...ROOM_FIRST_JOIN, presenceId: external.id, roomId: "demo", workspace: "/tmp/project", label: "改名後",
+  });
+  gui.requestExternalStandby(external.id, "demo", "/tmp/project");
+  gui.approveExternalStandby(external.id, "demo", "/tmp/project");
+
+  const afterRename = gui.requestExternalWake({ roomId: "demo", workspace: "/tmp/project", presenceId: external.id });
+  assert.equal(afterRename.recorded, true, "an ask for this seat in this minute is still on the record");
+  assert.equal(afterRename.fresh, false, "but this press did not write a new line");
+  assert.equal(afterRename.recordedAt, beforeRename.recordedAt,
+    "and the time reported is the earlier line's, recovered rather than left undefined");
+
   // Offline seats are refused outright rather than recorded against.
   gui.removeExternal({ presenceId: external.id, roomId: "demo", workspace: "/tmp/project" });
   assert.throws(
     () => gui.requestExternalWake({ roomId: "demo", workspace: "/tmp/project", presenceId: external.id }),
     /TARGET_AGENT_OFFLINE/u,
+  );
+});
+
+/*
+ * The owner's complaint was that the list grows: work queued for a seat that is rarely on duty had no
+ * time bound at all, and they would often just do the thing themselves in the meantime.
+ *
+ * The second half of the original spec -- "and the target seat is gone" -- is deliberately not a
+ * condition. That case never reaches twelve hours: roomView reconciles any queued delivery whose
+ * presence has vanished into failed/SEAT_OFFLINE on the very next poll. Requiring both would have
+ * produced a rule that essentially never fires, against the accumulation it was asked to stop.
+ */
+test("work still in the queue ages out on view, is recorded, and is kept rather than deleted", async (t) => {
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-expiry-"));
+  let clock = Date.parse("2026-09-03T09:00:00.000Z");
+  /* One clock for both stores. Expiry reads the inbox's; presence reads its own. Moving only one
+     would let twelve simulated hours pass in one store while the other stayed in the same minute. */
+  const gui = new CollaborationService(data, {
+    presence: { leaseMs: 120_000, now: () => clock },
+    inbox: { now: () => clock },
+  });
+  t.after(() => gui.close());
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+
+  gui.ledger.createRoom("demo", "/tmp/project");
+  const external = gui.registerExternal({ provider: "codex", workspace: "/tmp/project", hostPid: 7401, model: "gpt-test" });
+  gui.requestExternalJoin(external.id, "demo", "/tmp/project");
+  gui.approveExternalJoin({
+    ...ROOM_FIRST_JOIN, presenceId: external.id, roomId: "demo", workspace: "/tmp/project", label: "frontend",
+  });
+  gui.requestExternalStandby(external.id, "demo", "/tmp/project");
+  gui.approveExternalStandby(external.id, "demo", "/tmp/project");
+
+  const sent = gui.postToExternal({
+    roomId: "demo", workspace: "/tmp/project", presenceId: external.id, text: "有空看一下這個",
+  });
+  assert.equal(sent.delivery.state, "queued");
+
+  // The seat stays present the whole time -- heartbeating like a live terminal -- so the offline
+  // reconciliation never touches this delivery. Only age does.
+  /* Stepped in sub-lease increments, because a live terminal heartbeats every five seconds and the
+     presence lease is 120s: jumping an hour and then heartbeating would find the seat already pruned,
+     and the test would be measuring expiry against a seat that had ceased to exist -- which is the
+     case this test exists to exclude. */
+  const tick = (ms: number): void => {
+    for (let moved = 0; moved < ms; moved += 60_000) {
+      clock += Math.min(60_000, ms - moved);
+      gui.heartbeatExternal(external.id);
+    }
+  };
+  tick(11 * 60 * 60 * 1_000);
+  gui.roomView("demo", "/tmp/project");
+  assert.equal(gui.inbox.get(sent.delivery.id)?.state, "queued", "eleven hours is not twelve");
+
+  tick(70 * 60 * 1_000);
+  const view = gui.roomView("demo", "/tmp/project");
+  const aged = view.deliveries.find((delivery) => delivery.id === sent.delivery.id);
+  assert.equal(aged?.state, "expired");
+  assert.equal(aged?.failReason ?? null, null, "expiry is not a failure and must not read as one");
+  assert.equal(aged?.ledgerSeq, sent.delivery.ledgerSeq, "the row keeps what it was");
+
+  const lines = gui.ledger.listAfter("demo", 0).map((message) => String(message.text));
+  const note = lines.find((line: string) => line.includes(`#${sent.message.seq}`) && line.includes("已過期"));
+  assert.ok(note, `expiry must be visible in the ledger, got:\n${lines.join("\n")}`);
+  assert.match(String(note), /紀錄保留/u, "and must say the record was kept, since deleting is what an owner would fear");
+
+  // Viewing again must not add a second line for the same delivery.
+  gui.roomView("demo", "/tmp/project");
+  assert.equal(
+    gui.ledger.listAfter("demo", 0).filter((message) => String(message.text).includes("已過期")).length,
+    1,
   );
 });
 
