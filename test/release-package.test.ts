@@ -102,8 +102,14 @@ const USES = /(?<![\w-])(?:"uses"|'uses'|uses)\s*:\s*([^\s,}]+)([^\n]*)/gu;
  * repository's own workflow, which uses one form -- so reverting any of the three corrections above
  * leaves the suite green and the repair unguarded. That was true of the previous version: the flow
  * mapping it had just been fixed to see appears nowhere in the repository.
+ *
+ * "Plain spellings", not "every way", and the difference is load-bearing. A double-quoted YAML key
+ * may carry escapes, so `"\u0075ses":` parses to the same key and is not matched here. Recognising
+ * that needs a YAML parser, which is a dependency nobody has been asked for (D-006). The earlier
+ * name for this test claimed every way and was wrong in exactly the manner this file keeps
+ * catching elsewhere.
  */
-test("the action matcher sees every way a step can name one, and nothing else", () => {
+test("the action matcher sees the plain spellings of a step, and nothing that is not one", () => {
   const sees = (line: string): boolean => {
     USES.lastIndex = 0;
     return USES.test(line);
@@ -144,8 +150,16 @@ test("every CI action is pinned to a full commit SHA with the version it names",
 
   assert.ok(uses.length >= 2, "no `uses:` entries were parsed; this guard has stopped guarding");
 
-  for (const [file, reference, trailer] of uses) {
+  for (const [file, quoted, trailer] of uses) {
+    /* `uses: "owner/action@<sha>"` is legal YAML and the quotes are not part of the value. Left on,
+       they made a correctly pinned action fail the SHA match -- a false alarm on a real workflow. */
+    const reference = quoted.replace(/^["']|["']$/gu, "");
     if (reference.startsWith("./")) continue;   /* a local action in this repository, nothing to pin */
+    assert.ok(
+      !reference.startsWith("docker://"),
+      `${file}: ${reference} is a container action, which cannot carry a commit SHA. ` +
+        "Pin it by image digest and teach this guard the shape, rather than letting it through.",
+    );
     const [action, pin] = reference.split("@");
     assert.match(
       pin ?? "",

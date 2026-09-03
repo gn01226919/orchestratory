@@ -111,9 +111,14 @@ test("every surface that shows a merge decision declines to claim an OS sandbox"
      * than named after the stronger property.
      */
     if (url.pathname.endsWith(".html")) {
-      const dialog = text.match(/<section id="merge-approval"[\s\S]*?<\/section>/u)?.[0];
+      /* Comments come out FIRST. Extracting the section and then stripping comments inside it -- the
+         order this was written in -- passes for a whole `<section id="merge-approval">…</section>`
+         sitting inside a comment, which is a guard that can be switched off by commenting out the
+         thing it guards. */
+      const markup = text.replaceAll(/<!--[\s\S]*?-->/gu, "");
+      const dialog = markup.match(/<section id="merge-approval"[\s\S]*?<\/section>/u)?.[0];
       assert.ok(dialog, `${label}: the merge approval dialog was not found, so this guard cannot run`);
-      text = dialog.replaceAll(/<!--[\s\S]*?-->/gu, "");
+      text = dialog;
     }
     assert.match(text, disclaims, `${label} no longer says a worktree is not an OS sandbox`);
     assert.match(text, names, `${label} disclaims the sandbox without saying what can cross the boundary`);

@@ -244,10 +244,13 @@ test("an author's own message is found however much other traffic came first", a
   assert.throws(() => ledger.hasAuthorMessageAfter(room.id, 0, "   "), /INVALID_ROOM_AUTHOR/u);
   assert.throws(() => ledger.hasAuthorMessageAfter("", 0, "codex1"), /INVALID_ROOM_ID/u);
 
-  /* An unknown room answers `false` where `listAfter` throws. Asserted rather than left implicit,
-     because the two siblings disagreeing is the kind of thing a reader assumes is an oversight. */
-  assert.equal(ledger.hasAuthorMessageAfter("no-such-room", 0, "codex1"), false);
+  /* An unknown room throws, the same as `listAfter`. It answered `false` at first, which made a
+     mistyped or deleted room look exactly like a seat that had written nothing -- inside the method
+     whose only job is telling those apart. Treating a throw as "no evidence" is the seat-marking
+     caller's policy and lives there. */
+  assert.throws(() => ledger.hasAuthorMessageAfter("no-such-room", 0, "codex1"), /ROOM_NOT_FOUND/u);
   assert.throws(() => ledger.listAfter("no-such-room", 0), /ROOM_NOT_FOUND/u);
+  assert.throws(() => ledger.hasAuthorMessageAfter("   ", 0, "codex1"), /INVALID_ROOM_ID/u);
 
   /* Author matching is exact: SQLite compares TEXT with BINARY unless told otherwise, and a seat
      whose name differs only in case is a different seat. */

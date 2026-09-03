@@ -398,17 +398,20 @@ export class RoomLedger {
    */
   hasAuthorMessageAfter(roomId: string, afterSeq: number, author: string): boolean {
     /*
-     * `listAfter` throws ROOM_NOT_FOUND for an unknown room and this deliberately does not, which is
-     * a difference worth stating rather than leaving to be discovered. The question here is "is there
-     * evidence this author wrote", and a room that is not there is an absence of evidence, not a
-     * different kind of answer -- the caller marking a seat treats "could not look" and "nothing
-     * found" the same on purpose. Validating the arguments still matters: a malformed sequence or a
-     * blank author is a caller bug, and answering `false` for it would hide the bug behind a
-     * plausible result.
+     * Unknown room throws, like `listAfter`. It was written to answer `false` instead, with a comment
+     * arguing that "the room is not there" is an absence of evidence -- which is true for the one
+     * caller, and is that caller's policy, not this method's. Encoded here it made a mistyped or
+     * deleted room indistinguishable from a seat that stayed quiet, in a method whose entire job is
+     * to tell those apart. The caller already wraps this in a try/catch that treats a throw as no
+     * evidence, so the policy still holds where it is written down, and everyone else gets told.
+     *
+     * Blank is not a name and blank is not an id: `"   "` passed the first version of these checks,
+     * which only measured length, and would have returned a plausible `false` for a caller bug.
      */
-    if (typeof roomId !== "string" || roomId.length === 0) throw new Error("INVALID_ROOM_ID");
+    if (typeof roomId !== "string" || roomId.trim().length === 0) throw new Error("INVALID_ROOM_ID");
     if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new Error("INVALID_ROOM_SEQ");
     if (typeof author !== "string" || author.trim().length === 0) throw new Error("INVALID_ROOM_AUTHOR");
+    if (!this.getRoom(roomId)) throw new Error("ROOM_NOT_FOUND");
     const row = this.#db
       .prepare(
         "SELECT 1 AS found FROM room_messages WHERE room_id = ? AND seq > ? AND author = ? LIMIT 1",
