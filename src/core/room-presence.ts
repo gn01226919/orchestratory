@@ -439,6 +439,20 @@ export class RoomPresenceStore {
     this.#db.prepare("DELETE FROM presence_hook_dedup WHERE created_at_ms <= ?").run(now - 86_400_000);
   }
 
+  /*
+   * The clock this store was built with. Exposed so callers reasoning about presence time -- bucketing,
+   * expiry -- read the same clock the leases do, rather than calling Date.now() beside a store running
+   * on an injected one.
+   *
+   * It aligns a caller with THIS store, and claims nothing wider: the ledger stamps its own `at` from
+   * the system clock and the inbox has a third clock of its own. In production all three are Date.now
+   * and agree; under an injected clock they do not, which is fine for a value used only to build an
+   * idempotency key, and would not be fine for anything a reader sees.
+   */
+  now(): number {
+    return this.#now();
+  }
+
   register(input: PresenceRegistration): PresenceInfo {
     const provider = validProvider(input.provider);
     const workspace = validWorkspace(input.workspace);

@@ -1,5 +1,9 @@
 const page = new URL(window.location.href);
 const ROOM_UI_PROTOCOL = 2;
+/* How long the "it was already listening" receipt is kept. A floor, not a ceiling: it stays at least
+   this long, and it goes on the next repaint after that -- which the click schedules, but which an
+   unrelated presence change can also bring forward or a later click can push back (see wakeNoticeTimers). */
+const WAKE_NOOP_NOTICE_MS = 15_000;
 /*
  * Provider 選單的單一來源（瀏覽器側）。
  *
@@ -50,6 +54,14 @@ const state = {
   selectedAgent: "",
   selectedPresenceId: "",
   presenceLabels: {},
+  /* One repaint timer PER SEAT. A single shared timer meant a second seat's click cancelled the
+     first seat's repaint, so that first receipt could sit on screen well past its window -- and the
+     comment on WAKE_NOOP_NOTICE_MS claimed it could not. */
+  wakeNoticeTimers: {},
+  /* Declared like its siblings so the defensive guards elsewhere (two `|| {}` reads and one
+     `if (state.wakeNotices)`) stop being load-bearing. Keyed by presence id; entries carry their own
+     kind and timestamp. */
+  wakeNotices: {},
   presenceJoinModes: {},
   presenceTurnSync: {},
   presenceViewSignature: "",
@@ -599,6 +611,16 @@ function ledgerDayGroups(messages, todayKey) {
 }
 /* @pure-end ledger-day-groups */
 
+/* The clock time of a ledger line, for a receipt that names when the record is dated. Falls back to
+   an em dash rather than to "now": the whole point of showing this is that it may not be now. */
+function wakeClock(at) {
+  if (typeof at !== "string") return "—";
+  const date = new Date(at);
+  return Number.isNaN(date.getTime())
+    ? "—"
+    : `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
 /* @pure-start seat-listening-state */
 /**
  * What a seat is doing right now, in the words a person would use.
@@ -927,6 +949,34 @@ function renderPresencePanel() {
       }
       const actions = document.createElement("div");
       actions.className = "presence-actions";
+      /* First in the row, ahead of both destructive controls. Someone looking at a seat that is not
+         answering is reaching for "do something about this", and the two controls beside this one --
+         revoke standby, remove from room -- both make that seat harder to reach, not easier. The safe
+         action should be the one their hand lands on. */
+      /*
+       * Offered only where it can do its one job. On a listening seat there is nothing to record; on
+       * a seat with no standby authority a nudge cannot help, and offering it there would put a
+       * plausible-looking action next to a problem it does not touch -- which is how someone ends up
+       * clicking instead of doing the thing that works.
+       */
+      if (listening.key === "not-listening") {
+        const wake = document.createElement("button");
+        wake.type = "button";
+        wake.className = "presence-wake";
+        /* Not a bell. 🔔 means "summon" in every UI vocabulary there is, and it would be the most
+           conspicuous character in the row -- the text would say "record" while the icon said "ring",
+           and the icon is what gets believed. */
+        wake.textContent = "📝 在帳本記一筆：我找過它";
+        /* Does not promise the seat will see it. Nothing here delivers the ledger to it: room_wait
+           and room_join_request return no ledger tail, and the guidance agents are given is to
+           re-enter room_wait rather than to call room_read. What we can state is what we do. */
+        /* Says what it is FOR, not only what it is not. The disclaimer was clean and the value
+           proposition was missing entirely, which leaves a reader with no answer to "then why would I
+           press this". The honest answer is small and it is real: a timestamped record, for you. */
+        wake.title = "在帳本記下「你在這個時間找過它」，給你自己留個時間點。這不會叫醒它，Orchestratory 沒辦法從這裡叫醒終端機，也不保證它會去讀帳本。要它真的做事，直接交辦——交辦會排隊等它。";
+        wake.addEventListener("click", () => void requestPresenceWake(session, wake));
+        actions.append(wake);
+      }
       if (session.joined && session.standbyRequested && !session.standbyApproved) {
         const standby = document.createElement("button");
         standby.type = "button";
@@ -997,6 +1047,34 @@ function renderPresencePanel() {
         action.className = "presence-stage-hint is-action";
         action.textContent = `怎麼辦：${listening.fix}`;
         stages.append(action);
+      }
+      /*
+       * Each kind shown for as long as what it says stays true.
+       *
+       * "recorded" is about an ongoing silence: left standing after the seat returns it would sit
+       * under a "正在收聽" badge, with the button and the "怎麼辦" line already gone, reading as "I
+       * rang and it came back" -- every time, as the ordinary ending, not as a race.
+       *
+       * "noop" is about the click itself, so it is NOT gated on the seat being silent. It cannot be:
+       * the only way to produce it is the seat turning out to be listening.
+       */
+      const wakeEntry = (state.wakeNotices || {})[session.id];
+      const wakeNotice = !wakeEntry
+        ? ""
+        : wakeEntry.kind === "noop"
+          ? (Date.now() - wakeEntry.at < WAKE_NOOP_NOTICE_MS ? wakeEntry.text : "")
+          : (listening.key === "not-listening" ? wakeEntry.text : "");
+      if (wakeNotice) {
+        const notice = document.createElement("small");
+        notice.className = "presence-stage-hint is-wake-notice";
+        /* role=status because this sentence is the only thing standing between the click and the
+           wrong conclusion. Weaker than the other one-shot receipts here, which are pre-existing empty
+           live regions whose textContent changes -- a region inserted together with its content is
+           often not announced at all. Kept because it costs nothing and sometimes helps; not claimed
+           as equivalent. */
+        notice.setAttribute("role", "status");
+        notice.textContent = wakeNotice;
+        stages.append(notice);
       }
       row.append(identity, actions, stages);
       if (nameInput) row.append(nameInput);
@@ -1131,6 +1209,102 @@ async function changePresenceMembership(session, button) {
   }
 }
 
+/*
+ * Record that the owner wanted this seat's attention.
+ *
+ * It does not wake anything. MCP over stdio is request/response -- the server cannot push to a
+ * terminal that is not asking -- so a button that appeared to wake a seat would be the most harmful
+ * thing this panel could contain: an owner who believes help is coming stops looking for the reason
+ * it is not. Everything this function shows is therefore written to be readable as "recorded", never
+ * as "sent" or "woken" -- with one deliberate exception, the branch that reports the seat turned out
+ * to be listening and therefore says nothing was recorded at all.
+ *
+ * What it does do is real, and smaller than it first sounds: the line lands in the ledger, where that
+ * seat CAN read it with room_read. Nothing hands it over -- room_wait and room_join_request return no
+ * ledger tail, and agents are told to re-enter room_wait rather than to read -- so being seen is an
+ * opportunity, not a guarantee. The part that does not depend on the other end is the owner's own
+ * timestamped record of having looked for it.
+ */
+async function requestPresenceWake(session, button) {
+  if (!state.room) return;
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = "記錄中…";
+  try {
+    const value = await api("/api/rooms/presence/nudge", {
+      method: "POST",
+      body: JSON.stringify({ room: state.room, presenceId: session.id }),
+    });
+    /*
+     * Deliberately NOT re-inserting the session at the end of state.presences, unlike the standby and
+     * membership handlers. Those splice because the server state genuinely changed, and their next
+     * refresh restores the server's ordering. A nudge changes nothing, so `presenceChanged` stays
+     * false and the reordering would never be undone: clicking a button that does nothing to the seat
+     * would move that seat to the bottom of the list, permanently.
+     *
+     * The session IS adopted, though -- in place. An earlier version of this comment said there was
+     * nothing to merge, and the line directly below it merged. The seat may have started listening
+     * since the last poll, which is exactly the case the no-op receipt reports, and the row must not
+     * keep saying otherwise for the five seconds until the throttle lets a refresh through.
+     */
+    /*
+     * Adopt the session the server just returned, IN PLACE.
+     *
+     * On the no-op path the click has just proved the panel is stale: the seat is listening and this
+     * row still says it is not. `refreshPresence` is throttled to five seconds and `poll()` does not
+     * force it, so without this the receipt would read "它其實已經在收聽了" beside a badge saying
+     * "○ 沒在收聽", a wake button, and instructions to go restart a room_wait that is already open --
+     * for up to five seconds. In place rather than re-appended, because a nudge changes nothing about
+     * the seat and must not reorder the list: the handlers that do splice are corrected by their next
+     * refresh, and this one would never be.
+     */
+    if (value.session) {
+      state.presences = (state.presences || []).map((entry) => (entry.id === value.session.id ? value.session : entry));
+    }
+    /* The outcome sentence is the whole point of this button, so it goes on screen rather than into a
+       tooltip, and it never says the seat was reached. */
+    /*
+     * Two different sentences with two different lifetimes, so they carry which kind they are.
+     *
+     * "recorded" describes a silence that is still going on, so it belongs on screen for as long as
+     * that silence lasts and must vanish when it ends. "noop" describes THIS CLICK -- the seat turned
+     * out to be listening -- and gating that on the seat being silent, which an earlier version did,
+     * made it unreachable: the only way to see it is the case where the condition is false. The user
+     * then got a button that vanished, a badge that flipped to 正在收聽, and no words at all, which
+     * is precisely the "I rang and it came back" reading this whole item exists to prevent.
+     */
+    state.wakeNotices = { ...(state.wakeNotices || {}), [session.id]: value.listening
+      ? { kind: "noop", at: Date.now(), text: "它其實已經在收聽了，所以沒有記錄——直接交辦就會送過去。" }
+      /* Names the time on the record, not the time of this click. A second press inside the same
+         minute lands on the line the first one wrote; saying "已記一筆（含時間）" then would name a
+         timestamp that belongs to the earlier press. */
+      : { kind: "recorded", at: Date.now(), text: value.fresh
+          ? `已在帳本記一筆（${wakeClock(value.recordedAt)}）。它不一定會讀到。`
+          : `這一分鐘已經記過了（${wakeClock(value.recordedAt)}），沒有再記一筆。它不一定會讀到。` } };
+    if (value.listening) {
+      /* Only the no-op receipt needs a repaint: it expires on a clock and nothing else re-renders this
+         panel while the seat stays listening. The recorded one expires when the seat stops being
+         silent, which IS a presence change, so scheduling one for it would rebuild every row -- and
+         rebuilding drops any open <select> and the focus inside it -- for no reason. */
+      clearTimeout(state.wakeNoticeTimers[session.id]);
+      state.wakeNoticeTimers[session.id] = setTimeout(() => {
+        delete state.wakeNoticeTimers[session.id];
+        renderPresencePanel();
+      }, WAKE_NOOP_NOTICE_MS + 250);
+    }
+    renderPresencePanel();
+    /* No shortened refresh interval, unlike approving standby: a nudge changes nothing about the seat,
+       so there is nothing new to look for. The one case where the panel WAS stale -- the seat turned
+       out to be listening -- is corrected above from the session the server just returned, rather than
+       by asking again. */
+    await poll();
+  } catch (error) {
+    showRoomError(error, { prefix: "記錄失敗" });
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
 async function changePresenceStandby(session, action, button) {
   if (!state.room) return;
   button.disabled = true;
@@ -1183,6 +1357,33 @@ async function refreshPresence(force = false) {
     const nextDeliveries = Array.isArray(deliveryValue.deliveries) ? deliveryValue.deliveries : [];
     for (const session of [...state.presences, ...nextPresences]) {
       if (session.joined && session.displayName) state.knownExternalNames.add(session.displayName);
+    }
+    /*
+     * A wake notice belongs to one stretch of silence. Once the seat is listening the ask is over, so
+     * the notice is dropped rather than merely hidden -- otherwise it would reappear the next time
+     * that seat went quiet, telling the owner "已在帳本記下你找過它" about a request from an hour ago.
+     * Seats that have gone away entirely lose theirs too, so the map cannot grow without bound.
+     */
+    if (state.wakeNotices) {
+      /* Two rules, because the two kinds of notice are about different things.
+         A `recorded` notice belongs to one stretch of silence, so it is dropped the moment that seat
+         stops being silent -- using the SAME predicate the renderer uses, not an approximation.
+         (`!listening` is a wider set, also true for awaiting-approval and no-standby, so a notice on a
+         seat passing through those was hidden but kept, and reappeared an hour later.)
+         A `noop` notice is about one click, so only time retires it. It is deliberately NOT tied to
+         the seat still being present or still listening: it says what happened when the button was
+         pressed, and that stays true whatever the seat does next. The cost is that a seat which
+         vanishes inside the window leaves its entry until the window ends. */
+      const stillSilent = new Set(
+        nextPresences.filter((session) => seatListeningState(session).key === "not-listening").map((session) => session.id),
+      );
+      for (const [id, entry] of Object.entries(state.wakeNotices)) {
+        if (entry.kind === "noop") {
+          if (Date.now() - entry.at >= WAKE_NOOP_NOTICE_MS) delete state.wakeNotices[id];
+        } else if (!stillSilent.has(id)) {
+          delete state.wakeNotices[id];
+        }
+      }
     }
     const presenceChanged = presenceViewSignature(nextPresences) !== state.presenceViewSignature;
     const managedChanged = managedAgentViewSignature(nextManagedAgents) !== state.managedAgentViewSignature;

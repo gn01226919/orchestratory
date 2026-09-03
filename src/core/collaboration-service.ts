@@ -216,6 +216,99 @@ export class CollaborationService {
     return approved;
   }
 
+  /*
+   * The owner asking for a seat's attention.
+   *
+   * It does not wake anything, and it is important that it does not pretend to.
+   *
+   * MCP over stdio is request/response: this server reads requests from stdin and writes replies to
+   * stdout, and it has no way to make a terminal issue a call that terminal did not choose to issue.
+   * A seat is reachable only from inside a `room_wait` it opened itself -- that is what
+   * `wakeMode: "active-tool-pull"` means -- so when no such call is open there is nothing to deliver
+   * into. Even a server-initiated notification would not help: it cannot cause a call that does not
+   * exist to return.
+   *
+   * (An earlier version of this comment cited `tools.listChanged: false` as a measurement of the
+   * client. That was wrong three ways: the value is this server's own hardcoded capability
+   * declaration in its `initialize` reply, nothing here ever reads a client's capabilities, and
+   * list-changed notifications are about the tool list, not about waking anyone. The conclusion held;
+   * the evidence for it was invented.)
+   *
+   * A button that appeared to wake a seat would be the worst thing in this product -- an owner who
+   * believes help is on the way stops looking for the reason it is not.
+   *
+   * What it CAN do is turn an intention that existed only in the owner's head into a line in the
+   * ledger, where that seat is able to read it with `room_read`. Able to, not going to: nothing
+   * delivers the ledger to a returning seat, and the guidance agents are given is to re-enter
+   * `room_wait`, not to read. So this is an opportunity to be seen, not a guarantee of being seen --
+   * and the value that does not depend on the other end is the owner's own timestamped record.
+   *
+   * (The first version of this comment said the seat "reads the ledger when it next comes on duty",
+   * which would make the button's whole premise true by assertion. It contradicted this file's own
+   * ADR and the button's own tooltip, both written the same day. A maintainer reading only this
+   * paragraph would reasonably conclude the tooltip's caveat was surplus and delete it.)
+   *
+   * Refused for a seat with no standby approval: a nudge cannot help there, and the remedy is a
+   * different one (approve it, or have the terminal request standby). Recorded as a no-op when the
+   * seat is already listening, so a click that races a seat coming back on duty does not leave a
+   * line implying it was absent.
+   */
+  requestExternalWake(input: { roomId: string; workspace: string; presenceId: string }): {
+    session: PresenceInfo;
+    listening: boolean;
+    recorded: boolean;
+    /* Whether THIS press put a line in the ledger, as opposed to landing on one already there for
+       this seat in this minute. The caller needs the difference: "已記一筆（含時間）" said after a
+       deduped press names a timestamp belonging to the earlier press, not to the click just made. */
+    fresh: boolean;
+    /* The timestamp of the line that is on the record -- this press's, or the earlier one's. */
+    recordedAt?: string;
+  } {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    const target = this.presence.get(input.presenceId);
+    if (!target || target.workspace !== input.workspace || !target.joined || target.roomId !== input.roomId) {
+      throw new Error("TARGET_AGENT_OFFLINE");
+    }
+    if (!target.standbyApproved) throw new Error("TARGET_AGENT_STANDBY_NOT_APPROVED");
+    const listening = this.inbox.isListening(target.id, input.roomId);
+    if (listening) return { session: target, listening: true, recorded: false, fresh: false };
+    const name = target.displayName ?? target.provider;
+    /* The ledger dedupes on the key; the bucket decides how long one key lasts. Together they mean
+       holding the button down, or clicking it in frustration, leaves one line rather than a column of
+       them -- and that asking again a minute later is a new ask rather than a swallowed one. Without
+       the bucket the key would be permanent and the second ask would silently vanish. */
+    const bucket = Math.floor(this.presence.now() / 60_000);
+    const before = this.ledger.getRoom(input.roomId)?.messages ?? 0;
+    let recordedAt: string | undefined;
+    try {
+      recordedAt = this.ledger.appendSystemIdempotent(
+        input.roomId,
+        `📝 Owner 想找 ${name}，但它當時沒有在收聽。這則只是紀錄，Orchestratory 沒有辦法叫醒終端機。`,
+        `wake-request:${input.roomId}:${target.id}:${bucket}`,
+      ).at;
+    } catch (error) {
+      /*
+       * The key is the room, the seat and the minute; the stored payload hash also covers the seat's
+       * display name. So renaming a seat and pressing again inside the same minute is a same-key,
+       * different-text write, and the ledger correctly refuses it. There is nothing wrong here -- an
+       * ask for this seat in this minute is already on the record -- so it is reported as recorded
+       * rather than surfaced to the owner as a failure.
+       */
+      if (!(error instanceof Error) || error.message !== "ROOM_IDEMPOTENCY_CONFLICT") throw error;
+    }
+    /* Read back rather than inferred from which branch ran: a deduped append returns the EARLIER
+       message, and the rename conflict returns nothing at all, so neither path can tell the caller on
+       its own whether a new line exists. The room's message count can. */
+    const fresh = (this.ledger.getRoom(input.roomId)?.messages ?? before) > before;
+    return {
+      session: target,
+      listening: false,
+      recorded: true,
+      fresh,
+      ...(recordedAt === undefined ? {} : { recordedAt }),
+    };
+  }
+
   revokeExternalStandby(presenceId: string, roomId: string, workspace: string): PresenceInfo {
     this.#assertRoomWorkspace(roomId, workspace);
     const current = this.presence.get(presenceId);

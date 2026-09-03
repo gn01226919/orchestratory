@@ -98,7 +98,15 @@ async function fixture(t: TestContext, options: {
   await options.beforeInitialCommit?.(source);
   await execFileAsync("git", ["add", "-A"], { cwd: source });
   await execFileAsync("git", [...author, "commit", "-m", "initial"], { cwd: source });
-  t.after(async () => await rm(root, { recursive: true, force: true }));
+  /*
+   * Retried, because some tests here deliberately leave a process alive inside this tree and that
+   * process can still be writing when teardown runs -- macOS then fails the rmdir with ENOTEMPTY.
+   * Counted over one session on one machine: 3 failures across 13 completed full-suite runs, every
+   * one of them this error in teardown and none in an assertion. Not a general flake rate -- it will
+   * depend on the machine and on what else is running -- but enough to say the gate was unreliable. A gate that goes red at random costs more than the cleanup it is protecting:
+   * every "the suite passed" claim has to be re-checked by hand before it means anything.
+   */
+  t.after(async () => await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 
   const registry = new CandidateRegistry(data);
   t.after(() => registry.close());

@@ -813,6 +813,69 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.equal(standbyApproveBody.session.standbyRequested, false);
   assert.equal(standbyApproveBody.session.standbyApproved, true);
   assert.equal(standbyApproveBody.session.wakeable, false);
+  /*
+   * The nudge. It cannot wake anything -- MCP over stdio cannot push to a terminal that is not asking
+   * -- so what is asserted here is mostly what it must NOT claim. `woke: false` is in the response
+   * shape on purpose: a caller reading this JSON should not be able to come away with a different
+   * impression than the person who clicked the button.
+   */
+  const nudgeWithoutCsrf = await fetch(`${server.url}/api/rooms/presence/nudge`, {
+    method: "POST",
+    headers: { Cookie: cookie, Origin: server.url, "Content-Type": "application/json" },
+    body: JSON.stringify({ room: "presence-demo", presenceId: availableSession.id }),
+  });
+  assert.equal(nudgeWithoutCsrf.status, 403);
+  const nudgeInvalid = await fetch(`${server.url}/api/rooms/presence/nudge`, {
+    method: "POST",
+    headers: csrfHeaders,
+    body: JSON.stringify({ room: "presence-demo", presenceId: availableSession.id, extra: 1 }),
+  });
+  assert.equal(nudgeInvalid.status, 400);
+  assert.deepEqual(await nudgeInvalid.json(), { error: "INVALID_PRESENCE_WAKE_REQUEST" });
+
+  const nudge = await fetch(`${server.url}/api/rooms/presence/nudge`, {
+    method: "POST",
+    headers: csrfHeaders,
+    body: JSON.stringify({ room: "presence-demo", presenceId: availableSession.id }),
+  });
+  assert.equal(nudge.status, 200);
+  const nudgeBody = (await nudge.json()) as { recorded: boolean; listening: boolean; woke: boolean };
+  assert.equal(nudgeBody.listening, false);
+  assert.equal(nudgeBody.recorded, true);
+  assert.equal(nudgeBody.woke, false, "nothing here can wake a terminal, and the response must not suggest it");
+
+  // Pressed again: one line, not a column of them. Someone clicking a button that does not visibly do
+  // anything will click it again.
+  //
+  // Scope, stated because it is easy to overread: this proves the write is idempotent, NOT that the
+  // key is bucketed by minute -- a constant key would pass here too. What separates those two is the
+  // service test, which moves a controlled clock across a minute boundary and requires a second line.
+  // It also runs on the wall clock, so two presses straddling :59/:00 would legitimately produce two.
+  const nudgeAgain = await fetch(`${server.url}/api/rooms/presence/nudge`, {
+    method: "POST",
+    headers: csrfHeaders,
+    body: JSON.stringify({ room: "presence-demo", presenceId: availableSession.id }),
+  });
+  assert.equal(nudgeAgain.status, 200);
+  const nudgeLines = (await (await fetch(`${server.url}/api/rooms/messages?room=presence-demo&after=0`, {
+    headers: { Cookie: cookie },
+  })).json()) as { messages: { text: string; at: string }[] };
+  /*
+   * Stated as the property that is actually true on a wall clock: two presses collapse to one line,
+   * UNLESS they straddled a minute boundary, in which case the two lines must be in different
+   * minutes. An earlier version asserted exactly one line and admitted in its own comment that a
+   * :59/:00 straddle would legitimately produce two -- a known-flaky assertion, written down as such
+   * and left in place.
+   */
+  const nudgeMessages = nudgeLines.messages.filter((message) => String(message.text).includes("Owner 想找"));
+  assert.ok(nudgeMessages.length === 1 || nudgeMessages.length === 2, `unexpected line count ${nudgeMessages.length}`);
+  if (nudgeMessages.length === 2) {
+    const minutes = nudgeMessages.map((message) => String((message as { at: string }).at).slice(0, 16));
+    assert.notEqual(minutes[0], minutes[1], "a second line is only legitimate across a minute boundary");
+  }
+  const nudgeLine = nudgeMessages[0];
+  assert.match(String(nudgeLine?.text), /沒有辦法叫醒/u, "the ledger line must not read as a wake");
+
   const presencePost = await fetch(`${server.url}/api/rooms/presence/post`, {
     method: "POST",
     headers: csrfHeaders,
@@ -1416,6 +1479,116 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   // Wording: 待命 is the authority, 收聽 is actually listening. The receipt and the titles have to
   // hold the same line the badge does.
   assert.doesNotMatch(roomScript, /"它正在待命，正在送過去"/u);
+
+  /*
+   * The nudge button. The owner asked for one that wakes a silent terminal; the protocol cannot
+   * provide it, so this records the intention instead. Everything asserted here is about it not
+   * reading as an action on the seat -- a button believed to have summoned help stops the owner from
+   * looking for the reason help is not coming.
+   */
+  assert.match(roomScript, /presence-wake/u);
+  assert.match(roomScript, /在帳本記一筆：我找過它/u);
+  // Not a bell on THIS button: a bell reads as "summon" and would be the most conspicuous character in
+  // the row, so the icon would contradict the label -- and an icon outranks a label. Scoped to the
+  // assignment, because the file legitimately contains a bell elsewhere (the quiet-mode toggle) and
+  // because the comment explaining this choice names the character it rejects.
+  assert.doesNotMatch(roomScript, /wake\.textContent = "[^"]*🔔/u);
+  // The disclaimer alone leaves "then why press it" unanswered, and a control with no stated purpose
+  // gets assigned one by the person looking at it.
+  assert.match(roomScript, /給你自己留個時間點/u, "the button must say what it is FOR, not only what it is not");
+  assert.match(roomScript, /直接交辦——交辦會排隊等它/u, "and must point at the thing that does work");
+  assert.match(roomScript, /這不會叫醒它/u);
+  // Anchored to the guard itself, not to two strings being near each other. A proximity match proves
+  // "a not-listening check appears within 400 characters", which is not the same as "the button is
+  // built inside that check" -- and proximity assertions are exactly what this round replaced
+  // elsewhere for saying more than they check.
+  assert.match(
+    roomScript,
+    /if \(listening\.key === "not-listening"\) \{\s*\n\s*const wake = document\.createElement\("button"\);/u,
+    "the button must be created inside the not-listening guard, not merely near one",
+  );
+  // Scope stated exactly: this scans room.js for a handful of Chinese phrasings that would read as
+  // having woken or reached the seat. It is a tripwire for the obvious regressions, not a proof about
+  // the whole product -- "已送達" or an equivalent claim in another file would sail past it.
+  assert.doesNotMatch(roomScript, /已(喚|叫)醒|(喚|叫)醒了|已通知它|它已收到/u,
+    "room.js must not use these phrasings, which read as having woken or reached the terminal");
+  // The value proposition must not be a promise about the other end either: nothing delivers the
+  // ledger to a returning seat -- room_wait and room_join_request carry no tail, and agents are told
+  // to re-enter room_wait rather than to read.
+  assert.doesNotMatch(roomScript, /下次上線時看到|一定會看到|它會看到/u,
+    "the button may not promise the seat will read what was recorded");
+  assert.match(roomScript, /也不保證它會去讀帳本/u);
+  // The outcome sentence goes on screen, not into a tooltip: it is the whole point of the button,
+  // and a tooltip is unreachable on touch and unreliable to a screen reader.
+  assert.match(roomScript, /is-wake-notice/u);
+  /*
+   * Scoped to the silence it describes, and dropped when that silence ends. Left unscoped, the notice
+   * survives the seat coming back and ends up sitting under a "正在收聽" badge with the button and the
+   * "怎麼辦" line already gone -- which reads as "I rang, and it came back", every time, and still
+   * carries an instruction that would interrupt the wait the seat is now in.
+   */
+  // The "recorded" receipt is about an ongoing silence, so it goes when the silence does.
+  assert.match(roomScript, /listening\.key === "not-listening" \? wakeEntry\.text : ""/u,
+    "the recorded notice must not render once the seat is listening again");
+  // The "already listening" receipt is about the CLICK, not the seat. Gating it on the seat being
+  // silent made it unreachable -- the only way to produce it is the seat being listening -- which left
+  // that path showing a vanishing button, a badge flipping to 正在收聽, and no words at all.
+  // Anchored to what the no-op branch is actually gated on -- elapsed time -- rather than to the
+  // absence of a word nearby. A proximity check cannot tell "the noop branch is gated on
+  // not-listening" from "the noop branch is followed by the recorded branch, which correctly is".
+  assert.match(roomScript, /wakeEntry\.kind === "noop"\s*\?\s*\(Date\.now\(\) - wakeEntry\.at/u,
+    "the no-op receipt is about the click, so it expires on time rather than on seat state");
+  // Anchored to the PREDICATE, not to the presence of a delete. The earlier assertion only proved a
+  // delete existed somewhere; the clearing set could have been anything -- and it was: `!listening` is
+  // wider than the renderer's condition, so notices survived hidden on other states and came back.
+  assert.match(roomScript, /seatListeningState\(session\)\.key === "not-listening"\)\.map/u,
+    "clearing must use the same predicate the renderer uses, not an approximation of it");
+  // The clearing side needs its own no-op branch too. Without it the receipt is deleted on the very
+  // next refresh -- a listening seat is not in the still-silent set -- which is the same disappearing
+  // act, moved from the renderer into the state. The renderer's anchor cannot catch that: it names
+  // `wakeEntry`, and the clearing loop names `entry`.
+  assert.match(roomScript, /entry\.kind === "noop"[\s\S]{0,160}WAKE_NOOP_NOTICE_MS/u,
+    "the clearing loop must keep a no-op receipt until it expires, not until the seat is listening");
+  /*
+   * Three uses, one declaration, all naming the same constant -- asserted as three specific uses
+   * rather than as a total count. A count was the first attempt and it broke immediately: writing a
+   * comment that mentions the constant made it five, which is a legitimate edit failing a test for
+   * measuring the wrong thing. What matters is that no site hardcodes its own literal, and these
+   * three matches say exactly that.
+   */
+  assert.match(roomScript, /^const WAKE_NOOP_NOTICE_MS = /mu, "one declaration");
+  assert.match(roomScript, /Date\.now\(\) - wakeEntry\.at < WAKE_NOOP_NOTICE_MS/u, "the renderer expires on it");
+  assert.match(roomScript, /Date\.now\(\) - entry\.at >= WAKE_NOOP_NOTICE_MS/u, "the clearing loop expires on it");
+  assert.match(roomScript, /\}, WAKE_NOOP_NOTICE_MS \+ 250\)/u, "and the repaint is scheduled from it");
+  // And something has to repaint when it expires: this receipt only exists while the seat is
+  // listening, that state then stops changing, and the panel re-renders only on a presence change.
+  assert.match(roomScript, /state\.wakeNoticeTimers\[session\.id\] = setTimeout/u,
+    "one repaint timer per seat: a shared one let a second seat's click cancel the first seat's repaint");
+  // A nudge changes nothing about the seat, so it must not reorder the list the way the handlers that
+  // DO change something legitimately can -- their reordering is undone by the next refresh, and this
+  // one's never would be.
+  // Counted, not measured by proximity: the mutant that adds the splice back lands past any window
+  // small enough to be meaningful, so a nearby-text check silently passes. Two handlers legitimately
+  // re-insert a session (join and standby/membership); a third occurrence means the nudge grew one.
+  assert.equal(
+    (roomScript.match(/state\.presences = \[\.\.\.(\(state\.presences \|\| \[\]\)|state\.presences)\.filter/gu) ?? []).length,
+    2,
+    "only handlers that actually change server state may re-insert a session (count includes join and standby/membership; update this number when adding a legitimate one)",
+  );
+  // It must still ADOPT the returned session, in place. On the no-op path the click has just proved
+  // the row is stale -- the seat is listening and the badge says it is not -- and refreshPresence is
+  // throttled to five seconds, so discarding the server's answer leaves the receipt contradicting the
+  // badge beside it for that long.
+  assert.match(
+    roomScript,
+    /state\.presences = \(state\.presences \|\| \[\]\)\.map\(\(entry\) => \(entry\.id === value\.session\.id \? value\.session : entry\)\)/u,
+    "the nudge must adopt the returned session without reordering the list",
+  );
+  // The repaint timer belongs to the no-op receipt only. The recorded one expires when the seat stops
+  // being silent, which is already a presence change; scheduling a rebuild for it would drop any open
+  // select and the focus in it for nothing.
+  assert.match(roomScript, /if \(value\.listening\) \{[\s\S]{0,800}state\.wakeNoticeTimers\[session\.id\] = setTimeout/u,
+    "the repaint timer must sit under the listening branch (proximity check: it proves the two appear together, not that the nesting is exactly this)");
   // Anchored to the ASSIGNMENT, not to the words: the comment that explains why this line was
   // removed quotes the old string, and a bare substring check would fail on the explanation itself.
   assert.doesNotMatch(roomScript, /:\s*"可對話 · 待命";/u, "the office must not call a deaf seat 待命");

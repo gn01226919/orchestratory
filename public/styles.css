@@ -943,6 +943,28 @@ button.cancel-pending:hover { border-color: var(--warn); }
   padding-left: 8px;
   line-height: 1.5;
 }
+/* Quiet on purpose. It records an intention; it does not do anything to the seat, and a control that
+   looks like it acts would be read as one. */
+.office-presence-row button.presence-wake {
+  background: #1c2230;
+  border: 1px solid #3a4150;
+  color: #c8d2e0;
+  font-weight: 400;
+}
+.office-presence-row button.presence-wake:hover { border-color: #55607a; }
+.office-presence-row .presence-stage-hint.is-wake-notice {
+  /* Larger than the other hint lines, and still smaller than the listening badge it qualifies (11px),
+     so it does not outrank the state it is correcting -- it only stops being read as incidental.
+     An earlier version of this comment also cited "the panel heading 12px" as a second witness. That
+     number was invented: this panel's heading is 9px, and the 12px one belongs to a different panel.
+     The badge alone carries the point; the second witness was both false and unnecessary. */
+  font-size: 9px;
+  color: #9fc7e8;
+  border-left: 2px solid #3f5a72;
+  padding-left: 8px;
+  line-height: 1.5;
+}
+
 /* Revoking is the one destructive control on this row, and on a deaf seat it is also the one a reader
    is most likely to reach for -- it sounds like it addresses the problem and it is the only standby
    control in sight. It does the opposite, and the GUI cannot undo it. */

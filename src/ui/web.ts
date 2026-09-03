@@ -981,6 +981,46 @@ export async function startWebServer(
           json(response, 200, { session });
           return;
         }
+        if (url.pathname === "/api/rooms/presence/nudge") {
+          /*
+           * Records that the owner wanted this seat. It cannot wake anything -- see
+           * requestExternalWake -- and `woke: false` is in the response so that a caller reading this
+           * JSON cannot conclude otherwise. It carries the flags, not the button's sentences: an API
+           * caller gets the facts, and the wording that explains them lives with the UI that shows it.
+           */
+          if (typeof body !== "object" || body === null || Array.isArray(body)) {
+            throw new Error("INVALID_PRESENCE_WAKE_REQUEST");
+          }
+          const value = body as Record<string, unknown>;
+          if (
+            Object.keys(value).some((key) => key !== "room" && key !== "presenceId") ||
+            typeof value.room !== "string" || typeof value.presenceId !== "string"
+          ) throw new Error("INVALID_PRESENCE_WAKE_REQUEST");
+          const info = ledger.getRoom(value.room);
+          if (!info) throw new Error("ROOM_NOT_FOUND");
+          const workspace = await app.workspaces.assertAllowed(info.workspace);
+          const outcome = collaboration.requestExternalWake({
+            roomId: value.room,
+            workspace,
+            presenceId: value.presenceId,
+          });
+          const session = collaboration.roomView(value.room, workspace).sessions.find(
+            (candidate) => candidate.id === value.presenceId,
+          );
+          if (!session) throw new Error("PRESENCE_NOT_FOUND");
+          json(response, 200, {
+            session,
+            recorded: outcome.recorded,
+            /* Whether THIS request wrote the line, and what the line on the record is dated. Without
+               them a repeat press inside the same minute would be reported exactly like the first,
+               and the UI would name a time belonging to the earlier press. */
+            fresh: outcome.fresh,
+            ...(outcome.recordedAt === undefined ? {} : { recordedAt: outcome.recordedAt }),
+            listening: outcome.listening,
+            woke: false,
+          });
+          return;
+        }
         if (url.pathname === "/api/rooms/presence/post") {
           if (typeof body !== "object" || body === null || Array.isArray(body)) {
             throw new Error("INVALID_PRESENCE_MESSAGE");

@@ -229,6 +229,131 @@ test("work queued for a seat that is not listening is recorded in the ledger", a
   );
 });
 
+/*
+ * The nudge exists because the owner asked for a button that wakes a silent terminal, and the
+ * protocol cannot provide one: a seat is reachable only from inside a room_wait it opened itself, so
+ * when no such call is open there is nothing to deliver into. A server-initiated notification would
+ * not help either -- it cannot make a call that does not exist return -- which is the narrower and
+ * true form of "the server cannot reach it".
+ * So the button records the intention instead, and what has to be guarded is mostly what it must
+ * never do or claim.
+ */
+test("asking for a seat's attention records the intention and never claims to have woken it", async (t) => {
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-wake-"));
+  /*
+   * A controlled clock, because the thing under test is a time bucket. Three real calls land inside
+   * the same millisecond, so a millisecond-keyed implementation -- no bucketing at all -- would
+   * dedupe them too and this test would agree with it. Moving the clock between presses is the only
+   * way it can tell the two apart.
+   */
+  let clock = Date.parse("2026-09-02T14:12:00.000Z");
+  const gui = new CollaborationService(data, { presence: { leaseMs: 120_000, now: () => clock } });
+  /* The clock advances 12s, 25s, 60s and 90s to cross bucket boundaries. No single step exceeds the
+     120s presence lease, but they accumulate past it, so the seat is kept alive the way a real one is:
+     by heartbeating between steps. Widening the lease was the other option and it is not available --
+     the store caps it at 120s on purpose. */
+  /* Declared after `external` exists rather than closing over a binding that is still in its temporal
+     dead zone. It only worked before because of call ordering, which is a property of this test today
+     and not of the code. */
+  let tick = (ms: number): void => { clock += ms; };
+  t.after(() => gui.close());
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+
+  gui.ledger.createRoom("demo", "/tmp/project");
+  const external = gui.registerExternal({ provider: "codex", workspace: "/tmp/project", hostPid: 7301, model: "gpt-test" });
+  tick = (ms: number): void => { clock += ms; gui.heartbeatExternal(external.id); };
+  gui.requestExternalJoin(external.id, "demo", "/tmp/project");
+  gui.approveExternalJoin({
+    ...ROOM_FIRST_JOIN, presenceId: external.id, roomId: "demo", workspace: "/tmp/project", label: "frontend",
+  });
+
+  // Refused before standby is approved. A nudge cannot help a seat that is not allowed to receive
+  // work at all, and offering it there would put a plausible action next to a problem it does not
+  // touch -- which is how someone clicks instead of doing the thing that works.
+  assert.throws(
+    () => gui.requestExternalWake({ roomId: "demo", workspace: "/tmp/project", presenceId: external.id }),
+    /TARGET_AGENT_STANDBY_NOT_APPROVED/u,
+  );
+
+  gui.requestExternalStandby(external.id, "demo", "/tmp/project");
+  gui.approveExternalStandby(external.id, "demo", "/tmp/project");
+
+  const recorded = gui.requestExternalWake({ roomId: "demo", workspace: "/tmp/project", presenceId: external.id });
+  assert.equal(recorded.listening, false);
+  assert.equal(recorded.recorded, true);
+  assert.equal(recorded.fresh, true, "the first press in a minute writes the line");
+  assert.ok(recorded.recordedAt, "and reports when that line is dated");
+
+  const lines = gui.ledger.listAfter("demo", 0).map((message) => String(message.text));
+  const line = lines.find((entry: string) => entry.includes("Owner 想找"));
+  assert.ok(line, `the intention must reach the ledger, got:\n${lines.join("\n")}`);
+  assert.match(String(line), /沒有辦法叫醒/u, "and must say plainly that nothing was woken");
+  assert.doesNotMatch(String(line), /已喚醒|已叫醒|已通知/u);
+
+  // Held down, or clicked again out of frustration -- and it will be, because it does not visibly do
+  // anything -- leaves one line for the minute rather than a column of them.
+  tick(12_000);
+  gui.requestExternalWake({ roomId: "demo", workspace: "/tmp/project", presenceId: external.id });
+  tick(25_000);
+  gui.requestExternalWake({ roomId: "demo", workspace: "/tmp/project", presenceId: external.id });
+  assert.equal(
+    gui.ledger.listAfter("demo", 0).filter((message) => String(message.text).includes("Owner 想找")).length,
+    1,
+    "three presses spread across one minute leave one line",
+  );
+
+  /*
+   * A deduped press must say so. Reporting it exactly like the first press would put a timestamp on
+   * screen that belongs to the earlier click -- "已記一筆（含時間）" naming a minute the owner did not
+   * just act in.
+   */
+  const deduped = gui.requestExternalWake({ roomId: "demo", workspace: "/tmp/project", presenceId: external.id });
+  assert.equal(deduped.recorded, true, "an ask for this seat in this minute is on the record");
+  assert.equal(deduped.fresh, false, "but this press did not write it");
+  assert.equal(deduped.recordedAt, recorded.recordedAt, "and the time reported is the line's, not now");
+
+  // A later minute is a new ask, not a repeat of the old one, and gets its own line.
+  tick(60_000);
+  gui.requestExternalWake({ roomId: "demo", workspace: "/tmp/project", presenceId: external.id });
+  assert.equal(
+    gui.ledger.listAfter("demo", 0).filter((message) => String(message.text).includes("Owner 想找")).length,
+    2,
+    "asking again a minute later is a new ask",
+  );
+
+  /*
+   * A seat that is listening records nothing. The click can race a seat coming back on duty, and the
+   * ledger is permanent: "它當時沒有在收聽" written about a moment when it WAS would be a false line
+   * that nothing retracts. This branch existed with no test walking it.
+   */
+  const onDuty = new AbortController();
+  const duty = gui.inbox.wait({
+    presenceId: external.id, roomId: "demo", ledger: gui.ledger, signal: onDuty.signal,
+  }).then(() => "returned", (error: Error) => error.message);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(gui.inbox.isListening(external.id, "demo"), true, "the seat must actually be on duty for this to test anything");
+
+  const linesBefore = gui.ledger.listAfter("demo", 0).length;
+  tick(90_000);
+  const whileListening = gui.requestExternalWake({ roomId: "demo", workspace: "/tmp/project", presenceId: external.id });
+  assert.equal(whileListening.listening, true);
+  assert.equal(whileListening.recorded, false, "nothing to record about a seat that is right here");
+  assert.equal(
+    gui.ledger.listAfter("demo", 0).length,
+    linesBefore,
+    "and a fresh minute bucket must not be enough to write one anyway",
+  );
+  onDuty.abort();
+  assert.match(String(await duty), /ROOM_WAIT_CANCELLED/u);
+
+  // Offline seats are refused outright rather than recorded against.
+  gui.removeExternal({ presenceId: external.id, roomId: "demo", workspace: "/tmp/project" });
+  assert.throws(
+    () => gui.requestExternalWake({ roomId: "demo", workspace: "/tmp/project", presenceId: external.id }),
+    /TARGET_AGENT_OFFLINE/u,
+  );
+});
+
 test("exact terminal seats exchange authenticated multi-turn threads without provider fallback", async (t) => {
   const data = await mkdtemp(join(tmpdir(), "orchestratory-peer-thread-"));
   const codexProcess = collaborationService(data);
