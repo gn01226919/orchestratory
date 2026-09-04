@@ -10,86 +10,80 @@
   </head>
   <body>
     <div class="app">
-      <aside class="side" aria-label="控制室">
-        <div class="brand">
-          <span class="brand-dot" aria-hidden="true"></span>
-          <b>Room 控制室</b>
-          <small>ledger live</small>
+      <header class="topbar" aria-label="控制室頂欄">
+        <details class="room-menu" id="room-menu">
+          <summary class="room-menu-summary" aria-label="專案／房間選單">
+            <i class="dot on" id="room-menu-dot" aria-hidden="true"></i><b id="room-menu-label">Room 控制室</b><span aria-hidden="true">▾</span>
+          </summary>
+          <div class="room-menu-panel">
+            <label class="field" for="room-select">專案／房間
+              <select id="room-select"><option value="">載入中…</option></select>
+            </label>
+            <nav class="room-menu-nav" aria-label="Room 導航">
+              <a class="room-menu-item" id="live-link" href="/room"><b>▶ Room 即時協作</b><small>直播、發言與 @喚醒</small></a>
+              <a class="room-menu-item" id="history-link" href="/room?mode=history"><b>🕘 歷史紀錄</b><small>每次向前翻閱 100 則</small></a>
+              <a class="room-menu-item" href="/"><b>＋ 新增專案／房間</b><small>回主代理工作區設定</small></a>
+            </nav>
+            <label class="field" for="room-search">搜尋帳本
+              <input id="room-search" type="search" placeholder="關鍵字，清空回直播">
+            </label>
+            <button id="older-history" type="button" hidden>↑ 載入更早紀錄</button>
+            <button id="summarize" type="button">🧾 摘要這個房間</button>
+            <div class="room-menu-stats">
+              <span class="rail-row"><i class="dot on" id="rec-dot"></i><span><b id="rec-state">…</b><small id="room-stats">–</small></span></span>
+              <div id="author-stats" class="rail" aria-label="發言統計"></div>
+            </div>
+            <div id="connection" class="conn">連線中…</div>
+          </div>
+        </details>
+        <div class="topbar-chips" aria-label="房間概況">
+          <button id="agent-requests-open" class="agent-requests-open topbar-chip" type="button" aria-expanded="false" aria-controls="agent-requests-panel">
+            <span>終端</span><b id="topbar-terminal-count" class="topbar-chip-count">0</b><b id="agent-request-count" class="topbar-chip-alert" hidden>0</b>
+          </button>
+          <button id="topbar-managed-open" class="topbar-chip" type="button" aria-controls="agent-requests-panel">
+            <span>子 Agent</span><b id="topbar-managed-count" class="topbar-chip-count">0</b>
+          </button>
+          <button id="topbar-task-open" class="topbar-chip" type="button">
+            <span>任務</span><b id="topbar-task-count" class="topbar-chip-count">0</b>
+          </button>
         </div>
-        <nav class="side-nav" aria-label="Room 導航">
-          <a class="nav-card" href="/">
-            <b>← AI 對話</b>
-            <small>回到主代理工作區</small>
-          </a>
-          <a class="nav-card" id="live-link" href="/room">
-            <b>Room 即時協作</b>
-            <small>直播、發言與 @喚醒</small>
-          </a>
-          <a class="nav-card" id="history-link" href="/room?mode=history">
-            <b>歷史紀錄</b>
-            <small>每次向前翻閱 100 則</small>
-          </a>
-        </nav>
-        <label class="field" for="room-select">專案／房間
-          <select id="room-select"><option value="">載入中…</option></select>
-        </label>
-        <button id="agent-requests-open" class="agent-requests-open" type="button" aria-expanded="false">
-          <span>＋ 新增 Agents</span><b id="agent-request-count" hidden>0</b>
-        </button>
-        <section id="agent-requests-panel" class="agent-requests-panel" hidden aria-label="Agent 加入與待命申請">
-          <p><b>外接終端＝Native Full-Trust</b>：<code>room_join_request</code> 只申請加入房間，不會改變 host 原有的 sandbox、approval、工具、檔案、shell、network 或 subagent 能力；能力仍由 Codex／Claude Code host 掌管。加入後呼叫 <code>room_wait</code> 才會另行申請待命，這也只控制協作收件，不是能力授權。原生旁路無法攔截。</p>
-          <div id="sidebar-presence-list" class="office-presence-list"></div>
-          <form id="managed-agent-create" class="managed-agent-create">
-            <b>受控即時 Agent</b>
-            <small>GUI Managed · 由 Orchestratory 啟動 · 對話唯讀 · 寫入需另行 Owner Writer 授權</small>
-            <label for="managed-agent-provider">模型來源</label>
-            <select id="managed-agent-provider">
-              <option value="codex">Codex</option>
-              <option value="claude">Claude</option>
-              <option value="grok">Grok</option>
-            </select>
-            <label for="managed-agent-label">名稱／任務編號</label>
-            <input id="managed-agent-label" maxlength="24" required placeholder="例如：前端 2">
-            <button class="primary" type="submit">＋ 建立受控即時 Agent</button>
-            <small id="managed-agent-create-status" aria-live="polite"></small>
-          </form>
-          <div id="sidebar-managed-agent-list" class="office-presence-list managed-agent-list"></div>
-        </section>
-        <section class="merge-outcome-nav" aria-label="Merge 任務與紀錄 · Merge tasks and records">
+        <section class="merge-outcome-nav" aria-label="核准併入與併入紀錄">
           <div id="merge-active-task" class="merge-active-task" hidden>
-            <p>待處理的 Merge · Merge tasks</p>
             <button id="merge-approvals-open" class="agent-requests-open merge-approvals-open" type="button" aria-haspopup="dialog" aria-controls="merge-approval" disabled>
-              <span>⑂ 待核准 · Pending approval</span><b id="merge-approval-count" aria-label="0 件待核准">0</b>
+              <span>⑂</span><b id="merge-approval-count" aria-label="0 件待核准">0</b>
             </button>
           </div>
-          <p class="merge-outcome-nav-title">稽核紀錄（不是待辦） · Audit records, not tasks</p>
           <button id="merge-history-open" class="agent-requests-open merge-history-open" type="button" aria-haspopup="dialog" aria-controls="merge-history">
-            <span>▤ Merge 紀錄 · Merge records</span>
-            <em id="merge-records-attention" class="merge-records-attention" hidden>需檢查 · Review required</em>
+            <span>▤ 併入紀錄</span>
+            <em id="merge-records-attention" class="merge-records-attention" hidden>需檢查</em>
           </button>
-          <small>完成、拒絕或逾期後會從待處理區消失；歷史只在紀錄面板內保留，不顯示成側欄待辦數字。</small>
-          <p id="merge-outcome-nav-status" class="merge-outcome-nav-status" aria-live="polite"></p>
+          <p class="merge-outcome-nav-title sr-only">稽核紀錄（不是待辦）；完成、拒絕或逾期後會從待處理區消失，歷史只在紀錄面板內保留。</p>
+          <p id="merge-outcome-nav-status" class="merge-outcome-nav-status sr-only" aria-live="polite"></p>
         </section>
-        <label class="field" for="room-search">搜尋帳本
-          <input id="room-search" type="search" placeholder="關鍵字，清空回直播">
-        </label>
-        <div class="rail">
-          <div class="rail-row"><i class="dot on" id="rec-dot"></i><span><b id="rec-state">…</b><small id="room-stats">–</small></span></div>
-        </div>
-        <div class="rail" id="author-stats" aria-label="發言統計"></div>
-        <div class="side-foot">
-          <button id="older-history" type="button" hidden>↑ 載入更早紀錄</button>
-          <button id="summarize" type="button">🧾 摘要這個房間</button>
-          <button id="rec-toggle" type="button">⏸ 暫停收錄</button>
-          <button id="stop-all" type="button" class="danger">■ 緊急停止</button>
-          <div id="connection" class="conn">連線中…</div>
-        </div>
-      </aside>
+        <button id="rec-toggle" class="topbar-rec" type="button" title="切換收錄"><i class="dot on" id="topbar-rec-dot" aria-hidden="true"></i><b id="topbar-rec-state">…</b></button>
+        <button id="stop-all" type="button" class="danger topbar-stop" title="緊急停止" aria-label="緊急停止">■</button>
+      </header>
+      <section id="agent-requests-panel" class="agent-requests-panel topbar-drawer" hidden aria-label="Agent 加入與待命申請">
+        <div class="topbar-drawer-head"><b>終端與子 Agent</b><button id="agent-requests-close" type="button" aria-label="關閉終端面板">×</button></div>
+        <p><b>外接終端＝Native Full-Trust</b>：<code>room_join_request</code> 只申請加入房間，不會改變 host 原有的 sandbox、approval、工具、檔案、shell、network 或 subagent 能力；能力仍由 Codex／Claude Code host 掌管。加入後呼叫 <code>room_wait</code> 才會另行申請待命，這也只控制協作收件，不是能力授權。原生旁路無法攔截。</p>
+        <div id="sidebar-presence-list" class="office-presence-list"></div>
+        <form id="managed-agent-create" class="managed-agent-create">
+          <b>受控即時 Agent</b>
+          <small>GUI Managed · 由 Orchestratory 啟動 · 對話唯讀 · 寫入需另行 Owner Writer 授權</small>
+          <label for="managed-agent-provider">模型來源</label>
+          <select id="managed-agent-provider">
+            <option value="codex">Codex</option>
+            <option value="claude">Claude</option>
+            <option value="grok">Grok</option>
+          </select>
+          <label for="managed-agent-label">名稱／任務編號</label>
+          <input id="managed-agent-label" maxlength="24" required placeholder="例如：前端 2">
+          <button class="primary" type="submit">＋ 建立受控即時 Agent</button>
+          <small id="managed-agent-create-status" aria-live="polite"></small>
+        </form>
+        <div id="sidebar-managed-agent-list" class="office-presence-list managed-agent-list"></div>
+      </section>
       <main class="main">
-        <div class="view-bar">
-          <button id="view-ledger" class="view-tab is-active" type="button">💬 帳本直播</button>
-          <button id="view-office" class="view-tab" type="button">🏢 辦公室</button>
-        </div>
         <div id="ledger" class="stream" aria-live="polite">
           <div class="welcome"><b>Room Ledger 直播</b><p>選擇房間後，這裡會即時顯示所有 agents 的編號對話。點 #編號可展開被引用段落。</p></div>
         </div>
@@ -223,101 +217,118 @@
     </div>
     <section id="merge-approval" class="workspace-onboarding merge-approval" hidden role="dialog" aria-modal="true" aria-labelledby="merge-approval-title">
       <div class="workspace-onboarding-card merge-approval-card">
-        <header>
-          <span><small>MERGE CANDIDATE INTO MAIN</small><b id="merge-approval-title">合併進 main · Merge candidate into main</b></span>
-          <button id="merge-approval-close" type="button" aria-label="關閉合併核准 · Close merge approval">×</button>
+        <header class="merge-approval-bar">
+          <button id="merge-approval-close" type="button" aria-label="回辦公室，關閉核准併入">← 回辦公室</button>
+          <span class="merge-approval-bar-title"><small>MERGE CANDIDATE INTO MAIN</small><b id="merge-approval-title">⑂ 核准併入 main</b></span>
+          <code id="merge-approval-task">—</code>
+          <em id="merge-approval-risk" class="merge-approval-risk">風險</em>
         </header>
-        <div class="merge-approval-head">
-          <div class="merge-approval-identity">
-            <em id="merge-approval-risk" class="merge-approval-risk">風險 · RISK</em>
-            <code id="merge-approval-task">—</code>
+        <div class="merge-approval-body">
+          <aside class="merge-approval-facts" aria-label="核准事實">
+            <div class="merge-approval-head">
+              <p class="merge-approval-facts-label">來源 → 目標</p>
+              <p id="merge-approval-route" class="merge-approval-route">草稿版 → 正式版 main</p>
+              <!-- 邊界寫在 Owner 打確認語的同一頁，不是設定頁深處：「草稿區」字面容易被讀成作業系統層級的保證。
+                   它放在 scroll-gate 量測區域「之外」的左欄；量測區域內（renderMergePromotionDisclosure）另有一次。 -->
+              <p class="merge-approval-route merge-approval-disclaimer">草稿區保證的是看得到、可退回、有紀錄，<b>不是作業系統層級的隔離</b>：同一個帳號下的 full-trust agent 技術上仍可繞過應用層邊界。需要強制隔離請用容器或另一個帳號。</p>
+              <label class="field merge-approval-switch" for="merge-approval-select" id="merge-approval-switch" hidden>其他待核准項目
+                <select id="merge-approval-select"></select>
+              </label>
+              <div id="merge-approval-risks" class="merge-approval-risks"></div>
+            </div>
+            <div class="merge-approval-recovery">
+              <b>還原點</b>
+              <div id="merge-approval-recovery-facts" class="merge-approval-recovery-facts"></div>
+              <code id="merge-approval-restore">—</code>
+              <button id="merge-approval-copy" type="button">⧉ 複製還原指令</button>
+              <small>Orchestratory 不會替你執行這段指令；它只是把還原路徑寫成可直接貼上的形式。</small>
+            </div>
+            <div class="merge-approval-ttl">
+              <span><small>核准視窗剩餘</small><b id="merge-approval-ttl">—</b></span>
+              <button id="merge-approval-refresh" type="button">↻ 重新產生預覽</button>
+            </div>
+            <p class="merge-approval-others">其他待核准 · <b id="merge-approval-others-count">0</b></p>
+            <button id="merge-approval-history-open" class="merge-approval-history-open" type="button" aria-haspopup="dialog" aria-controls="merge-history">
+              <span>▤ 併入紀錄</span><small id="merge-approval-history-summary">尚未讀取</small>
+            </button>
+            <small class="merge-approval-facts-note">紀錄是稽核檔案，不是待辦。</small>
+          </aside>
+          <div class="merge-approval-review">
+            <div class="merge-approval-review-head">
+              <b>審閱 · 捲到底才解鎖</b>
+              <div id="merge-approval-stats" class="merge-approval-stats"></div>
+            </div>
+            <p class="merge-approval-diff-label" id="merge-approval-diff-label">這次併入會執行什麼、覆蓋什麼，以及變更檔案（預設收合，請捲到底）</p>
+            <section id="merge-approval-blocking" class="merge-approval-blocking" aria-live="polite" hidden>
+              <b>無法核准</b>
+              <p>下列項目存在期間，「核准併入 main」保持停用；一般阻擋項目不會鎖住輸入，但逾時／終局核准不能復活。</p>
+              <ul id="merge-approval-blockers"></ul>
+              <button id="merge-approval-repreview" type="button">↻ 重新產生預覽</button>
+            </section>
+            <div id="merge-approval-diff" class="merge-approval-diff" tabindex="0" role="group" aria-labelledby="merge-approval-diff-label" aria-describedby="merge-approval-scroll-hint"></div>
           </div>
-          <p id="merge-approval-route" class="merge-approval-route">候選 worktree → 目標分支 · candidate worktree → target branch</p>
-          <!-- 這個檔案與 room.js 有十處「隔離 worktree」，而這是 README 教的主線核准。字面容易被讀成
-               作業系統層級的保證，所以邊界寫在 Owner 打確認語的同一頁，不是設定頁深處。
-               它刻意放在 scroll-gate 量測區域「之外」：放進去才是更強的位置（Owner 必經），但那會改到
-               merge-dialog-acceptance 雜湊涵蓋的 renderMergePromotionDisclosure，讓一次真人瀏覽器驗收失效。
-               重跑那次驗收是 Owner 的動作，所以更強的位置留給下一次瀏覽器驗收，這裡先讓它出現在畫面上。 -->
-          <p class="merge-approval-route">「隔離 worktree」保證的是可追溯、可復原、有紀錄，<b>不是作業系統層級的隔離</b>：同一個帳號下的 full-trust agent 技術上仍可繞過應用層邊界。需要強制隔離請用容器或另一個帳號。 · An isolated worktree is a record and a recovery point, <b>not an OS sandbox</b>: a full-trust agent under this same account can bypass an application-level boundary.</p>
-          <label class="field merge-approval-switch" for="merge-approval-select" id="merge-approval-switch" hidden>其他待核准項目 · Other pending approvals
-            <select id="merge-approval-select"></select>
-          </label>
-          <div id="merge-approval-risks" class="merge-approval-risks"></div>
         </div>
-        <section id="merge-approval-blocking" class="merge-approval-blocking" aria-live="polite" hidden>
-          <b>無法核准 · Blocking</b>
-          <p>下列項目存在期間，「合併進 main」保持停用；一般 blocker 不會鎖住輸入，但逾時／終局核准不能復活。 · Blocking items keep the primary button disabled; ordinary blockers do not lock the field, but expired or terminal approvals cannot be revived.</p>
-          <ul id="merge-approval-blockers"></ul>
-          <button id="merge-approval-repreview" type="button">↻ 重新產生預覽 · Re-preview</button>
-        </section>
-        <div id="merge-approval-stats" class="merge-approval-stats"></div>
-        <p class="merge-approval-diff-label" id="merge-approval-diff-label">這次促進會執行什麼、覆蓋什麼，以及變更檔案（預設收合，請捲到底） · What this promotion would execute and overwrite, then the changed files (collapsed by default, scroll to the bottom)</p>
-        <div id="merge-approval-diff" class="merge-approval-diff" tabindex="0" role="group" aria-labelledby="merge-approval-diff-label" aria-describedby="merge-approval-scroll-hint"></div>
-        <p id="merge-approval-scroll-hint" class="merge-approval-scroll-hint" aria-live="polite"></p>
-        <section class="merge-approval-recovery">
-          <b>復原點 · Recovery point</b>
-          <div id="merge-approval-recovery-facts" class="merge-approval-recovery-facts"></div>
-          <code id="merge-approval-restore">—</code>
-          <button id="merge-approval-copy" type="button">⧉ 複製還原指令 · Copy restore command</button>
-          <small>Orchestratory 不會替你執行這段指令；它只是把復原路徑寫成可直接貼上的形式。 · Orchestratory never runs this for you; it only writes the recovery path out in copy-paste form.</small>
-        </section>
-        <div class="merge-approval-ttl">
-          <span><small>核准視窗剩餘 · Approval window</small><b id="merge-approval-ttl">—</b></span>
-          <button id="merge-approval-refresh" type="button">↻ 重新產生預覽 · Re-preview</button>
-        </div>
-        <div id="merge-approval-confirm-area">
-          <label for="merge-approval-confirmation">可先輸入 <code id="merge-approval-phrase">MERGE INTO MAIN</code>；捲完內層 diff 且沒有阻擋項目後，最終按鈕才解鎖 · You may type now; the final button also requires the inner diff to be read to the end</label>
-          <input id="merge-approval-confirmation" type="text" maxlength="64" autocomplete="off" spellcheck="false" aria-describedby="merge-approval-confirmation-feedback" disabled>
-          <p id="merge-approval-confirmation-feedback" class="merge-confirmation-feedback" aria-live="polite"></p>
-        </div>
-        <div class="workspace-onboarding-actions merge-approval-actions">
-          <button id="merge-approval-reject" type="button">拒絕並保留候選 · Reject &amp; keep candidate</button>
-          <button id="merge-approval-cancel" type="button">取消 · Cancel</button>
-          <button id="merge-approval-confirm" class="danger" type="button" aria-disabled="true" aria-describedby="merge-approval-scroll-hint merge-approval-confirmation-feedback merge-approval-status" disabled>合併進 main · Merge into main</button>
-        </div>
-        <section id="merge-approval-result" class="merge-approval-result" aria-live="polite" hidden></section>
-        <section id="merge-approval-retry-panel" class="merge-approval-result is-failed" aria-live="polite" hidden>
-          <b>這筆核准已結案，但可以安全重試 · This approval is closed; a safe retry is available</b>
-          <p>系統不會復活或重用舊授權。按下後會重新讀取 live main、建立新的 snapshot-bound 核准，並自動切換到可輸入的新畫面；不會自動 Merge。</p>
-          <button id="merge-approval-new-request" type="button">↻ 建立新的預覽與核准 · Create fresh preview &amp; approval</button>
-        </section>
-        <p id="merge-approval-status" class="workspace-onboarding-status" aria-live="polite"></p>
+        <footer class="merge-approval-confirm">
+          <div class="merge-approval-confirm-row">
+            <span id="merge-approval-blocker-count" class="merge-approval-blocker-count">阻擋項目 · 0</span>
+            <p id="merge-approval-scroll-hint" class="merge-approval-scroll-hint" aria-live="polite"></p>
+          </div>
+          <div id="merge-approval-confirm-area">
+            <label for="merge-approval-confirmation">可先輸入 <code id="merge-approval-phrase">MERGE INTO MAIN</code>；捲完內層變更清單且沒有阻擋項目後，最終按鈕才解鎖</label>
+            <div class="merge-approval-confirm-line">
+              <input id="merge-approval-confirmation" type="text" maxlength="64" autocomplete="off" spellcheck="false" aria-describedby="merge-approval-confirmation-feedback" disabled>
+              <div class="workspace-onboarding-actions merge-approval-actions">
+                <button id="merge-approval-reject" type="button">拒絕並保留草稿版</button>
+                <button id="merge-approval-cancel" type="button">取消</button>
+                <button id="merge-approval-confirm" class="danger" type="button" aria-disabled="true" aria-describedby="merge-approval-scroll-hint merge-approval-confirmation-feedback merge-approval-status" disabled>核准併入 main</button>
+              </div>
+            </div>
+            <p id="merge-approval-confirmation-feedback" class="merge-confirmation-feedback" aria-live="polite"></p>
+          </div>
+          <section id="merge-approval-result" class="merge-approval-result" aria-live="polite" hidden></section>
+          <section id="merge-approval-retry-panel" class="merge-approval-result is-failed" aria-live="polite" hidden>
+            <b>這筆核准已結案，但可以安全重試</b>
+            <p>系統不會復活或重用舊授權。按下後會重新讀取 live main、建立新的 snapshot-bound 核准，並自動切換到可輸入的新畫面；不會自動併入。</p>
+            <button id="merge-approval-new-request" type="button">↻ 建立新的預覽與核准</button>
+          </section>
+          <p id="merge-approval-status" class="workspace-onboarding-status" aria-live="polite"></p>
+        </footer>
       </div>
     </section>
     <section id="merge-history" class="workspace-onboarding merge-history" hidden role="dialog" aria-modal="true" aria-labelledby="merge-history-title">
       <div class="workspace-onboarding-card merge-history-card">
         <header>
-          <span><small>DURABLE OUTCOME ARCHIVE</small><b id="merge-history-title">Merge 結果檔案 · Merge outcome records</b></span>
-          <button id="merge-history-close" type="button" aria-label="關閉 Merge 結果檔案 · Close merge records">×</button>
+          <span><small>DURABLE OUTCOME ARCHIVE</small><b id="merge-history-title">併入紀錄</b></span>
+          <button id="merge-history-close" type="button" aria-label="關閉併入紀錄">×</button>
         </header>
-        <p class="merge-history-note">這是不會被「關閉」清除的 durable audit 檔案，不是待辦清單。只有 <code>applied</code>、觀察到授權 merge commit，且讀到 main HEAD after 才會進入「已 Merge」。 · This durable audit archive is not a task queue and closing it never clears records.</p>
+        <p class="merge-history-note">這是不會被「關閉」清除的 durable audit 檔案，不是待辦清單。只有 <code>applied</code>、觀察到授權 merge commit，且讀到 main HEAD after 才會進入「已併入」。</p>
         <div class="merge-history-sections" aria-live="polite">
           <section id="merge-history-merged-section" class="merge-history-section is-merged" tabindex="-1" aria-labelledby="merge-history-merged-title">
-            <header><span><b id="merge-history-merged-title">已 Merge · Merged</b><small>已驗證的 main 事實 · verified repository fact</small></span><strong id="merge-history-merged-total">0</strong></header>
+            <header><span><b id="merge-history-merged-title">已併入</b><small>已驗證的 main 事實</small></span><strong id="merge-history-merged-total">0</strong></header>
             <div id="merge-history-merged-list" class="merge-history-list"></div>
           </section>
           <section id="merge-history-review-section" class="merge-history-section is-review" tabindex="-1" aria-labelledby="merge-history-review-title">
-            <header><span><b id="merge-history-review-title">需要檢查 · Review required</b><small>重新讀取或核對 recovery；絕不重複 apply · refresh or inspect; never re-apply</small></span><strong id="merge-history-review-total">0</strong></header>
+            <header><span><b id="merge-history-review-title">需要檢查</b><small>重新讀取或核對還原點；絕不重複 apply</small></span><strong id="merge-history-review-total">0</strong></header>
             <div id="merge-history-review-list" class="merge-history-list"></div>
           </section>
           <section id="merge-history-unpromoted-section" class="merge-history-section is-unpromoted" tabindex="-1" aria-labelledby="merge-history-unpromoted-title">
-            <header><span><b id="merge-history-unpromoted-title">未進入 Merge · 可重新發起 · Can be re-requested</b><small>候選仍在等合併；重新發起會依 live main 重算預覽 · the work is still waiting</small></span><strong id="merge-history-unpromoted-total">0</strong></header>
+            <header><span><b id="merge-history-unpromoted-title">未進入併入 · 可重新發起</b><small>草稿版仍在等併入；重新發起會依 live main 重算預覽</small></span><strong id="merge-history-unpromoted-total">0</strong></header>
             <div class="merge-history-batch">
-              <label><input id="merge-history-select-all" type="checkbox"> 全選 · Select all</label>
-              <button id="merge-history-retry-selected" type="button" disabled>↻ 重新發起選取的核准 · Re-request selected</button>
-              <span id="merge-history-batch-note" class="merge-history-batch-note">同一個候選一次只能有一筆待答的請求，重複的會被跳過。 · One open question per candidate; duplicates are skipped.</span>
+              <label><input id="merge-history-select-all" type="checkbox"> 全選</label>
+              <button id="merge-history-retry-selected" type="button" disabled>↻ 重新發起選取的核准</button>
+              <span id="merge-history-batch-note" class="merge-history-batch-note">同一個草稿版一次只能有一筆待答的請求，重複的會被跳過。</span>
             </div>
             <div id="merge-history-unpromoted-list" class="merge-history-list"></div>
           </section>
           <section id="merge-history-blocked-section" class="merge-history-section is-blocked" tabindex="-1" aria-labelledby="merge-history-blocked-title">
-            <header><span><b id="merge-history-blocked-title">未進入 Merge · 不能重新發起 · Cannot be re-requested</b><small>每一筆都寫明理由；這裡沒有按鈕是刻意的 · each row states why</small></span><strong id="merge-history-blocked-total">0</strong></header>
+            <header><span><b id="merge-history-blocked-title">未進入併入 · 不能重新發起</b><small>每一筆都寫明理由；這裡沒有按鈕是刻意的</small></span><strong id="merge-history-blocked-total">0</strong></header>
             <div id="merge-history-blocked-list" class="merge-history-list"></div>
           </section>
         </div>
         <p id="merge-history-status" class="workspace-onboarding-status" aria-live="polite"></p>
         <div class="workspace-onboarding-actions">
-          <button id="merge-history-refresh" type="button">↻ 重新讀取紀錄 · Refresh</button>
-          <button id="merge-history-done" class="primary" type="button">關閉紀錄 · Close records</button>
+          <button id="merge-history-refresh" type="button">↻ 重新讀取紀錄</button>
+          <button id="merge-history-done" class="primary" type="button">關閉紀錄</button>
         </div>
       </div>
     </section>
