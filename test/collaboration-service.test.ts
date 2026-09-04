@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
@@ -1516,4 +1517,57 @@ test("Writer serializes same-provider writable children in the task worktree and
     epoch: switched.lease.epoch, checkpoint: "Claude Writer 完成",
   }).state, "completed");
   assert.equal(service.revokeUnrecoverableWriters(), 0);
+});
+
+/*
+ * A store whose schema is newer than this build refuses to open, and that refusal is correct —
+ * old code misreading new rows is worse than old code stopping. What was not correct was the blast
+ * radius: the inbox is constructed in the service constructor, so its refusal threw there and took
+ * every other store, and every tool built on them, down with it. Twenty-one of the twenty-seven MCP
+ * tools never touch the inbox.
+ *
+ * This reproduces the real failure — a database written by a later build — rather than injecting a
+ * fake error, because what matters is that the actual guard produces a degraded service and not a
+ * dead one.
+ */
+test("an inbox from a newer build disables its own features and nothing else", async (t) => {
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-inbox-ahead-"));
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+
+  /* Let the real store create the file, then stamp a version this build cannot know. */
+  const seed = new CollaborationService(data, { presence: { leaseMs: 120_000 } });
+  assert.equal(seed.inboxAvailable, true, "the seeded service must start healthy");
+  seed.close();
+
+  const raw = new DatabaseSync(join(data, "room-inbox.sqlite"));
+  raw.exec("PRAGMA user_version = 9999");
+  raw.close();
+
+  const service = new CollaborationService(data, { presence: { leaseMs: 120_000 } });
+  t.after(() => service.close());
+
+  assert.equal(service.inboxAvailable, false);
+
+  /* The reason has to be actionable. A bare code tells the person relaying it nothing they can do,
+     and the person is usually not the one who knows what a schema version is. */
+  const reason = service.inboxUnavailableReason ?? "";
+  assert.match(reason, /SCHEMA_TOO_NEW/u);
+  assert.match(reason, /其餘工具正常運作/u, "it must say what still works, not only what broke");
+  assert.match(reason, /install:runtime/u, "it must say what to do about it");
+
+  /* Everything that does not need the inbox still does. This is the whole point of the change. */
+  const room = service.ledger.createRoom("degraded", data);
+  /* Relative, not absolute: creating a room writes its own opening line, so a hard 0 here would be
+     asserting an implementation detail rather than the property being tested — that appending still
+     works while the inbox is down. */
+  const before = service.ledger.getRoom(room.id)?.messages ?? 0;
+  service.ledger.append(room.id, "you", "帳本照常運作");
+  assert.equal(service.ledger.getRoom(room.id)?.messages, before + 1);
+  assert.ok(service.ledger.listAfter(room.id, 0).some((m) => m.text === "帳本照常運作"));
+  assert.equal(service.presence.list(data).length, 0);
+  assert.ok(service.candidates);
+  assert.ok(service.audit);
+
+  /* And asking for the inbox gives the actionable reason, at the call rather than at construction. */
+  assert.throws(() => service.inbox.list(room.id), /SCHEMA_TOO_NEW/u);
 });

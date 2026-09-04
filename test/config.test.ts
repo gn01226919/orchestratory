@@ -1,12 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { chmod, link, mkdtemp, mkdir, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ABSOLUTE_HARD_LIMITS,
   DEFAULT_HARD_LIMITS,
   defaultDataDirectory,
+  DATA_DIRECTORY_ENVIRONMENT_KEY,
+  assertDataDirectoryOverride,
   PROFILES,
   apiModelsPath,
   hardLimitsPath,
@@ -328,4 +330,80 @@ test("retention policy is finite, owner-only and debug capture defaults off", as
   );
   assert.equal(saved.terminalRunDays, 14);
   assert.equal((await stat(retentionPolicyPath(data))).mode & 0o777, 0o600);
+});
+
+/*
+ * The data directory override.
+ *
+ * It exists because a working tree and an installed runtime resolved to the same directory, so the
+ * moment a development build applied a newer migration every installed runtime was locked out of the
+ * database -- correctly, since refusing an unknown schema is the safe answer, but the lockout took
+ * the whole product down for every session on the machine. Development needs its own state.
+ *
+ * The tests below are in both directions, because the value is an input that decides where the
+ * ledger, the approvals and credential-adjacent state are read from and written to.
+ */
+test("the data directory is overridable, and an override is judged by where it lands", () => {
+  const base = defaultDataDirectory({});
+  assert.match(base, /Library\/Application Support\/Orchestratory$/u);
+
+  /* Absent and empty both mean "not set". An empty string reaching the validator would fail
+     `isAbsolute` and throw, which would turn `export ORCHESTRATORY_DATA_DIR=` -- a perfectly ordinary
+     way to unset a variable in a shell -- into a crash. */
+  assert.equal(defaultDataDirectory({ [DATA_DIRECTORY_ENVIRONMENT_KEY]: "" }), base);
+  assert.equal(defaultDataDirectory({}), base);
+
+  const chosen = defaultDataDirectory({ [DATA_DIRECTORY_ENVIRONMENT_KEY]: "/tmp/orchestratory-dev" });
+  assert.equal(chosen, "/tmp/orchestratory-dev");
+
+  /* Spelling does not decide the answer: `..` is collapsed before anything is compared, and a
+     trailing separator resolves to the same directory, so every store agrees on one string. */
+  assert.equal(assertDataDirectoryOverride("/tmp/a/../orchestratory-dev"), "/tmp/orchestratory-dev");
+  assert.equal(assertDataDirectoryOverride("/tmp/orchestratory-dev/"), "/tmp/orchestratory-dev");
+  assert.equal(assertDataDirectoryOverride("/tmp//orchestratory-dev"), "/tmp/orchestratory-dev");
+});
+
+test("an override that lands somewhere it should not is refused, not quietly ignored", () => {
+  const refuse = (value: string, code: RegExp) =>
+    assert.throws(() => assertDataDirectoryOverride(value), code, `${value} should be refused`);
+
+  refuse("relative/path", /NOT_ABSOLUTE/u);
+  refuse("", /NOT_ABSOLUTE/u);
+  refuse("/tmp/with\0nul", /NUL_BYTE/u);
+
+  /* Landing on the filesystem root or on a home directory itself means every later `join` writes
+     into a directory whose contents are not this product's. The home case had no test until a
+     mutant removed the check and nothing turned red -- the rule was written and unguarded. */
+  refuse("/", /FILESYSTEM_ROOT/u);
+  refuse("/tmp/..", /FILESYSTEM_ROOT/u);
+  refuse(homedir(), /HOME_ROOT/u);
+  refuse(`${homedir()}/`, /HOME_ROOT/u);
+  /* A directory INSIDE home is the ordinary case and must stay allowed -- that is where the real
+     default lives. */
+  assert.equal(assertDataDirectoryOverride(`${homedir()}/orchestratory-dev`), `${homedir()}/orchestratory-dev`);
+
+  /* Directories the operating system owns. Writing here needs privileges this product never asks
+     for, so a value pointing at one is a mistake rather than an intention. */
+  for (const reserved of ["/System", "/usr/local", "/etc", "/var/db", "/private/etc/hosts.d"]) {
+    refuse(reserved, /SYSTEM_PATH/u);
+  }
+  /* A directory whose name merely begins with a reserved one is somebody's ordinary folder. */
+  assert.equal(assertDataDirectoryOverride("/etcetera/data"), "/etcetera/data");
+  assert.equal(assertDataDirectoryOverride("/usr-local-backup"), "/usr-local-backup");
+});
+
+test("an invalid override throws instead of falling back to the default", () => {
+  /*
+   * The failure this prevents is the exact one the override exists to fix: a developer sets it,
+   * mistypes it, is told nothing, and unknowingly migrates the production database. Silence would
+   * make the mistake indistinguishable from success.
+   */
+  assert.throws(
+    () => defaultDataDirectory({ [DATA_DIRECTORY_ENVIRONMENT_KEY]: "not/absolute" }),
+    /INVALID_DATA_DIRECTORY/u,
+  );
+  assert.throws(
+    () => defaultDataDirectory({ [DATA_DIRECTORY_ENVIRONMENT_KEY]: "/" }),
+    /INVALID_DATA_DIRECTORY/u,
+  );
 });

@@ -120,10 +120,56 @@ export interface WriterWorktreeLifecycle {
  * Each process owns one service instance, while SQLite WAL + the append-only room
  * ledger provide the cross-process source of truth and global per-room sequence.
  */
+/*
+ * What to tell whoever asks for the inbox after it failed to open.
+ *
+ * The message carries three things on purpose: what happened, what still works, and what to do.
+ * A bare error code fails all three -- the person reading it is usually an agent relaying to a
+ * human who has no idea a schema version exists. The schema case gets its own sentence because it
+ * is the one with a known, ordinary fix.
+ */
+function describeInboxUnavailable(error: unknown): string {
+  const code = error instanceof Error ? error.message : String(error);
+  if (code === "ROOM_INBOX_SCHEMA_UNSUPPORTED") {
+    return "ROOM_INBOX_UNAVAILABLE:SCHEMA_TOO_NEW — 這個 runtime 認得的收件匣 schema 比資料庫舊，"
+      + "所以拒絕開啟（那是刻意的，舊程式碼誤讀新資料比停下來更危險）。"
+      + "收件匣相關的工具暫時停用，其餘工具正常運作。"
+      + "修法：重建並安裝 runtime（npm run build:package 之後 npm run install:runtime），"
+      + "然後把 orchestrator 指向新的 digest。";
+  }
+  return `ROOM_INBOX_UNAVAILABLE:${code} — 收件匣打不開，相關工具暫時停用，其餘工具正常運作。`;
+}
+
 export class CollaborationService {
   readonly ledger: RoomLedger;
   readonly presence: RoomPresenceStore;
-  readonly inbox: RoomInboxStore;
+  /*
+   * The inbox, or the reason it could not be opened.
+   *
+   * Every other store here is constructed and that is the end of it. This one is allowed to fail
+   * because it is the store whose schema moves most often, and because of what its failure used to
+   * cost: a development build applies a newer migration, the installed runtime then refuses to open
+   * the database -- correctly, refusing an unknown schema is the safe answer -- and the constructor
+   * throwing took the entire MCP server down with it. Twenty-one of twenty-seven tools never touch
+   * this store, and all of them disappeared. The refusal was right and its blast radius was not.
+   *
+   * `inbox` stays a getter with the same shape every caller already uses, so the twenty-odd call
+   * sites are unchanged and a caller that needs it still gets an error rather than an undefined.
+   * What changes is that the error arrives at the call, not at construction.
+   */
+  readonly #inboxStore: RoomInboxStore | undefined;
+  readonly inboxUnavailableReason: string | undefined;
+
+  get inbox(): RoomInboxStore {
+    if (!this.#inboxStore) throw new Error(this.inboxUnavailableReason ?? "ROOM_INBOX_UNAVAILABLE");
+    return this.#inboxStore;
+  }
+
+  /** Whether inbox-backed features can run at all. Cheap, and does not throw. */
+  get inboxAvailable(): boolean {
+    return this.#inboxStore !== undefined;
+  }
+
   readonly managedAgents: ManagedRoomAgentStore;
   readonly writerLeases: WriterLeaseStore;
   readonly writerDelegations: WriterDelegationStore;
@@ -157,7 +203,21 @@ export class CollaborationService {
     this.#dataDirectory = dataDirectory;
     this.ledger = new RoomLedger(dataDirectory);
     this.presence = new RoomPresenceStore(dataDirectory, options.presence ?? {});
-    this.inbox = new RoomInboxStore(dataDirectory, options.inbox ?? {});
+    /*
+     * The one construction that is allowed to fail. The reason is kept verbatim rather than
+     * flattened to a boolean, because the caller that eventually asks for the inbox is the one who
+     * has to act on it, and "unavailable" tells them nothing they can do.
+     */
+    let inboxStore: RoomInboxStore | undefined;
+    let inboxUnavailableReason: string | undefined;
+    try {
+      inboxStore = new RoomInboxStore(dataDirectory, options.inbox ?? {});
+    } catch (error) {
+      inboxStore = undefined;
+      inboxUnavailableReason = describeInboxUnavailable(error);
+    }
+    this.#inboxStore = inboxStore;
+    this.inboxUnavailableReason = inboxUnavailableReason;
     this.managedAgents = new ManagedRoomAgentStore(dataDirectory);
     this.writerLeases = new WriterLeaseStore(dataDirectory);
     this.writerDelegations = new WriterDelegationStore(dataDirectory);
@@ -1910,7 +1970,9 @@ export class CollaborationService {
       () => this.writerDelegations.close(),
       () => this.writerLeases.close(),
       () => this.managedAgents.close(),
-      () => this.inbox.close(),
+      /* Not `this.inbox.close()`: the getter throws when the store never opened, and closing a
+         service that started degraded must not itself fail. Nothing to close is not an error. */
+      () => this.#inboxStore?.close(),
       () => this.presence.close(),
       () => this.ledger.close(),
     ]) {

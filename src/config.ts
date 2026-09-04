@@ -125,8 +125,63 @@ export async function loadNativeRoomPtyEnabled(dataDirectory = defaultDataDirect
   return await loadOwnerBooleanGate(dataDirectory, "native-room-pty.json");
 }
 
-export function defaultDataDirectory(): string {
-  return join(homedir(), "Library", "Application Support", "Orchestratory");
+/**
+ * Where every store lives. Overridable, and the override is validated rather than trusted.
+ *
+ * Why an override exists at all: a working tree and an installed runtime resolved to the SAME
+ * directory, so the moment a development build opened it and applied a newer migration, every
+ * installed runtime was locked out of it -- correctly, because refusing an unknown schema is the
+ * safe answer, but the lockout took down the whole product for every session on the machine. The
+ * fix for that class is not a looser schema check; it is giving development its own state.
+ *
+ * Why the override is checked: an absolute-path environment variable is an input, and this one
+ * decides where credentials-adjacent state, the append-only ledger and the approval records are
+ * read from and written to. The threat is not a remote attacker -- anyone who can set your
+ * environment already runs as you. It is the ordinary mistake: a typo, a stale export in a shell
+ * profile, a path that resolves somewhere with existing contents.
+ *
+ * An invalid value THROWS. It deliberately does not fall back to the default, because the failure
+ * that would cause is the exact one being fixed: a developer who believes they are isolated, is
+ * not, and finds out by migrating the production database.
+ */
+export const DATA_DIRECTORY_ENVIRONMENT_KEY = "ORCHESTRATORY_DATA_DIR";
+
+export function defaultDataDirectory(environment: NodeJS.ProcessEnv = process.env): string {
+  const override = environment[DATA_DIRECTORY_ENVIRONMENT_KEY];
+  if (override === undefined || override === "") {
+    return join(homedir(), "Library", "Application Support", "Orchestratory");
+  }
+  return assertDataDirectoryOverride(override);
+}
+
+/**
+ * The checks, in the order a wrong value is most likely to be wrong.
+ *
+ * `resolve` collapses `..` before anything is compared, so a path is judged by where it lands
+ * rather than by how it was spelled. Everything after that is about landing somewhere that is
+ * plausibly a data directory and not somewhere whose contents belong to someone else.
+ */
+export function assertDataDirectoryOverride(value: string): string {
+  if (value.includes("\0")) throw new Error("INVALID_DATA_DIRECTORY:NUL_BYTE");
+  if (!isAbsolute(value)) throw new Error("INVALID_DATA_DIRECTORY:NOT_ABSOLUTE");
+
+  const canonical = resolve(value);
+  /* Landing on the filesystem root, or on a home directory itself, means every later `join` writes
+     into a directory whose contents are not this product's. */
+  if (canonical === "/") throw new Error("INVALID_DATA_DIRECTORY:FILESYSTEM_ROOT");
+  if (canonical === homedir()) throw new Error("INVALID_DATA_DIRECTORY:HOME_ROOT");
+
+  /* Directories the operating system owns. Writing here needs privileges this product never asks
+     for, so a value pointing at one is a mistake rather than an intention. */
+  for (const reserved of ["/System", "/Library", "/usr", "/bin", "/sbin", "/etc", "/var", "/private/etc"]) {
+    if (canonical === reserved || canonical.startsWith(`${reserved}/`)) {
+      throw new Error("INVALID_DATA_DIRECTORY:SYSTEM_PATH");
+    }
+  }
+
+  /* A trailing separator, doubled separators and a relative spelling all resolve to the same
+     directory; returning the canonical form means every store agrees on one string. */
+  return canonical;
 }
 
 export function hardLimitsPath(dataDirectory = defaultDataDirectory()): string {

@@ -757,7 +757,11 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
             ...app.store.inventory(),
             rooms: collaboration.ledger.inventory(),
             roomPresence: collaboration.presence.inventory(),
-            roomInbox: collaboration.inbox.inventory(),
+            /* 診斷指令的職責是「說出現況」，收件匣打不開本身就是現況的一部分——
+               讓整個 inventory 因此失敗，等於在最需要診斷的時候拒絕診斷。 */
+            roomInbox: collaboration.inboxAvailable
+              ? collaboration.inbox.inventory()
+              : { unavailable: collaboration.inboxUnavailableReason },
             managedRoomAgents: collaboration.managedAgents.inventory(),
             writerLeases: collaboration.writerLeases.inventory(),
             writerDelegations: collaboration.writerDelegations.inventory(),
@@ -781,7 +785,9 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       try {
         roomReport = collaboration.ledger.integrity();
         presenceReport = collaboration.presence.integrity();
-        inboxReport = collaboration.inbox.integrity();
+        inboxReport = collaboration.inboxAvailable
+          ? collaboration.inbox.integrity()
+          : { unavailable: collaboration.inboxUnavailableReason };
         managedReport = collaboration.managedAgents.integrity();
         writerReport = collaboration.writerLeases.integrity();
         delegationReport = collaboration.writerDelegations.integrity();
@@ -812,8 +818,11 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
         report.roomPresence.quickCheck !== "ok" ||
         report.roomPresence.foreignKeyViolations > 0 ||
         !report.roomPresence.stateValid ||
-        report.roomInbox.quickCheck !== "ok" ||
-        !report.roomInbox.stateValid ||
+        /* 檢查不了不等於健全。收件匣打不開時整體判定為失敗，而不是跳過它——
+           `data integrity` 的用途就是回答「資料現在可信嗎」，而答案是「有一部分不知道」。 */
+        !collaboration.inboxAvailable ||
+        ("quickCheck" in report.roomInbox && report.roomInbox.quickCheck !== "ok") ||
+        ("stateValid" in report.roomInbox && !report.roomInbox.stateValid) ||
         report.managedRoomAgents.quickCheck !== "ok" ||
         !report.managedRoomAgents.stateValid ||
         report.writerLeases.quickCheck !== "ok" ||

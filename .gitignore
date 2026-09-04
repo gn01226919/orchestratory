@@ -32,6 +32,11 @@ build/
 .vscode/
 *.swp
 
+# 展示影片與其可重剪專案：產出物，不是原始碼。
+# 和上面的 dist/ 同一個道理——它可以從素材與腳本重建，而 115 MB 的 mp4 一旦進了
+# 公開 repo 的歷史就拿不出來了（GitHub 對 100 MB 以下的檔案不會擋，它會安靜地成功）。
+video demo/
+
 # Temporary files
 *.tmp
 *.temp
