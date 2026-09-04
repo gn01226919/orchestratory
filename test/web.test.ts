@@ -1858,10 +1858,10 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomHtml, /class="agent-requests-open merge-approvals-open"/u);
   assert.match(roomHtml, /id="merge-active-task" class="merge-active-task" hidden/u);
   assert.match(roomHtml, /id="merge-history-open"/u);
-  assert.match(roomHtml, /▤ Merge 紀錄 · Merge records/u);
+  assert.match(roomHtml, /▤ 併入紀錄/u);
   assert.match(roomHtml, /id="merge-records-attention" class="merge-records-attention" hidden/u);
-  assert.match(roomHtml, /需檢查 · Review required/u);
-  assert.match(roomHtml, /稽核紀錄（不是待辦） · Audit records, not tasks/u);
+  assert.match(roomHtml, /需檢查</u);
+  assert.match(roomHtml, /稽核紀錄（不是待辦）/u);
   assert.doesNotMatch(roomHtml, /id="merge-history-count"/u);
   assert.doesNotMatch(roomHtml, /id="merge-history-other-open"/u);
   assert.match(roomHtml, /id="merge-outcome-nav-status"[^>]*aria-live="polite"/u);
@@ -1869,7 +1869,7 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomHtml, /id="merge-history-review-list"/u);
   assert.match(roomHtml, /id="merge-history-unpromoted-list"/u);
   assert.match(roomHtml, /DURABLE OUTCOME ARCHIVE/u);
-  assert.match(roomHtml, /關閉紀錄 · Close records/u);
+  assert.match(roomHtml, /關閉紀錄</u);
   assert.doesNotMatch(roomHtml, />完成 · Done</u);
   assert.match(
     roomStyles,
@@ -1884,35 +1884,35 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   // Layout, top to bottom: header, blocking section above the diff, diff, recovery, TTL, actions.
   assert.match(roomHtml, /id="merge-approval-risk"/u);
   assert.match(roomHtml, /id="merge-approval-task"/u);
-  assert.match(roomHtml, /候選 worktree → 目標分支 · candidate worktree → target branch/u);
+  assert.match(roomHtml, /草稿版 → 正式版 main/u);
   assert.match(roomHtml, /id="merge-approval-risks"/u);
-  assert.match(roomHtml, /無法核准 · Blocking/u);
+  assert.match(roomHtml, /<b>無法核准<\/b>/u);
   assert.match(
     roomHtml,
-    /Blocking items keep the primary button disabled; ordinary blockers do not lock the field, but expired or terminal approvals cannot be revived\./u,
+    /一般阻擋項目不會鎖住輸入，但逾時／終局核准不能復活。/u,
   );
-  assert.match(roomHtml, /id="merge-approval-repreview" type="button">↻ 重新產生預覽 · Re-preview/u);
+  assert.match(roomHtml, /id="merge-approval-repreview" type="button">↻ 重新產生預覽</u);
   // The scroll-gated region holds the promotion disclosure BEFORE the file list, so its label has
   // to say so: the owner is being asked to scroll past what would run, not only past the diff.
-  assert.match(roomHtml, /這次促進會執行什麼、覆蓋什麼，以及變更檔案（預設收合，請捲到底）/u);
-  assert.match(roomHtml, /What this promotion would execute and overwrite, then the changed files \(collapsed by default, scroll to the bottom\)/u);
+  assert.match(roomHtml, /這次併入會執行什麼、覆蓋什麼，以及變更檔案（預設收合，請捲到底）/u);
+  assert.match(roomHtml, /id="merge-approval-diff-label"/u);
   assert.match(roomHtml, /id="merge-approval-diff"/u);
   assert.match(roomHtml, /id="merge-approval-diff"[^>]*tabindex="0"[^>]*aria-describedby="merge-approval-scroll-hint"/u);
-  assert.match(roomHtml, /復原點 · Recovery point/u);
+  assert.match(roomHtml, /<b>還原點<\/b>/u);
   assert.match(roomHtml, /id="merge-approval-restore"/u);
-  assert.match(roomHtml, /⧉ 複製還原指令 · Copy restore command/u);
-  assert.match(roomHtml, /核准視窗剩餘 · Approval window/u);
-  assert.match(roomHtml, /id="merge-approval-refresh" type="button">↻ 重新產生預覽 · Re-preview/u);
+  assert.match(roomHtml, /⧉ 複製還原指令</u);
+  assert.match(roomHtml, /核准視窗剩餘</u);
+  assert.match(roomHtml, /id="merge-approval-refresh" type="button">↻ 重新產生預覽</u);
   // Static HTML ships fail-closed; renderMergeApproval enables the field for a live pending row.
   assert.match(roomHtml, /id="merge-approval-confirmation" type="text" maxlength="64" autocomplete="off" spellcheck="false" aria-describedby="merge-approval-confirmation-feedback" disabled/u);
   assert.match(roomHtml, /id="merge-approval-confirmation-feedback" class="merge-confirmation-feedback" aria-live="polite"/u);
   assert.match(roomHtml, /<code id="merge-approval-phrase">MERGE INTO MAIN<\/code>/u);
   assert.match(roomHtml, /可先輸入/u);
-  assert.match(roomHtml, /the final button also requires the inner diff/u);
+  assert.match(roomHtml, /捲完內層變更清單且沒有阻擋項目後，最終按鈕才解鎖/u);
   // Cancel takes default focus; the merge button is the only primary and is styled danger.
-  assert.match(roomHtml, /id="merge-approval-cancel" type="button">取消 · Cancel/u);
-  assert.match(roomHtml, /id="merge-approval-confirm" class="danger" type="button" aria-disabled="true" aria-describedby="merge-approval-scroll-hint merge-approval-confirmation-feedback merge-approval-status" disabled>合併進 main · Merge into main/u);
-  assert.match(roomHtml, /id="merge-approval-reject" type="button">拒絕並保留候選 · Reject &amp; keep candidate/u);
+  assert.match(roomHtml, /id="merge-approval-cancel" type="button">取消</u);
+  assert.match(roomHtml, /id="merge-approval-confirm" class="danger" type="button" aria-disabled="true" aria-describedby="merge-approval-scroll-hint merge-approval-confirmation-feedback merge-approval-status" disabled>核准併入 main</u);
+  assert.match(roomHtml, /id="merge-approval-reject" type="button">拒絕並保留草稿版</u);
   assert.doesNotMatch(roomHtml, /id="merge-approval-confirm"[^>]*class="[^"]*primary/u);
 
   const mergeDialogStart = roomScript.indexOf("merge-into-main approval dialog");
@@ -1975,19 +1975,19 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(mergeDialogScript, /await loadMergeApproval\(fresh\.id\)/u);
   assert.match(mergeDialogScript, /舊核准.*保持終局/u);
   // Mode changes, submodules and opaque files are marked as such, not as ordinary edits.
-  assert.match(mergeDialogScript, /模式變更 \$\{file\.mode\.from\} → \$\{file\.mode\.to\}，不是一般檔案編輯 · mode change, not an ordinary edit/u);
-  assert.match(mergeDialogScript, /Submodule 指標變更，不是一般檔案編輯 · submodule pointer, not an ordinary edit/u);
-  assert.match(mergeDialogScript, /二進位／過大：無法顯示，將整檔取代 · binary or oversized: cannot be shown, replaced whole-file/u);
-  assert.match(mergeDialogScript, /二進位項目 · Binary/u);
+  assert.match(mergeDialogScript, /模式變更 \$\{file\.mode\.from\} → \$\{file\.mode\.to\}，不是一般檔案編輯/u);
+  assert.match(mergeDialogScript, /Submodule 指標變更，不是一般檔案編輯/u);
+  assert.match(mergeDialogScript, /二進位／過大：無法顯示，將整檔取代/u);
+  assert.match(mergeDialogScript, /\["二進位", /u);
   // Recovery point: base SHA, the recovery ref and a one-click-copy restore command.
-  assert.match(mergeDialogScript, /基準 main SHA · Base main head/u);
-  assert.match(mergeDialogScript, /復原點 ref · Recovery ref/u);
+  assert.match(mergeDialogScript, /\["基準 main", binding\.baseMainHead\]/u);
+  assert.match(mergeDialogScript, /還原點 ref/u);
   assert.match(mergeDialogScript, /navigator\.clipboard\.writeText/u);
   assert.match(mergeDialogScript, /git -C \$\{mainPath\} rev-parse \$\{ref\}/u);
   // TTL countdown, which window.prompt made physically impossible.
   assert.match(mergeDialogScript, /function formatCountdown\(/u);
   assert.match(mergeDialogScript, /setInterval\(tickMergeApprovalTtl, 1000\)/u);
-  assert.match(mergeDialogScript, /已逾時 · expired/u);
+  assert.match(mergeDialogScript, /"已逾時"/u);
   // Expiry while the owner is typing or scrolling is composed, not merely styled: the ticker marks
   // the exact approval expired and synchronously re-renders; updateMergeApprovalGate receives that
   // bit and the pure gate clears/locks the input. A stale client click remains server-refused.
@@ -2013,13 +2013,13 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(mergeDialogScript, /entry\?\.state === "applied"/u);
   assert.match(mergeDialogScript, /entry\?\.observation\?\.authorizedMergeCommit === true/u);
   assert.match(mergeDialogScript, /value\.mainMutated === true/u);
-  assert.match(mergeDialogScript, /Merge 成功 · Merge succeeded/u);
+  assert.match(mergeDialogScript, /✓ 併入成功/u);
   assert.match(mergeDialogScript, /function returnToRoomAfterSuccessfulMerge\(\)/u);
-  assert.match(mergeDialogScript, /closeMergeApprovalDialog\(\);\s+switchView\("ledger"\);\s+byId\("post-input"\)\?\.focus\(\);/u);
+  assert.match(mergeDialogScript, /closeMergeApprovalDialog\(\);[\s\S]{0,200}switchView\(state\.mode === "history" \? "ledger" : "office"\);/u);
   assert.match(mergeDialogScript, /const succeeded = mergeHistorySucceeded\(promotion\) && value\.mainMutated === true;/u);
-  assert.match(mergeDialogScript, /完成並回到 Room 主畫面 · Done & return to Room/u);
+  assert.match(mergeDialogScript, /完成，回辦公室/u);
   assert.equal(
-    mergeDialogScript.match(/完成並回到 Room 主畫面 · Done & return to Room/gu)?.length,
+    mergeDialogScript.match(/完成，回辦公室/gu)?.length,
     1,
   );
   assert.match(
@@ -2030,10 +2030,10 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
     mergeDialogScript.indexOf('} else if (promotion.state === "rolled-back"'),
     mergeDialogScript.indexOf("log.textContent =", mergeDialogScript.indexOf('} else if (promotion.state === "rolled-back"')),
   );
-  assert.doesNotMatch(nonSuccessResultBranches, /merge-success-return|Done & return to Room/u);
+  assert.doesNotMatch(nonSuccessResultBranches, /merge-success-return|完成，回辦公室/u);
   assert.match(mergeDialogScript, /returnButton\.addEventListener\("click", returnToRoomAfterSuccessfulMerge\);/u);
   assert.match(mergeDialogScript, /if \(returnButton\) result\.append\(returnButton\);\s+result\.hidden = false;\s+returnButton\?\.focus\(\);/u);
-  assert.match(mergeDialogScript, /尚未能確認 Merge 成功 · Merge requires review/u);
+  assert.match(mergeDialogScript, /尚未能確認併入成功/u);
   assert.match(mergeDialogScript, /不會重複 apply/u);
   // Rejection describes what this ACTION did and never declares the current state of anything: the
   // three `*Retained` constants it used to print were assertions made by a path that reads nothing.
@@ -2046,8 +2046,8 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(mergeDialogScript, /未重新讀取/u);
   assert.match(mergeDialogScript, /拒絕不等於刪除授權/u);
   // Bilingual state text, and a binding refusal that says which bound values moved.
-  assert.match(mergeDialogScript, /Blockers prevent submission; pressing Merge only guides you to them and sends nothing\./u);
-  assert.match(mergeDialogScript, /pressing Merge only guides you there and submits nothing\./u);
+  assert.match(mergeDialogScript, /按它只會帶你到阻擋項目，不會送出/u);
+  assert.match(mergeDialogScript, /只會帶你到內層清單，不會送出/u);
   assert.match(roomScript, /MAIN_MERGE_APPROVAL_BINDING_CHANGED:/u);
   assert.match(roomScript, /const MERGE_BINDING_LABELS = \{/u);
   assert.match(roomScript, /function renderMergeApprovalBadge\(/u);
@@ -2537,7 +2537,7 @@ test("Merge confirmation gives truthful, retryable feedback for exact and incorr
   const decided = gate.mergeApprovalGate({ ...passing, decided: true });
   assert.equal(decided.inputDisabled, true);
   assert.equal(decided.inputValue, "");
-  assert.match(decided.feedback, /Merge 結果檔案/u);
+  assert.match(decided.feedback, /併入紀錄/u);
 
   const malformed = gate.mergeApprovalGate(undefined);
   assert.equal(malformed.inputDisabled, true);
@@ -2704,7 +2704,7 @@ test("ending a wait is offered only when the record names both a phrase and its 
   assert.match(body, /不會終止任何程序/u);
   assert.match(body, /不會寫入 main/u);
   assert.match(body, /不會修復紀錄/u);
-  assert.match(body, /不代表產品判斷 merge 已/u);
+  assert.match(body, /不代表產品判斷併入已/u);
   assert.match(body, /\/api\/rooms\/merge-promotions\/release/u);
   assert.doesNotMatch(body, /merge-approvals\/approve|promoteMainMerge|reset --hard/u);
 });
@@ -3527,4 +3527,179 @@ test("the ledger groups by LOCAL day and opens the newest one", async () => {
   const empty = grouper.ledgerDayGroups([], "2026-08-21");
   assert.equal([...empty.groups].length, 0);
   assert.equal(empty.openKey, "");
+});
+
+/*
+ * The records panel can be opened from inside the merge approval layer. Closing it used to call
+ * renderMergeApproval(), which rebuilds the diff region and sets scrollTop back to 0 -- so the
+ * scroll-gate the owner had just passed was silently closed again, and the typed phrase, the
+ * enabled state of the final button and the focus target could all move underneath them. This
+ * runs the real closeMergeHistory() against a recording DOM stand-in and asserts that the only
+ * thing it touches in the open approval layer is the one-line records summary.
+ */
+test("closing the records panel leaves the open approval gate exactly as the owner left it", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const fn = (name: string) => {
+    const found = new RegExp(String.raw`^(?:async )?function ${name}\([\s\S]*?^\}$`, "mu").exec(source);
+    assert.ok(found, `${name}() is gone from public/room.js`);
+    return found[0];
+  };
+  const bucketsStart = source.indexOf("/* @pure-start merge-history-buckets");
+  const bucketsEnd = source.indexOf("/* @pure-end merge-history-buckets */");
+  assert.ok(bucketsStart > 0 && bucketsEnd > bucketsStart);
+  const closeSource = fn("closeMergeHistory");
+  // The guard itself, stated on the source: no full re-render from the close path.
+  assert.doesNotMatch(closeSource, /renderMergeApproval\(|renderMergeDiff\(|loadMergeApproval\(|updateMergeApprovalGate\(/u);
+  assert.match(closeSource, /renderMergeApprovalHistorySummary\(\);/u);
+
+  type Node = {
+    id: string; hidden: boolean; textContent: string; value: string; scrollTop: number; disabled: boolean;
+    attrs: Record<string, string>; setAttribute: (k: string, v: string) => void; getAttribute: (k: string) => string | null;
+    focus: () => void; classList: { add: () => void; remove: () => void; toggle: () => void; contains: () => boolean };
+  };
+  const focusLog: string[] = [];
+  const node = (id: string, init: Partial<Node> = {}): Node => ({
+    id, hidden: false, textContent: "", value: "", scrollTop: 0, disabled: false, attrs: {},
+    setAttribute(k, v) { this.attrs[k] = String(v); },
+    getAttribute(k) { return this.attrs[k] ?? null; },
+    focus() { focusLog.push(this.id); },
+    classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+    ...init,
+  });
+  const nodes: Record<string, Node> = {};
+  for (const n of [
+    node("merge-history", { hidden: false }),
+    node("merge-outcome-nav-status"),
+    node("merge-approval", { hidden: false }),
+    node("merge-approval-diff", { scrollTop: 358 }),
+    node("merge-approval-confirmation", { value: "MERGE INTO MAIN", disabled: false }),
+    node("merge-approval-confirm", { attrs: { "aria-disabled": "false" }, disabled: false }),
+    node("merge-approval-ttl", { textContent: "04:11（12:52:24 到期）" }),
+    node("merge-approval-scroll-hint", { textContent: "變更清單已捲到底" }),
+    node("merge-approval-history-summary", { textContent: "尚未讀取" }),
+    node("merge-approval-history-open"),
+  ]) nodes[n.id] = n;
+  const state = {
+    room: "demo",
+    mergeApproval: { id: "a1", taskId: "t1", state: "requested", expired: false },
+    mergeApprovalScrolled: true,
+    mergeHistoryLoaded: true,
+    mergeHistoryRoom: "demo",
+    mergeHistory: [
+      { id: "p1", state: "applied", mainHeadAfter: "abc", observation: { authorizedMergeCommit: true } },
+      { id: "p2", state: "applying", observation: {} },
+    ],
+    mergeUnpromotedApprovals: [{ id: "a0", state: "expired", retry: { eligible: true } }],
+    mergeHistoryReturnFocus: nodes["merge-approval-history-open"],
+  };
+  const sandbox = {
+    state,
+    byId: (id: string) => nodes[id] ?? null,
+    document: { body: { classList: { add() {}, remove() {} } }, activeElement: null },
+  };
+  runInNewContext(
+    `${source.slice(bucketsStart, bucketsEnd)}\n${fn("renderMergeApprovalHistorySummary")}\n${closeSource}\ncloseMergeHistory();`,
+    sandbox,
+    { timeout: 2_000 },
+  );
+  // What closing must do.
+  assert.equal(nodes["merge-history"].hidden, true);
+  assert.equal(nodes["merge-approval-history-summary"].textContent, "已併入 1 · 需檢查 1 · 未進入 1");
+  assert.deepEqual(focusLog, ["merge-approval-history-open"], "focus returns to the control that opened the panel");
+  assert.equal(state.mergeHistoryReturnFocus, null);
+  // What closing must NOT do: the open approval layer is left exactly as the owner had it.
+  assert.equal(nodes["merge-approval"].hidden, false);
+  assert.equal(nodes["merge-approval-diff"].scrollTop, 358, "the scroll-gate the owner passed stays passed");
+  assert.equal(nodes["merge-approval-confirmation"].value, "MERGE INTO MAIN");
+  assert.equal(nodes["merge-approval-confirmation"].disabled, false);
+  assert.equal(nodes["merge-approval-confirm"].getAttribute("aria-disabled"), "false");
+  assert.equal(nodes["merge-approval-confirm"].disabled, false);
+  assert.equal(nodes["merge-approval-ttl"].textContent, "04:11（12:52:24 到期）");
+  assert.equal(nodes["merge-approval-scroll-hint"].textContent, "變更清單已捲到底");
+  assert.equal(state.mergeApprovalScrolled, true);
+  assert.equal(state.mergeApproval.id, "a1");
+});
+
+/*
+ * Escape closes one surface at a time, top-most first. The top-bar popups (room menu, terminal
+ * drawer) float above the approval layer, so an Escape pressed while the room menu is open must
+ * close only the menu and hand focus back to its toggle -- the approval the owner is reviewing must
+ * still be there for the next Escape. Runs the real handler against a recording DOM stand-in.
+ */
+test("Escape closes the top-bar popup first and only then the approval layer", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const fn = (name: string) => {
+    const found = new RegExp(String.raw`^(?:async )?function ${name}\([\s\S]*?^\}$`, "mu").exec(source);
+    assert.ok(found, `${name}() is gone from public/room.js`);
+    return found[0];
+  };
+  assert.match(source, /document\.addEventListener\("keydown", handleEscapeKeydown\);/u);
+  type Node = {
+    id: string; hidden: boolean; value: string; disabled: boolean; attrs: Record<string, string>;
+    setAttribute: (k: string, v: string) => void; getAttribute: (k: string) => string | null; focus: () => void;
+  };
+  const focusLog: string[] = [];
+  const node = (id: string, init: Partial<Node> = {}): Node => ({
+    id, hidden: true, value: "", disabled: false, attrs: {},
+    setAttribute(k, v) { this.attrs[k] = String(v); },
+    getAttribute(k) { return this.attrs[k] ?? null; },
+    focus() { focusLog.push(this.id); },
+    ...init,
+  });
+  const nodes: Record<string, Node> = {};
+  for (const n of [
+    node("room-menu-panel", { hidden: false }),
+    node("room-menu-toggle", { attrs: { "aria-expanded": "true" } }),
+    node("agent-requests-panel", { hidden: true }),
+    node("agent-requests-open", { attrs: { "aria-expanded": "false" } }),
+    node("merge-history", { hidden: true }),
+    node("merge-approval", { hidden: false }),
+    node("merge-approval-confirmation", { value: "MERGE INTO MAIN" }),
+    node("merge-approval-confirm"),
+    node("merge-approval-cancel"),
+  ]) nodes[n.id] = n;
+  const state = {
+    mergeApproval: { id: "a1" }, mergeApprovalTicker: 7, mergeApprovalPoll: 8, mergeApprovalSubmitting: false,
+    mergeApprovalInputApprovalId: "a1", mergeApprovalScrolled: true, mergeApprovalBlockers: [],
+    mergeApprovalReturnFocus: nodes["merge-approval-cancel"],
+  };
+  const cleared: unknown[] = [];
+  const sandbox = {
+    state,
+    byId: (id: string) => nodes[id] ?? null,
+    document: { body: { classList: { add() {}, remove() {} } }, activeElement: null },
+    clearInterval: (handle: unknown) => { cleared.push(handle); },
+  };
+  const escape = { key: "Escape" };
+  runInNewContext(
+    `${fn("setRoomMenuOpen")}\n${fn("setAgentRequestsOpen")}\n${fn("closeMergeHistory")}\n${fn("renderMergeApprovalHistorySummary")}\n`
+      + `${fn("closeMergeApprovalDialog")}\n${fn("handleEscapeKeydown")}\n`
+      + "function mergeHistoryBuckets() { throw new Error('the summary must not be rendered here'); }\n"
+      + "globalThis.press = () => handleEscapeKeydown(escape);",
+    Object.assign(sandbox, { escape }),
+    { timeout: 2_000 },
+  );
+  const press = (sandbox as unknown as { press: () => void }).press;
+  press();
+  // First Escape: only the menu goes, focus returns to its toggle, the approval stays open and intact.
+  assert.equal(nodes["room-menu-panel"].hidden, true);
+  assert.equal(nodes["room-menu-toggle"].getAttribute("aria-expanded"), "false");
+  assert.deepEqual(focusLog, ["room-menu-toggle"]);
+  assert.equal(nodes["merge-approval"].hidden, false);
+  assert.equal(nodes["merge-approval-confirmation"].value, "MERGE INTO MAIN");
+  assert.equal(state.mergeApproval?.id, "a1");
+  assert.deepEqual(cleared, []);
+  // Second Escape: nothing floats above the approval layer any more, so it closes.
+  press();
+  assert.equal(nodes["merge-approval"].hidden, true);
+  assert.equal(state.mergeApproval, null);
+  assert.deepEqual(focusLog, ["room-menu-toggle", "merge-approval-cancel"]);
+  // And the drawer takes the same precedence as the menu.
+  nodes["merge-approval"].hidden = false;
+  nodes["agent-requests-panel"].hidden = false;
+  press();
+  assert.equal(nodes["agent-requests-panel"].hidden, true);
+  assert.equal(nodes["agent-requests-open"].getAttribute("aria-expanded"), "false");
+  assert.equal(nodes["merge-approval"].hidden, false);
+  assert.equal(focusLog.at(-1), "agent-requests-open");
 });
