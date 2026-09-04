@@ -657,10 +657,9 @@ function wakeClock(at) {
  * cannot drift.
  */
 /*
- * `label` is the office word: the two-to-four character answer the pixel floor and the drawers
- * have room for (可交辦 / 排隊中 / 等你核准 / 不可交辦). `text` stays the sidebar badge and is what
- * test/web.test.ts pins; the two say the same thing at two lengths, and both live here so the
- * office cannot drift from the row the way the earlier hand-written copies did.
+ * One vocabulary for every surface: the sidebar badge, the office desk label, the task rows and
+ * the chips all read `text` (可交辦 / 排隊中 / 等你核准 / 不可交辦), so the pixel floor and the
+ * drawers cannot drift from the row the way the earlier hand-written copies did.
  */
 function seatListeningState(session) {
   const joined = Boolean(session?.joined);
@@ -668,7 +667,6 @@ function seatListeningState(session) {
     return {
       key: "not-joined",
       mark: "·",
-      label: "還沒加入",
       text: "還沒加入",
       title: "這個終端還沒被核准進入房間。",
       send: "還不能送。它還沒加入房間。",
@@ -683,17 +681,16 @@ function seatListeningState(session) {
     return {
       key: "listening",
       mark: "●",
-      label: "可交辦",
-      /* "正在收聽", not "正在待命". On this screen 待命 already means "approved for standby" (stage two,
+      /* "可交辦", not "正在待命". On this screen 待命 already means "approved for standby" (stage two,
          the approve/revoke buttons) and it is the difference between the two that this badge exists
          to show. One word cannot carry both halves of the distinction it is drawing. */
-      text: "正在收聽",
-      send: "它正在收聽，送出後會直接送過去。",
+      text: "可交辦",
+      send: "交辦會直接送到它手上。",
       fix: "",
       /* Not "馬上收到": the liveness lease runs for up to 15s and the GUI polls every 5s, so a seat
          killed a moment ago still reads as listening for a short while. Saying the delivery goes
          straight to it is true of what we do; promising arrival is a claim about the other end. */
-      title: "剛才它還在收聽，交辦會直接送過去。",
+      title: "剛才它還在等工作，交辦會直接送過去。",
       cls: "is-listening",
     };
   }
@@ -701,16 +698,15 @@ function seatListeningState(session) {
     return {
       key: "not-listening",
       mark: "○",
-      label: "排隊中",
-      text: "沒在收聽",
-      send: "它現在沒在收聽，送出的訊息會進收件匣排隊（每席最多 32 則還沒結束的交辦，滿了就送不出去）。",
+      text: "排隊中",
+      send: "交辦會進它的收件匣排隊，等它下次 room_wait。（每席最多 32 則還沒結束的交辦，滿了就送不出去。）",
       fix: "到那個終端機視窗，讓它再呼叫一次 room_wait。在那之前交辦會排隊等它，但距離你上次要求超過 12 小時、而且還在排隊的話就會過期（紀錄留著，也可以再按一次重新排隊）。"
         + "不要按撤銷——撤銷之後只有那個終端能自己申請回來。",
       /* This one DOES say what happens next, unlike the ledger line, which is forbidden from doing so.
          The difference is retractability: this is a live view that re-renders every five seconds and
          corrects itself the moment the seat starts listening. A ledger line is permanent, so a
          prediction written there stays on the record after it stops being true. */
-      title: "它在房間裡，但現在沒有在等工作。交辦過去會先排隊，要等它下次呼叫 room_wait 才拿得到。沒有辦法從這裡叫醒它。",
+      title: "它在房間裡，但現在沒有在等工作。交辦會先排隊，等它下次呼叫 room_wait 才拿得到；沒有辦法從這裡叫醒它。",
       cls: "is-silent",
     };
   }
@@ -718,13 +714,12 @@ function seatListeningState(session) {
     return {
       key: "awaiting-approval",
       mark: "◌",
-      label: "等你核准",
-      text: "等你核准待命",
+      text: "等你核准",
       /* Refused, not queued: postToExternal throws TARGET_AGENT_STANDBY_NOT_APPROVED before anything
          is enqueued. And the fix is a button right here, not a trip to the terminal. */
-      send: "還不能送。它的待命還等你核准，在那之前交辦會被拒絕。",
-      fix: "在右邊席位清單的那一列，按「核准 room-wait 待命」就可以了。",
-      title: "它申請了待命，等你按下核准之後才能收工作。",
+      send: "還不能送，先在這裡按核准。",
+      fix: "按這一列（或通知抽屜）的「核准」就可以了。",
+      title: "它申請了待命，你按核准之後才能交辦。",
       cls: "is-pending",
     };
   }
@@ -737,11 +732,10 @@ function seatListeningState(session) {
   return {
     key: "no-standby",
     mark: "–",
-    label: "不可交辦",
-    text: "不能收工作",
-    send: "還不能送。它沒有待命授權，交辦會被拒絕。",
+    text: "不可交辦",
+    send: "還不能送，它沒有待命授權，只有那個終端能自己再申請。",
     fix: "只有那個終端能自己再呼叫一次 room_wait 來申請待命，你在這裡按不回來。",
-    title: "這個席位現在沒有待命授權，所以交辦不到它。要恢復，得由那個終端自己再呼叫一次 room_wait。",
+    title: "這個席位現在沒有待命授權，交辦不到它。要恢復，得由那個終端自己再呼叫一次 room_wait。",
     cls: "",
   };
 }
@@ -1034,8 +1028,8 @@ function renderPresencePanel() {
         ? "② 待命（加入後由終端自行申請）"
         : session.standbyApproved
           ? session.listening
-            ? "② 待命已核准 · 正在收聽"
-            : "② 待命已核准 · 目前沒在收聽"
+            ? "② 待命已核准 · 可交辦"
+            : "② 待命已核准 · 排隊中"
           : standbyPending ? "② 待命待核准" : "② 沒有待命授權";
       stages.append(stageOne, stageTwo);
       if (standbyPending) {
@@ -2025,15 +2019,20 @@ function providerInfo(agent) {
 }
 
 /*
- * Office wording, applied where a notification enters the drawer rather than at every source. The
- * office speaks one language and one vocabulary (候選 is 草稿版 everywhere on this side of the
- * screen); the sources that raise these notifications also feed bilingual surfaces and keep their
- * own text.
+ * Office wording, applied where a notification enters the drawer rather than at every source: the
+ * bilingual tail is dropped, and the listed templates are re-said in the office vocabulary. The
+ * list is exact strings from known sources, not a global word swap, so a title that happens to
+ * contain the same characters is left alone.
+ *   - refreshMergeApprovals: "有候選要求合併進 main · merge into main requested"
  */
+const OFFICE_NOTIFICATION_REWRITES = Object.freeze([
+  ["有候選要求合併進 main", "有草稿版要求合併進 main"],
+]);
+
 function officeText(value) {
-  return String(value || "")
-    .replace(/\s*·\s*[A-Za-z][A-Za-z0-9 ,.'\-]*$/u, "")
-    .replaceAll("候選", "草稿版");
+  let text = String(value || "").replace(/\s*·\s*[A-Za-z][A-Za-z0-9 ,.'\-]*$/u, "");
+  for (const [from, to] of OFFICE_NOTIFICATION_REWRITES) text = text.replace(from, to);
+  return text;
 }
 
 function addOfficeNotification(kind, title, detail, unread = true, action) {
@@ -2371,7 +2370,7 @@ function officeSeatRows() {
     return {
       key: `seat:${session.id}`, color: authorColor(session.provider),
       name: session.displayName || (tag ? `${session.provider} · ${tag}` : `${session.provider} 申請 ${index + 1}`),
-      status: session.joined ? (isWriter ? `Writer · ${listening.label}` : listening.label) : "待核准加入",
+      status: session.joined ? (isWriter ? `Writer · ${listening.text}` : listening.text) : "待核准加入",
       statusCls: session.joined ? listening.cls : "is-pending",
       title: listening.title,
       details, actions,
@@ -2858,7 +2857,7 @@ function renderSeatChips() {
   const chips = [];
   for (const session of (state.presences || []).filter((entry) => entry.joined && entry.displayName)) {
     const listening = seatListeningState(session);
-    chips.push({ agent: session.displayName, text: `${listening.mark} ${session.displayName}`, cls: `seat-chip ${listening.cls}`, title: `${listening.label} · ${listening.title}`, color: authorColor(session.provider) });
+    chips.push({ agent: session.displayName, text: `${listening.mark} ${session.displayName}`, cls: `seat-chip ${listening.cls}`, title: listening.title, color: authorColor(session.provider) });
   }
   for (const agent of state.managedAgents) {
     chips.push({ agent: agent.displayName, text: `◇ ${agent.displayName}`, cls: `seat-chip is-managed ${agent.busy ? "is-busy" : ""}`, title: agent.busy ? "回覆中" : "GUI Managed · 對話唯讀", color: authorColor(agent.provider) });
@@ -3007,7 +3006,7 @@ function renderAgentCard(agent, messages = state.recent || []) {
   status.textContent = work
     ? `⛔ ${work.label}`
     : deskListening
-      ? `${deskListening.mark} ${deskListening.label}`
+      ? `${deskListening.mark} ${deskListening.text}`
       : isManagedAgent(agent) ? "◇ 唯讀 · 閒置" : "閒置";
   status.className = `seat-listening ${work ? "is-busy" : deskListening?.cls || ""}`;
   status.title = work ? `請勿打擾：${work.detail || work.label}` : deskListening?.title || "";
