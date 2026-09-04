@@ -3966,6 +3966,39 @@ main、provider session、cookie/storage 內容或外網。
 
 新的 served-bytes digest：`feae694a9d713fd83b66d8c2a177bbe4c4ee519fada516be82167784b74108b8`。
 
+### 2026-09-04 Merge 結果檔案：分清楚哪一筆還能重新發起
+
+Owner 在真實瀏覽器（Chrome，`127.0.0.1:4318/room?room=orchestratory`）觀察正式 GUI 的
+「Merge 結果檔案」對話框並確認畫面。沒有執行任何 merge、沒有建立核准、沒有碰 canonical main、
+provider session 或外網。
+
+被重現的產品斷點：Owner 對十二筆「未進入 Merge」的紀錄逐一按下「建立新的預覽與核准」，十二次
+全部得到 `MAIN_MERGE_CANDIDATE_ALREADY_MERGED`。按鈕的顯示條件只讀 `approval.state`，而那十二筆的
+候選 task 早已是 `merged` —— 由同一 task 的另一筆核准完成。系統每次都拒絕得正確，Owner 每次都白按。
+`requestMainMerge()` 早就寫著「一個註定被拒絕的問題不是問題，是浪費 owner 的一次決策」，這條規則
+當時只套用在後端。
+
+| 行為 | 真實 in-app browser 觀察 |
+|---|---|
+| 分區 | 四區各自一色：已 Merge 綠、需要檢查 黃、可重新發起 藍、不能重新發起 灰；灰不是錯誤色 |
+| 可重新發起 | 0 筆；批次工具列（全選＋「重新發起選取的核准」）常駐，按鈕在未選取時停用 |
+| 不能重新發起 | 12 筆，**不再顯示按鈕**；每筆寫明白話理由，例如「這份工作已經進入 main 了（由另一次核准完成），所以不需要、也不能再合併一次。」 |
+| Reason 欄位 | 過期紀錄不再顯示「未讀到 · unavailable」；改為「送出後 15 分鐘內沒有人核准，問題窗口關閉。沒有人拒絕它。」 |
+| 可複製事實 | 已 Merge 紀錄顯示「檢視這次合併」＋完整 `git -C … log --oneline <before>..<after>` 與「複製」按鈕；核准紀錄顯示候選 worktree 絕對路徑與複製按鈕 |
+| 副作用邊界 | 全程唯讀：沒有 promotion、沒有核准、沒有 API/MCP、push、publish、deploy、delete 或 cleanup |
+
+判定來源刻意放在後端（`listMergeHistory` 的 `retry: { eligible, blockedBy }`），因為前端拿得到的
+`approval.state` 只描述那張票的生死，描述不了那份工作是否已經完成 —— 兩者是獨立的事實，而舊的
+UI 把它們當成同一件。判定只讀本來就開著的 store，不跑 `previewMainMerge`：後者會對整棵樹做指紋，
+十二筆一起跑會讓開啟對話框變成一次昂貴操作。因此 `eligible` 是「可以問」，不是「一定會成功」；
+真正的權威仍然是送出請求時的重新驗證。
+
+批次一次只對同一個候選送出一筆請求（registry 的 open-approval slot 就是這個規則），重複的會被
+跳過並在結果訊息裡點名，避免 Owner 把「規則生效」讀成「批次失敗」。
+
+新的 served-bytes digest：`9cb3927498625d23b923a2eab3edeb559339c121736c144d41faed7a37fd0489`。
+
+
 Room Claude #777（第 1／3 輪）結論 **PASS**。依其 residual checks 再確認：
 `mergeHistorySucceeded()` 明確同時要求 `state=applied`、`authorizedMergeCommit=true` 與非空
 `mainHeadAfter`；直接 classifier regression 對缺 observation、缺 HEAD、`needs-manual-review` 都回 false。

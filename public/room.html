@@ -301,8 +301,17 @@
             <div id="merge-history-review-list" class="merge-history-list"></div>
           </section>
           <section id="merge-history-unpromoted-section" class="merge-history-section is-unpromoted" tabindex="-1" aria-labelledby="merge-history-unpromoted-title">
-            <header><span><b id="merge-history-unpromoted-title">未進入 Merge · Merge never started</b><small>已過期、已拒絕或已失效的核准</small></span><strong id="merge-history-unpromoted-total">0</strong></header>
+            <header><span><b id="merge-history-unpromoted-title">未進入 Merge · 可重新發起 · Can be re-requested</b><small>候選仍在等合併；重新發起會依 live main 重算預覽 · the work is still waiting</small></span><strong id="merge-history-unpromoted-total">0</strong></header>
+            <div class="merge-history-batch">
+              <label><input id="merge-history-select-all" type="checkbox"> 全選 · Select all</label>
+              <button id="merge-history-retry-selected" type="button" disabled>↻ 重新發起選取的核准 · Re-request selected</button>
+              <span id="merge-history-batch-note" class="merge-history-batch-note">同一個候選一次只能有一筆待答的請求，重複的會被跳過。 · One open question per candidate; duplicates are skipped.</span>
+            </div>
             <div id="merge-history-unpromoted-list" class="merge-history-list"></div>
+          </section>
+          <section id="merge-history-blocked-section" class="merge-history-section is-blocked" tabindex="-1" aria-labelledby="merge-history-blocked-title">
+            <header><span><b id="merge-history-blocked-title">未進入 Merge · 不能重新發起 · Cannot be re-requested</b><small>每一筆都寫明理由；這裡沒有按鈕是刻意的 · each row states why</small></span><strong id="merge-history-blocked-total">0</strong></header>
+            <div id="merge-history-blocked-list" class="merge-history-list"></div>
           </section>
         </div>
         <p id="merge-history-status" class="workspace-onboarding-status" aria-live="polite"></p>

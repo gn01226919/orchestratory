@@ -131,6 +131,26 @@ export interface WriterWorktreeLifecycle {
  * wrong with the owner's records. Only the schema case degrades; everything else still fails the
  * whole service, loudly, which is the correct answer for "something is wrong with your data".
  */
+/**
+ * Why a closed approval cannot be retried. Each value names a fact the view can state plainly
+ * rather than making the owner press a button to find out.
+ *
+ * `NOT_A_CLOSED_APPROVAL` is the one that should never reach a person: it means the row is still
+ * live, and a live approval is answered, not re-asked.
+ */
+export type MergeRetryBlock =
+  | "NOT_A_CLOSED_APPROVAL"
+  | "TASK_NOT_FOUND"
+  | "ALREADY_MERGED"
+  | "NOT_COMPLETED"
+  | "APPROVAL_PENDING";
+
+/** Permission to ask again, never a promise the ask will succeed. The request re-verifies. */
+export interface MergeRetryVerdict {
+  eligible: boolean;
+  blockedBy?: MergeRetryBlock;
+}
+
 const DEGRADABLE_INBOX_ERRORS: ReadonlySet<string> = new Set(["ROOM_INBOX_SCHEMA_UNSUPPORTED"]);
 
 function inboxErrorCode(error: unknown): string {
@@ -960,7 +980,7 @@ export class CollaborationService {
     taskId?: string;
   }): Promise<{
     promotions: Awaited<ReturnType<CandidateRegistry["promotions"]>>;
-    unpromotedApprovals: MergeApproval[];
+    unpromotedApprovals: Array<MergeApproval & { retry: MergeRetryVerdict }>;
   }> {
     this.#assertRoomWorkspace(input.roomId, input.workspace);
     let promotions = await this.candidates.promotions({
@@ -1009,10 +1029,52 @@ export class CollaborationService {
     });
     const promoted = new Set(promotions.flatMap((promotion) =>
       "approvalId" in promotion ? [promotion.approvalId] : []));
+    /*
+     * Why the verdict travels with the record instead of being discovered by pressing the button.
+     *
+     * `approval.state` says whether this ticket is still open. It says nothing about whether the
+     * work still needs doing: a task whose approval expired can already be in main, merged by a
+     * later approval for the same task. The dialog used to offer a retry on state alone, so rows
+     * like that carried a button whose only possible answer was MAIN_MERGE_CANDIDATE_ALREADY_MERGED
+     * -- an owner pressed it twelve times and was refused twelve times, correctly, uselessly.
+     *
+     * `requestMainMerge` already refuses to ask an owner a question whose only answer is refusal.
+     * The same rule has to hold one layer up: a view that offers an action it knows will fail is
+     * spending the owner's attention on nothing.
+     *
+     * Every check below reads a store this call already opened. Running the real preview would be
+     * authoritative rather than indicative, but it fingerprints the whole working tree per row and
+     * this list is drawn every time the dialog opens. The button remains the authority: a verdict
+     * of `eligible` is permission to ask, never a promise the ask will succeed.
+     */
+    const tasks = new Map((await this.candidates.status({
+      roomId: input.roomId,
+      mainPath: input.workspace,
+      ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+    })).map((task) => [task.taskId, task.status]));
+    /* Mirrors `#openMergeApproval`: one unanswered question per task. A row that has lapsed does
+       not hold the slot, because the retry sweeps it before asking. */
+    const questionOpen = new Set(approvals
+      .filter((approval) => ["requested", "approved"].includes(approval.state) && approval.expired !== true)
+      .map((approval) => approval.binding.taskId));
+    const verdict = (approval: MergeApproval): MergeRetryVerdict => {
+      if (!["rejected", "invalidated", "expired"].includes(approval.state)) {
+        return { eligible: false, blockedBy: "NOT_A_CLOSED_APPROVAL" };
+      }
+      const status = tasks.get(approval.binding.taskId);
+      if (status === undefined) return { eligible: false, blockedBy: "TASK_NOT_FOUND" };
+      if (status === "merged") return { eligible: false, blockedBy: "ALREADY_MERGED" };
+      if (status !== "completed") return { eligible: false, blockedBy: "NOT_COMPLETED" };
+      if (questionOpen.has(approval.binding.taskId)) {
+        return { eligible: false, blockedBy: "APPROVAL_PENDING" };
+      }
+      return { eligible: true };
+    };
     return {
       promotions,
-      unpromotedApprovals: approvals.filter((approval) =>
-        approval.state !== "requested" && !promoted.has(approval.id)),
+      unpromotedApprovals: approvals
+        .filter((approval) => approval.state !== "requested" && !promoted.has(approval.id))
+        .map((approval) => ({ ...approval, retry: verdict(approval) })),
     };
   }
 

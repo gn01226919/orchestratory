@@ -4209,10 +4209,71 @@ function mergeHistorySucceeded(entry) {
     && typeof entry?.mainHeadAfter === "string" && entry.mainHeadAfter.trim().length > 0;
 }
 
+/*
+ * Why a closed record is split again by whether it can be re-asked.
+ *
+ * A closed approval and a finished piece of work are different facts. An approval can lapse while
+ * its task goes into main on a later approval, and then re-asking is not just refused, it is
+ * meaningless -- the thing is already there. Grouping on state alone put both kinds under one
+ * heading with the same button, and the button was right to refuse every time.
+ *
+ * `retry` comes from the server, which can see the task. When it is absent -- an older response,
+ * or a record fetched by a path that does not compute it -- the row goes to `blockedApprovals`
+ * with no reason rather than to `retryableApprovals`: an unknown is not a yes.
+ */
+function mergeRetryReason(approval) {
+  const blocked = approval?.retry?.blockedBy;
+  if (blocked === "ALREADY_MERGED") {
+    return "這份工作已經進入 main 了（由另一次核准完成），所以不需要、也不能再合併一次。"
+      + " · Already in main via another approval.";
+  }
+  if (blocked === "NOT_COMPLETED") {
+    return "候選還沒回報完成，要先完成才談得上合併。 · The candidate has not reported completion yet.";
+  }
+  if (blocked === "APPROVAL_PENDING") {
+    return "這個候選已經有一筆還沒回答的核准請求；同一份工作一次只問一個問題。先回答那一筆。"
+      + " · Another request for this task is still open.";
+  }
+  if (blocked === "TASK_NOT_FOUND") {
+    return "找不到對應的候選任務紀錄，無法重新產生預覽。核准本身仍保留為紀錄。"
+      + " · The candidate task record is gone; the approval is kept as a record.";
+  }
+  if (blocked === "NOT_A_CLOSED_APPROVAL") {
+    return "這筆核准還沒結案，不需要重新發起。 · Still open; answer it rather than re-asking.";
+  }
+  return "這筆紀錄沒有附帶可否重新發起的判定，因此不提供按鈕。"
+    + " · No retry verdict travelled with this record.";
+}
+
+/*
+ * Expiry is a knowable reason, not a missing one. Nobody refuses an approval by letting it lapse,
+ * so `refusal` is empty and the field used to read "unavailable" -- which says the system lost the
+ * reason, when in fact there is nothing to lose. The two windows are told apart by their length:
+ * the question gets fifteen minutes, a granted authorization five.
+ */
+function mergeApprovalClosedReason(approval) {
+  const stated = approval?.refusal?.reason || approval?.refusal?.code;
+  if (stated) return String(stated);
+  if (approval?.state !== "expired") return "";
+  const opened = Date.parse(approval?.createdAt ?? "");
+  const closed = Date.parse(approval?.expiresAt ?? "");
+  const minutes = Number.isFinite(opened) && Number.isFinite(closed)
+    ? Math.round((closed - opened) / 60000)
+    : undefined;
+  if (approval?.decidedBy) {
+    return `已核准，但授權窗口${minutes ? ` ${minutes} 分鐘` : ""}內沒有完成合併，授權作廢。`
+      + " · Approved, but the authorization window closed before the merge ran.";
+  }
+  return `送出後${minutes ? ` ${minutes} 分鐘` : ""}內沒有人核准，問題窗口關閉。沒有人拒絕它。`
+    + " · Nobody answered within the window; it was not refused.";
+}
+
 function mergeHistoryBuckets(promotions, unpromotedApprovals) {
   const mergedPromotions = [];
   const reviewPromotions = [];
   const notStartedApprovals = [];
+  const retryableApprovals = [];
+  const blockedApprovals = [];
   const reviewApprovals = [];
   for (const promotion of Array.isArray(promotions) ? promotions : []) {
     (mergeHistorySucceeded(promotion) ? mergedPromotions : reviewPromotions).push(promotion);
@@ -4220,6 +4281,7 @@ function mergeHistoryBuckets(promotions, unpromotedApprovals) {
   for (const approval of Array.isArray(unpromotedApprovals) ? unpromotedApprovals : []) {
     if (["rejected", "expired", "invalidated"].includes(approval?.state)) {
       notStartedApprovals.push(approval);
+      (approval?.retry?.eligible === true ? retryableApprovals : blockedApprovals).push(approval);
     } else {
       /* approved/consumed/malformed without a promotion row is not a closed non-event. */
       reviewApprovals.push(approval);
@@ -4229,6 +4291,8 @@ function mergeHistoryBuckets(promotions, unpromotedApprovals) {
     mergedPromotions,
     reviewPromotions,
     notStartedApprovals,
+    retryableApprovals,
+    blockedApprovals,
     reviewApprovals,
     otherCount: reviewPromotions.length + reviewApprovals.length + notStartedApprovals.length,
   };
@@ -4311,6 +4375,17 @@ function renderPromotionHistoryEntry(host, entry) {
   historyFact(facts, "Candidate HEAD", entry?.candidateHead);
   historyFact(facts, "Recovery ref", entry?.recoveryRef);
   historyFact(facts, "Observation", entry?.observation?.code);
+  /* The two commits are already on screen; what was missing was the one line that turns them into
+     an answer. Only offered when both ends were observed -- half a range inspects nothing. */
+  if (typeof entry?.mainPath === "string" && typeof entry?.mainHeadBefore === "string"
+    && typeof entry?.mainHeadAfter === "string") {
+    historyCopyable(
+      facts,
+      "檢視這次合併 · Inspect this merge",
+      `git -C ${entry.mainPath} log --oneline ${entry.mainHeadBefore}..${entry.mainHeadAfter}`,
+      "已複製指令 · Command copied",
+    );
+  }
   const hooks = entry?.observation?.hooksExecuted;
   historyFact(facts, "Hooks", Array.isArray(hooks)
     ? (hooks.length ? hooks.map((hook) => `${hook.name}(exit ${hook.exitCode ?? "?"})`).join("、") : "none observed")
@@ -4323,6 +4398,36 @@ function renderPromotionHistoryEntry(host, entry) {
     item.append(action);
   }
   host.append(item);
+}
+
+/*
+ * A fact nobody can act on is decoration. The worktree path and the inspection command are the two
+ * things an owner actually wants from this archive -- "what did that merge change" and "where is
+ * the work" -- and both used to require copying a UUID out of the dialog and assembling a path by
+ * hand. The value stays visible and selectable; the button only saves the typing.
+ */
+function historyCopyable(list, label, value, copiedNote) {
+  if (typeof value !== "string" || value.trim().length === 0) return;
+  const term = document.createElement("dt");
+  term.textContent = label;
+  const detail = document.createElement("dd");
+  detail.className = "merge-history-copyable";
+  const shown = document.createElement("code");
+  shown.textContent = value;
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "merge-history-copy";
+  copy.textContent = "⧉ 複製 · Copy";
+  copy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      copy.textContent = copiedNote || "已複製 · Copied";
+    } catch {
+      copy.textContent = "無法自動複製，請手動選取 · Select it manually";
+    }
+  });
+  detail.append(shown, copy);
+  list.append(term, detail);
 }
 
 function renderApprovalHistoryEntry(host, approval, reviewRequired = false) {
@@ -4344,17 +4449,29 @@ function renderApprovalHistoryEntry(host, approval, reviewRequired = false) {
   historyFact(facts, "Candidate HEAD", approval?.candidateHead || approval?.binding?.candidateHead);
   historyFact(facts, "main HEAD bound", approval?.mainHead || approval?.binding?.mainHead);
   historyFact(facts, "Recovery ref", approval?.binding?.recoveryRef);
-  historyFact(facts, "Reason", approval?.refusal?.reason || approval?.refusal?.code);
+  historyFact(facts, "原因 · Reason", mergeApprovalClosedReason(approval));
+  historyCopyable(facts, "候選 worktree · Candidate worktree", approval?.binding?.candidatePath);
   item.append(header, facts);
   if (reviewRequired) {
     const action = document.createElement("p");
     action.className = "merge-history-action";
     action.textContent = "不要再次核准或 apply；重新讀取後仍存在時，依 approval 與 recovery ref 人工核對。 · Do not approve or apply again; refresh, then inspect the approval and recovery ref if it persists.";
     item.append(action);
-  } else if (mergeApprovalRetryEligible(approval)) {
+  } else if (approval?.retry?.eligible === true) {
     const action = document.createElement("p");
     action.className = "merge-history-action";
-    action.textContent = "這筆核准沒有進入 promotion；可重新讀取 live state 並建立全新的核准。舊核准仍永久保留為終局紀錄。 · A fresh request is available; the old approval remains closed.";
+    const pick = document.createElement("label");
+    pick.className = "merge-history-pick";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.className = "merge-history-select";
+    box.dataset.approvalId = String(approval?.id || "");
+    box.dataset.taskId = String(approval?.binding?.taskId || approval?.taskId || "");
+    box.addEventListener("change", updateMergeRetrySelection);
+    pick.append(box, document.createTextNode("選取這筆一起重新發起 · Include in batch"));
+    action.append(pick, document.createTextNode(
+      "候選還在等合併；重新發起會依 live main 重算預覽。舊核准仍永久保留為終局紀錄。"
+      + " · The work is still waiting; a fresh request re-previews against live main."));
     const retry = document.createElement("button");
     retry.type = "button";
     retry.textContent = "↻ 建立新的預覽與核准 · Create fresh preview & approval";
@@ -4364,27 +4481,109 @@ function renderApprovalHistoryEntry(host, approval, reviewRequired = false) {
     });
     action.append(retry);
     item.append(action);
+  } else {
+    /* No button. The reason is the whole content of this row: an owner who can read why does not
+       need to press anything to find out, and pressing was the only way to find out before. */
+    const action = document.createElement("p");
+    action.className = "merge-history-action is-blocked";
+    action.textContent = mergeRetryReason(approval);
+    item.append(action);
   }
   host.append(item);
+}
+
+/*
+ * The batch exists because the archive is a list and the owner's problem was a list: twelve rows,
+ * each needing the same decision. What it must never become is a way to ask twelve questions at
+ * once -- the registry allows exactly one unanswered request per candidate, so a second row for the
+ * same task would be refused after the first succeeded, and the owner would read that refusal as a
+ * failure of the batch rather than as the rule working. Same-task duplicates are skipped here and
+ * named in the summary, so what happened stays legible.
+ */
+function mergeRetrySelection() {
+  return [...document.querySelectorAll(".merge-history-select:checked")]
+    .map((box) => ({ approvalId: box.dataset.approvalId, taskId: box.dataset.taskId }))
+    .filter((pick) => typeof pick.approvalId === "string" && pick.approvalId.length > 0);
+}
+
+function updateMergeRetrySelection() {
+  const button = byId("merge-history-retry-selected");
+  const all = byId("merge-history-select-all");
+  if (!button) return;
+  const boxes = [...document.querySelectorAll(".merge-history-select")];
+  const picked = mergeRetrySelection();
+  button.disabled = picked.length === 0 || state.mergeRetryBatchRunning === true;
+  button.textContent = picked.length === 0
+    ? "↻ 重新發起選取的核准 · Re-request selected"
+    : `↻ 重新發起選取的 ${picked.length} 筆 · Re-request ${picked.length}`;
+  if (all) {
+    all.checked = boxes.length > 0 && picked.length === boxes.length;
+    all.indeterminate = picked.length > 0 && picked.length < boxes.length;
+    all.disabled = boxes.length === 0;
+  }
+}
+
+async function retrySelectedMergeApprovals() {
+  const status = byId("merge-history-status");
+  const picked = mergeRetrySelection();
+  if (picked.length === 0 || state.mergeRetryBatchRunning === true) return;
+  state.mergeRetryBatchRunning = true;
+  updateMergeRetrySelection();
+  const seenTask = new Set();
+  const created = [];
+  const skipped = [];
+  const failed = [];
+  for (const pick of picked) {
+    if (pick.taskId && seenTask.has(pick.taskId)) {
+      skipped.push(pick.approvalId);
+      continue;
+    }
+    status.textContent = `正在重新發起 ${created.length + failed.length + 1}/${picked.length}；不會自動 Merge…`
+      + " · Creating fresh approvals; no merge will run.";
+    try {
+      /* Sequential on purpose: each request re-previews against live main, and two of them racing
+         would have one of them reading a tree the other is about to invalidate. */
+      const value = await api("/api/rooms/merge-approvals/retry", {
+        method: "POST",
+        body: JSON.stringify({ room: state.room, approvalId: pick.approvalId }),
+      });
+      if (pick.taskId) seenTask.add(pick.taskId);
+      created.push(value?.approval?.id || pick.approvalId);
+    } catch (error) {
+      failed.push(`${String(pick.approvalId).slice(0, 8)}：${error?.message || "unknown"}`);
+    }
+  }
+  state.mergeRetryBatchRunning = false;
+  const parts = [`已建立 ${created.length} 筆新的核准請求`];
+  if (skipped.length > 0) parts.push(`跳過 ${skipped.length} 筆（同一個候選已經有一筆在這批裡）`);
+  if (failed.length > 0) parts.push(`失敗 ${failed.length} 筆：${failed.join("；")}`);
+  parts.push("main 未因這次操作而改變。 · No merge ran.");
+  status.textContent = parts.join("；");
+  await refreshMergeHistory();
 }
 
 function renderMergeHistory() {
   const mergedHost = byId("merge-history-merged-list");
   const reviewHost = byId("merge-history-review-list");
   const unpromotedHost = byId("merge-history-unpromoted-list");
-  if (!mergedHost || !reviewHost || !unpromotedHost) return;
+  const blockedHost = byId("merge-history-blocked-list");
+  if (!mergedHost || !reviewHost || !unpromotedHost || !blockedHost) return;
   mergedHost.textContent = "";
   reviewHost.textContent = "";
   unpromotedHost.textContent = "";
+  blockedHost.textContent = "";
   const buckets = mergeHistoryBuckets(state.mergeHistory, state.mergeUnpromotedApprovals);
   byId("merge-history-merged-total").textContent = String(buckets.mergedPromotions.length);
   const reviewCount = buckets.reviewPromotions.length + buckets.reviewApprovals.length;
   byId("merge-history-review-total").textContent = String(reviewCount);
-  byId("merge-history-unpromoted-total").textContent = String(buckets.notStartedApprovals.length);
+  byId("merge-history-unpromoted-total").textContent = String(buckets.retryableApprovals.length);
+  byId("merge-history-blocked-total").textContent = String(buckets.blockedApprovals.length);
   for (const entry of buckets.mergedPromotions) renderPromotionHistoryEntry(mergedHost, entry);
   for (const entry of buckets.reviewPromotions) renderPromotionHistoryEntry(reviewHost, entry);
   for (const approval of buckets.reviewApprovals) renderApprovalHistoryEntry(reviewHost, approval, true);
-  for (const approval of buckets.notStartedApprovals) renderApprovalHistoryEntry(unpromotedHost, approval);
+  for (const approval of buckets.retryableApprovals) renderApprovalHistoryEntry(unpromotedHost, approval);
+  for (const approval of buckets.blockedApprovals) renderApprovalHistoryEntry(blockedHost, approval);
+  updateMergeRetrySelection();
   if (!buckets.mergedPromotions.length) {
     mergeHistoryEmpty(mergedHost, "尚無已驗證的 Merge。 · No verified merges.");
   }
@@ -5298,6 +5497,13 @@ async function retryMergeApprovalWithFreshSnapshot() {
 
 byId("merge-approvals-open").addEventListener("click", () => openMergeApprovalDialog(""));
 byId("merge-history-open").addEventListener("click", () => void openMergeHistory());
+byId("merge-history-select-all").addEventListener("change", (event) => {
+  for (const box of document.querySelectorAll(".merge-history-select")) {
+    box.checked = event.target.checked;
+  }
+  updateMergeRetrySelection();
+});
+byId("merge-history-retry-selected").addEventListener("click", retrySelectedMergeApprovals);
 byId("merge-history-close").addEventListener("click", closeMergeHistory);
 byId("merge-history-done").addEventListener("click", closeMergeHistory);
 byId("merge-history-refresh").addEventListener("click", async () => {
