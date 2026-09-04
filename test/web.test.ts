@@ -3579,6 +3579,16 @@ test("closing the records panel leaves the open approval gate exactly as the own
     node("merge-approval-history-summary", { textContent: "尚未讀取" }),
     node("merge-approval-history-open"),
   ]) nodes[n.id] = n;
+  /* Reads go through this rather than indexing directly. `Record<string, Node>` under
+     noUncheckedIndexedAccess makes every lookup `Node | undefined`, and the twenty assertions below
+     would each need a `!` to compile -- twenty places where a mistyped id would silently become
+     undefined and the assertion would compare against nothing. Naming the missing id instead turns
+     a fixture typo into the failure it is. */
+  const at = (id: string): Node => {
+    const found = nodes[id];
+    if (!found) throw new Error(`the fixture has no node with id ${id}`);
+    return found;
+  };
   const state = {
     room: "demo",
     mergeApproval: { id: "a1", taskId: "t1", state: "requested", expired: false },
@@ -3590,7 +3600,7 @@ test("closing the records panel leaves the open approval gate exactly as the own
       { id: "p2", state: "applying", observation: {} },
     ],
     mergeUnpromotedApprovals: [{ id: "a0", state: "expired", retry: { eligible: true } }],
-    mergeHistoryReturnFocus: nodes["merge-approval-history-open"],
+    mergeHistoryReturnFocus: at("merge-approval-history-open"),
   };
   const sandbox = {
     state,
@@ -3603,19 +3613,19 @@ test("closing the records panel leaves the open approval gate exactly as the own
     { timeout: 2_000 },
   );
   // What closing must do.
-  assert.equal(nodes["merge-history"].hidden, true);
-  assert.equal(nodes["merge-approval-history-summary"].textContent, "已併入 1 · 需檢查 1 · 未進入 1");
+  assert.equal(at("merge-history").hidden, true);
+  assert.equal(at("merge-approval-history-summary").textContent, "已併入 1 · 需檢查 1 · 未進入 1");
   assert.deepEqual(focusLog, ["merge-approval-history-open"], "focus returns to the control that opened the panel");
   assert.equal(state.mergeHistoryReturnFocus, null);
   // What closing must NOT do: the open approval layer is left exactly as the owner had it.
-  assert.equal(nodes["merge-approval"].hidden, false);
-  assert.equal(nodes["merge-approval-diff"].scrollTop, 358, "the scroll-gate the owner passed stays passed");
-  assert.equal(nodes["merge-approval-confirmation"].value, "MERGE INTO MAIN");
-  assert.equal(nodes["merge-approval-confirmation"].disabled, false);
-  assert.equal(nodes["merge-approval-confirm"].getAttribute("aria-disabled"), "false");
-  assert.equal(nodes["merge-approval-confirm"].disabled, false);
-  assert.equal(nodes["merge-approval-ttl"].textContent, "04:11（12:52:24 到期）");
-  assert.equal(nodes["merge-approval-scroll-hint"].textContent, "變更清單已捲到底");
+  assert.equal(at("merge-approval").hidden, false);
+  assert.equal(at("merge-approval-diff").scrollTop, 358, "the scroll-gate the owner passed stays passed");
+  assert.equal(at("merge-approval-confirmation").value, "MERGE INTO MAIN");
+  assert.equal(at("merge-approval-confirmation").disabled, false);
+  assert.equal(at("merge-approval-confirm").getAttribute("aria-disabled"), "false");
+  assert.equal(at("merge-approval-confirm").disabled, false);
+  assert.equal(at("merge-approval-ttl").textContent, "04:11（12:52:24 到期）");
+  assert.equal(at("merge-approval-scroll-hint").textContent, "變更清單已捲到底");
   assert.equal(state.mergeApprovalScrolled, true);
   assert.equal(state.mergeApproval.id, "a1");
 });
@@ -3658,10 +3668,20 @@ test("Escape closes the top-bar popup first and only then the approval layer", a
     node("merge-approval-confirm"),
     node("merge-approval-cancel"),
   ]) nodes[n.id] = n;
+  /* Reads go through this rather than indexing directly. `Record<string, Node>` under
+     noUncheckedIndexedAccess makes every lookup `Node | undefined`, and the twenty assertions below
+     would each need a `!` to compile -- twenty places where a mistyped id would silently become
+     undefined and the assertion would compare against nothing. Naming the missing id instead turns
+     a fixture typo into the failure it is. */
+  const at = (id: string): Node => {
+    const found = nodes[id];
+    if (!found) throw new Error(`the fixture has no node with id ${id}`);
+    return found;
+  };
   const state = {
     mergeApproval: { id: "a1" }, mergeApprovalTicker: 7, mergeApprovalPoll: 8, mergeApprovalSubmitting: false,
     mergeApprovalInputApprovalId: "a1", mergeApprovalScrolled: true, mergeApprovalBlockers: [],
-    mergeApprovalReturnFocus: nodes["merge-approval-cancel"],
+    mergeApprovalReturnFocus: at("merge-approval-cancel"),
   };
   const cleared: unknown[] = [];
   const sandbox = {
@@ -3682,24 +3702,24 @@ test("Escape closes the top-bar popup first and only then the approval layer", a
   const press = (sandbox as unknown as { press: () => void }).press;
   press();
   // First Escape: only the menu goes, focus returns to its toggle, the approval stays open and intact.
-  assert.equal(nodes["room-menu-panel"].hidden, true);
-  assert.equal(nodes["room-menu-toggle"].getAttribute("aria-expanded"), "false");
+  assert.equal(at("room-menu-panel").hidden, true);
+  assert.equal(at("room-menu-toggle").getAttribute("aria-expanded"), "false");
   assert.deepEqual(focusLog, ["room-menu-toggle"]);
-  assert.equal(nodes["merge-approval"].hidden, false);
-  assert.equal(nodes["merge-approval-confirmation"].value, "MERGE INTO MAIN");
+  assert.equal(at("merge-approval").hidden, false);
+  assert.equal(at("merge-approval-confirmation").value, "MERGE INTO MAIN");
   assert.equal(state.mergeApproval?.id, "a1");
   assert.deepEqual(cleared, []);
   // Second Escape: nothing floats above the approval layer any more, so it closes.
   press();
-  assert.equal(nodes["merge-approval"].hidden, true);
+  assert.equal(at("merge-approval").hidden, true);
   assert.equal(state.mergeApproval, null);
   assert.deepEqual(focusLog, ["room-menu-toggle", "merge-approval-cancel"]);
   // And the drawer takes the same precedence as the menu.
-  nodes["merge-approval"].hidden = false;
-  nodes["agent-requests-panel"].hidden = false;
+  at("merge-approval").hidden = false;
+  at("agent-requests-panel").hidden = false;
   press();
-  assert.equal(nodes["agent-requests-panel"].hidden, true);
-  assert.equal(nodes["agent-requests-open"].getAttribute("aria-expanded"), "false");
-  assert.equal(nodes["merge-approval"].hidden, false);
+  assert.equal(at("agent-requests-panel").hidden, true);
+  assert.equal(at("agent-requests-open").getAttribute("aria-expanded"), "false");
+  assert.equal(at("merge-approval").hidden, false);
   assert.equal(focusLog.at(-1), "agent-requests-open");
 });
