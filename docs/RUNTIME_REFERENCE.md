@@ -269,3 +269,81 @@ binary 或總 context 超限時 fail closed；模式篩選仍不是秘密偵測�
 開始、GUI、Agents、Room、安全寫入與排錯六章；其中所有按鈕都是演示，不會啟動 provider、
 消耗訂閱額度或修改專案。
 
+
+
+---
+
+# 命令列介面與開發
+
+（原本在 `README.md`，為了讓首頁聚焦而搬來這裡。）
+
+## 命令列介面
+
+```text
+orchestrator                         自然語言 TUI ＋ 本機 GUI
+orchestrator tui                     只啟動終端對話
+orchestrator gui [--port <number>]   只啟動 loopback GUI（web 是相容別名）
+orchestrator mcp [--actor <id>]      stdio MCP server；actor 由啟動設定固定，tool call 不能偽造
+orchestrator run                     從 stdin 讀一份 JSON workflow，輸出 JSONL
+orchestrator doctor                  不消耗額度的 CLI 健檢
+orchestrator models list <provider> [--api]
+orchestrator room init|list|status|writers|audit|pause|resume|off|tail|export|log
+orchestrator room hooks --provider <codex|claude|grok> [--install]   # 預設只預覽
+orchestrator room pty codex|grok [--room <id>]                       # macOS；需 owner opt-in
+orchestrator workspaces list|allow <path> [--label <name>]
+orchestrator worktrees list|cleanup <run-id> [--execute]
+orchestrator candidates orphan-refs <workspace>    # 唯讀；只列出，永不刪除
+orchestrator candidates promotions <workspace>     # 重新觀察並更新未定案紀錄
+orchestrator data inventory|integrity|purge [--execute]
+orchestrator data retention show|set [--terminal-days N] [--max-runs N]
+orchestrator telemetry status|on|off|log
+orchestrator daemon install|uninstall|status
+orchestrator config show
+orchestrator audit
+```
+
+破壞性、計費、worktree、測試與 restore 類動作一律需要核准。以 `orchestrator --help` 為準。
+
+## 開發
+
+Node.js 22.20+ 可直接執行此專案的可剝離型別 TypeScript。正式 typecheck 需安裝鎖定的 dev dependencies。
+
+```text
+npm install --ignore-scripts
+npm run check
+```
+
+本機啟動：
+
+```text
+npm start                # 對話 TUI＋本機 GUI
+npm run web              # http://127.0.0.1:4317
+npm run doctor           # 不消耗模型額度的 CLI 版本檢查
+```
+
+若要在任何終端機直接使用 `orchestrator`，只把 link 建在使用者擁有且已列入 `PATH` 的 npm
+prefix；不要使用 `sudo npm link` 或放寬 `/usr/local` 權限。`npm link` 只適合開發 CLI，不能安裝
+登入常駐 daemon：`orchestrator daemon install` 會拒絕直接從 TypeScript source checkout 啟動。
+正式 daemon 必須由 `npm run build:package` 產生、SHA-256 已驗證並安裝在獨立 digest 目錄的 compiled
+runtime 啟動；LaunchAgent 不得指向 Git working tree 或 npm-link symlink。
+
+首次執行 workflow 前必須明確加入最小必要 root：
+
+```text
+orchestrator workspaces allow /path/to/projects --label Projects
+```
+
+此命令要求 TTY 精確輸入 `ALLOW`，並把 canonical path 寫入 mode `0600` 的本機 policy。不要把整個
+home directory 加入 allowlist。Web/TUI 仍會在核心層重新驗證，不能靠竄改表單繞過。
+
+也可以在本機 GUI 按「＋ 新增專案」，選擇資料夾或貼上路徑。介面會先顯示 canonical Git root、
+owner／權限與敏感範圍檢查，只有輸入指定的 `ALLOW <專案資料夾名>` 後才會寫入同一份 policy；
+確認時會重驗路徑與 `.git`，preview 後被替換就拒絕。這是 owner 的直接授權入口，不是交給 Agent
+申請再由同一人批准。Agent 的安裝、登入與能力開關仍在終端完成，GUI 只顯示已可用的 Agent。
+
+更深入的 runtime 行為（TUI／GUI 對話模式、@提及比稿、原生終端加入 Room、MCP-first 協作、
+Writer Lease、Dirty Snapshot、workflow 引擎與 API 設定）見
+[`docs/RUNTIME_REFERENCE.md`](docs/RUNTIME_REFERENCE.md)。任何貢獻前先讀 `AGENTS.md`；
+Claude Code 另讀 `CLAUDE.md`。第一次使用可直接用瀏覽器開啟
+`docs/orchestrator-interactive-guide.html`——離線互動教程，裡面所有按鈕都是演示，不會啟動
+provider、消耗額度或修改專案。
