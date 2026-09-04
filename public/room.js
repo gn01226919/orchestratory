@@ -1639,6 +1639,8 @@ async function selectRoom(id) {
   const roomInfo = state.rooms.find((room) => room.id === id);
   byId("office-chat-room").textContent = roomInfo?.projectName || id || "LIVE";
   byId("office-chat-room").title = roomInfo ? `${roomInfo.workspace} · 內部 Room ID：${id}` : id;
+  /* A repaint booked for the old room's receipts must not fire into the new one. */
+  clearTaskCenterRepaint();
   resetOfficeDrawers();
   byId("office-agent-card").hidden = true;
   state.selectedAgent = "";
@@ -2599,6 +2601,44 @@ function candidateIdFromApproval(approval) {
 }
 /* @pure-end candidate-id-from-approval */
 
+/* @pure-start wake-notice-repaint
+ * How long until the next "noop" wake receipt in `notices` expires, or null when none will. A
+ * "recorded" receipt never expires on a clock (a presence change retires it), and one already past
+ * its window is drawn as absent by seatWakeNotice, so neither asks for a timer. */
+function wakeNoticeRepaintDelay(notices, now, ttl) {
+  let next = null;
+  for (const entry of Object.values(notices || {})) {
+    if (!entry || entry.kind !== "noop") continue;
+    const remaining = Number(entry.at) + Number(ttl) - Number(now);
+    if (!Number.isFinite(remaining) || remaining <= 0) continue;
+    next = next === null ? remaining : Math.min(next, remaining);
+  }
+  return next;
+}
+/* @pure-end wake-notice-repaint */
+
+/*
+ * The drawer's seat rows carry the wake receipt, and the "noop" kind expires on a clock. Nothing
+ * else repaints the drawer at that moment -- the click path's own timer goes through the topbar
+ * panel, and the drawer must not depend on which caller last drew it -- so every render books one
+ * repaint for the earliest expiry still ahead. One timer, replaced on each render and dropped on a
+ * room switch; never a polling interval.
+ */
+let officeTaskRepaintTimer = null;
+function clearTaskCenterRepaint() {
+  clearTimeout(officeTaskRepaintTimer);
+  officeTaskRepaintTimer = null;
+}
+function scheduleTaskCenterRepaint() {
+  clearTaskCenterRepaint();
+  const delay = wakeNoticeRepaintDelay(state.wakeNotices, Date.now(), WAKE_NOOP_NOTICE_MS);
+  if (delay === null) return;
+  officeTaskRepaintTimer = setTimeout(() => {
+    officeTaskRepaintTimer = null;
+    renderTaskCenter();
+  }, delay + 50);
+}
+
 /* What the drawer last painted. A poll that changes nothing the drawer shows must not rebuild it:
    rebuilding drops the scroll position and whatever button had focus. */
 let officeTaskSignature = "";
@@ -2606,6 +2646,7 @@ let officeTaskSignature = "";
 function renderTaskCenter(force = false) {
   const list = byId("office-task-list");
   if (!list) return;
+  scheduleTaskCenterRepaint();
   const groups = [
     ["執行中", officeRunningRows()],
     ["終端", officeSeatRows()],

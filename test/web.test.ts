@@ -3723,3 +3723,46 @@ test("Escape closes the top-bar popup first and only then the approval layer", a
   assert.equal(at("merge-approval").hidden, false);
   assert.equal(focusLog.at(-1), "agent-requests-open");
 });
+
+/*
+ * The task drawer's seat rows show the wake receipt, and the "noop" kind expires on a clock. The
+ * drawer used to be repainted at that moment only when something else happened to render it, so
+ * the receipt outlived its window on screen. The delay is computed by a DOM-free function that this
+ * test executes; the wiring (every render books the repaint, a room switch drops it) is pinned.
+ */
+test("Room task drawer books one repaint for the next wake-receipt expiry", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const start = source.indexOf("/* @pure-start wake-notice-repaint");
+  const end = source.indexOf("/* @pure-end wake-notice-repaint */");
+  assert.ok(start > 0 && end > start, "public/room.js must expose the DOM-free wake-notice repaint block");
+  const block = source.slice(start, end);
+  assert.doesNotMatch(
+    block,
+    /(?:\b(?:document|window|navigator|localStorage|state)\s*\.|\b(?:fetch|byId|api|setInterval|setTimeout|require|import)\s*\()/u,
+  );
+  const sandbox: { delay?: (notices: unknown, now: number, ttl: number) => number | null } = {};
+  runInNewContext(`${block}\nglobalThis.delay = wakeNoticeRepaintDelay;`, sandbox, { timeout: 2_000 });
+  const delay = sandbox.delay;
+  assert.ok(delay, "wakeNoticeRepaintDelay was not defined by the block");
+  const ttl = 15_000;
+  assert.equal(delay(undefined, 1_000_000, ttl), null);
+  assert.equal(delay({}, 1_000_000, ttl), null);
+  // A recorded receipt is retired by a presence change, never by the clock.
+  assert.equal(delay({ a: { kind: "recorded", at: 999_000 } }, 1_000_000, ttl), null);
+  // One noop receipt: the time left in its window.
+  assert.equal(delay({ a: { kind: "noop", at: 990_000 } }, 1_000_000, ttl), 5_000);
+  // Already past its window: seatWakeNotice draws it as absent, so nothing to wait for.
+  assert.equal(delay({ a: { kind: "noop", at: 900_000 } }, 1_000_000, ttl), null);
+  // Several: the earliest expiry wins, and junk entries are skipped rather than thrown on.
+  assert.equal(
+    delay({ a: { kind: "noop", at: 995_000 }, b: { kind: "noop", at: 990_000 }, c: null, d: { kind: "noop", at: "x" } }, 1_000_000, ttl),
+    5_000,
+  );
+  // Wiring: the drawer books the repaint on every render and a room switch drops the booking.
+  const render = /^function renderTaskCenter\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(render, /scheduleTaskCenterRepaint\(\);/u);
+  const select = /^async function selectRoom\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(select, /clearTaskCenterRepaint\(\);/u);
+  assert.match(source, /officeTaskRepaintTimer = setTimeout\(\(\) => \{\n {4}officeTaskRepaintTimer = null;\n {4}renderTaskCenter\(\);/u);
+  assert.doesNotMatch(source, /setInterval\([^)]*renderTaskCenter/u);
+});
