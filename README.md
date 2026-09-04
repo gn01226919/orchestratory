@@ -4,9 +4,22 @@
 
 ## 問題與目標
 
-一個人現在同時開著好幾個 AI coding agent。它們各自有能力改你的專案，但**你沒有一個地方能看到「誰、在什麼依據下、做了什麼」，也沒有一道閘門能擋住任何一次寫入**。
+我寫程式時會同時用 Claude、Codex、Grok 交叉協作——同一廠牌的 agent 有設計上的偏好偏差，
+換一家才看得出盲點。但每開一個新 session、每換一個 agent，我就得**從頭交代一次專案**：
+現在做到哪、為什麼這樣做、上次那個決定是誰下的。
 
-出事的時候你只能從 `git log` 反推——而 `git log` 不會告訴你當時是誰要求的、它讀了哪些檔案、另一個 agent 那時候在做什麼。多個 agent 同時動同一個 repo，你能做的只有事後補救，或事前不信任它們。
+**累的不是技術，是每次都要重講。**
+
+想像一間公司，所有資料都開源，每個新進員工報到時都拿到一本手冊，上面寫著他即將面對的工作
+與過往所有進度——這樣就不需要任何人重新交代任何事。
+
+**那些新進員工就是 agents，手冊就是 Orchestratory 的帳本，公司就是每一個獨立專案。**
+
+跨廠牌、跨模型、跨 session。
+
+而且它順手解決了另一件事：多個 agent 同時動一個 repo 時，你原本沒有一個地方能看到
+「誰、在什麼依據下、做了什麼」，也沒有一道閘門能擋住任何一次寫入——出事只能從 `git log`
+反推，而 `git log` 不會告訴你當時是誰要求的、它讀了哪些檔案、另一個 agent 那時在做什麼。
 
 **目標使用者**：同時使用兩個以上 coding agent 的個人開發者與小團隊。
 
@@ -84,7 +97,7 @@ flowchart LR
 git clone <repository-url> && cd orchestratory
 node --version                      # 需 v22.20.0+
 npm ci --ignore-scripts
-npm run check                       # 完整閘門：typecheck、839 測試、覆蓋率門檻、fuzz、SBOM、密鑰掃描
+npm run check                       # 完整閘門：typecheck、全套測試、覆蓋率門檻、fuzz、SBOM、密鑰掃描
 
 # 2. 安裝到自己的家目錄（不碰系統目錄）
 npm_config_ignore_scripts=true npm_config_prefix="$HOME/.local" npm link
