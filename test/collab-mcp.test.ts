@@ -2231,8 +2231,17 @@ test("the tools a degraded inbox stops are measured by running them, not by read
   t.after(async () => await healthy.close());
   t.after(async () => await degraded.close());
 
-  /* The dispatch is still the population. If it grows, this guard must be told, not quietly left
-     measuring a subset -- which is exactly what the seventeen-of-twenty-seven table did. */
+  /*
+   * The population comes from the server at runtime, and is then cross-checked against the source.
+   *
+   * `tools()` is what the server actually advertises, so a tool added by any means -- a new literal,
+   * a table, an alias, a loop over a registry -- appears here without this guard needing to know how
+   * it was written. The source scan stays as a second, independent reading: if the two disagree,
+   * something is advertised but not dispatched or dispatched but not advertised, and either is worth
+   * a red bar. A single regex over the source was the weaker half on its own, because it could only
+   * see tools spelled the one way it knows.
+   */
+  const advertised = new Set(healthy.broker.tools().map((tool) => String(tool.name)));
   const source = await readFile(new URL("../src/mcp/collab-server.ts", import.meta.url), "utf8");
   const dispatchBody = source.slice(source.indexOf("async #dispatch("));
   const dispatched = new Set(
@@ -2240,9 +2249,14 @@ test("the tools a degraded inbox stops are measured by running them, not by read
       .matchAll(/name === "([a-z][a-z0-9_]*)"/gu)].map((match) => match[1]!),
   );
   assert.deepEqual(
+    [...advertised].sort(),
     [...dispatched].sort(),
+    "a tool is advertised but not dispatched, or dispatched but not advertised",
+  );
+  assert.deepEqual(
+    [...advertised].sort(),
     [...INBOX_CAPABILITY_TOOLS].sort(),
-    "the dispatch and this guard no longer agree on which tools exist",
+    "the server advertises a different set of tools than this guard measures",
   );
 
   const healthyArgs = capabilityArguments(healthy);

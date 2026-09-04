@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { safeSummary } from "../src/security/redact.ts";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1683,4 +1683,45 @@ test("the original failure stays reachable locally, and the summariser drops it"
   assert.equal(onTheWire.includes(secret), false, "the path must not survive summarisation");
   assert.equal(onTheWire.includes("EACCES: permission denied"), false, "nor may the original text");
   assert.match(onTheWire, /STORE_UNAVAILABLE:room-inbox:PERMISSION/u);
+});
+
+test("a permission failure is a real one, produced by the filesystem rather than by a hand-built Error", async (t) => {
+  /*
+   * The classification tests above construct Errors and check how they are read. That verifies the
+   * reading and nothing about whether such an Error ever arrives. This one loosens a real data
+   * directory to 0755 and lets the store refuse it, so the path from "the filesystem said no" to
+   * "the person is told what to check" is exercised end to end at least once.
+   *
+   * 0755 rather than 0000 on purpose: an unreadable directory fails everywhere and proves little,
+   * while a group-readable one is the mistake people actually make -- a `chmod -R 755`, a restore
+   * from a backup, a directory created before the product existed.
+   */
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-perm-"));
+  t.after(async () => {
+    await chmod(data, 0o700).catch(() => undefined);
+    await rm(data, { recursive: true, force: true });
+  });
+
+  const seed = new CollaborationService(data, { presence: { leaseMs: 120_000 } });
+  seed.close();
+  await chmod(data, 0o755);
+
+  /* Running as root, or on a filesystem that ignores the mode bits, makes this unobservable. Say so
+     rather than passing quietly: a test that measures nothing is the thing this round is about. */
+  const enforced = (await stat(data)).mode & 0o777;
+  if (enforced !== 0o755) {
+    t.skip(`this filesystem reported mode ${enforced.toString(8)}; the permission cannot be observed here`);
+    return;
+  }
+
+  assert.throws(
+    () => new CollaborationService(data, { presence: { leaseMs: 120_000 } }),
+    (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      assert.match(message, /STORE_UNAVAILABLE:[a-z-]+:PERMISSION/u, "a real refusal must classify as PERMISSION");
+      assert.match(message, /chmod|權限/u, "and must say what to check");
+      assert.equal(message.includes(data), false, "without repeating the path");
+      return true;
+    },
+  );
 });

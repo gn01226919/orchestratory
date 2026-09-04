@@ -345,8 +345,27 @@ export function assertDataDirectoryOverride(value: string): string {
         + "的非目錄項目。請改指向一個目錄，或換一個尚未使用的路徑。",
       );
     }
+    /*
+     * A platform with no `process.getuid` cannot answer "is this yours", and the earlier version
+     * treated that as "then do not ask" -- so the check silently did nothing while --help promised
+     * unconditionally that a directory belonging to somebody else is refused. Two ways to make
+     * those agree: weaken the sentence, or refuse when the question cannot be answered.
+     *
+     * Refusing is the right one here because it costs so little. Only the override is refused, not
+     * the product: without the variable the default location is used and everything works. So the
+     * price of this is "you cannot point the data directory somewhere else on a platform where we
+     * cannot check who owns it", which is a fair trade for a promise that stays true everywhere.
+     */
     const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
-    if (uid !== undefined && existingTarget.uid !== uid) {
+    if (uid === undefined) {
+      throw new Error(
+        `INVALID_DATA_DIRECTORY:OWNERSHIP_UNVERIFIABLE — 這個平台無法查詢檔案擁有者，`
+        + `所以無法確認 ${DATA_DIRECTORY_ENVIRONMENT_KEY} 指向的既有目錄是不是你的。`
+        + `執行 \`unset ${DATA_DIRECTORY_ENVIRONMENT_KEY}\` 會使用預設位置，那個位置由本程式建立，`
+        + "不需要這項檢查。",
+      );
+    }
+    if (existingTarget.uid !== uid) {
       throw new Error(
         `INVALID_DATA_DIRECTORY:NOT_OWNED — ${DATA_DIRECTORY_ENVIRONMENT_KEY} 指向的目錄屬於其他使用者。`
         + "資料目錄必須由執行這個程式的帳號擁有；若這個目錄曾經以 sudo 建立，它會屬於 root。",
