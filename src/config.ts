@@ -216,13 +216,37 @@ export function assertDataDirectoryOverride(value: string): string {
          * and "the third segment answered EACCES" tells them which parent to look at without this
          * process repeating anything back.
          */
-        const depth = trailing.length + 1;
+        /*
+         * Says what happened in ordinary words, and gives the one action that always works.
+         *
+         * The first version counted segments -- "the third from the end answered EACCES" -- which
+         * sounds precise and is not: `realpathSync` can fail because of a directory further up than
+         * the one being named, so the number points at a segment that may be innocent. A reader
+         * cannot tell that from the message, so the precision is borrowed, not earned.
+         *
+         * It also told the reader to run `orchestratory data inventory` to see the resolved path.
+         * That command reads the same variable, so it fails with this same error: the message
+         * offered an exit that leads back to the room it is describing. Nothing here was tested
+         * before it was promised.
+         *
+         * `unset` is the action that cannot fail, so it is the one named.
+         */
+        const reason = code === "EACCES" || code === "EPERM"
+          ? "沒有權限讀取路徑中的某一層目錄"
+          : code === "ELOOP"
+            ? "路徑中有循環的符號連結"
+            : code === "ENOTDIR"
+              ? "路徑中間有一層不是目錄"
+              : code === "ENAMETOOLONG"
+                ? "路徑太長"
+                : `作業系統回報 ${code ?? "未知錯誤"}`;
         throw new Error(
-          `INVALID_DATA_DIRECTORY:UNRESOLVABLE — ${DATA_DIRECTORY_ENVIRONMENT_KEY} 的路徑無法解析：`
-          + `從尾端數來第 ${depth} 段回報 ${code ?? "未知錯誤"}。這不是「還沒建立」，而是「查不下去」，`
-          + "所以不能假設它安全。請確認該層的拼寫與權限，以及外接或網路磁碟是否已掛載。"
-          + "（訊息刻意不回吐路徑；`orchestratory data inventory` 會在本機顯示解析結果。）"
-          + "未設定這個變數時會使用預設位置；設錯不會靜默退回預設。",
+          `INVALID_DATA_DIRECTORY:UNRESOLVABLE — 無法確認 ${DATA_DIRECTORY_ENVIRONMENT_KEY} 指向哪裡：`
+          + `${reason}（${code ?? "未知"}）。這不是「目錄還沒建立」——那種情況會正常繼續——`
+          + "而是「查不下去」，所以不能假設它安全。"
+          + `要立刻脫困：執行 \`unset ${DATA_DIRECTORY_ENVIRONMENT_KEY}\` 就會回到預設位置。`
+          + "要繼續用自訂位置：檢查該路徑每一層的存在與權限，以及外接或網路磁碟是否已掛載。"
+          + "（這則訊息刻意不回吐路徑，因為它可能被轉述到本機以外。）",
         );
       }
       const parent = dirname(existing);

@@ -2262,21 +2262,28 @@ test("the tools a degraded inbox stops are measured by running them, not by read
       assert.equal(after.ok, true, `${tool} swallows its failure, so it must still return -- got: ${after.message} | healthy: ${before.ok ? "ok" : before.message}`);
       const payload = JSON.parse(after.payload) as Record<string, unknown>;
       if (tool === "compare_agents") {
-        const answers = payload.answers as Array<{ error?: string }> | undefined;
-        assert.ok(Array.isArray(answers) && answers.length > 0, "compare_agents must answer");
+        /* Compared to the healthy world rather than to a shape: "answers exist and none mention the
+           inbox" would pass on one answer where there should be two, or on an answer carrying some
+           other error. What must hold is that degrading the inbox changed nothing here. */
+        const healthyAnswers = (JSON.parse(before.payload) as { answers?: unknown[] }).answers;
+        const degradedAnswers = payload.answers as Array<{ error?: string; target?: string }> | undefined;
+        assert.ok(Array.isArray(healthyAnswers) && healthyAnswers.length === 2, "the healthy world must answer both targets");
+        assert.equal(degradedAnswers?.length, healthyAnswers.length, "the degraded world must answer the same targets");
         assert.equal(
-          answers.some((answer) => /ROOM_INBOX_UNAVAILABLE/u.test(answer?.error ?? "")),
+          degradedAnswers?.some((answer) => answer?.error !== undefined),
           false,
-          "compare_agents must not be quietly reporting an inbox failure inside its payload",
+          "no answer may carry an error the healthy world did not have",
         );
       }
       if (tool === "room_join_request") {
+        /* "Exactly the briefing" is checked by key comparison, not by the briefing's absence: the
+           earlier version could not tell a lost briefing from a lost half of the response. */
         const healthyPayload = JSON.parse(before.payload) as Record<string, unknown>;
         assert.ok("briefing" in healthyPayload, "the healthy join must carry a briefing");
-        assert.equal(
-          "briefing" in payload,
-          false,
-          "the degraded join must lose exactly the briefing -- not the call, and not nothing",
+        assert.deepEqual(
+          Object.keys(payload).sort(),
+          Object.keys(healthyPayload).filter((key) => key !== "briefing").sort(),
+          "the degraded join must lose the briefing and nothing else",
         );
       }
       continue;

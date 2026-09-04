@@ -1648,16 +1648,24 @@ test("failure classes say what to do, and never repeat what the failure said", (
   assert.match(described, /STORE_UNAVAILABLE:room-inbox:PERMISSION/u);
 });
 
-test("the original failure stays reachable locally and never reaches the wire", async (t) => {
+test("the original failure stays reachable locally, and the summariser drops it", async (t) => {
   /*
    * `cause` is how a person debugging keeps the real error after it has been classified, and it is
    * the obvious place for the path to escape from: the message is scrubbed, and then the thing it
    * was scrubbed of travels attached to it.
    *
-   * Today nothing serialises it -- the MCP layer sends `error.message` through `safeSummary`, and no
-   * caller reads `.cause`. That was true by accident until this test, which is the difference
-   * between a property and a coincidence. If a future error path starts sending the whole object,
-   * or summarising `cause` alongside `message`, this goes red before it ships.
+   * What this proves, exactly: `safeSummary` applied to the wrapped message drops the original,
+   * which is the shape both MCP servers use for their JSON-RPC error field.
+   *
+   * What it does NOT prove, and the name said it did: that no future code path sends the whole
+   * Error or summarises `cause` alongside `message`. Nothing here constructs a server or reads a
+   * response, so a change like that would ship green past this test. The earlier name --
+   * "never reaches the wire" -- claimed the second thing while testing the first, in a round whose
+   * subject is exactly that gap.
+   *
+   * Today nothing serialises `cause`: the MCP layer sends `error.message` through `safeSummary`,
+   * and no caller reads `.cause`. That is verified by reading, not by this test, and is recorded in
+   * ADR-045 as a property held by convention rather than by a guard.
    */
   const secret = "/Users/example/private/data.sqlite";
   const original = Object.assign(new Error(`EACCES: permission denied, open '${secret}'`), {
