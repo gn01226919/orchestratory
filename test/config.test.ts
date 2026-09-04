@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { chmod, link, mkdtemp, mkdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import {
   ABSOLUTE_HARD_LIMITS,
   DEFAULT_HARD_LIMITS,
@@ -353,14 +354,19 @@ test("the data directory is overridable, and an override is judged by where it l
   assert.equal(defaultDataDirectory({ [DATA_DIRECTORY_ENVIRONMENT_KEY]: "" }), base);
   assert.equal(defaultDataDirectory({}), base);
 
-  const chosen = defaultDataDirectory({ [DATA_DIRECTORY_ENVIRONMENT_KEY]: "/tmp/orchestratory-dev" });
-  assert.equal(chosen, "/tmp/orchestratory-dev");
+  /*
+   * The expected value is derived, not written down. `/tmp` is a symlink to `/private/tmp` on macOS
+   * and the override now resolves links, so hardcoding either spelling would assert one platform's
+   * layout rather than the property: that every spelling of one directory produces one string.
+   */
+  const expected = join(realpathSync("/tmp"), "orchestratory-dev");
+  assert.equal(defaultDataDirectory({ [DATA_DIRECTORY_ENVIRONMENT_KEY]: "/tmp/orchestratory-dev" }), expected);
 
-  /* Spelling does not decide the answer: `..` is collapsed before anything is compared, and a
-     trailing separator resolves to the same directory, so every store agrees on one string. */
-  assert.equal(assertDataDirectoryOverride("/tmp/a/../orchestratory-dev"), "/tmp/orchestratory-dev");
-  assert.equal(assertDataDirectoryOverride("/tmp/orchestratory-dev/"), "/tmp/orchestratory-dev");
-  assert.equal(assertDataDirectoryOverride("/tmp//orchestratory-dev"), "/tmp/orchestratory-dev");
+  /* Spelling does not decide the answer: `..` is collapsed, a trailing separator and a doubled one
+     land in the same place, and links are followed — so every store agrees on one string. */
+  assert.equal(assertDataDirectoryOverride("/tmp/a/../orchestratory-dev"), expected);
+  assert.equal(assertDataDirectoryOverride("/tmp/orchestratory-dev/"), expected);
+  assert.equal(assertDataDirectoryOverride("/tmp//orchestratory-dev"), expected);
 });
 
 test("an override that lands somewhere it should not is refused, not quietly ignored", () => {
@@ -380,16 +386,69 @@ test("an override that lands somewhere it should not is refused, not quietly ign
   refuse(`${homedir()}/`, /HOME_ROOT/u);
   /* A directory INSIDE home is the ordinary case and must stay allowed -- that is where the real
      default lives. */
-  assert.equal(assertDataDirectoryOverride(`${homedir()}/orchestratory-dev`), `${homedir()}/orchestratory-dev`);
+  assert.equal(
+    assertDataDirectoryOverride(`${homedir()}/orchestratory-dev`),
+    join(realpathSync(homedir()), "orchestratory-dev"),
+  );
 
   /* Directories the operating system owns. Writing here needs privileges this product never asks
      for, so a value pointing at one is a mistake rather than an intention. */
   for (const reserved of ["/System", "/usr/local", "/etc", "/var/db", "/private/etc/hosts.d"]) {
     refuse(reserved, /SYSTEM_PATH/u);
   }
-  /* A directory whose name merely begins with a reserved one is somebody's ordinary folder. */
+  /* A directory whose name merely begins with a reserved one is somebody's ordinary folder. These
+     do not exist, so nothing resolves and the requested path comes back unchanged. */
   assert.equal(assertDataDirectoryOverride("/etcetera/data"), "/etcetera/data");
   assert.equal(assertDataDirectoryOverride("/usr-local-backup"), "/usr-local-backup");
+});
+
+test("the override is judged by where it resolves to, not by how it is spelled", () => {
+  /*
+   * Both of these were measured as bypasses of the first version, which compared strings after
+   * `resolve` and therefore knew nothing about the filesystem.
+   */
+
+  /* `/var` is a symlink to `/private/var` on macOS. Refusing one spelling and allowing the other
+     refuses a path the check has already decided is forbidden. */
+  assert.throws(() => assertDataDirectoryOverride("/var/db/x"), /SYSTEM_PATH/u);
+  assert.throws(() => assertDataDirectoryOverride("/private/var/db/x"), /SYSTEM_PATH/u);
+
+  /* The volume is usually case-insensitive, so these name the very directories being refused. */
+  for (const spelling of ["/SYSTEM/x", "/System/x", "/Etc/x", "/USR/local/x", "/etc/x"]) {
+    assert.throws(() => assertDataDirectoryOverride(spelling), /SYSTEM_PATH/u, spelling);
+  }
+
+  /* A target that does not exist yet is the ordinary case for a fresh data directory: the deepest
+     existing ancestor is resolved and the rest appended, so a symlinked parent is still seen. */
+  const fresh = assertDataDirectoryOverride("/tmp/orchestratory-not-created-yet/data");
+  assert.match(fresh, /orchestratory-not-created-yet\/data$/u);
+  assert.ok(isAbsolute(fresh));
+});
+
+test("every rejection names the variable and says what would be acceptable", () => {
+  /*
+   * A code alone is not actionable. The reader is usually an agent relaying to a person who has
+   * never heard of this variable, so the message has to name it and describe the shape of a value
+   * that would work — otherwise the only way forward is to guess.
+   */
+  const cases: Array<[string, RegExp]> = [
+    ["relative/path", /NOT_ABSOLUTE/u],
+    ["/", /FILESYSTEM_ROOT/u],
+    [homedir(), /HOME_ROOT/u],
+    ["/System/x", /SYSTEM_PATH/u],
+  ];
+  for (const [value, code] of cases) {
+    assert.throws(
+      () => assertDataDirectoryOverride(value),
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        assert.match(message, code);
+        assert.match(message, new RegExp(DATA_DIRECTORY_ENVIRONMENT_KEY, "u"), `${value} must name the variable`);
+        assert.match(message, /不會靜默退回預設/u, `${value} must say it is not silently ignored`);
+        return true;
+      },
+    );
+  }
 });
 
 test("an invalid override throws instead of falling back to the default", () => {

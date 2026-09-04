@@ -1552,7 +1552,11 @@ test("an inbox from a newer build disables its own features and nothing else", a
      and the person is usually not the one who knows what a schema version is. */
   const reason = service.inboxUnavailableReason ?? "";
   assert.match(reason, /SCHEMA_TOO_NEW/u);
-  assert.match(reason, /其餘工具正常運作/u, "it must say what still works, not only what broke");
+  /* The wording matters, not just the presence of reassurance. This used to assert 「其餘工具正常運作」,
+     which promised the other stores were healthy — a guarantee this code cannot make, since it only
+     knows the inbox failed. The sentence now scopes the promise to non-involvement, and the assertion
+     pins that narrower claim so a future widening back to 「正常運作」 has to go red first. */
+  assert.match(reason, /不使用收件匣的工具不受這件事影響/u, "it must scope what is unaffected, not vouch for the rest");
   assert.match(reason, /install:runtime/u, "it must say what to do about it");
 
   /* Everything that does not need the inbox still does. This is the whole point of the change. */

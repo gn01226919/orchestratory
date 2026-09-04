@@ -752,8 +752,19 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       ).listRunIds();
       const collaboration = new CollaborationService(app.store.dataDirectory);
       try {
+        const { DATA_DIRECTORY_ENVIRONMENT_KEY: dataDirectoryEnvironmentKey } =
+          await import("./config.ts");
         stdout.write(
           `${JSON.stringify({
+            /* Where the data actually is, and why. Someone who set the variable needs to confirm it
+               took effect; someone who did not needs to know the default is what they are looking at.
+               Printing only the path answers neither question. */
+            dataDirectory: {
+              path: app.store.dataDirectory,
+              source: process.env[dataDirectoryEnvironmentKey]
+                ? `${dataDirectoryEnvironmentKey} environment variable`
+                : "default location",
+            },
             ...app.store.inventory(),
             rooms: collaboration.ledger.inventory(),
             roomPresence: collaboration.presence.inventory(),

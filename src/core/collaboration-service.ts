@@ -121,24 +121,48 @@ export interface WriterWorktreeLifecycle {
  * ledger provide the cross-process source of truth and global per-room sequence.
  */
 /*
+ * Which inbox failures are allowed to degrade, and what to say about the one that is.
+ *
+ * Degrading on ANY construction error was the first version and it was wrong in a way worth
+ * recording. "This build is older than the database" and "this database is corrupt" both arrive as
+ * a thrown Error, and only the first is a version mismatch with a known, ordinary fix. Treating
+ * corruption or a permission failure as a reason to carry on quietly would hide a data problem
+ * behind a message about runtimes -- the product would keep running while something was actually
+ * wrong with the owner's records. Only the schema case degrades; everything else still fails the
+ * whole service, loudly, which is the correct answer for "something is wrong with your data".
+ */
+const DEGRADABLE_INBOX_ERRORS: ReadonlySet<string> = new Set(["ROOM_INBOX_SCHEMA_UNSUPPORTED"]);
+
+function inboxErrorCode(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/*
  * What to tell whoever asks for the inbox after it failed to open.
  *
- * The message carries three things on purpose: what happened, what still works, and what to do.
- * A bare error code fails all three -- the person reading it is usually an agent relaying to a
- * human who has no idea a schema version exists. The schema case gets its own sentence because it
- * is the one with a known, ordinary fix.
+ * The message carries three things on purpose: what happened, what is unaffected, and what to do,
+ * with the fix written as commands rather than as a description of a fix. The reader is usually an
+ * agent relaying to a person who has never heard of a schema version, and "point it at the new
+ * digest" is not something that person can act on.
+ *
+ * It says "tools that do not use the inbox are unaffected BY THIS", not "everything else works".
+ * The narrower claim is the true one: this failure does not touch them, which is not a promise that
+ * nothing else is broken. The first version promised the second thing.
  */
 function describeInboxUnavailable(error: unknown): string {
-  const code = error instanceof Error ? error.message : String(error);
+  const code = inboxErrorCode(error);
   if (code === "ROOM_INBOX_SCHEMA_UNSUPPORTED") {
     return "ROOM_INBOX_UNAVAILABLE:SCHEMA_TOO_NEW — 這個 runtime 認得的收件匣 schema 比資料庫舊，"
-      + "所以拒絕開啟（那是刻意的，舊程式碼誤讀新資料比停下來更危險）。"
-      + "收件匣相關的工具暫時停用，其餘工具正常運作。"
-      + "修法：重建並安裝 runtime（npm run build:package 之後 npm run install:runtime），"
-      + "然後把 orchestrator 指向新的 digest。";
+      + "所以拒絕開啟（那是刻意的：舊程式碼誤讀新資料比停下來更危險）。"
+      + "收件匣相關的工具（room_wait／room_ack／room_reply／room_fail）停用；"
+      + "**不使用收件匣的工具不受這件事影響**。"
+      + "修法：在專案目錄依序執行 `npm run build:package`、"
+      + "`npm run install:runtime -- --artifact <產出的 tgz> --checksum <同名 .sha256>`，"
+      + "再把 ~/.local/lib/node_modules/orchestratory 的 symlink 指向新的 digest 目錄。";
   }
-  return `ROOM_INBOX_UNAVAILABLE:${code} — 收件匣打不開，相關工具暫時停用，其餘工具正常運作。`;
+  return `ROOM_INBOX_UNAVAILABLE:${code}`;
 }
+
 
 export class CollaborationService {
   readonly ledger: RoomLedger;
@@ -213,6 +237,9 @@ export class CollaborationService {
     try {
       inboxStore = new RoomInboxStore(dataDirectory, options.inbox ?? {});
     } catch (error) {
+      /* Only a version mismatch degrades. Corruption, permissions and anything else rethrow, so a
+         data problem stays a data problem instead of becoming a quieter product. */
+      if (!DEGRADABLE_INBOX_ERRORS.has(inboxErrorCode(error))) throw error;
       inboxStore = undefined;
       inboxUnavailableReason = describeInboxUnavailable(error);
     }

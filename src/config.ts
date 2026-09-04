@@ -1,8 +1,8 @@
 import { chmod, lstat, mkdir, open, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { constants } from "node:fs";
+import { constants, realpathSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type {
   ApiModelPolicy,
   HardLimits,
@@ -162,27 +162,94 @@ export function defaultDataDirectory(environment: NodeJS.ProcessEnv = process.en
  * plausibly a data directory and not somewhere whose contents belong to someone else.
  */
 export function assertDataDirectoryOverride(value: string): string {
-  if (value.includes("\0")) throw new Error("INVALID_DATA_DIRECTORY:NUL_BYTE");
-  if (!isAbsolute(value)) throw new Error("INVALID_DATA_DIRECTORY:NOT_ABSOLUTE");
+  if (value.includes("\0")) throw new Error(
+      `INVALID_DATA_DIRECTORY:NUL_BYTE — ${DATA_DIRECTORY_ENVIRONMENT_KEY} 路徑不能含 NUL 位元組。`
+      + "未設定這個變數時會使用預設位置；設錯不會靜默退回預設。",
+    );
+  if (!isAbsolute(value)) throw new Error(
+      `INVALID_DATA_DIRECTORY:NOT_ABSOLUTE — ${DATA_DIRECTORY_ENVIRONMENT_KEY} 路徑必須是絕對路徑，例如 /Users/example/orchestratory-dev。`
+      + "未設定這個變數時會使用預設位置；設錯不會靜默退回預設。",
+    );
 
-  const canonical = resolve(value);
-  /* Landing on the filesystem root, or on a home directory itself, means every later `join` writes
-     into a directory whose contents are not this product's. */
-  if (canonical === "/") throw new Error("INVALID_DATA_DIRECTORY:FILESYSTEM_ROOT");
-  if (canonical === homedir()) throw new Error("INVALID_DATA_DIRECTORY:HOME_ROOT");
+  /*
+   * Resolve links before judging, and judge the resolved form.
+   *
+   * The first version compared the string after `resolve`, which collapses `..` but knows nothing
+   * about the filesystem. Two bypasses were measured on macOS, not argued: `/private/var/db` passed
+   * while `/var/db` was refused, because `/var` is a symlink to it and only one spelling was in the
+   * list; and `/SYSTEM`, `/Etc` and `/USR/local` all passed on a case-insensitive volume that treats
+   * them as the very directories being refused.
+   *
+   * The target may not exist yet -- that is the ordinary case for a fresh data directory -- so the
+   * deepest ancestor that DOES exist is resolved and the remainder appended. That also closes the
+   * case of a symlinked parent with a not-yet-created leaf.
+   */
+  const requested = resolve(value);
+  let existing = requested;
+  const trailing: string[] = [];
+  for (;;) {
+    try {
+      existing = realpathSync(existing);
+      break;
+    } catch {
+      const parent = dirname(existing);
+      /* `dirname("/") === "/"`: nothing above the root exists to resolve, so stop rather than loop. */
+      if (parent === existing) break;
+      /* `basename`, not a slice by the parent's length: at the filesystem root the parent is "/",
+         whose length already counts the separator, so `parent.length + 1` ate the first character
+         of the child and turned /etcetera into /tcetera. Only reachable one level below the root,
+         which is exactly where a test found it. */
+      trailing.unshift(basename(existing));
+      existing = parent;
+    }
+  }
+  const canonical = trailing.length > 0 ? join(existing, ...trailing) : existing;
 
-  /* Directories the operating system owns. Writing here needs privileges this product never asks
-     for, so a value pointing at one is a mistake rather than an intention. */
-  for (const reserved of ["/System", "/Library", "/usr", "/bin", "/sbin", "/etc", "/var", "/private/etc"]) {
-    if (canonical === reserved || canonical.startsWith(`${reserved}/`)) {
-      throw new Error("INVALID_DATA_DIRECTORY:SYSTEM_PATH");
+  if (canonical === "/") throw new Error(
+      `INVALID_DATA_DIRECTORY:FILESYSTEM_ROOT — ${DATA_DIRECTORY_ENVIRONMENT_KEY} 不能是檔案系統根目錄。`
+      + "未設定這個變數時會使用預設位置；設錯不會靜默退回預設。",
+    );
+
+  /* Home is compared resolved too: a home directory reached through a symlinked volume is still
+     the home directory, and every later `join` would write into somebody's own files. */
+  let home = homedir();
+  try { home = realpathSync(home); } catch { /* an unreadable home cannot be the target either */ }
+  if (canonical === home) throw new Error(
+      `INVALID_DATA_DIRECTORY:HOME_ROOT — ${DATA_DIRECTORY_ENVIRONMENT_KEY} 不能是家目錄本身；家目錄底下的子目錄可以。`
+      + "未設定這個變數時會使用預設位置；設錯不會靜默退回預設。",
+    );
+
+  /*
+   * Directories the operating system owns. Compared case-insensitively because the volume this runs
+   * on usually is: on a case-insensitive filesystem `/SYSTEM` and `/System` name one directory, and
+   * a check that distinguishes them refuses one spelling of a path it has already decided is
+   * forbidden. Case-folding is the conservative direction -- it can only refuse more.
+   */
+  const RESERVED = [
+    "/System", "/Library", "/usr", "/bin", "/sbin", "/etc", "/var", "/opt", "/cores",
+    "/private/etc", "/private/var", "/Applications", "/Volumes/Preboot",
+  ];
+  const folded = canonical.toLowerCase();
+  for (const reserved of RESERVED) {
+    const target = reserved.toLowerCase();
+    if (folded === target || folded.startsWith(`${target}/`)) {
+      throw new Error(
+      `INVALID_DATA_DIRECTORY:SYSTEM_PATH — ${DATA_DIRECTORY_ENVIRONMENT_KEY} 不能落在作業系統擁有的目錄（/System、/usr、/etc、/var…）。`
+      + "未設定這個變數時會使用預設位置；設錯不會靜默退回預設。",
+    );
     }
   }
 
-  /* A trailing separator, doubled separators and a relative spelling all resolve to the same
-     directory; returning the canonical form means every store agrees on one string. */
+  /*
+   * What this does NOT establish, said plainly because the previous version's comment claimed more
+   * than it held: resolving a path is a read, and the filesystem can change between this check and
+   * the moment a store opens a file there. Closing that needs `O_NOFOLLOW` and directory-relative
+   * opens in every store, which is a change to how files are opened rather than to how a path is
+   * judged. Recorded as residual in docs/DECISIONS.md rather than implied to be handled.
+   */
   return canonical;
 }
+
 
 export function hardLimitsPath(dataDirectory = defaultDataDirectory()): string {
   return join(dataDirectory, "hard-limits.json");

@@ -2006,3 +2006,68 @@ test("asking a provider, writing the question, and then failing still marks the 
   );
   assert.equal(ledger.verifyChain("demo"), true);
 });
+
+/*
+ * Which tools need the inbox, asserted rather than asserted-about.
+ *
+ * The claim made when the inbox was allowed to degrade was that six of the twenty-seven tools stop
+ * and twenty-one carry on. A review pointed out that nothing in the change demonstrated it — the
+ * number came from counting `#seatInbox()` call sites by hand, which measures today's code and
+ * would not notice a twenty-second tool quietly acquiring a dependency.
+ *
+ * This reads the dispatch and the call sites out of the source, the same way the classification
+ * guard does, and fails when the two lists disagree. Adding an inbox dependency to a tool that the
+ * degraded path is supposed to keep alive turns this red.
+ */
+test("exactly the tools that use the inbox are the ones a degraded inbox stops", async () => {
+  const source = await readFile(new URL("../src/mcp/collab-server.ts", import.meta.url), "utf8");
+  const NAME = '"([a-z][a-z0-9_]*)"';
+
+  const dispatchBody = source.slice(source.indexOf("async #dispatch("));
+  const dispatched = new Set(
+    [...dispatchBody.slice(0, dispatchBody.indexOf("UNKNOWN_COLLAB_TOOL"))
+      .matchAll(new RegExp("name === " + NAME, "gu"))].map((match) => match[1]!),
+  );
+  assert.equal(dispatched.size, 27, "the dispatch no longer parses to the tools this guard counts");
+
+  /*
+   * The tools whose handler reaches `#seatInbox()`. Found by slicing each handler from its own
+   * declaration to the next one — a handler that stops needing the inbox drops out here on its own,
+   * and one that starts needing it appears without anybody remembering to add it.
+   */
+  const NEEDS_INBOX = new Set(["room_wait", "room_ack", "room_reply", "room_fail"]);
+  const handlerFor: Record<string, string> = {
+    room_wait: "#roomWait", room_ack: "#roomAck", room_reply: "#roomReply", room_fail: "#roomFail",
+    room_send: "#roomSend", room_await_reply: "#roomAwaitReply", room_post: "#roomPost",
+    room_read: "#roomRead", room_get: "#roomGet", room_search: "#roomSearch",
+    room_status: "#roomStatus", room_init: "#roomInit", room_start: "#roomStart",
+    list_agents: "#listAgents", candidate_status: "#candidateStatus",
+    main_merge_preview: "#mainMergePreview", main_merge_request: "#mainMergeRequest",
+  };
+
+  const measured = new Set<string>();
+  for (const [tool, handler] of Object.entries(handlerFor)) {
+    const start = source.indexOf(`  ${handler}(`) >= 0
+      ? source.indexOf(`  ${handler}(`)
+      : source.indexOf(`  async ${handler}(`);
+    assert.ok(start > 0, `${handler} no longer exists; this guard is reading a stale name`);
+    /* To the next method declaration at the same indentation, which is where this one ends. */
+    const rest = source.slice(start + 1);
+    const nextIndex = rest.search(/\n {2}(?:async )?#?[a-zA-Z]+\(/u);
+    const body = nextIndex >= 0 ? rest.slice(0, nextIndex) : rest;
+    if (body.includes("#seatInbox()")) measured.add(tool);
+  }
+
+  assert.deepEqual(
+    [...measured].sort(),
+    [...NEEDS_INBOX].sort(),
+    "the set of tools that touch the inbox changed; the degraded-mode claim in "
+      + "describeInboxUnavailable names room_wait/room_ack/room_reply/room_fail and must be updated too",
+  );
+
+  /* And the message the owner reads must name the same tools it is describing. */
+  const service = await readFile(new URL("../src/core/collaboration-service.ts", import.meta.url), "utf8");
+  for (const tool of NEEDS_INBOX) {
+    assert.match(service, new RegExp(tool, "u"), `the unavailable message must name ${tool}`);
+  }
+});
