@@ -1916,6 +1916,19 @@ byId("room-search").addEventListener("input", async () => {
 /* ── Agents 辦公室視圖（原創 Orbie，走動＋閒聊＝免費裝飾；點擊喚醒＝真對話）── */
 const BASE_OFFICE_AGENTS = Object.freeze(["you", ...ROOM_RESIDENT_PROVIDER_IDS]);
 const OFFICE_AGENTS = [...BASE_OFFICE_AGENTS];
+/*
+ * Stage geometry at --desk-scale 1, in CSS pixels. Seats are laid out from the floor's real width and
+ * height (updateOfficeCapacity), never from a fixed minimum width, so the floor can always be 100% wide
+ * and the viewport never grows a horizontal scrollbar. When the rows do not fit, the desks and figures
+ * shrink together through --desk-scale; the name plate and the status word keep their 10px text.
+ */
+const OFFICE_DESK = Object.freeze({ width: 170, height: 112, plate: 54, colGap: 18, rowGap: 12, minScale: 0.46 });
+const OFFICE_WALL_RATIO = 0.24;
+const OFFICE_FLOOR_MIN_HEIGHT = 520;
+/* The glass draft room owns the right-hand strip of the floor; the desk grid lives left of it. */
+const OFFICE_DRAFT_ROOM = Object.freeze({ left: 73.5, seat: { x: 86.5, y: 63 } });
+const OFFICE_GRID_FALLBACK = Object.freeze({ columns: 3, rows: 1, scale: 1, left: 3, width: 68, top: 42, pitch: 25, ownerX: 50, ownerY: 87 });
+let officeGrid = null;
 const ORBIE_HTML =
   '<span class="orbie-shadow"></span><span class="orbie-body">' +
   '<span class="orbie-antenna"></span><span class="orbie-visor">' +
@@ -1940,26 +1953,44 @@ function saveOfficePositions() {
   state.officeLayouts[state.room] = { ...state.officePositions };
 }
 
+/*
+ * Seat order on the floor: the three resident models always take the first row, external terminals and
+ * managed agents fill the rows below in arrival order, and the owner's desk sits alone on the front row,
+ * centred, facing the whole office. Everything is a percentage of the floor so drag-and-drop keeps
+ * working, but the row pitch itself comes from the measured grid (officeGrid), not from a guess.
+ */
 function defaultOfficeHome(agent) {
-  const baseHomes = {
-    codex: { x: 31, y: 43 }, claude: { x: 66, y: 43 },
-    grok: { x: 34, y: 73 }, you: { x: 69, y: 73 },
-  };
-  if (OFFICE_AGENTS.length <= 4 && baseHomes[agent]) return baseHomes[agent];
-  const count = Math.max(1, OFFICE_AGENTS.length);
-  const columns = count <= 6 ? 3 : count <= 12 ? 4 : 5;
-  const rows = Math.ceil(count / columns);
-  const index = Math.max(0, OFFICE_AGENTS.indexOf(agent));
-  const column = index % columns;
-  const row = Math.floor(index / columns);
-  return {
-    x: ((column + 0.5) / columns) * 100,
-    y: rows <= 1 ? 61 : 40 + (row / (rows - 1)) * 47,
-  };
+  const grid = officeGrid || OFFICE_GRID_FALLBACK;
+  const columnX = (column, inRow) => grid.left + ((column + 0.5) / Math.max(1, inRow)) * grid.width;
+  if (agent === "you") return { x: grid.ownerX, y: grid.ownerY };
+  const residents = OFFICE_AGENTS.filter((name) => ROOM_RESIDENT_PROVIDER_IDS.includes(name));
+  const residentIndex = residents.indexOf(agent);
+  if (residentIndex >= 0) return { x: columnX(residentIndex, residents.length), y: grid.top };
+  const guests = OFFICE_AGENTS.filter((name) => name !== "you" && !ROOM_RESIDENT_PROVIDER_IDS.includes(name));
+  const index = Math.max(0, guests.indexOf(agent));
+  const row = 1 + Math.floor(index / grid.columns);
+  const rowStart = (row - 1) * grid.columns;
+  const inRow = Math.min(grid.columns, guests.length - rowStart);
+  return { x: columnX(index - rowStart, inRow), y: grid.top + row * grid.pitch };
+}
+
+/* The agent whose desk belongs in the draft room right now: the active Writer, if it has a desk. */
+function officeWriterAgent() {
+  const name = activeWriterLease()?.writer?.displayName || "";
+  return name !== "you" && OFFICE_AGENTS.includes(name) ? name : "";
 }
 
 function officeHome(agent) {
+  if (agent && agent === officeWriterAgent()) return { ...OFFICE_DRAFT_ROOM.seat };
   return state.officePositions[agent] || defaultOfficeHome(agent);
+}
+
+/* The word under a desk when nothing is happening there. External seats answer "can it take work",
+   managed agents are read-only by construction, resident models are simply idle. */
+function officeIdleLabel(agent) {
+  const seat = presenceForAgent(agent);
+  if (seat) return seatListeningState(seat).text;
+  return isManagedAgent(agent) ? "唯讀" : "閒置";
 }
 const AGENT_DEFAULTS = Object.freeze({
   codex: { label: "Codex", model: "gpt-5.6-sol", access: "唯讀／實驗性 Writer" },
@@ -2231,16 +2262,24 @@ function buildOffice() {
         <span class="book b7"></span><span class="book b8"></span><span class="book b9"></span>
       </div>
       <div class="office-window"><i></i><i></i><span class="city-lights"></span></div>
-      <div class="office-pinboard"><b>SPRINT 17</b><i></i><i></i><i></i><small>BUILD · REVIEW · SHIP</small></div>
-      <div class="studio-sign"><b>ORCHESTRATORY</b><small>AGENT STUDIO</small></div>
+      <div class="studio-sign"><b>ORCHESTRATORY</b></div>
       <div class="wall-clock"><i></i></div>
+    </div>
+    <div class="office-status-wall" id="office-status-wall" role="status" aria-label="狀態牆">
+      <span class="office-status-chip is-rec" id="office-chip-rec"></span>
+      <span class="office-status-chip is-writer" id="office-chip-writer" hidden></span>
+      <span class="office-status-chip is-approvals" id="office-chip-approvals" hidden></span>
     </div>
     <div class="ceiling-light light-left" aria-hidden="true"><i></i></div>
     <div class="ceiling-light light-right" aria-hidden="true"><i></i></div>
     <div class="floor-perspective" aria-hidden="true"></div>
     <div class="floor-inlay" aria-hidden="true"></div>
-    <div class="office-rug" aria-hidden="true"><span>O</span></div>
-    <div class="office-server" aria-hidden="true"><i></i><i></i><i></i><b>LOCAL</b></div>
+    <div class="office-draft-room is-empty" id="office-draft-room" aria-label="草稿區">
+      <div class="office-draft-door" id="office-draft-door"><b>草稿區</b><span id="office-draft-candidate"></span><span id="office-draft-checkpoint" hidden></span></div>
+      <small class="office-draft-note">草稿區＝獨立副本，看得到、可退回、有紀錄；不是沙盒</small>
+    </div>
+    <button type="button" class="office-approval-tray is-empty" id="office-approval-tray" aria-label="核准托盤：沒有待核准"><i aria-hidden="true">📁</i><b id="office-approval-tray-count" hidden></b></button>
+    <div class="office-lounge" id="office-lounge" aria-label="休息區">
     <div class="office-sofa" aria-hidden="true"><i></i><i></i></div>
     <div class="coffee-table" aria-hidden="true"><span></span></div>
     <div class="office-plant plant-left" aria-hidden="true"><i></i><i></i><i></i><i></i><b></b></div>
@@ -2270,20 +2309,90 @@ function buildOffice() {
       </span>
       <span class="pet-name"><b>BYTE</b><small>tiny debugger</small></span>
     </div>
+    </div>
   `);
+  const tray = byId("office-approval-tray");
+  if (tray && !tray.dataset.wired) {
+    tray.dataset.wired = "true";
+    tray.addEventListener("click", (event) => {
+      event.stopPropagation();
+      /* The tray only opens the existing gate; it never decides anything itself. */
+      if (mergeTaskSummary(state.mergeApprovals).count > 0) openMergeApprovalDialog();
+      else byId("office-caption").textContent = "核准托盤是空的 · 目前沒有草稿版等你核准併入";
+    });
+  }
   syncOfficeDesks();
   startOfficeLife();
 }
 
+/*
+ * Fit every seat on the floor without ever cropping one or growing a horizontal scrollbar. Columns come
+ * from the measured grid width divided by one desk pitch; if the rows then do not fit the floor's
+ * height, --desk-scale shrinks desks and figures together (and the extra width buys more columns) until
+ * they do. The result is published as officeGrid for defaultOfficeHome. A hidden floor measures 0 wide;
+ * the previous grid is kept for it and the next visible sync re-measures.
+ */
 function updateOfficeCapacity(agents) {
   const floor = byId("office-floor");
-  const expanded = agents.length > 4;
-  const columns = agents.length <= 6 ? 3 : agents.length <= 12 ? 4 : 5;
-  const rows = Math.ceil(Math.max(agents.length, 4) / columns);
-  floor.classList.toggle("many-agents", expanded);
-  floor.classList.toggle("office-expanded", expanded);
-  floor.style.setProperty("--office-min-width", `${Math.max(900, columns * 245)}px`);
-  floor.style.setProperty("--office-min-height", `${Math.max(620, 330 + rows * 185)}px`);
+  const viewport = byId("office-viewport");
+  const width = floor.clientWidth;
+  let height = Math.max(OFFICE_FLOOR_MIN_HEIGHT, (viewport?.clientHeight || 0) - 16);
+  floor.classList.toggle("office-expanded", agents.length > 4);
+  if (!width) {
+    floor.style.setProperty("--office-min-height", `${height}px`);
+    officeGrid ||= { ...OFFICE_GRID_FALLBACK };
+    return;
+  }
+  const guests = agents.filter((agent) => agent !== "you" && !ROOM_RESIDENT_PROVIDER_IDS.includes(agent)).length;
+  const gridLeftPx = width * 0.03;
+  const gridWidthPx = width * (OFFICE_DRAFT_ROOM.left / 100 - 0.03) - 10;
+  const wallPx = (floorHeight) => floorHeight * OFFICE_WALL_RATIO + 10;
+  let topPx = wallPx(height);
+  let bottomPx = height - 26;
+  const colPitch = OFFICE_DESK.width + OFFICE_DESK.colGap;
+  const rowPitch = (scaleValue) => OFFICE_DESK.height * scaleValue + OFFICE_DESK.plate + OFFICE_DESK.rowGap;
+  /* Try every column count the width could hold and keep the one that lets the desks stay largest:
+     more columns cost width per desk, fewer columns cost rows and therefore height. */
+  const availableHeight = bottomPx - topPx;
+  const maxColumns = Math.max(3, Math.floor(gridWidthPx / (colPitch * OFFICE_DESK.minScale)));
+  let columns = 3;
+  let rows = 1 + Math.ceil(guests / columns);
+  let scale = 0;
+  for (let candidate = 3; candidate <= maxColumns; candidate += 1) {
+    const candidateRows = 1 + Math.ceil(guests / candidate);
+    const byWidth = gridWidthPx / (candidate * colPitch);
+    const byHeight = (availableHeight / (candidateRows + 1) - OFFICE_DESK.plate - OFFICE_DESK.rowGap) / OFFICE_DESK.height;
+    const fit = Math.min(1, byWidth, byHeight);
+    if (fit > scale + 0.001) {
+      scale = fit;
+      columns = candidate;
+      rows = candidateRows;
+    }
+    if (candidateRows === 1 && guests > 0) break;
+  }
+  if (scale < OFFICE_DESK.minScale) {
+    /* Below the minimum the desks stop being readable, so the floor grows downward instead and the
+       viewport scrolls vertically. Sideways it never scrolls: the width was already the constraint
+       that chose the column count. */
+    scale = OFFICE_DESK.minScale;
+    height = Math.ceil(((rows + 1) * rowPitch(scale) + 36) / (1 - OFFICE_WALL_RATIO));
+    topPx = wallPx(height);
+    bottomPx = height - 26;
+  }
+  floor.style.setProperty("--office-min-height", `${height}px`);
+  const pitchPx = rowPitch(scale);
+  floor.style.setProperty("--desk-scale", scale.toFixed(3));
+  officeGrid = {
+    columns,
+    rows,
+    scale,
+    left: (gridLeftPx / width) * 100,
+    width: (gridWidthPx / width) * 100,
+    top: ((topPx + pitchPx / 2) / height) * 100,
+    pitch: (pitchPx / height) * 100,
+    ownerX: 50,
+    ownerY: ((bottomPx - pitchPx / 2) / height) * 100,
+  };
 }
 
 function positionOfficeSeat(agent, point, instant = false) {
@@ -2298,6 +2407,13 @@ function positionOfficeSeat(agent, point, instant = false) {
   if (desk) {
     desk.style.left = `${point.x}%`;
     desk.style.top = `${point.y - 2}%`;
+  }
+  /* The approval tray is furniture on the owner's desk, so it follows that desk wherever it goes. */
+  const tray = agent === "you" ? byId("office-approval-tray") : null;
+  if (tray) {
+    const scale = officeGrid?.scale || 1;
+    tray.style.left = `calc(${point.x}% + ${Math.round((OFFICE_DESK.width / 2) * scale + 40)}px)`;
+    tray.style.top = `${point.y + 1}%`;
   }
   if (instant) requestAnimationFrame(() => desk?.classList.remove("is-dragging"));
 }
@@ -2353,13 +2469,26 @@ function createOfficeDesk(agent) {
     cube.dataset.provider = provider;
     cube.style.left = `${home.x}%`;
     cube.style.top = `${home.y}%`;
+    /* The plate carries the name and, directly under it, one status word. Nothing else: the message
+       count lives in the status card. The word sits in the plate rather than under the figure so it
+       stays legible at every --desk-scale instead of landing on the desk top when desks shrink. */
+    const plate = document.createElement("div");
+    plate.className = "name-plate";
+    const plateName = document.createElement("span");
+    plateName.textContent = agent;
+    const stat = document.createElement("div");
+    stat.className = "desk-stat";
+    stat.id = `stat-${agent}`;
+    stat.textContent = officeIdleLabel(agent);
+    plate.append(plateName, stat);
     cube.innerHTML =
-      `<div class="name-plate"><span>${agent}</span><small>WORKSTATION</small></div>` +
       '<div class="workstation-mat"></div>' +
       '<div class="monitor"><i></i><i></i><em></em><span></span></div>' +
       '<div class="desk-lamp"><i></i></div><div class="desk-mug"><i></i></div>' +
       '<div class="keyboard"></div><div class="desk-mouse"></div><div class="desk-top"></div>' +
       '<div class="desk-leg left"></div><div class="desk-leg right"></div><div class="chair"></div>';
+    cube.prepend(plate);
+    if (agent === "you") cube.classList.add("office-owner-desk");
     if (agent !== "you") {
       cube.tabIndex = 0;
       cube.setAttribute("role", "button");
@@ -2389,11 +2518,7 @@ function createOfficeDesk(agent) {
     orbie.dataset.provider = provider;
     orbie.style.setProperty("--orbie", authorColor(agent));
     orbie.innerHTML = ORBIE_HTML;
-    const stat = document.createElement("div");
-    stat.className = "desk-stat";
-    stat.id = `stat-${agent}`;
-    stat.textContent = "閒置";
-    desk.append(orbie, stat);
+    desk.append(orbie);
     desk.addEventListener("click", () => focusAgentComposer(agent));
     floor.append(desk);
     enableOfficeSeatDrag(cube, desk, agent);
@@ -2431,6 +2556,8 @@ function syncOfficeDesks() {
     const deskSeat = presenceForAgent(agent);
     const deskSilent = Boolean(deskSeat) && !deskSeat.listening;
     if (desk) desk.classList.toggle("seat-not-listening", deskSilent);
+    /* The whole desk, not just the figure: the plate and the status word dim with it. */
+    if (cube) cube.classList.toggle("seat-not-listening", deskSilent);
     if (desk && deskSilent) {
       /* Stop the story, not just the colour. Dimming a figure that is still strolling to the coffee
          machine and thinking in a speech bubble does not read as "this one cannot hear you". */
@@ -2438,10 +2565,87 @@ function syncOfficeDesks() {
       if (desk.dataset.activity) clearIdleActivity(agent);
     }
   }
+  updateOfficeDraftRoom();
+  updateOfficeApprovalTray();
   if (state.selectedAgent && !desired.includes(state.selectedAgent)) {
     state.selectedAgent = "";
     byId("office-agent-card").hidden = true;
   }
+}
+
+/*
+ * The status wall: three live chips where the fake sprint board used to hang. Recording state and the
+ * latest ledger number, the active Writer and its epoch, and how many drafts wait for the owner's
+ * approval. Nothing here is written by hand; a chip with nothing true to say is hidden, not padded.
+ */
+function updateOfficeStatusWall(messages) {
+  const rec = byId("office-chip-rec");
+  const writer = byId("office-chip-writer");
+  const approvals = byId("office-chip-approvals");
+  if (!rec || !writer || !approvals) return;
+  const room = (state.rooms || []).find((entry) => entry.id === state.room);
+  const lastSeq = messages.length ? messages[messages.length - 1].seq : room?.messages;
+  const seqText = Number.isFinite(Number(lastSeq)) && lastSeq !== undefined && lastSeq !== null ? ` · #${lastSeq}` : "";
+  const recording = room?.recording;
+  rec.textContent = recording === "on"
+    ? `● 收錄中${seqText}`
+    : recording === "paused"
+      ? `⏸ 已暫停${seqText}`
+      : recording
+        ? `■ 已關閉${seqText}`
+        : "○ 尚未選擇房間";
+  rec.classList.toggle("is-on", recording === "on");
+  const lease = activeWriterLease();
+  writer.hidden = !lease;
+  if (lease) {
+    const name = lease.writer?.displayName || lease.writer?.actorId || "Writer";
+    writer.textContent = `✎ ${name} · 第 ${Number(lease.epoch) || 1} 任`;
+  }
+  const count = mergeTaskSummary(state.mergeApprovals).count;
+  approvals.hidden = count === 0;
+  approvals.textContent = `⑂ 待核准 ${count}`;
+}
+
+/* The tray beside the owner's desk: a red count while drafts wait, greyed out with no label when none do. */
+function updateOfficeApprovalTray() {
+  const tray = byId("office-approval-tray");
+  const badge = byId("office-approval-tray-count");
+  if (!tray || !badge) return;
+  const count = mergeTaskSummary(state.mergeApprovals).count;
+  tray.classList.toggle("is-empty", count === 0);
+  badge.hidden = count === 0;
+  badge.textContent = `${count} 待核准`;
+  tray.setAttribute("aria-label", count ? `核准托盤：${count} 件待核准，按下開啟核准併入` : "核准托盤：沒有待核准");
+  tray.title = count ? `${count} 件草稿版等你核准併入 main` : "核准托盤（目前沒有待核准）";
+}
+
+/*
+ * The glass room is the draft area: while a Writer holds the lease its desk is moved inside, and the
+ * door plate names the draft (candidate id when the lease or its approval carries one, else the task id)
+ * and the checkpoint when one is known. With no lease the room goes dark and the plate is blank.
+ */
+function updateOfficeDraftRoom() {
+  const room = byId("office-draft-room");
+  const candidate = byId("office-draft-candidate");
+  const checkpoint = byId("office-draft-checkpoint");
+  if (!room || !candidate || !checkpoint) return;
+  const lease = activeWriterLease();
+  room.classList.toggle("is-empty", !lease);
+  const writerAgent = officeWriterAgent();
+  for (const node of byId("office-floor").querySelectorAll(".cubicle[data-agent], .desk[data-agent]")) {
+    node.classList.toggle("is-writer", Boolean(writerAgent) && node.dataset.agent === writerAgent);
+  }
+  if (!lease) {
+    candidate.textContent = "";
+    checkpoint.hidden = true;
+    return;
+  }
+  const approval = (state.mergeApprovals || []).find((entry) => entry.taskId === lease.taskId);
+  const candidateId = lease.candidateId || approval?.candidateId || lease.taskId || "";
+  candidate.textContent = candidateId ? `草稿版 ${String(candidateId).slice(0, 8)}` : "";
+  const sha = lease.checkpoint || approval?.candidateHead || approval?.binding?.candidateHead || "";
+  checkpoint.hidden = !sha;
+  checkpoint.textContent = sha ? `存檔點 ${String(sha).slice(0, 8)}` : "";
 }
 
 function seatOrbie(agent) {
@@ -2482,7 +2686,7 @@ function clearIdleActivity(agent, activityId) {
     /* Not "待命": that word already means "approved for standby" one panel over and "currently
        listening" in the header count. Three meanings on one screen is how a reader ends up unable to
        act on any of them. */
-    stat.textContent = "閒置";
+    stat.textContent = officeIdleLabel(agent);
   }
   clearBubble(agent);
 }
@@ -2630,7 +2834,7 @@ function showOfficeOutcome(status, detail) {
   office.classList.remove("outcome-completed", "outcome-failed");
   office.classList.add(status === "completed" ? "outcome-completed" : "outcome-failed");
   panel.className = `office-outcome is-${status}`;
-  panel.querySelector("b").textContent = status === "completed" ? "✓ WORKFLOW COMPLETE" : "! WORKFLOW NEEDS ATTENTION";
+  panel.querySelector("b").textContent = status === "completed" ? "✓ 工作流完成" : "! 工作流需要注意";
   panel.querySelector("span").textContent = String(detail).slice(0, 180);
   panel.hidden = false;
   clearTimeout(state.outcomeTimer);
@@ -2752,7 +2956,6 @@ function updateOffice(messages) {
   const speaker = lastChat && Date.now() - lastAt < 8000 && !String(lastChat.text).startsWith("@")
     ? lastChat.author
     : null;
-  const stats = Object.fromEntries((state.stats || []).map((s) => [s.author, s]));
   if (lastChat && lastChat.seq > officeLastSeq) {
     officeLastSeq = lastChat.seq;
     const m = String(lastChat.text).match(MENTION_WORD_PATTERN);
@@ -2766,7 +2969,6 @@ function updateOffice(messages) {
   for (const agent of OFFICE_AGENTS) {
     const desk = byId(`desk-${agent}`);
     if (!desk) continue;
-    const st = stats[agent];
     const managed = state.managedAgents.find((entry) => entry.displayName === agent);
     const work = managed?.busy
       ? { kind: "room", label: "即時回覆中", detail: "正在處理指定給此席位的任務" }
@@ -2780,25 +2982,26 @@ function updateOffice(messages) {
        terminals keep the plain idle label, which for them is simply true. */
     const deskSeatState = presenceForAgent(agent);
     if (!desk.dataset.activity) {
-      /* State first for a seat that cannot hear you: any seat that has ever spoken has a message
-         count, so ordering the count first meant the label a reader glances at almost never carried
-         the one fact this item exists to surface. */
+      /* One status word under the desk, never a message count: the count moved into the status card.
+         A seat that cannot hear you says so here first; every other seat gets its idle word from
+         officeIdleLabel (the listening state's own text, 唯讀 for managed agents, 閒置 for residents).
+         The first branch is the wiring anchor test/web.test.ts pins for the not-listening label. */
       const deskLabelState = deskSeatState ? seatListeningState(deskSeatState) : undefined;
       byId(`stat-${agent}`).textContent = deskLabelState && deskLabelState.key !== "listening"
         ? deskLabelState.text
-        : st
-          ? `${st.messages} 則`
-          : deskLabelState
-            ? deskLabelState.text
-            : "閒置";
+        : officeIdleLabel(agent);
     }
     desk.classList.remove("idle", "speaking", "waking", "real-busy", "workflow-busy", "mood-focused");
+    /* The status word lives on the cubicle's plate, so the busy state has to reach the cubicle too. */
+    document.querySelector(`.cubicle[data-agent="${CSS.escape(agent)}"]`)?.classList.toggle("real-busy", Boolean(work));
     if (work) {
       busyCount += 1;
       busyCaption ||= `${agent} · ${work.label}`;
       desk.classList.add("real-busy", "mood-focused", work.kind === "workflow" ? "workflow-busy" : "waking");
-      byId(`stat-${agent}`).textContent = `⛔ ${work.label}`;
-      desk.title = `請勿打擾：${work.detail || work.label}`;
+      /* Short on the floor, full in the tooltip and the status card: the desk only has to say that
+         this seat cannot take work right now. */
+      byId(`stat-${agent}`).textContent = "⛔ 工作中";
+      desk.title = `請勿打擾：${work.label}${work.detail ? ` · ${work.detail}` : ""}`;
       setBubble(agent, work.kind === "room" ? "⛔ 思考回覆中…" : `⛔ ${work.label}`, true);
     }
     else if (agent === speaker) { desk.classList.add("speaking"); setBubble(agent, String(lastChat.text), false); }
@@ -2816,6 +3019,9 @@ function updateOffice(messages) {
       : OFFICE_AGENTS.length > 4
         ? `已擴編至 ${OFFICE_AGENTS.length} 席 · 可拖曳辦公桌調整位置`
         : "點選任一 agent 工位開始對話";
+  updateOfficeStatusWall(messages);
+  updateOfficeApprovalTray();
+  updateOfficeDraftRoom();
   if (state.selectedAgent) {
     renderAgentCard(state.selectedAgent, messages);
     /*
@@ -2925,7 +3131,7 @@ byId("office-quiet-toggle").addEventListener("click", () => {
   byId("office").classList.toggle("quiet-mode", state.quietMode);
   const button = byId("office-quiet-toggle");
   button.setAttribute("aria-pressed", String(state.quietMode));
-  button.textContent = state.quietMode ? "🔔 顯示泡泡" : "🔕 安靜";
+  button.textContent = state.quietMode ? "🔔 顯示休息區" : "🔕 安靜";
   if (state.quietMode) {
     for (const agent of OFFICE_AGENTS) {
       const desk = byId(`desk-${agent}`);
@@ -2969,6 +3175,14 @@ byId("office-fullscreen-toggle").addEventListener("click", async () => {
   updateFullscreenButton();
 });
 document.addEventListener("fullscreenchange", updateFullscreenButton);
+
+/* The grid is measured from the floor, so a resized window (or fullscreen) has to re-measure it. */
+let officeResizeFrame = 0;
+window.addEventListener("resize", () => {
+  if (byId("office").hidden) return;
+  cancelAnimationFrame(officeResizeFrame);
+  officeResizeFrame = requestAnimationFrame(() => syncOfficeDesks());
+});
 
 function activeWriterLease() {
   const taskId = byId("writer-task-id")?.value.trim();
