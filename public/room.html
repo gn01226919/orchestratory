@@ -65,7 +65,7 @@
       </header>
       <section id="agent-requests-panel" class="agent-requests-panel topbar-drawer" hidden aria-label="Agent 加入與待命申請">
         <div class="topbar-drawer-head"><b>終端與子 Agent</b><button id="agent-requests-close" type="button" aria-label="關閉終端面板，回到頂欄">×</button></div>
-        <p><b>外接終端＝Native Full-Trust</b>：<code>room_join_request</code> 只申請加入房間，不會改變 host 原有的 sandbox、approval、工具、檔案、shell、network 或 subagent 能力；能力仍由 Codex／Claude Code host 掌管。加入後呼叫 <code>room_wait</code> 才會另行申請待命，這也只控制協作收件，不是能力授權。原生旁路無法攔截。</p>
+        <button id="agent-requests-disclaimer" class="office-inline-link" type="button" aria-haspopup="dialog" aria-controls="office-disclaimer">ⓘ 外接終端＝Native Full-Trust，能力仍由 host 掌管 · 免責與說明 ▸</button>
         <div id="sidebar-presence-list" class="office-presence-list"></div>
         <form id="managed-agent-create" class="managed-agent-create">
           <b>受控即時 Agent</b>
@@ -235,17 +235,6 @@
               <button type="button" role="menuitem" data-office-action="rec-toggle"><span id="office-rec-label">⏸ 暫停收錄</span></button>
               <button type="button" role="menuitem" id="office-disclaimer-open"><span>ⓘ 免責與說明</span></button>
             </div>
-            <section id="office-disclaimer" class="office-disclaimer" hidden role="dialog" aria-modal="true" aria-labelledby="office-disclaimer-title">
-              <div class="office-disclaimer-card">
-                <header class="office-drawer-head">
-                  <b id="office-disclaimer-title">免責與說明</b>
-                  <button id="office-disclaimer-close" type="button" aria-label="關閉免責與說明">×</button>
-                </header>
-                <p><b>外接終端＝Native Full-Trust</b>：<code>room_join_request</code> 只申請加入房間，不會改變 host 原有的 sandbox、approval、工具、檔案、shell、network 或 subagent 能力；能力仍由 Codex／Claude Code host 掌管。加入後呼叫 <code>room_wait</code> 才會另行申請待命，這也只控制協作收件，不是能力授權。原生旁路無法攔截。</p>
-                <p><b>GUI Managed 子 Agent</b>：由 Orchestratory 啟動，對話唯讀；寫入需另行 Owner Writer 授權。</p>
-                <p><b>草稿區</b>：獨立副本、看得到、可退回、有紀錄；不是沙盒。核准併入前 main 不會被修改。</p>
-              </div>
-            </section>
           </aside>
         </div>
         <form id="post-form" class="composer">
@@ -257,6 +246,17 @@
         </form>
       </main>
     </div>
+    <section id="office-disclaimer" class="office-disclaimer" hidden role="dialog" aria-modal="true" aria-labelledby="office-disclaimer-title">
+      <div class="office-disclaimer-card">
+        <header class="office-drawer-head">
+          <b id="office-disclaimer-title">免責與說明</b>
+          <button id="office-disclaimer-close" type="button" aria-label="關閉免責與說明">×</button>
+        </header>
+        <p><b>外接終端＝Native Full-Trust</b>：<code>room_join_request</code> 只申請加入房間，不會改變 host 原有的 sandbox、approval、工具、檔案、shell、network 或 subagent 能力；能力仍由 Codex／Claude Code host 掌管。加入後呼叫 <code>room_wait</code> 才會另行申請待命，這也只控制協作收件，不是能力授權。原生旁路無法攔截。</p>
+        <p><b>GUI Managed 子 Agent</b>：由 Orchestratory 啟動，對話唯讀；寫入需另行 Owner Writer 授權。</p>
+        <p><b>草稿區</b>：獨立副本、看得到、可退回、有紀錄；不是沙盒。核准併入前 main 不會被修改。</p>
+      </div>
+    </section>
     <section id="merge-approval" class="workspace-onboarding merge-approval" hidden role="dialog" aria-modal="true" aria-labelledby="merge-approval-title">
       <div class="workspace-onboarding-card merge-approval-card">
         <header class="merge-approval-bar">

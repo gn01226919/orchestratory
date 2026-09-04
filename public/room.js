@@ -3766,17 +3766,32 @@ for (const item of document.querySelectorAll("#office-settings-menu [data-office
     if (item.getAttribute("role") !== "menuitemcheckbox") setOfficeSettingsMenu(false);
   });
 }
-byId("office-disclaimer-open").addEventListener("click", () => {
-  setOfficeSettingsMenu(false);
+/*
+ * One disclaimer, two doors. The ⚙ menu and the topbar terminal panel used to each carry a copy of
+ * the Native Full-Trust paragraph; a sentence about capability boundaries must not exist twice or
+ * the two drift. Both now open this dialog, and closing it returns focus to whichever door opened
+ * it (the ⚙ button, or the panel's link -- with the panel itself already closed behind it).
+ */
+let officeDisclaimerOpener = null;
+function openOfficeDisclaimer(opener) {
+  officeDisclaimerOpener = opener || null;
+  setOfficeSettingsMenu(false, { restoreFocus: false });
+  setAgentRequestsOpen(false);
   byId("office-disclaimer").hidden = false;
   byId("office-disclaimer-close").focus();
-});
-byId("office-disclaimer-close").addEventListener("click", () => {
-  byId("office-disclaimer").hidden = true;
-  byId("office-settings-toggle").focus();
-});
+}
+function closeOfficeDisclaimer() {
+  const dialog = byId("office-disclaimer");
+  if (dialog.hidden) return;
+  dialog.hidden = true;
+  (officeDisclaimerOpener || byId("office-settings-toggle"))?.focus?.();
+  officeDisclaimerOpener = null;
+}
+byId("office-disclaimer-open").addEventListener("click", () => openOfficeDisclaimer(byId("office-settings-toggle")));
+byId("agent-requests-disclaimer")?.addEventListener("click", () => openOfficeDisclaimer(byId("agent-requests-open")));
+byId("office-disclaimer-close").addEventListener("click", closeOfficeDisclaimer);
 byId("office-disclaimer").addEventListener("click", (event) => {
-  if (event.target === event.currentTarget) byId("office-disclaimer").hidden = true;
+  if (event.target === event.currentTarget) closeOfficeDisclaimer();
 });
 document.addEventListener("click", (event) => {
   const menu = byId("office-settings-menu");
@@ -3790,7 +3805,7 @@ document.addEventListener("click", (event) => {
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   if (!byId("office-settings-menu").hidden) setOfficeSettingsMenu(false);
-  else if (!byId("office-disclaimer").hidden) byId("office-disclaimer").hidden = true;
+  else if (!byId("office-disclaimer").hidden) closeOfficeDisclaimer();
 });
 
 byId("managed-agent-create").addEventListener("submit", async (event) => {
