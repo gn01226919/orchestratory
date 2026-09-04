@@ -113,10 +113,10 @@
           </section>
           <aside class="office-chat" aria-label="辦公室右側面板">
             <nav class="office-rail" aria-label="辦公室抽屜">
-              <button id="office-chat-toggle" class="office-rail-button" type="button" data-drawer="office-drawer-chat" aria-pressed="false" title="對話 · 帳本直播" aria-label="開啟對話抽屜">💬</button>
-              <button id="office-task-toggle" class="office-rail-button" type="button" data-drawer="office-task-center" aria-pressed="true" title="任務清單" aria-label="開啟任務抽屜">📋<b id="office-task-count" hidden>0</b></button>
-              <button id="office-notification-toggle" class="office-rail-button" type="button" data-drawer="office-notifications" aria-pressed="false" title="通知" aria-label="開啟通知">🔔<b id="office-notification-count" class="is-alert" hidden>0</b></button>
-              <button id="writer-handoff-toggle" class="office-rail-button" type="button" data-drawer="writer-handoff" aria-pressed="false" title="Writer" aria-label="開啟 Writer 抽屜">✎</button>
+              <button id="office-chat-toggle" class="office-rail-button" type="button" data-drawer="office-drawer-chat" aria-controls="office-drawer-chat" aria-pressed="false" title="對話 · 帳本直播" aria-label="開啟對話抽屜">💬</button>
+              <button id="office-task-toggle" class="office-rail-button" type="button" data-drawer="office-task-center" aria-controls="office-task-center" aria-pressed="true" title="任務清單" aria-label="開啟任務抽屜">📋<b id="office-task-count" hidden>0</b></button>
+              <button id="office-notification-toggle" class="office-rail-button" type="button" data-drawer="office-notifications" aria-controls="office-notifications" aria-pressed="false" title="通知" aria-label="開啟通知">🔔<b id="office-notification-count" class="is-alert" hidden>0</b></button>
+              <button id="writer-handoff-toggle" class="office-rail-button" type="button" data-drawer="writer-handoff" aria-controls="writer-handoff" aria-pressed="false" title="Writer" aria-label="開啟 Writer 抽屜">✎</button>
               <span class="office-rail-spacer" aria-hidden="true"></span>
               <button id="office-settings-toggle" class="office-rail-button" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="office-settings-menu" title="設定" aria-label="開啟設定選單">⚙</button>
             </nav>
@@ -139,8 +139,8 @@
                       <button id="office-agent-close" type="button" aria-label="關閉 Agent 狀態卡">×</button>
                     </span>
                   </div>
-                  <p class="office-agent-line"><b id="office-agent-status">—</b><span aria-hidden="true">·</span><span id="office-agent-access">唯讀</span><span aria-hidden="true">·</span><span id="office-agent-model">—</span></p>
-                  <p class="office-agent-line is-muted"><span id="office-agent-last">最近 —</span><span aria-hidden="true">·</span><span id="office-agent-messages">訊息 0 則</span></p>
+                  <p class="office-agent-line"><b id="office-agent-status">—</b><span aria-hidden="true">·</span><span id="office-agent-access">唯讀</span></p>
+                  <p class="office-agent-line is-muted"><span id="office-agent-provider">—</span><span aria-hidden="true">·</span><span id="office-agent-model">—</span><span aria-hidden="true">·</span><span id="office-agent-last">最近 —</span><span aria-hidden="true">·</span><span id="office-agent-messages">訊息 0 則</span></p>
                   <p id="office-agent-detail" class="office-agent-detail" hidden></p>
                 </section>
                 <form id="office-chat-form" class="office-chat-form">

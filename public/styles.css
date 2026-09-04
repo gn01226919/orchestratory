@@ -1133,11 +1133,15 @@ button.cancel-pending:hover { border-color: var(--warn); }
 /* The stage toolbar's buttons live on in the ⚙ menu, which forwards every click to them. */
 .office-stage .office-toolbar, [data-office-toolbar] { display: none !important; }
 .office-chat {
-  position: relative;
+  /* Never taller than the viewport and pinned while the page scrolls past a tall stage: the
+     composer and the approval footer sit at the drawer's bottom edge and must stay reachable. */
+  position: sticky;
+  top: 8px;
   display: flex;
   flex-direction: row;
   min-width: 0;
   min-height: 0;
+  max-height: calc(100vh - 64px);
   margin: 8px 0;
   overflow: hidden;
   border: 1px solid #3d3240;

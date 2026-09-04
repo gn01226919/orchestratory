@@ -2211,6 +2211,7 @@ function officeClock(value) {
 function officeTaskRow({ key, color, name, status, statusCls = "", details = [], actions = [], title = "" }) {
   const row = document.createElement("article");
   row.className = "office-task-row";
+  row.dataset.key = key;
   const expanded = officeTaskExpanded.has(key);
   const head = document.createElement("button");
   head.type = "button";
@@ -2398,18 +2399,61 @@ function officeChildRows() {
   return rows;
 }
 
-function renderTaskCenter() {
+/*
+ * The real draft-area id behind an approval, or nothing. The task id is a different identifier and
+ * must not stand in for it: the footer names the thing the owner would look for on disk.
+ * Approvals carry the candidate path (…/candidates/<candidateId>); the id is its last segment and
+ * is only trusted when it has the shape the registry mints.
+ */
+function mergeApprovalCandidateId(approval) {
+  const direct = approval?.candidateId || approval?.binding?.candidateId;
+  if (typeof direct === "string" && direct) return direct;
+  const tail = workspaceLabel(approval?.binding?.candidatePath);
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(tail) ? tail : "";
+}
+
+/* What the drawer last painted. A poll that changes nothing the drawer shows must not rebuild it:
+   rebuilding drops the scroll position and whatever button had focus. */
+let officeTaskSignature = "";
+
+function renderTaskCenter(force = false) {
   const list = byId("office-task-list");
   if (!list) return;
-  /* Rebuilding while the owner is typing into a row would drop the field and the caret with it. */
-  const active = document.activeElement;
-  if (active && list.contains(active) && /^(INPUT|SELECT|TEXTAREA)$/u.test(active.tagName)) return;
-  list.textContent = "";
   const groups = [
     ["執行中", officeRunningRows()],
     ["終端", officeSeatRows()],
     ["子 Agent", officeChildRows()],
   ];
+  const approvals = mergeTaskSummary(state.mergeApprovals).pending
+    .map((approval) => ({ approval, candidateId: mergeApprovalCandidateId(approval) }))
+    .filter((entry) => entry.candidateId);
+  const running = groups[0][1].length;
+  const badge = byId("office-task-count");
+  if (badge) {
+    badge.textContent = String(running + approvals.length);
+    badge.hidden = running + approvals.length === 0;
+  }
+  const signature = JSON.stringify({
+    groups: groups.map(([name, rows]) => [name, rows.map((row) => [
+      row.key, row.name, row.status, row.statusCls, row.title, row.details,
+      row.actions.map((action) => `${action.tagName}:${action.textContent}:${action.className}:${action.disabled}`),
+    ])]),
+    approvals: approvals.map((entry) => [entry.approval.id, entry.candidateId]),
+  });
+  if (!force && signature === officeTaskSignature) return;
+  officeTaskSignature = signature;
+  /* Keep the reader's place: scroll offset, opened rows (officeTaskExpanded, read by officeTaskRow)
+     and the focused control, found again by row key and label after the rebuild. */
+  const scrollTop = list.scrollTop;
+  const active = document.activeElement;
+  const focused = active && list.contains(active)
+    ? {
+        row: active.closest(".office-task-row")?.dataset.key || "",
+        head: active.classList.contains("office-task-row-head"),
+        text: active.textContent,
+      }
+    : null;
+  list.textContent = "";
   for (const [name, rows] of groups) {
     const head = document.createElement("small");
     head.className = "office-drawer-group";
@@ -2424,28 +2468,34 @@ function renderTaskCenter() {
     }
     for (const row of rows) list.append(officeTaskRow(row));
   }
+  list.scrollTop = scrollTop;
+  if (focused?.row) {
+    const row = list.querySelector(`.office-task-row[data-key="${CSS.escape(focused.row)}"]`);
+    const target = focused.head
+      ? row?.querySelector(".office-task-row-head")
+      : [...(row?.querySelectorAll("button, a") || [])].find((node) => node.textContent === focused.text);
+    target?.focus({ preventScroll: true });
+  }
   const footer = byId("office-task-footer");
-  const pendingApprovals = mergeTaskSummary(state.mergeApprovals).pending;
   if (footer) {
     footer.textContent = "";
-    footer.hidden = pendingApprovals.length === 0;
-    for (const approval of pendingApprovals) {
-      const code = (workspaceLabel(approval.binding?.candidatePath) || approval.taskId || approval.id).slice(0, 8);
-      const open = officeButton("", () => openMergeApprovalDialog(approval.id), "office-task-approval");
+    footer.hidden = approvals.length === 0;
+    if (approvals.length) {
+      /* One row whatever the count. With several pending, the approval dialog's own picker lists
+         them; the footer only says how many are waiting, never picks one on the owner's behalf. */
+      const open = officeButton("", () => openMergeApprovalDialog(approvals[0].approval.id), "office-task-approval");
       const label = document.createElement("span");
-      label.textContent = `📁 草稿版 ${code} 待核准`;
+      label.textContent = approvals.length === 1
+        ? `📁 草稿版 ${approvals[0].candidateId.slice(0, 8)} 待核准`
+        : `📁 ${approvals.length} 筆草稿版待核准`;
       const go = document.createElement("b");
       go.textContent = "核准併入 ▸";
       open.append(label, go);
-      open.title = `${approval.taskId} · 需要 Owner 逐項檢視後核准；核准前 main 不會被修改。`;
+      open.title = approvals.length === 1
+        ? `${approvals[0].approval.taskId} · 需要 Owner 逐項檢視後核准；核准前 main 不會被修改。`
+        : "打開核准併入的檢視，在裡面選擇要看哪一筆；核准前 main 不會被修改。";
       footer.append(open);
     }
-  }
-  const running = groups[0][1].length;
-  const badge = byId("office-task-count");
-  if (badge) {
-    badge.textContent = String(running + pendingApprovals.length);
-    badge.hidden = running + pendingApprovals.length === 0;
   }
 }
 
@@ -2998,9 +3048,17 @@ function renderAgentCard(agent, messages = state.recent || []) {
   const stats = (state.stats || []).find((entry) => entry.author === agent);
   state.selectedAgent = agent;
   card.hidden = false;
-  byId("office-agent-name").textContent = info.label.toUpperCase();
-  byId("office-agent-dot").style.background = authorColor(agent);
   const seatBehindDesk = presenceForAgent(agent);
+  const managedBehindDesk = state.managedAgents.find((entry) => entry.displayName === agent);
+  /* The title is the seat the owner clicked, by the name they know it by; which provider and model
+     sit behind it is the secondary line. */
+  byId("office-agent-name").textContent = seatBehindDesk
+    ? (seatBehindDesk.displayName || `${seatBehindDesk.provider} · ${seatTag(seatBehindDesk.id)}`)
+    : agent === "you" ? "YOU" : managedBehindDesk?.displayName || agent;
+  byId("office-agent-provider").textContent = seatBehindDesk
+    ? `${seatBehindDesk.provider} 終端`
+    : managedBehindDesk ? `${managedBehindDesk.provider} · GUI Managed` : info.label;
+  byId("office-agent-dot").style.background = authorColor(agent);
   const deskListening = seatBehindDesk ? seatListeningState(seatBehindDesk) : undefined;
   const status = byId("office-agent-status");
   status.textContent = work
@@ -3052,7 +3110,7 @@ function openOfficeDrawer(id) {
   if (!panel) return;
   closeOfficeSidePanels(id);
   panel.hidden = false;
-  if (id === "office-task-center") renderTaskCenter();
+  if (id === "office-task-center") renderTaskCenter(true);
   if (id === "office-notifications") {
     renderOfficeNotifications();
     markOfficeNotificationsRead();
@@ -3289,13 +3347,33 @@ function syncOfficeSettingsMenu() {
   if (rec && recLabel) recLabel.textContent = rec.textContent;
 }
 
-function setOfficeSettingsMenu(open) {
+/*
+ * The menu is not a drawer: opening it leaves the rail's pressed state alone, it owns its own
+ * aria-expanded on the ⚙ button, and closing it hands focus back there unless the close came from a
+ * click somewhere else on the page (where stealing focus would be the surprise).
+ */
+function setOfficeSettingsMenu(open, { restoreFocus = true } = {}) {
   const menu = byId("office-settings-menu");
   if (!menu) return;
+  const wasOpen = !menu.hidden;
   menu.hidden = !open;
   byId("office-settings-toggle").setAttribute("aria-expanded", String(open));
-  if (open) syncOfficeSettingsMenu();
+  if (open) {
+    syncOfficeSettingsMenu();
+    menu.querySelector("button:not(:disabled)")?.focus();
+  } else if (wasOpen && restoreFocus) {
+    byId("office-settings-toggle").focus();
+  }
 }
+
+byId("office-settings-menu").addEventListener("keydown", (event) => {
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+  const items = [...byId("office-settings-menu").querySelectorAll("button:not(:disabled)")];
+  const index = items.indexOf(document.activeElement);
+  if (index < 0) return;
+  event.preventDefault();
+  items[(index + (event.key === "ArrowDown" ? 1 : items.length - 1)) % items.length].focus();
+});
 
 byId("office-settings-toggle").addEventListener("click", () => setOfficeSettingsMenu(byId("office-settings-menu").hidden));
 for (const item of document.querySelectorAll("#office-settings-menu [data-office-action]")) {
@@ -3324,7 +3402,7 @@ document.addEventListener("click", (event) => {
   /* A menu item forwards its click to the hidden toolbar button, and that synthetic click bubbles
      here too; it is the menu acting, not the owner clicking away from it. */
   if (event.target.closest?.(".office-toolbar, [data-office-toolbar]")) return;
-  setOfficeSettingsMenu(false);
+  setOfficeSettingsMenu(false, { restoreFocus: false });
 });
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
