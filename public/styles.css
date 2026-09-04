@@ -935,11 +935,6 @@ button.cancel-pending:hover { border-color: var(--warn); }
   .floor-lamp, .coffee-table { display: none; }
   .cubicle { width: clamp(138px, 22%, 180px); }
 }
-@media (max-width: 620px) {
-  .office { min-height: 470px; overflow: auto; }
-  .office-floor { width: 760px; min-height: 430px; margin-inline: 0; transform-origin: top left; }
-  .office-caption { align-self: flex-start; }
-}
 
 /* Live MCP terminal membership: explicit join before any Room recording. */
 .office-presence {
@@ -1407,11 +1402,6 @@ button.cancel-pending:hover { border-color: var(--warn); }
   .office { grid-template-columns: minmax(0, 1fr) 250px; gap: 8px; }
   .office-chat-message p { font-size: 10px; }
 }
-@media (max-width: 880px) {
-  .office { grid-template-columns: 1fr; grid-template-rows: minmax(410px, 1fr) 260px; overflow-y: auto; }
-  .office-chat { min-height: 250px; }
-  .office-chat-stream { min-height: 110px; }
-}
 
 /* ── Office polish: richer depth, lighting and workstation details ─────── */
 .office-stage {
@@ -1765,7 +1755,6 @@ button.cancel-pending:hover { border-color: var(--warn); }
   .workstation-mat { opacity: .35; }
 }
 @media (max-width: 880px) {
-  .office-stage { min-height: 410px; }
   .ambient-beam { opacity: .2; }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -2106,6 +2095,14 @@ button.cancel-pending:hover { border-color: var(--warn); }
 .office-task-row-actions button.leave.is-demoted { opacity: .55; }
 .office-task-row-actions button.cancel { border-color: #77565e; color: #e0a3ad; background: #321e24; }
 .office-task-row-actions button.presence-wake { border-color: #3f4658; color: #b9c3d9; background: #1b1f2a; }
+/* The one door from the task drawer to the topbar panel that holds what the drawer's rows do not:
+   naming and mode for a seat still waiting to join, and creating a managed agent. */
+.office-task-settings { flex: none; width: auto; margin: 0 10px; padding: 9px 2px; border: 0; border-top: 1px dashed #403748; border-radius: 0; color: #bbb0be; background: transparent; font-size: 11px; text-align: left; }
+.office-task-settings:hover, .office-task-settings:focus-visible { color: #f1e5f2; }
+.office-task-settings[aria-expanded="true"] { color: #8ce1b4; }
+/* The group a topbar chip just pointed at: lit for a moment so the eye lands on the right heading. */
+.office-drawer-group { transition: color .6s ease; }
+.office-drawer-group.is-target { color: #8ce1b4; transition: none; }
 .office-task-proposal { flex: none; margin: 0 10px; border-top: 1px dashed #403748; }
 .office-task-proposal summary { cursor: pointer; padding: 9px 2px; color: #bbb0be; font-size: 11px; list-style: none; }
 .office-task-proposal summary::-webkit-details-marker { display: none; }
@@ -2222,6 +2219,8 @@ button.cancel-pending:hover { border-color: var(--warn); }
   box-shadow: 0 18px 42px rgb(0 0 0 / 56%), inset 0 1px rgb(255 255 255 / 4%);
 }
 .office-settings-menu[hidden] { display: none; }
+/* The menu hangs off the rail to the left of the column; at 250px (≤1080px) the column would clip it. */
+.office-chat.is-menu-open { overflow: visible; }
 .office-settings-menu button {
   display: flex;
   align-items: center;
@@ -2240,10 +2239,12 @@ button.cancel-pending:hover { border-color: var(--warn); }
 .office-settings-menu button i { width: 7px; height: 7px; border: 1px solid #5d5662; border-radius: 50%; }
 .office-settings-menu button[aria-checked="true"] i { border-color: #58ce90; background: #58ce90; box-shadow: 0 0 8px rgb(88 206 144 / 60%); }
 .office-settings-menu hr { margin: 5px 4px; border: 0; border-top: 1px solid #352d38; }
+/* One dialog for both openers (the ⚙ menu and the topbar terminal panel), so it lives at body level
+   and covers the page rather than the right column it used to sit inside. */
 .office-disclaimer {
-  position: absolute;
+  position: fixed;
   inset: 0;
-  z-index: 50;
+  z-index: 60;
   display: grid;
   place-items: center;
   padding: 16px;
@@ -2253,7 +2254,7 @@ button.cancel-pending:hover { border-color: var(--warn); }
 .office-disclaimer-card {
   display: grid;
   gap: 8px;
-  width: min(100%, 320px);
+  width: min(100%, 420px);
   max-height: 100%;
   overflow-y: auto;
   padding: 0 0 12px;
@@ -2267,6 +2268,8 @@ button.cancel-pending:hover { border-color: var(--warn); }
 .office-disclaimer-card p { margin: 0 12px; color: #b8aec0; font-size: 11px; line-height: 1.6; }
 .office-disclaimer-card p b { color: #f0e6f1; }
 .office-disclaimer-card code { color: #8ce1b4; font-size: 10.5px; }
+.office-inline-link { width: 100%; padding: 6px 8px; border: 1px dashed #385d4b; border-radius: 7px; color: #9fd9bb; background: transparent; font-size: 11px; line-height: 1.4; text-align: left; }
+.office-inline-link:hover, .office-inline-link:focus-visible { border-style: solid; color: #d5f2e2; background: #18231e; }
 
 /* A real provider call is the only state allowed to display DND. */
 .desk.real-busy { z-index: 24; }
@@ -2344,8 +2347,6 @@ button.cancel-pending:hover { border-color: var(--warn); }
 @media (max-width: 880px) {
   .office-toolbar { flex-direction: column; }
   .office-toolbar-actions { width: 100%; justify-content: flex-start; }
-  .office { grid-template-columns: minmax(0, 1fr); }
-  .office-chat { height: 440px; }
 }
 @media (max-width: 560px) {
   .office-toolbar-actions button { flex: 1; }
@@ -2833,8 +2834,6 @@ body.workspace-modal-open { overflow: hidden; }
 .topbar-chip .topbar-chip-count { display: inline; min-width: 0; height: auto; padding: 0; border-radius: 0; color: var(--text); background: transparent; font: 700 12px/1 var(--font-mono); }
 .topbar-chip .topbar-chip-alert { display: inline-grid; min-width: 18px; height: 18px; padding-inline: 5px; place-items: center; border-radius: 999px; color: #2a1013; background: #ef9096; font: 900 10px/1 var(--font-mono); }
 .topbar-chip .topbar-chip-alert[hidden] { display: none; }
-#agent-requests-open.topbar-chip { justify-content: flex-start; border-color: var(--border); color: var(--muted); background: var(--panel-2); }
-#agent-requests-open.topbar-chip[aria-expanded="true"] { border-color: #385d4b; color: #bfe4d0; background: #18231e; }
 .topbar .merge-outcome-nav .merge-approvals-open { display: inline-flex; gap: 6px; min-height: 30px; padding: 4px 10px; border-radius: 999px; font: 700 13px/1 var(--font-mono); border-color: #7a3a40; color: #ffd9db; background: #a5303a; }
 .topbar .merge-outcome-nav .merge-approvals-open b { min-width: 18px; height: 18px; color: #2a1013; background: #ffb8bc; font-size: 11px; }
 .topbar .merge-outcome-nav .merge-approvals-open:disabled { opacity: .45; }
@@ -2849,6 +2848,7 @@ body.workspace-modal-open { overflow: hidden; }
 .topbar-drawer-head b { font-size: 12px; color: #bfe4d0; }
 .topbar-drawer-head button { width: 26px; height: 26px; padding: 0; border-radius: 50%; background: transparent; }
 .topbar-drawer > p { font-size: 11px; }
+.topbar-drawer-note { margin: 0; color: #9aa39d; line-height: 1.5; }
 .topbar-drawer .managed-agent-create > b { font-size: 11px; }
 .topbar-drawer .managed-agent-create > small, .topbar-drawer .managed-agent-create label { font-size: 10px; }
 .topbar-drawer .managed-agent-create select, .topbar-drawer .managed-agent-create input, .topbar-drawer .managed-agent-create button { font-size: 11px; }
@@ -2910,4 +2910,20 @@ body.view-office #ledger, body.view-office #post-form { display: none; }
   .topbar .merge-outcome-nav .merge-history-open span::before { content: "▤"; font-size: 12px; }
   .workspace-onboarding.merge-approval { top: 0; }
   .topbar-drawer { top: 122px; }
+}
+
+/* ── 窄版辦公室（≤880px）：右欄收成只剩 rail，抽屜以浮層蓋在舞台上，預設收起 ──
+   Stacking the right column under the stage left the floor 274px tall at 640px wide -- less than
+   one row of desks. The rail stays as the door to the drawers (badges included); an open drawer
+   floats over the stage's right edge and closes from its × or its rail button. Placed at the end
+   of the file so it wins over the same-weight .office and .office-chat rules above. */
+@media (max-width: 880px) {
+  .office { grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: minmax(0, 1fr); gap: 8px; overflow: hidden; }
+  .office-stage { min-height: 0; }
+  .office-chat { position: relative; top: auto; max-height: none; margin: 8px 0; }
+  .office-chat:not(.is-open) .office-drawers { display: none; }
+  .office-chat:not(.is-open) .office-rail { border-right: 0; }
+  /* The ⚙ menu hangs off the rail to the left; a 54px column with overflow hidden would clip it. */
+  .office-chat:not(.is-open) { overflow: visible; }
+  .office-chat.is-open { position: absolute; top: 8px; right: 8px; bottom: 8px; width: min(calc(100% - 16px), 400px); z-index: 32; margin: 0; }
 }

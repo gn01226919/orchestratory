@@ -1472,7 +1472,7 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomHtml, /GUI Managed/u);
   assert.match(roomHtml, /原生旁路無法攔截/u);
   assert.match(roomHtml, /id="writer-run-cancel"/u);
-  assert.match(roomHtml, /共用目前 task worktree 並由系統序列執行/u);
+  assert.match(roomHtml, /共用目前任務草稿區並由系統序列執行/u);
   assert.doesNotMatch(roomHtml, /(?:src|href)="https?:\/\//u);
   const roomScriptResponse = await fetch(`${server.url}/room.js`);
   assert.equal(roomScriptResponse.status, 200);
@@ -1691,11 +1691,11 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomScript, /function pendingWriterLease\(/u);
   assert.match(roomScript, /pendingWriterLease\(\)\?\.taskId \|\| `task-\$\{Date\.now\(\)\.toString\(36\)\}`/u);
   // Completing a Writer revokes access, so the button says so and confirms once inline.
-  assert.match(roomScript, /結束 Writer 並準備回寫/u);
+  assert.match(roomScript, /結束並 apply-back/u);
   assert.match(roomScript, /再按一次：結束 Writer 並撤銷寫入權/u);
   assert.match(roomScript, /writerCompleteConfirm/u);
   assert.match(roomScript, /階段 1／2（結束 Writer）失敗/u);
-  assert.match(roomScript, /階段 2／2（回寫主專案）失敗/u);
+  assert.match(roomScript, /階段 2／2（apply-back 主專案）失敗/u);
 
   // ── P0-2: the Writer apply-back approval is an in-page dialog, not window.prompt ──
   // A native prompt can be silenced for good (it then returns null and the approval UI fails
@@ -1758,7 +1758,7 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomScript, /② 待命待核准/u);
   assert.match(roomScript, /office-notification-action/u);
   assert.match(roomScript, /standby-approve/u);
-  assert.match(roomHtml, /id="writer-complete" type="button" disabled>結束 Writer 並準備回寫/u);
+  assert.match(roomHtml, /id="writer-complete" type="button" disabled>結束並 apply-back/u);
   const appScriptResponse = await fetch(`${server.url}/app.js`);
   assert.equal(appScriptResponse.status, 200);
   const appScript = await appScriptResponse.text();
@@ -3722,4 +3722,47 @@ test("Escape closes the top-bar popup first and only then the approval layer", a
   assert.equal(at("agent-requests-open").getAttribute("aria-expanded"), "false");
   assert.equal(at("merge-approval").hidden, false);
   assert.equal(focusLog.at(-1), "agent-requests-open");
+});
+
+/*
+ * The task drawer's seat rows show the wake receipt, and the "noop" kind expires on a clock. The
+ * drawer used to be repainted at that moment only when something else happened to render it, so
+ * the receipt outlived its window on screen. The delay is computed by a DOM-free function that this
+ * test executes; the wiring (every render books the repaint, a room switch drops it) is pinned.
+ */
+test("Room task drawer books one repaint for the next wake-receipt expiry", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const start = source.indexOf("/* @pure-start wake-notice-repaint");
+  const end = source.indexOf("/* @pure-end wake-notice-repaint */");
+  assert.ok(start > 0 && end > start, "public/room.js must expose the DOM-free wake-notice repaint block");
+  const block = source.slice(start, end);
+  assert.doesNotMatch(
+    block,
+    /(?:\b(?:document|window|navigator|localStorage|state)\s*\.|\b(?:fetch|byId|api|setInterval|setTimeout|require|import)\s*\()/u,
+  );
+  const sandbox: { delay?: (notices: unknown, now: number, ttl: number) => number | null } = {};
+  runInNewContext(`${block}\nglobalThis.delay = wakeNoticeRepaintDelay;`, sandbox, { timeout: 2_000 });
+  const delay = sandbox.delay;
+  assert.ok(delay, "wakeNoticeRepaintDelay was not defined by the block");
+  const ttl = 15_000;
+  assert.equal(delay(undefined, 1_000_000, ttl), null);
+  assert.equal(delay({}, 1_000_000, ttl), null);
+  // A recorded receipt is retired by a presence change, never by the clock.
+  assert.equal(delay({ a: { kind: "recorded", at: 999_000 } }, 1_000_000, ttl), null);
+  // One noop receipt: the time left in its window.
+  assert.equal(delay({ a: { kind: "noop", at: 990_000 } }, 1_000_000, ttl), 5_000);
+  // Already past its window: seatWakeNotice draws it as absent, so nothing to wait for.
+  assert.equal(delay({ a: { kind: "noop", at: 900_000 } }, 1_000_000, ttl), null);
+  // Several: the earliest expiry wins, and junk entries are skipped rather than thrown on.
+  assert.equal(
+    delay({ a: { kind: "noop", at: 995_000 }, b: { kind: "noop", at: 990_000 }, c: null, d: { kind: "noop", at: "x" } }, 1_000_000, ttl),
+    5_000,
+  );
+  // Wiring: the drawer books the repaint on every render and a room switch drops the booking.
+  const render = /^function renderTaskCenter\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(render, /scheduleTaskCenterRepaint\(\);/u);
+  const select = /^async function selectRoom\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(select, /clearTaskCenterRepaint\(\);/u);
+  assert.match(source, /officeTaskRepaintTimer = setTimeout\(\(\) => \{\n {4}officeTaskRepaintTimer = null;\n {4}renderTaskCenter\(\);/u);
+  assert.doesNotMatch(source, /setInterval\([^)]*renderTaskCenter/u);
 });

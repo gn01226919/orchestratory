@@ -37,13 +37,13 @@
           </div>
         </div>
         <div class="topbar-chips" aria-label="房間概況">
-          <button id="agent-requests-open" class="agent-requests-open topbar-chip" type="button" aria-expanded="false" aria-controls="agent-requests-panel" aria-label="終端席位與子 Agent 面板">
+          <button id="topbar-terminal-open" class="topbar-chip" type="button" aria-controls="office-task-center" aria-label="終端：開啟任務清單的「終端」分組">
             <span>終端</span><b id="topbar-terminal-count" class="topbar-chip-count">0</b><b id="agent-request-count" class="topbar-chip-alert" hidden>0</b>
           </button>
-          <button id="topbar-managed-open" class="topbar-chip" type="button" aria-controls="agent-requests-panel" aria-label="子 Agent：開啟終端面板並建立受控即時 Agent">
+          <button id="topbar-managed-open" class="topbar-chip" type="button" aria-controls="office-task-center" aria-label="子 Agent：開啟任務清單的「子 Agent」分組">
             <span>子 Agent</span><b id="topbar-managed-count" class="topbar-chip-count">0</b>
           </button>
-          <button id="topbar-task-open" class="topbar-chip" type="button" aria-label="任務：開啟任務清單">
+          <button id="topbar-task-open" class="topbar-chip" type="button" aria-controls="office-task-center" aria-label="任務：開啟任務清單的「執行中」分組">
             <span>任務</span><b id="topbar-task-count" class="topbar-chip-count">0</b>
           </button>
         </div>
@@ -63,9 +63,10 @@
         <button id="rec-toggle" class="topbar-rec" type="button" title="切換收錄" aria-label="收錄狀態：點一下切換暫停或恢復收錄"><i class="dot on" id="topbar-rec-dot" aria-hidden="true"></i><b id="topbar-rec-state">…</b></button>
         <button id="stop-all" type="button" class="danger topbar-stop" title="緊急停止：停止所有執行中的工作流" aria-label="緊急停止：停止所有執行中的工作流">■</button>
       </header>
-      <section id="agent-requests-panel" class="agent-requests-panel topbar-drawer" hidden aria-label="Agent 加入與待命申請">
-        <div class="topbar-drawer-head"><b>終端與子 Agent</b><button id="agent-requests-close" type="button" aria-label="關閉終端面板，回到頂欄">×</button></div>
-        <p><b>外接終端＝Native Full-Trust</b>：<code>room_join_request</code> 只申請加入房間，不會改變 host 原有的 sandbox、approval、工具、檔案、shell、network 或 subagent 能力；能力仍由 Codex／Claude Code host 掌管。加入後呼叫 <code>room_wait</code> 才會另行申請待命，這也只控制協作收件，不是能力授權。原生旁路無法攔截。</p>
+      <section id="agent-requests-panel" class="agent-requests-panel topbar-drawer" hidden aria-label="終端加入設定與受控即時 Agent">
+        <div class="topbar-drawer-head"><b>終端加入設定 · 受控即時 Agent</b><button id="agent-requests-close" type="button" aria-label="關閉終端面板，回到任務清單">×</button></div>
+        <p class="topbar-drawer-note">待核准加入的終端在這裡取名、選協作模式；已加入的席位與子 Agent 在任務清單的「終端」「子 Agent」分組管理。</p>
+        <button id="agent-requests-disclaimer" class="office-inline-link" type="button" aria-haspopup="dialog" aria-controls="office-disclaimer">ⓘ 外接終端＝Native Full-Trust，能力仍由 host 掌管 · 免責與說明 ▸</button>
         <div id="sidebar-presence-list" class="office-presence-list"></div>
         <form id="managed-agent-create" class="managed-agent-create">
           <b>受控即時 Agent</b>
@@ -81,7 +82,6 @@
           <button class="primary" type="submit">＋ 建立受控即時 Agent</button>
           <small id="managed-agent-create-status" aria-live="polite"></small>
         </form>
-        <div id="sidebar-managed-agent-list" class="office-presence-list managed-agent-list"></div>
       </section>
       <main class="main">
         <div id="ledger" class="stream" aria-live="polite">
@@ -93,7 +93,7 @@
               <span class="office-toolbar-title"><i></i><b>辦公室</b><small id="office-live-state">LIVE</small></span>
               <span class="office-toolbar-actions">
                 <button id="office-theme-toggle" type="button" aria-pressed="false" title="切換日夜場景">☀ 日間</button>
-                <button id="office-quiet-toggle" type="button" aria-pressed="false" title="隱藏休息區與裝飾泡泡">🔕 安靜</button>
+                <button id="office-quiet-toggle" type="button" aria-pressed="false" title="隱藏休息區（沙發、盆栽、寵物）與休閒泡泡">🔕 安靜</button>
                 <button id="office-idle-toggle" type="button" aria-pressed="true" title="開關休閒活動">🧘 活動</button>
                 <button id="office-layout-reset" type="button" title="重新排列所有工位">⇄ 整理工位</button>
                 <button id="office-fullscreen-toggle" type="button" aria-pressed="false" title="切換全螢幕">⛶ 全螢幕</button>
@@ -146,13 +146,14 @@
                   </div>
                 </form>
               </section>
-              <section id="office-task-center" class="office-drawer office-drawer-tasks" aria-label="任務清單">
+              <section id="office-task-center" class="office-drawer office-drawer-tasks" hidden aria-label="任務清單">
                 <header class="office-drawer-head">
                   <b>任務清單</b>
                   <small id="office-presence-count">偵測中…</small>
                   <button id="office-task-close" type="button" data-drawer-close="office-task-center" aria-label="關閉任務清單">×</button>
                 </header>
                 <div id="office-task-list" class="office-task-list"></div>
+                <button id="agent-requests-open" class="office-task-settings" type="button" aria-expanded="false" aria-controls="agent-requests-panel">⚙ 終端加入設定 · ＋ 受控即時 Agent ▸</button>
                 <details id="office-workflow-proposal" class="office-task-proposal">
                   <summary>＋ 建立傳統 workflow 提案</summary>
                   <p>只建立傳統 coding workflow 提案，之後到主工作區確認；有進行中的 Writer 時會改為交給它執行。</p>
@@ -199,7 +200,7 @@
                   <span id="writer-active-meta">指派後會建立獨立草稿區；交接時舊任與子 Agent 的寫入權立即失效。</span>
                   <div class="writer-handoff-actions">
                     <button id="writer-handover" type="button" disabled>交接</button>
-                    <button class="primary" id="writer-complete" type="button" disabled>結束 Writer 並準備回寫</button>
+                    <button class="primary" id="writer-complete" type="button" disabled>結束並 apply-back</button>
                   </div>
                 </section>
                 <section class="writer-live-control" aria-label="指派新 Writer">
@@ -219,7 +220,7 @@
                   <button id="writer-delegate" type="button" disabled>建立子 Agent</button>
                   <details class="writer-delegate-note">
                     <summary>ⓘ 同類型共用草稿區、序列執行；跨類型唯讀 ▸</summary>
-                    <small>與 Writer 同類型：共用目前 task worktree 並由系統序列執行；不同類型：唯讀；不可再轉派。</small>
+                    <small>與 Writer 同類型：共用目前任務草稿區並由系統序列執行；不同類型：唯讀；不可再轉派。</small>
                   </details>
                 </section>
                 <small id="writer-live-status" class="writer-handoff-status" aria-live="polite"></small>
@@ -227,7 +228,7 @@
             </div>
             <div id="office-settings-menu" class="office-settings-menu" hidden role="menu" aria-label="辦公室設定">
               <button type="button" role="menuitemcheckbox" data-office-action="office-theme-toggle" aria-checked="false"><span>☀ 日間場景</span><i></i></button>
-              <button type="button" role="menuitemcheckbox" data-office-action="office-quiet-toggle" aria-checked="false"><span>🔕 安靜（隱藏裝飾）</span><i></i></button>
+              <button type="button" role="menuitemcheckbox" data-office-action="office-quiet-toggle" aria-checked="false"><span>🔕 安靜（隱藏休息區）</span><i></i></button>
               <button type="button" role="menuitemcheckbox" data-office-action="office-idle-toggle" aria-checked="true"><span>🧘 休閒活動</span><i></i></button>
               <button type="button" role="menuitem" data-office-action="office-layout-reset"><span>⇄ 整理工位</span></button>
               <button type="button" role="menuitem" data-office-action="office-fullscreen-toggle"><span>⛶ 全螢幕</span></button>
@@ -235,17 +236,6 @@
               <button type="button" role="menuitem" data-office-action="rec-toggle"><span id="office-rec-label">⏸ 暫停收錄</span></button>
               <button type="button" role="menuitem" id="office-disclaimer-open"><span>ⓘ 免責與說明</span></button>
             </div>
-            <section id="office-disclaimer" class="office-disclaimer" hidden role="dialog" aria-modal="true" aria-labelledby="office-disclaimer-title">
-              <div class="office-disclaimer-card">
-                <header class="office-drawer-head">
-                  <b id="office-disclaimer-title">免責與說明</b>
-                  <button id="office-disclaimer-close" type="button" aria-label="關閉免責與說明">×</button>
-                </header>
-                <p><b>外接終端＝Native Full-Trust</b>：<code>room_join_request</code> 只申請加入房間，不會改變 host 原有的 sandbox、approval、工具、檔案、shell、network 或 subagent 能力；能力仍由 Codex／Claude Code host 掌管。加入後呼叫 <code>room_wait</code> 才會另行申請待命，這也只控制協作收件，不是能力授權。原生旁路無法攔截。</p>
-                <p><b>GUI Managed 子 Agent</b>：由 Orchestratory 啟動，對話唯讀；寫入需另行 Owner Writer 授權。</p>
-                <p><b>草稿區</b>：獨立副本、看得到、可退回、有紀錄；不是沙盒。核准併入前 main 不會被修改。</p>
-              </div>
-            </section>
           </aside>
         </div>
         <form id="post-form" class="composer">
@@ -257,11 +247,22 @@
         </form>
       </main>
     </div>
+    <section id="office-disclaimer" class="office-disclaimer" hidden role="dialog" aria-modal="true" aria-labelledby="office-disclaimer-title">
+      <div class="office-disclaimer-card">
+        <header class="office-drawer-head">
+          <b id="office-disclaimer-title">免責與說明</b>
+          <button id="office-disclaimer-close" type="button" aria-label="關閉免責與說明">×</button>
+        </header>
+        <p><b>外接終端＝Native Full-Trust</b>：<code>room_join_request</code> 只申請加入房間，不會改變 host 原有的 sandbox、approval、工具、檔案、shell、network 或 subagent 能力；能力仍由 Codex／Claude Code host 掌管。加入後呼叫 <code>room_wait</code> 才會另行申請待命，這也只控制協作收件，不是能力授權。原生旁路無法攔截。</p>
+        <p><b>GUI Managed 子 Agent</b>：由 Orchestratory 啟動，對話唯讀；寫入需另行 Owner Writer 授權。</p>
+        <p><b>草稿區</b>：獨立副本、看得到、可退回、有紀錄；不是沙盒。核准併入前 main 不會被修改。</p>
+      </div>
+    </section>
     <section id="merge-approval" class="workspace-onboarding merge-approval" hidden role="dialog" aria-modal="true" aria-labelledby="merge-approval-title">
       <div class="workspace-onboarding-card merge-approval-card">
         <header class="merge-approval-bar">
           <button id="merge-approval-close" type="button" aria-label="回辦公室，關閉核准併入">← 回辦公室</button>
-          <span class="merge-approval-bar-title"><small>MERGE CANDIDATE INTO MAIN</small><b id="merge-approval-title">⑂ 核准併入 main</b></span>
+          <span class="merge-approval-bar-title"><small>MERGE DRAFT INTO MAIN</small><b id="merge-approval-title">⑂ 核准併入 main</b></span>
           <code id="merge-approval-task">—</code>
           <em id="merge-approval-risk" class="merge-approval-risk">風險</em>
         </header>
