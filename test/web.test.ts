@@ -1507,13 +1507,13 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomScript, /Native Full-Trust · host-controlled/u);
   assert.match(roomScript, /GUI Managed · 對話唯讀/u);
   assert.match(roomScript, /終端對話同步/u);
-  assert.match(roomScript, /它正在收聽，送出後會直接送過去/u);
+  assert.match(roomScript, /交辦會直接送到它手上/u);
   // 待命 means "approved for standby" everywhere else on this screen -- stage two, the approve and
   // revoke buttons -- and the badge exists to show the gap between that and actually listening. One
   // word cannot carry both halves of the distinction it is drawing.
-  assert.match(roomScript, /text: "正在收聽"/u);
+  assert.match(roomScript, /text: "可交辦"/u);
   assert.doesNotMatch(roomScript, /text: "正在待命"/u);
-  assert.match(roomScript, /它現在沒在收聽，送出的訊息會進收件匣排隊/u);
+  assert.match(roomScript, /交辦會進它的收件匣排隊，等它下次 room_wait/u);
   // The receipt now composes its label from the same state function instead of keeping a second
   // hand-written copy of the branches -- that copy collapsed two states into one line, directly under
   // a comment claiming there was one answer per state "where it cannot drift".
@@ -1522,8 +1522,8 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   // Refused, not queued. A seat without standby authority throws TARGET_AGENT_STANDBY_NOT_APPROVED
   // before anything is enqueued, so telling the reader it will wait in a queue is simply false --
   // and that was the shape of the contradiction the first pass shipped.
-  assert.match(roomScript, /還不能送。它的待命還等你核准/u);
-  assert.match(roomScript, /還不能送。它沒有待命授權/u);
+  assert.match(roomScript, /還不能送，先在這裡按核准/u);
+  assert.match(roomScript, /還不能送，它沒有待命授權/u);
   // The office is where work is actually handed over, so it has to answer the same question the
   // sidebar does. It used to say "可對話 · 待命" for a seat whose terminal had stopped asking.
   assert.match(roomScript, /怎麼辦：\$\{deskListening\.fix\}|怎麼辦：\$\{listening\.fix\}/u);
@@ -1592,7 +1592,7 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomScript, /is-wake-notice/u);
   /*
    * Scoped to the silence it describes, and dropped when that silence ends. Left unscoped, the notice
-   * survives the seat coming back and ends up sitting under a "正在收聽" badge with the button and the
+   * survives the seat coming back and ends up sitting under a "可交辦" badge with the button and the
    * "怎麼辦" line already gone -- which reads as "I rang, and it came back", every time, and still
    * carries an instruction that would interrupt the wait the seat is now in.
    */
@@ -1601,7 +1601,7 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
     "the recorded notice must not render once the seat is listening again");
   // The "already listening" receipt is about the CLICK, not the seat. Gating it on the seat being
   // silent made it unreachable -- the only way to produce it is the seat being listening -- which left
-  // that path showing a vanishing button, a badge flipping to 正在收聽, and no words at all.
+  // that path showing a vanishing button, a badge flipping to 可交辦, and no words at all.
   // Anchored to what the no-op branch is actually gated on -- elapsed time -- rather than to the
   // absence of a word nearby. A proximity check cannot tell "the noop branch is gated on
   // not-listening" from "the noop branch is followed by the recorded branch, which correctly is".
@@ -3391,6 +3391,43 @@ test("a seat row distinguishes listening from merely present, in plain words", a
     assert.doesNotMatch(stateValue.text, /room_wait|standby|MCP/u,
       `"${stateValue.text}" names the mechanism where it should answer the question`);
   }
+});
+
+/*
+ * The office task footer names a draft area by its candidate id, and the only place that id travels
+ * today is the candidate path the registry builds. Reading it back has to be strict: a task id, a
+ * mangled id, a trailing slash or some other directory under the data root must all come back as
+ * null, because the footer would otherwise print an identifier that is not on disk.
+ */
+test("the task footer takes a candidate id only from a well-formed candidates/<uuid> path", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const start = source.indexOf("/* @pure-start candidate-id-from-approval");
+  const end = source.indexOf("/* @pure-end candidate-id-from-approval */");
+  assert.ok(start > 0 && end > start, "room.js must expose the DOM-free candidate id reader");
+  const block = source.slice(start, end);
+  assert.doesNotMatch(
+    block,
+    /(?:\b(?:document|window|navigator|localStorage|state)\s*\.|\b(?:fetch|byId|api|setInterval|setTimeout|require|import)\s*\()/u,
+  );
+  const reader = runInNewContext(
+    `${block}\n({ candidateIdFromApproval });`,
+    Object.create(null) as object,
+    { timeout: 2_000 },
+  ) as { candidateIdFromApproval: (approval: unknown) => string | null };
+  const id = "1dca001d-0000-4000-8000-000000000001";
+  assert.equal(reader.candidateIdFromApproval({ binding: { candidatePath: `/data/candidates/${id}` } }), id);
+  assert.equal(reader.candidateIdFromApproval({ candidateId: id }), id, "an explicit id of the right shape is accepted");
+  // Malformed UUID: the registry never mints this, so it is not a draft area.
+  assert.equal(reader.candidateIdFromApproval({ binding: { candidatePath: "/data/candidates/1dca001d-not-a-uuid" } }), null);
+  // Trailing slash: the last segment is empty, and the id must not be fished out of the one before.
+  assert.equal(reader.candidateIdFromApproval({ binding: { candidatePath: `/data/candidates/${id}/` } }), null);
+  // Not under candidates/: a worktree or any other directory is a different thing entirely.
+  assert.equal(reader.candidateIdFromApproval({ binding: { candidatePath: `/data/worktrees/${id}` } }), null);
+  // And a task id is never a substitute.
+  assert.equal(reader.candidateIdFromApproval({ taskId: id, binding: { candidatePath: "/data/main" } }), null);
+  assert.equal(reader.candidateIdFromApproval(undefined), null);
+  // Wiring: the footer must consult the reader rather than carry its own parse.
+  assert.match(source, /candidateId: candidateIdFromApproval\(approval\)/u);
 });
 
 test("the ledger groups by LOCAL day and opens the newest one", async () => {
