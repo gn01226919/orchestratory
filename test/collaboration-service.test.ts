@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
-import { CollaborationService } from "../src/core/collaboration-service.ts";
+import { CollaborationService, classifyStoreFailure, describeStoreFailure } from "../src/core/collaboration-service.ts";
 
 /*
  * A seat registered here is scaffolding, not the thing under test. The production presence lease is
@@ -1574,4 +1574,75 @@ test("an inbox from a newer build disables its own features and nothing else", a
 
   /* And asking for the inbox gives the actionable reason, at the call rather than at construction. */
   assert.throws(() => service.inbox.list(room.id), /SCHEMA_TOO_NEW/u);
+});
+
+test("a store that cannot open takes the ones opened before it down with it", async (t) => {
+  /*
+   * The branch the previous round claimed and never tested. "Corruption and permissions still fail
+   * closed" was true about the throw and silent about everything else: the ledger and presence
+   * stores were already open when the inbox threw, the throw escaped the constructor, and with no
+   * instance there was no `close()` anyone could call. Each store cleans up after its own failed
+   * constructor, which is exactly why nobody noticed -- the leak lives between them.
+   */
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-store-fail-"));
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+
+  /* Let the real stores create their files, then make the inbox unopenable in a way that is not a
+     version mismatch, so it must not degrade. */
+  const seed = new CollaborationService(data, { presence: { leaseMs: 120_000 } });
+  seed.close();
+  await writeFile(join(data, "room-inbox.sqlite"), "this is not a database", "utf8");
+
+  assert.throws(
+    () => new CollaborationService(data, { presence: { leaseMs: 120_000 } }),
+    (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      assert.match(message, /STORE_UNAVAILABLE:room-inbox:CORRUPT/u, "the class has to be actionable");
+      /* Asserted against the path this run actually used, not against a spelling of somebody's home
+         directory. Writing that spelling here would put it in a file the repository scanner reads,
+         which is the same mistake in a different place -- and this is the stronger check anyway: it
+         catches a leak of THIS path rather than a leak that happens to look like a Mac. */
+      assert.equal(message.includes(data), false, "the message must not repeat the data directory");
+      assert.ok(error instanceof Error && error.cause !== undefined, "the original must stay reachable");
+      return true;
+    },
+  );
+
+  /*
+   * The stores really were closed. A leaked SQLite connection leaves its WAL sidecar behind because
+   * nothing checkpointed it; a closed one does not. Asserting on the sidecar is the observable
+   * consequence rather than a restatement of the code.
+   */
+  const leftovers = await readdir(data);
+  assert.equal(
+    leftovers.some((name) => name === "rooms.sqlite-wal" || name === "room-presence.sqlite-wal"),
+    false,
+    `stores opened before the failure were left open: ${leftovers.join(", ")}`,
+  );
+});
+
+test("failure classes say what to do, and never repeat what the failure said", () => {
+  /* Each class exists because the reader's next action differs. A message that cannot tell them
+     apart sends someone to retry a full disk or to reopen a corrupt file. */
+  assert.equal(classifyStoreFailure(new Error("UNSAFE_SQLITE_FILE")), "PERMISSION");
+  assert.equal(classifyStoreFailure(Object.assign(new Error("x"), { code: "EACCES" })), "PERMISSION");
+  assert.equal(classifyStoreFailure(Object.assign(new Error("x"), { code: "ENOSPC" })), "DISK_FULL");
+  assert.equal(classifyStoreFailure(new Error("database or disk is full")), "DISK_FULL");
+  assert.equal(classifyStoreFailure(new Error("ROOM_INBOX_CORRUPT")), "CORRUPT");
+  assert.equal(classifyStoreFailure(new Error("file is not a database")), "CORRUPT");
+  assert.equal(classifyStoreFailure(new Error("something nobody has seen")), "UNRECOGNISED");
+
+  /* The property that matters more than the classification: nothing from the failure is echoed. */
+  /* Spelled with the placeholder the repository scan already allows, rather than assembled from
+     parts to slip past it. Getting around a rule that guards a public repository is not a smaller
+     version of obeying it, and this file would be a strange place to start. */
+  const secret = "/Users/example/private/data.sqlite";
+  const leaky = Object.assign(
+    new Error(`ENOENT: no such file or directory, open '${secret}'`),
+    { code: "EACCES" },
+  );
+  const described = describeStoreFailure("room-inbox", leaky);
+  assert.equal(described.includes(secret), false, "the path must not survive into the description");
+  assert.equal(described.includes(leaky.message), false, "nothing the failure said may be echoed");
+  assert.match(described, /STORE_UNAVAILABLE:room-inbox:PERMISSION/u);
 });

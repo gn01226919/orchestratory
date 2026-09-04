@@ -1,5 +1,6 @@
 import { chmod, lstat, mkdir, open, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { constants, realpathSync } from "node:fs";
+import { constants, realpathSync, statSync } from "node:fs";
+import type { Stats } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
@@ -191,7 +192,27 @@ export function assertDataDirectoryOverride(value: string): string {
     try {
       existing = realpathSync(existing);
       break;
-    } catch {
+    } catch (error) {
+      /*
+       * ENOENT is the only failure that means "keep looking further up". Everything else means the
+       * resolution did not happen, and walking up on those turns the whole check into the string
+       * comparison it replaced: the loop climbs to `/`, `realpathSync("/")` always succeeds, and
+       * `canonical` comes out as plain `resolve(value)` with no symlink resolved anywhere in it.
+       *
+       * That is not a theoretical path. A data directory on a network volume answers EIO or ESTALE
+       * during an ordinary reconnect; ELOOP, ENOTDIR and ENAMETOOLONG are answers about the path
+       * itself. In every one of those the earlier symlink bypass comes back whole, and nothing had
+       * to go wrong on purpose for it to happen -- one transient read is enough.
+       */
+      const code = (error as NodeJS.ErrnoException | undefined)?.code;
+      if (code !== "ENOENT") {
+        throw new Error(
+          `INVALID_DATA_DIRECTORY:UNRESOLVABLE — ${DATA_DIRECTORY_ENVIRONMENT_KEY} 的路徑無法解析`
+          + `（${existing} 回報 ${code ?? "未知錯誤"}）。這不是「還沒建立」，而是「查不下去」，`
+          + "所以不能假設它安全。請確認路徑拼寫、父目錄權限，以及外接或網路磁碟已經掛載。"
+          + "未設定這個變數時會使用預設位置；設錯不會靜默退回預設。",
+        );
+      }
       const parent = dirname(existing);
       /* `dirname("/") === "/"`: nothing above the root exists to resolve, so stop rather than loop. */
       if (parent === existing) break;
@@ -213,7 +234,18 @@ export function assertDataDirectoryOverride(value: string): string {
   /* Home is compared resolved too: a home directory reached through a symlinked volume is still
      the home directory, and every later `join` would write into somebody's own files. */
   let home = homedir();
-  try { home = realpathSync(home); } catch { /* an unreadable home cannot be the target either */ }
+  try {
+    home = realpathSync(home);
+  } catch (error) {
+    /* A home that will not resolve is not a reason to compare against the unresolved spelling and
+       call the difference a pass: that is exactly how a symlinked home would slip through. */
+    if ((error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") {
+      throw new Error(
+        `INVALID_DATA_DIRECTORY:HOME_UNRESOLVABLE — 無法解析家目錄，因此無法確認 `
+        + `${DATA_DIRECTORY_ENVIRONMENT_KEY} 不是家目錄本身。這是環境問題，不是設定值的問題。`,
+      );
+    }
+  }
   if (canonical === home) throw new Error(
       `INVALID_DATA_DIRECTORY:HOME_ROOT — ${DATA_DIRECTORY_ENVIRONMENT_KEY} 不能是家目錄本身；家目錄底下的子目錄可以。`
       + "未設定這個變數時會使用預設位置；設錯不會靜默退回預設。",
@@ -247,6 +279,51 @@ export function assertDataDirectoryOverride(value: string): string {
    * opens in every store, which is a change to how files are opened rather than to how a path is
    * judged. Recorded as residual in docs/DECISIONS.md rather than implied to be handled.
    */
+  /*
+   * Ownership, checked here so the refusal happens where the value was set.
+   *
+   * This adds no security. `assertOwnerDirectory` in sqlite-security.ts already refuses a directory
+   * that is not yours or not 0700, and it does so at the moment a store opens the file, which is the
+   * only moment that can be authoritative -- this check and that one are separated by exactly the
+   * TOCTOU window ADR-045 records as unclosed. What it adds is the difference between being told
+   * `UNSAFE_SQLITE_DIRECTORY` several layers into startup and being told, at the variable, that the
+   * directory belongs to somebody else.
+   *
+   * A path that does not exist yet is the ordinary case and passes: the store creates it with 0700.
+   */
+  let existingTarget: Stats | undefined;
+  try {
+    existingTarget = statSync(canonical);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") {
+      throw new Error(
+        `INVALID_DATA_DIRECTORY:UNREADABLE — 無法讀取 ${DATA_DIRECTORY_ENVIRONMENT_KEY} 指向的位置。`
+        + "請確認父目錄權限與磁碟是否已掛載。未設定這個變數時會使用預設位置；設錯不會靜默退回預設。",
+      );
+    }
+  }
+  if (existingTarget !== undefined) {
+    if (!existingTarget.isDirectory()) {
+      throw new Error(
+        `INVALID_DATA_DIRECTORY:NOT_A_DIRECTORY — ${DATA_DIRECTORY_ENVIRONMENT_KEY} 指向的是一個已存在`
+        + "的非目錄項目。請改指向一個目錄，或換一個尚未使用的路徑。",
+      );
+    }
+    const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+    if (uid !== undefined && existingTarget.uid !== uid) {
+      throw new Error(
+        `INVALID_DATA_DIRECTORY:NOT_OWNED — ${DATA_DIRECTORY_ENVIRONMENT_KEY} 指向的目錄屬於其他使用者。`
+        + "資料目錄必須由執行這個程式的帳號擁有；若這個目錄曾經以 sudo 建立，它會屬於 root。",
+      );
+    }
+    if ((existingTarget.mode & 0o077) !== 0) {
+      throw new Error(
+        `INVALID_DATA_DIRECTORY:TOO_PERMISSIVE — ${DATA_DIRECTORY_ENVIRONMENT_KEY} 指向的目錄開放了`
+        + "群組或其他使用者的權限。資料目錄必須是 0700；請執行 chmod 700 後重試。",
+      );
+    }
+  }
+
   return canonical;
 }
 

@@ -466,3 +466,138 @@ test("an invalid override throws instead of falling back to the default", () => 
     /INVALID_DATA_DIRECTORY/u,
   );
 });
+
+test("a symlink into a refused directory is refused for where it points, not how it is spelled", async (t) => {
+  /*
+   * The test the previous round was missing. `/var/db/x` and `/private/var/db/x` were both asserted
+   * to be refused, but the denylist spells both, so string comparison alone passed them and deleting
+   * `realpathSync` left that assertion green. Here the spelling is a path under a temporary
+   * directory that appears on no list; the only thing that can refuse it is following the link.
+   */
+  const box = await mkdtemp(join(tmpdir(), "orchestratory-symlink-"));
+  t.after(async () => await rm(box, { recursive: true, force: true }));
+  const link = join(box, "into-system");
+  await symlink("/private/var/db", link);
+  assert.throws(
+    () => assertDataDirectoryOverride(join(link, "orchestratory")),
+    /INVALID_DATA_DIRECTORY:SYSTEM_PATH/u,
+    "a link whose own spelling is innocent must still be judged by its target",
+  );
+});
+
+test("a resolvable path is returned as its target, not as the name it was reached by", async (t) => {
+  /* Not `tmpdir()`: on macOS that is $TMPDIR under /var/folders, which resolves into /private/var
+     and is refused by name -- correctly, but it makes the directory useless for the cases here that
+     are supposed to be accepted. /tmp resolves to /private/tmp, which is not a refused root. */
+  const box = await mkdtemp(join("/tmp", "orchestratory-symlink-ok-"));
+  t.after(async () => await rm(box, { recursive: true, force: true }));
+  const real = join(box, "real");
+  await mkdir(real);
+  const link = join(box, "link");
+  await symlink(real, link);
+  assert.equal(assertDataDirectoryOverride(join(link, "data")), join(realpathSync(real), "data"));
+});
+
+test("a path that cannot be resolved is refused rather than assumed to be merely absent", async (t) => {
+  /*
+   * The whole reason the errno matters. Treating every failure as "not created yet" walks up to the
+   * filesystem root, where `realpathSync` always succeeds, and hands back plain `resolve(value)` --
+   * the string-only version, with every symlink unresolved. One transient EIO on a network volume
+   * used to be enough to reinstate the bypass this function exists to close.
+   */
+  const box = await mkdtemp(join(tmpdir(), "orchestratory-eacces-"));
+  t.after(async () => {
+    await chmod(box, 0o700).catch(() => undefined);
+    await rm(box, { recursive: true, force: true });
+  });
+  const inner = join(box, "inner");
+  await mkdir(inner);
+  await chmod(box, 0o600);
+  const denied = (() => {
+    try {
+      realpathSync(inner);
+      return false;
+    } catch {
+      return true;
+    }
+  })();
+  /* Running as root, or on a filesystem that ignores the mode, makes this unobservable. Say so
+     rather than passing: a test that silently measures nothing is the thing this round is about. */
+  if (!denied) {
+    t.skip("this filesystem or user does not enforce the search bit; EACCES is unobservable here");
+    return;
+  }
+  assert.throws(
+    () => assertDataDirectoryOverride(join(inner, "data")),
+    /INVALID_DATA_DIRECTORY:UNRESOLVABLE/u,
+  );
+  assert.throws(() => assertDataDirectoryOverride(join(inner, "data")), /EACCES/u);
+});
+
+test("a symlink loop is refused, and the message says which path could not be read", async (t) => {
+  const box = await mkdtemp(join(tmpdir(), "orchestratory-eloop-"));
+  t.after(async () => await rm(box, { recursive: true, force: true }));
+  await symlink(join(box, "b"), join(box, "a"));
+  await symlink(join(box, "a"), join(box, "b"));
+  assert.throws(
+    () => assertDataDirectoryOverride(join(box, "a", "data")),
+    (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      assert.match(message, /INVALID_DATA_DIRECTORY:UNRESOLVABLE/u);
+      assert.match(message, /ELOOP/u);
+      assert.match(message, new RegExp(DATA_DIRECTORY_ENVIRONMENT_KEY, "u"));
+      return true;
+    },
+  );
+});
+
+test("a directory that does not exist yet is still the ordinary case", async (t) => {
+  /* The counterweight to the three above: ENOENT must keep walking up, or a fresh install of the
+     product could not choose a directory it has not created. */
+  /* /tmp for the same reason as above: $TMPDIR resolves under /private/var and would be refused. */
+  const box = await mkdtemp(join("/tmp", "orchestratory-enoent-"));
+  t.after(async () => await rm(box, { recursive: true, force: true }));
+  const fresh = assertDataDirectoryOverride(join(box, "not", "created", "yet"));
+  assert.equal(fresh, join(realpathSync(box), "not", "created", "yet"));
+});
+
+test("an existing target that is not a directory you own with 0700 is refused at the variable", async (t) => {
+  /*
+   * The help says "a directory you own". That was true of the product and not of this function:
+   * `assertOwnerDirectory` enforced it several layers later, so the person who mistyped the
+   * variable met an internal code instead of a sentence about their directory. These checks change
+   * nothing about what is allowed -- the store still refuses independently, and must, because the
+   * window between the two is the TOCTOU ADR-045 leaves open.
+   */
+  const box = await mkdtemp(join("/tmp", "orchestratory-owner-"));
+  t.after(async () => {
+    await chmod(box, 0o700).catch(() => undefined);
+    await rm(box, { recursive: true, force: true });
+  });
+
+  const asFile = join(box, "a-file");
+  await writeFile(asFile, "not a directory", "utf8");
+  assert.throws(
+    () => assertDataDirectoryOverride(asFile),
+    /INVALID_DATA_DIRECTORY:NOT_A_DIRECTORY/u,
+  );
+
+  const loose = join(box, "loose");
+  await mkdir(loose, { mode: 0o755 });
+  assert.throws(
+    () => assertDataDirectoryOverride(loose),
+    (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      assert.match(message, /INVALID_DATA_DIRECTORY:TOO_PERMISSIVE/u);
+      assert.match(message, /chmod 700/u, "a refusal without the fix is half a message");
+      assert.match(message, new RegExp(DATA_DIRECTORY_ENVIRONMENT_KEY, "u"));
+      return true;
+    },
+  );
+
+  /* And the ordinary cases still pass: 0700 is fine, and not existing yet is the normal case. */
+  const good = join(box, "good");
+  await mkdir(good, { mode: 0o700 });
+  assert.equal(assertDataDirectoryOverride(good), realpathSync(good));
+  assert.ok(assertDataDirectoryOverride(join(box, "not-created-yet")).endsWith("not-created-yet"));
+});

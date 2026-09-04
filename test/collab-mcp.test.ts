@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import {
   CollabToolBroker,
   handleCollabMcpMessage,
@@ -15,7 +16,7 @@ import {
 } from "../src/mcp/collab-server.ts";
 import { RoomLedger } from "../src/core/room-ledger.ts";
 import { RoomInboxStore } from "../src/core/room-inbox.ts";
-import { CollaborationService } from "../src/core/collaboration-service.ts";
+import { CollaborationService, INBOX_DEPENDENT_TOOLS } from "../src/core/collaboration-service.ts";
 import { WorkflowRequestStore } from "../src/core/workflow-request-store.ts";
 import { ProviderRegistry } from "../src/providers/registry.ts";
 import { WorkspacePolicy } from "../src/security/workspace-policy.ts";
@@ -2032,66 +2033,249 @@ test("a join request names the seat by its tag and workspace directory, never by
 });
 
 /*
- * Which tools need the inbox, asserted rather than asserted-about.
+ * What the previous version of this guard did, and why it passed while being wrong.
  *
- * The claim made when the inbox was allowed to degrade was that six of the twenty-seven tools stop
- * and twenty-one carry on. A review pointed out that nothing in the change demonstrated it — the
- * number came from counting `#seatInbox()` call sites by hand, which measures today's code and
- * would not notice a twenty-second tool quietly acquiring a dependency.
+ * It read `collab-server.ts` as text and looked for the literal `#seatInbox()` inside each handler
+ * body. Three things were wrong at once. The symbol has no causal relation to the behaviour --
+ * `#seatInbox()` throws only when there is no collaboration service at all, while the failure this
+ * is about comes from the `inbox` getter one layer down. The slice could not follow a call, so
+ * `room_send`, `room_await_reply` and `list_agents`, which reach the store through a service method,
+ * were all read as independent. And the table listed seventeen tools while the same test asserted
+ * the dispatch parses to twenty-seven, so ten were never examined at all.
  *
- * This reads the dispatch and the call sites out of the source, the same way the classification
- * guard does, and fails when the two lists disagree. Adding an inbox dependency to a tool that the
- * degraded path is supposed to keep alive turns this red.
+ * It was green. It made the count in `describeInboxUnavailable` look measured. It was not.
+ *
+ * This runs the tools. Two worlds are built identically except that one has an inbox stamped to a
+ * schema this build refuses; every tool is called on both with the same arguments; a tool "needs
+ * the inbox" when the degraded world answers ROOM_INBOX_UNAVAILABLE and the healthy one does not.
+ * A tool that fails for its own reasons in both worlds is telling the truth about itself.
  */
-test("exactly the tools that use the inbox are the ones a degraded inbox stops", async () => {
-  const source = await readFile(new URL("../src/mcp/collab-server.ts", import.meta.url), "utf8");
-  const NAME = '"([a-z][a-z0-9_]*)"';
+const INBOX_CAPABILITY_TOOLS = [
+  "list_agents", "ask_claude", "ask_codex", "ask_grok", "compare_agents",
+  "room_init", "room_status", "room_post", "room_read", "room_get", "room_search",
+  "room_mention", "room_join_request", "request_coding_workflow", "room_start",
+  "room_send", "room_await_reply", "candidate_start", "candidate_checkpoint",
+  "candidate_complete", "candidate_status", "main_merge_preview", "main_merge_request",
+  "room_wait", "room_ack", "room_reply", "room_fail",
+] as const;
 
+/*
+ * Two tools cannot be judged by their error, and saying so here is the point: a guard that quietly
+ * counts them as independent would be repeating the mistake it replaces.
+ *
+ * `compare_agents` catches every per-target failure into `answers[].error`, so it never throws.
+ * `room_join_request` wraps the briefing in try/catch, so a degraded inbox costs it a field rather
+ * than an error. Both are asserted separately, on their payloads.
+ */
+const NOT_JUDGED_BY_ERROR = new Set(["compare_agents", "room_join_request"]);
+
+interface CapabilityWorld {
+  broker: CollabToolBroker;
+  service: CollaborationService;
+  root: string;
+  seatTwo: string;
+  close(): void;
+}
+
+async function capabilityWorld(degraded: boolean): Promise<CapabilityWorld> {
+  const root = await mkdtemp(join(tmpdir(), "orchestratory-capability-root-"));
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-capability-data-"));
+  await execFileAsync("git", ["init", "-b", "main"], { cwd: root });
+  await writeFile(join(root, "README.md"), "main\n", "utf8");
+  await execFileAsync("git", ["add", "README.md"], { cwd: root });
+  await execFileAsync("git", [
+    "-c", "user.name=Capability", "-c", "user.email=test@example.invalid", "commit", "-m", "initial",
+  ], { cwd: root });
+
+  /* Let the real store create its file before stamping it: a version written into a file the store
+     has never opened would be testing the migration, not the refusal. */
+  const seed = new CollaborationService(data, { presence: { leaseMs: 120_000 } });
+  seed.close();
+  if (degraded) {
+    const raw = new DatabaseSync(join(data, "room-inbox.sqlite"));
+    raw.exec("PRAGMA user_version = 9999");
+    raw.close();
+  }
+
+  const service = new CollaborationService(data, { presence: { leaseMs: 120_000 } });
+  assert.equal(service.inboxAvailable, !degraded, "the world was not built in the state it claims");
+  service.ledger.createRoom("demo", root);
+  const join1 = service.registerExternal({ provider: "codex", workspace: root, hostPid: 9_101 });
+  service.requestExternalJoin(join1.id, "demo", root);
+  service.approveExternalJoin({
+    presenceId: join1.id, roomId: "demo", workspace: root,
+    label: "seat-one", collaborationMode: "room-first", syncTurns: true,
+  });
+  /* Standby, or `room_wait` returns a polite timeout from the approval poll and never reaches the
+     store -- a false negative that would have made the tool look independent. */
+  service.requestExternalStandby(join1.id, "demo", root);
+  service.approveExternalStandby(join1.id, "demo", root);
+
+  const join2 = service.registerExternal({ provider: "claude", workspace: root, hostPid: 9_102 });
+  service.requestExternalJoin(join2.id, "demo", root);
+  service.approveExternalJoin({
+    presenceId: join2.id, roomId: "demo", workspace: root,
+    label: "seat-two", collaborationMode: "room-first", syncTurns: true,
+  });
+  service.requestExternalStandby(join2.id, "demo", root);
+  service.approveExternalStandby(join2.id, "demo", root);
+
+  const broker = new CollabToolBroker({
+    providers: new ProviderRegistry([]),
+    workspaces: WorkspacePolicy.fromPaths([root]),
+    hardLimits: DEFAULT_HARD_LIMITS,
+    invoke: async (assignment, request) =>
+      providerResult(assignment, request, `${assignment.provider} answered`),
+    contextFactory: () => ({
+      fileTree: async () => "README.md",
+      readFiles: async () => "File: README.md\nmain",
+    }),
+    ledger: service.ledger,
+    collaboration: service,
+    resolvePresenceId: () => join1.id,
+    resolveActor: (roomId: string) => service.externalActor(join1.id, roomId),
+    resolveSessionRoom: () => ({
+      roomId: "demo", workspace: root, actor: service.externalActor(join1.id, "demo"),
+      collaborationMode: "room-first", syncTurns: true,
+    }),
+    requestRoomJoin: () => undefined,
+    waitForRoomJoin: async () => true,
+    cancelRoomJoin: () => undefined,
+    workflowRequests: new WorkflowRequestStore(data),
+  });
+
+  return {
+    broker,
+    service,
+    root,
+    seatTwo: join2.id,
+    close: () => service.close(),
+  };
+}
+
+function capabilityArguments(world: CapabilityWorld): Record<string, Record<string, unknown>> {
+  const anyUuid = randomUUID();
+  return {
+    list_agents: {},
+    ask_claude: { question: "q" },
+    ask_codex: { question: "q" },
+    ask_grok: { question: "q" },
+    compare_agents: { question: "q", targets: ["codex", "claude"] },
+    room_init: {},
+    room_status: {},
+    room_post: { text: "hello" },
+    room_read: {},
+    room_get: { from: 1, to: 1 },
+    room_search: { query: "hello" },
+    room_mention: { target: "claude", text: "請看" },
+    room_join_request: { room: "demo" },
+    request_coding_workflow: { task: "做一件事" },
+    room_start: { mode: "continue", note: "n" },
+    room_send: { targetPresenceId: world.seatTwo, clientRequestId: randomUUID(), text: "hi" },
+    room_await_reply: { deliveryId: randomUUID(), timeoutMs: 50 },
+    candidate_start: { clientRequestId: randomUUID(), mainPath: world.root, task: "t" },
+    candidate_checkpoint: { clientRequestId: randomUUID(), taskId: anyUuid, summary: "s" },
+    candidate_complete: { clientRequestId: randomUUID(), taskId: anyUuid, summary: "s" },
+    candidate_status: {},
+    main_merge_preview: { taskId: anyUuid },
+    main_merge_request: {
+      clientRequestId: randomUUID(), taskId: anyUuid, completionId: randomUUID(),
+      previewDigest: "a".repeat(64),
+    },
+    room_wait: { room: "demo", timeoutMs: 50 },
+    room_ack: { deliveryId: "x", leaseToken: "y", phase: "read" },
+    room_reply: { deliveryId: "x", leaseToken: "y", text: "t" },
+    room_fail: { deliveryId: "x", leaseToken: "y", reason: "r" },
+  };
+}
+
+async function outcomeOf(
+  broker: CollabToolBroker,
+  tool: string,
+  args: Record<string, unknown>,
+): Promise<{ ok: boolean; message: string; payload: string }> {
+  try {
+    const payload = await broker.call(tool, args);
+    return { ok: true, message: "", payload };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error), payload: "" };
+  }
+}
+
+test("the tools a degraded inbox stops are measured by running them, not by reading the source", async (t) => {
+  const healthy = await capabilityWorld(false);
+  const degraded = await capabilityWorld(true);
+  t.after(() => healthy.close());
+  t.after(() => degraded.close());
+
+  /* The dispatch is still the population. If it grows, this guard must be told, not quietly left
+     measuring a subset -- which is exactly what the seventeen-of-twenty-seven table did. */
+  const source = await readFile(new URL("../src/mcp/collab-server.ts", import.meta.url), "utf8");
   const dispatchBody = source.slice(source.indexOf("async #dispatch("));
   const dispatched = new Set(
     [...dispatchBody.slice(0, dispatchBody.indexOf("UNKNOWN_COLLAB_TOOL"))
-      .matchAll(new RegExp("name === " + NAME, "gu"))].map((match) => match[1]!),
+      .matchAll(/name === "([a-z][a-z0-9_]*)"/gu)].map((match) => match[1]!),
   );
-  assert.equal(dispatched.size, 27, "the dispatch no longer parses to the tools this guard counts");
-
-  /*
-   * The tools whose handler reaches `#seatInbox()`. Found by slicing each handler from its own
-   * declaration to the next one — a handler that stops needing the inbox drops out here on its own,
-   * and one that starts needing it appears without anybody remembering to add it.
-   */
-  const NEEDS_INBOX = new Set(["room_wait", "room_ack", "room_reply", "room_fail"]);
-  const handlerFor: Record<string, string> = {
-    room_wait: "#roomWait", room_ack: "#roomAck", room_reply: "#roomReply", room_fail: "#roomFail",
-    room_send: "#roomSend", room_await_reply: "#roomAwaitReply", room_post: "#roomPost",
-    room_read: "#roomRead", room_get: "#roomGet", room_search: "#roomSearch",
-    room_status: "#roomStatus", room_init: "#roomInit", room_start: "#roomStart",
-    list_agents: "#listAgents", candidate_status: "#candidateStatus",
-    main_merge_preview: "#mainMergePreview", main_merge_request: "#mainMergeRequest",
-  };
-
-  const measured = new Set<string>();
-  for (const [tool, handler] of Object.entries(handlerFor)) {
-    const start = source.indexOf(`  ${handler}(`) >= 0
-      ? source.indexOf(`  ${handler}(`)
-      : source.indexOf(`  async ${handler}(`);
-    assert.ok(start > 0, `${handler} no longer exists; this guard is reading a stale name`);
-    /* To the next method declaration at the same indentation, which is where this one ends. */
-    const rest = source.slice(start + 1);
-    const nextIndex = rest.search(/\n {2}(?:async )?#?[a-zA-Z]+\(/u);
-    const body = nextIndex >= 0 ? rest.slice(0, nextIndex) : rest;
-    if (body.includes("#seatInbox()")) measured.add(tool);
-  }
-
   assert.deepEqual(
-    [...measured].sort(),
-    [...NEEDS_INBOX].sort(),
-    "the set of tools that touch the inbox changed; the degraded-mode claim in "
-      + "describeInboxUnavailable names room_wait/room_ack/room_reply/room_fail and must be updated too",
+    [...dispatched].sort(),
+    [...INBOX_CAPABILITY_TOOLS].sort(),
+    "the dispatch and this guard no longer agree on which tools exist",
   );
 
-  /* And the message the owner reads must name the same tools it is describing. */
-  const service = await readFile(new URL("../src/core/collaboration-service.ts", import.meta.url), "utf8");
-  for (const tool of NEEDS_INBOX) {
-    assert.match(service, new RegExp(tool, "u"), `the unavailable message must name ${tool}`);
+  const healthyArgs = capabilityArguments(healthy);
+  const degradedArgs = capabilityArguments(degraded);
+  const stopped: string[] = [];
+  for (const tool of INBOX_CAPABILITY_TOOLS) {
+    const before = await outcomeOf(healthy.broker, tool, healthyArgs[tool]!);
+    const after = await outcomeOf(degraded.broker, tool, degradedArgs[tool]!);
+    const brokenByInbox = !after.ok && /ROOM_INBOX_UNAVAILABLE/u.test(after.message);
+    if (NOT_JUDGED_BY_ERROR.has(tool)) {
+      assert.equal(brokenByInbox, false, `${tool} is asserted on its payload, not its error`);
+      continue;
+    }
+    if (brokenByInbox) {
+      assert.ok(
+        before.ok || !/ROOM_INBOX_UNAVAILABLE/u.test(before.message),
+        `${tool} reported the inbox as unavailable in the healthy world too`,
+      );
+      stopped.push(tool);
+    }
   }
+
+  /* Compared to the exported list the message is built from, not to the message text. Scraping the
+     prose was its own small version of the bug being fixed: the first wording that mentioned
+     room_join_request as still working got counted as declaring it broken. */
+  assert.deepEqual(
+    stopped.slice().sort(),
+    [...INBOX_DEPENDENT_TOOLS].sort(),
+    "INBOX_DEPENDENT_TOOLS names a different set of tools than the ones that actually stop",
+  );
+  assert.ok(stopped.length > 0, "nothing stopped, so this guard measured nothing");
+});
+
+test("the join briefing is the one dependency that fails quietly, and it is asserted where it lives", async (t) => {
+  /*
+   * `room_join_request` wraps the briefing in try/catch, so a degraded inbox costs it a field and
+   * not an error -- invisible to the differencing above, which is why that guard names it rather
+   * than counting it as independent. The dependency itself is one layer down, so it is measured
+   * there: `roomBriefing` reads the inbox for per-seat listening state and pending counts.
+   *
+   * Asserting the field's absence through the tool would need a seat that has not joined yet, and
+   * the world here is built with its seat joined so that room_wait can reach standby. Measuring the
+   * method directly tests the same dependency without a second world shaped for one assertion.
+   */
+  const healthy = await capabilityWorld(false);
+  const degraded = await capabilityWorld(true);
+  t.after(() => healthy.close());
+  t.after(() => degraded.close());
+  const briefing = healthy.service.roomBriefing({ roomId: "demo", workspace: healthy.root });
+  assert.ok(briefing.seats.length > 0, "the healthy briefing must list seats or this proves nothing");
+  assert.throws(
+    () => degraded.service.roomBriefing({ roomId: "demo", workspace: degraded.root }),
+    /ROOM_INBOX_UNAVAILABLE/u,
+    "the briefing must fail on a degraded inbox; the tool is what turns that into a missing field",
+  );
+  /* And the tool itself keeps working, which is the half that matters to a caller. */
+  assert.equal(degraded.service.inboxAvailable, false);
+  assert.ok(degraded.service.ledger.getRoom("demo"));
 });

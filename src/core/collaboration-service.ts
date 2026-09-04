@@ -151,6 +151,27 @@ export interface MergeRetryVerdict {
   blockedBy?: MergeRetryBlock;
 }
 
+/**
+ * The tools a degraded inbox stops, as measured rather than as remembered.
+ *
+ * It is exported and interpolated into the message instead of being spelled out there, because the
+ * message and the list used to be two places saying the same thing and they stopped agreeing. The
+ * message named four; running all twenty-seven tools against a degraded store showed seven. The
+ * three that were missing -- `room_send`, `room_await_reply`, `list_agents` -- reach the store
+ * through a service method, so nothing in the MCP layer's own source mentions the inbox at all, and
+ * every check that read that source concluded they were independent.
+ *
+ * `test/collab-mcp.test.ts` compares this array to what actually fails. Adding a name here without
+ * the behaviour, or acquiring the behaviour without the name, turns that test red.
+ *
+ * `room_join_request` is deliberately absent: it keeps working and loses its briefing, which is a
+ * different fact and is asserted separately.
+ */
+export const INBOX_DEPENDENT_TOOLS: readonly string[] = [
+  "room_wait", "room_ack", "room_reply", "room_fail",
+  "room_send", "room_await_reply", "list_agents",
+];
+
 const DEGRADABLE_INBOX_ERRORS: ReadonlySet<string> = new Set(["ROOM_INBOX_SCHEMA_UNSUPPORTED"]);
 
 function inboxErrorCode(error: unknown): string {
@@ -174,13 +195,62 @@ function describeInboxUnavailable(error: unknown): string {
   if (code === "ROOM_INBOX_SCHEMA_UNSUPPORTED") {
     return "ROOM_INBOX_UNAVAILABLE:SCHEMA_TOO_NEW — 這個 runtime 認得的收件匣 schema 比資料庫舊，"
       + "所以拒絕開啟（那是刻意的：舊程式碼誤讀新資料比停下來更危險）。"
-      + "收件匣相關的工具（room_wait／room_ack／room_reply／room_fail）停用；"
-      + "**不使用收件匣的工具不受這件事影響**。"
+      + `以下工具停用：${INBOX_DEPENDENT_TOOLS.join("／")}。`
+      + "room_join_request 仍可用，但回應會少掉 briefing。"
+      + "**其餘不使用收件匣的工具不受這件事影響**。"
       + "修法：在專案目錄依序執行 `npm run build:package`、"
       + "`npm run install:runtime -- --artifact <產出的 tgz> --checksum <同名 .sha256>`，"
       + "再把 ~/.local/lib/node_modules/orchestratory 的 symlink 指向新的 digest 目錄。";
   }
-  return `ROOM_INBOX_UNAVAILABLE:${code}`;
+  /*
+   * Unreachable while only SCHEMA_TOO_NEW degrades, and written so that it stays safe if that ever
+   * changes. It used to interpolate `code`, which is the error's own message: an fs failure carries
+   * an absolute path in it, and this string is returned through MCP and printed by `doctor`. A
+   * classification is enough for a reader to act on; the untrusted text stays out.
+   */
+  return `ROOM_INBOX_UNAVAILABLE:${classifyStoreFailure(error)}`;
+}
+
+/**
+ * What kind of failure this is, in a word a person can act on and without repeating anything the
+ * failure said.
+ *
+ * Rethrowing the raw error was "not degrading wrongly", which is correct, but it left the caller
+ * with an internal string and no next step -- a permission problem, a corrupt file and a full disk
+ * all arrived looking the same. The classes below differ in what the reader has to DO, which is the
+ * only distinction worth making at this boundary.
+ *
+ * Deliberately matched on the product's own error codes first, and only then on SQLite's English
+ * prose, because that prose changes between versions and must never be the thing a security
+ * decision reads. Nothing here is used to decide whether to degrade -- that stays an exact match on
+ * one code -- so a wrong guess costs a less helpful sentence, never a weaker refusal.
+ */
+export type StoreFailureClass = "PERMISSION" | "CORRUPT" | "DISK_FULL" | "UNRECOGNISED";
+
+export function classifyStoreFailure(error: unknown): StoreFailureClass {
+  const message = error instanceof Error ? error.message : String(error);
+  const errno = (error as NodeJS.ErrnoException | undefined)?.code;
+  if (errno === "EACCES" || errno === "EPERM" || /^UNSAFE_SQLITE_/u.test(message)) return "PERMISSION";
+  if (errno === "ENOSPC" || /disk is full|database or disk is full/iu.test(message)) return "DISK_FULL";
+  if (/_CORRUPT$|_ROW_TAMPERED$|_ROW_INVALID$|_FOREIGN_KEY_VIOLATION$/u.test(message)) return "CORRUPT";
+  if (/not a database|malformed|disk image/iu.test(message)) return "CORRUPT";
+  return "UNRECOGNISED";
+}
+
+/** The sentence that goes with each class. Says what to check, not what went wrong internally. */
+export function describeStoreFailure(store: string, error: unknown): string {
+  const kind = classifyStoreFailure(error);
+  const advice = kind === "PERMISSION"
+    ? "資料目錄或其中的檔案不是你能讀寫的，或權限比 0600／0700 寬鬆而被拒絕。"
+      + "請確認資料目錄的擁有者與權限；若曾用 sudo 執行過，檔案可能屬於 root。"
+    : kind === "DISK_FULL"
+      ? "磁碟或配額已滿，資料庫無法寫入。清出空間後重試；在滿的磁碟上重試不會有不同結果。"
+      : kind === "CORRUPT"
+        ? "資料檔內容無法通過完整性檢查。不要重試，先保留現場：把資料目錄整份複製一份再處理，"
+          + "重複開啟可能讓還讀得出來的部分也一起失去。"
+        : "無法歸類的開啟失敗。請用 `orchestratory doctor` 取得本機診斷；"
+          + "這段訊息刻意不含路徑與原始錯誤內容。";
+  return `STORE_UNAVAILABLE:${store}:${kind} — ${advice}`;
 }
 
 
@@ -194,8 +264,13 @@ export class CollaborationService {
    * because it is the store whose schema moves most often, and because of what its failure used to
    * cost: a development build applies a newer migration, the installed runtime then refuses to open
    * the database -- correctly, refusing an unknown schema is the safe answer -- and the constructor
-   * throwing took the entire MCP server down with it. Twenty-one of twenty-seven tools never touch
-   * this store, and all of them disappeared. The refusal was right and its blast radius was not.
+   * throwing took the entire MCP server down with it. Twenty of the twenty-seven tools keep working
+   * without this store -- nineteen untouched and one that loses a field -- and all of them
+   * disappeared. The refusal was right and its blast radius was not.
+   *
+   * That count said twenty-one until the guard stopped reading source text and started running the
+   * tools. It was never measured; it was arithmetic on a list that had missed three dependencies
+   * reached through service methods.
    *
    * `inbox` stays a getter with the same shape every caller already uses, so the twenty-odd call
    * sites are unchanged and a caller that needs it still gets an error rather than an undefined.
@@ -245,8 +320,43 @@ export class CollaborationService {
     inbox?: { now?: () => number };
   } = {}) {
     this.#dataDirectory = dataDirectory;
-    this.ledger = new RoomLedger(dataDirectory);
-    this.presence = new RoomPresenceStore(dataDirectory, options.presence ?? {});
+    /*
+     * Nine stores open here, and until now a failure in any of them left every earlier one open
+     * with no way to close it: the throw escapes the constructor, so there is no instance, so
+     * nobody can call `close()`. Each store closes its own database when its own constructor
+     * fails, which is why this was invisible -- the leak is between them, not inside them.
+     *
+     * The cost is real: each open store holds a SQLite connection with its WAL and shm sidecars and
+     * an advisory lock, and none of them get a checkpoint, so the files are left needing recovery.
+     * A CLI that constructs a service per command, or a test suite that constructs one per case,
+     * runs out of descriptors rather than reporting the failure it actually had.
+     *
+     * `opened` is the undo list. It closes in reverse order and swallows nothing except a failure
+     * to close -- by then something has already gone wrong, and a second error from the cleanup
+     * would replace the first one, which is the one worth reading.
+     */
+    const opened: Array<{ close(): void }> = [];
+    const open = <T>(store: string, make: () => T): T => {
+      try {
+        const value = make();
+        /* `WorktreeBroker` has no `close()` -- it holds no database of its own. Tracking only what
+           can be closed keeps this list honest rather than pretending to own more than it does. */
+        if (typeof (value as { close?: unknown } | null)?.close === "function") {
+          opened.push(value as unknown as { close(): void });
+        }
+        return value;
+      } catch (error) {
+        for (const store of opened.reverse()) {
+          try {
+            store.close();
+          } catch { /* the original failure is the one that must survive to the caller */ }
+        }
+        throw new Error(describeStoreFailure(store, error), { cause: error });
+      }
+    };
+
+    this.ledger = open("rooms", () => new RoomLedger(dataDirectory));
+    this.presence = open("room-presence", () => new RoomPresenceStore(dataDirectory, options.presence ?? {}));
     /*
      * The one construction that is allowed to fail. The reason is kept verbatim rather than
      * flattened to a boolean, because the caller that eventually asks for the inbox is the one who
@@ -256,25 +366,34 @@ export class CollaborationService {
     let inboxUnavailableReason: string | undefined;
     try {
       inboxStore = new RoomInboxStore(dataDirectory, options.inbox ?? {});
+      opened.push(inboxStore);
     } catch (error) {
       /* Only a version mismatch degrades. Corruption, permissions and anything else rethrow, so a
-         data problem stays a data problem instead of becoming a quieter product. */
-      if (!DEGRADABLE_INBOX_ERRORS.has(inboxErrorCode(error))) throw error;
+         data problem stays a data problem instead of becoming a quieter product -- and now it takes
+         the stores opened before it down with it instead of stranding them. */
+      if (!DEGRADABLE_INBOX_ERRORS.has(inboxErrorCode(error))) {
+        for (const store of opened.reverse()) {
+          try {
+            store.close();
+          } catch { /* see above */ }
+        }
+        throw new Error(describeStoreFailure("room-inbox", error), { cause: error });
+      }
       inboxStore = undefined;
       inboxUnavailableReason = describeInboxUnavailable(error);
     }
     this.#inboxStore = inboxStore;
     this.inboxUnavailableReason = inboxUnavailableReason;
-    this.managedAgents = new ManagedRoomAgentStore(dataDirectory);
-    this.writerLeases = new WriterLeaseStore(dataDirectory);
-    this.writerDelegations = new WriterDelegationStore(dataDirectory);
-    this.audit = new CollaborationAuditLog(dataDirectory);
-    this.candidates = new CandidateRegistry(dataDirectory, {
+    this.managedAgents = open("managed-room-agents", () => new ManagedRoomAgentStore(dataDirectory));
+    this.writerLeases = open("writer-leases", () => new WriterLeaseStore(dataDirectory));
+    this.writerDelegations = open("writer-delegations", () => new WriterDelegationStore(dataDirectory));
+    this.audit = open("collaboration-audit", () => new CollaborationAuditLog(dataDirectory));
+    this.candidates = open("candidate-registry", () => new CandidateRegistry(dataDirectory, {
       ...(options.maxCandidateFiles === undefined ? {} : { maxFiles: options.maxCandidateFiles }),
       onMergeApprovalInvalidated: (event) => this.#recordMergeApprovalDrift(event),
       onMergePromotion: (event) => this.#recordMergePromotion(event),
-    });
-    this.#worktrees = new WorktreeBroker(dataDirectory);
+    }));
+    this.#worktrees = open("worktrees", () => new WorktreeBroker(dataDirectory));
     this.#writerWorktrees = options.writerWorktrees;
   }
 
