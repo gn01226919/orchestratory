@@ -151,9 +151,19 @@ test("every CI action is pinned to a full commit SHA with the version it names",
   assert.ok(uses.length >= 2, "no `uses:` entries were parsed; this guard has stopped guarding");
 
   for (const [file, quoted, trailer] of uses) {
-    /* `uses: "owner/action@<sha>"` is legal YAML and the quotes are not part of the value. Left on,
-       they made a correctly pinned action fail the SHA match -- a false alarm on a real workflow. */
-    const reference = quoted.replace(/^["']|["']$/gu, "");
+    /*
+     * `uses: "owner/action@<sha>"` is legal YAML and the quotes are not part of the value; left on,
+     * they failed the SHA match on a correctly pinned action.
+     *
+     * Only a matched pair comes off. Stripping the two ends independently -- which is what
+     * `/^["']|["']$/` does -- also removes a lone TRAILING quote, and that one lands on the pin:
+     * `owner/x@<40 hex>"` is not a valid reference, and tidying the quote away makes it satisfy the
+     * SHA check. Measured, including the case that turned out not to matter: a lone LEADING quote
+     * attaches to the action name, which the pin check never looks at, so it changes nothing. The
+     * dangerous direction is the trailing one, and it is the only one this needed to close.
+     */
+    const pair = /^(["'])([\s\S]*)\1$/u.exec(quoted);
+    const reference = pair ? pair[2]! : quoted;
     if (reference.startsWith("./")) continue;   /* a local action in this repository, nothing to pin */
     assert.ok(
       !reference.startsWith("docker://"),

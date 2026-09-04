@@ -3973,3 +3973,32 @@ Room Claude #777（第 1／3 輪）結論 **PASS**。依其 residual checks 再�
 composer 實際成為 active focus，且返回後 History row 仍存在。成功結果只在 approve Promise 的一次 response
 render 建立，既有 5 秒 poll 不重畫結果卡。Privacy UI audit 對 candidate 與 main 都只回報相同四個既有
 loopback fetch（`app.js:94`、`room.js:120/126/140`）；本次變更沒有新增 finding 或 network/storage/analytics。
+
+### 2026-09-04 `merge-promotion` 在高負載機器上的 `GIT_COMMAND_FAILED`：不是回歸
+
+一次完整 `npm run check` 以 `exit=1` 結束：839 支測試中有 4 支失敗，全部在
+`test/merge-promotion.test.ts` 的 `no source subset lets a live merge be concluded about: … spawn-record
+are forged` 一族，錯誤是 `GIT_COMMAND_FAILED`，堆疊落在 `GitBroker.restorePoint` 裡一個
+`Promise.all` 的 git 指令上。**整輪耗時 3 小時**，而前三次相同範圍的執行都是 18–19 分鐘。
+
+**它不是程式碼回歸。** 同一份工作樹、機器安靜下來之後單獨重跑 `merge-promotion.test.ts`：
+**194/194 通過，16 分鐘**。同一族 32 支測試的耗時對照——正常那次每支 6.6–7.4 秒、合計 3.6 分；
+失敗那次最慢一支 **1880 秒**、合計 169 分。
+
+**兩個聽起來合理的假設，實測都被推翻，記在這裡免得下次有人重走一遍：**
+
+- 「41 個指向已刪除路徑的 stale worktree 拖慢 git」——`git status --porcelain` 實測 **0.045 秒**、
+  `git worktree list` **0.029 秒**。數字很嚇人（`git worktree list` 有 42 筆、15 筆可 prune），
+  但它們不是原因。
+- 「程序數耗盡」——`kern.maxprocperuid` 為 5333，當下該使用者程序數 **1220**；記憶體 43% 空閒。
+
+**當時的真正成因仍然未知，這一點必須明說。** 事後狀態查不出當時發生了什麼，因為現象已經消失。
+能確定的只有：**同一份程式碼在安靜的機器上通過**，所以問題出在執行環境而非合併邏輯；
+失敗的形狀（一個 git 子程序跑了 31 分鐘才失敗）也指向子程序啟動或排程，而不是計算錯誤。
+
+**下次遇到同樣的失敗，先看這三件事再懷疑程式碼：** 整輪耗時是否遠超 18–19 分鐘；失敗是否集中在
+會 spawn 子程序的測試；單獨重跑該檔案是否通過。三者都成立就是這一類。反之——單獨重跑仍失敗——
+那才是回歸。
+
+（附帶觀察，與本次失敗無因果關係但值得知道：`$TMPDIR` 累積了約 7600 個 `orchestratory-*`
+暫存目錄、共 1.8 GB，最舊可回溯到 7/23；測試的暫存目錄沒有被清掉。清理需要 owner 決定。）

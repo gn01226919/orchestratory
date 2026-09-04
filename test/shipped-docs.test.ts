@@ -114,7 +114,14 @@ test("every surface that shows a merge decision declines to claim an OS sandbox"
       /* Comments come out FIRST. Extracting the section and then stripping comments inside it -- the
          order this was written in -- passes for a whole `<section id="merge-approval">…</section>`
          sitting inside a comment, which is a guard that can be switched off by commenting out the
-         thing it guards. */
+         thing it guards.
+
+         Stripping with a regular expression is not HTML parsing, and the difference is a real one:
+         a `<!--` inside a script or an attribute value would start a comment as far as this is
+         concerned, and could remove a real section or splice two fragments into a false one. This
+         file has one comment, one script, and no `<!--` inside either, so it is not reachable here
+         today -- checked rather than assumed. Making it structurally impossible needs a DOM, the
+         same dependency question as visibility (D-006). */
       const markup = text.replaceAll(/<!--[\s\S]*?-->/gu, "");
       const dialog = markup.match(/<section id="merge-approval"[\s\S]*?<\/section>/u)?.[0];
       assert.ok(dialog, `${label}: the merge approval dialog was not found, so this guard cannot run`);
