@@ -4046,7 +4046,7 @@ async function assignWriter() {
   }
   const active = activeWriterLease();
   try {
-    status.textContent = active ? "正在凍結舊 Writer 並建立交接 checkpoint…" : "正在建立草稿區（獨立副本）與 Writer Lease…";
+    status.textContent = active ? "正在凍結舊 Writer 並建立交接存檔點…" : "正在建立獨立草稿區與 Writer Lease…";
     if (active) {
       if (!checkpoint) throw new Error("交接前必須填寫存檔點");
       await api("/api/rooms/writers/switch", {
@@ -4061,7 +4061,7 @@ async function assignWriter() {
     }
     byId("writer-checkpoint").value = "";
     await refreshPresence(true);
-    status.textContent = active ? "Writer 已交接；舊 epoch 與子權限已撤銷。" : "Writer 已指派並建立草稿區（獨立副本）。";
+    status.textContent = active ? "Writer 已交接；舊任與子 Agent 的寫入權已撤銷。" : "Writer 已指派並建立獨立草稿區。";
   } catch (error) {
     status.textContent = `Writer 操作失敗：${humanError(error)}`;
   }
