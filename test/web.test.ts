@@ -1691,11 +1691,11 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomScript, /function pendingWriterLease\(/u);
   assert.match(roomScript, /pendingWriterLease\(\)\?\.taskId \|\| `task-\$\{Date\.now\(\)\.toString\(36\)\}`/u);
   // Completing a Writer revokes access, so the button says so and confirms once inline.
-  assert.match(roomScript, /結束 Writer 並準備回寫/u);
+  assert.match(roomScript, /結束並 apply-back/u);
   assert.match(roomScript, /再按一次：結束 Writer 並撤銷寫入權/u);
   assert.match(roomScript, /writerCompleteConfirm/u);
   assert.match(roomScript, /階段 1／2（結束 Writer）失敗/u);
-  assert.match(roomScript, /階段 2／2（回寫主專案）失敗/u);
+  assert.match(roomScript, /階段 2／2（apply-back 主專案）失敗/u);
 
   // ── P0-2: the Writer apply-back approval is an in-page dialog, not window.prompt ──
   // A native prompt can be silenced for good (it then returns null and the approval UI fails
@@ -1758,7 +1758,7 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomScript, /② 待命待核准/u);
   assert.match(roomScript, /office-notification-action/u);
   assert.match(roomScript, /standby-approve/u);
-  assert.match(roomHtml, /id="writer-complete" type="button" disabled>結束 Writer 並準備回寫/u);
+  assert.match(roomHtml, /id="writer-complete" type="button" disabled>結束並 apply-back/u);
   const appScriptResponse = await fetch(`${server.url}/app.js`);
   assert.equal(appScriptResponse.status, 200);
   const appScript = await appScriptResponse.text();

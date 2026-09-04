@@ -3992,14 +3992,14 @@ function renderWriterControl() {
   const awaitingCompleteConfirm = Boolean(active) &&
     state.writerCompleteConfirm === `${active.taskId}:${active.epoch}`;
   completeButton.disabled = !active && !reviewReady;
-  /* test/web.test.ts pins these two labels; the drawer keeps them rather than the mock-up's shorter
-     "結束並 apply-back", because "準備回寫" is the honest tense -- pressing it revokes write access and
-     only PREPARES the apply-back preview. */
+  /* "結束並 apply-back" is the settled office label (test/web.test.ts pins it). Pressing it only
+     revokes write access and PREPARES the apply-back preview -- the second press inside the
+     approval dialog is what applies -- so the title of that dialog carries the "preview" tense. */
   completeButton.textContent = awaitingCompleteConfirm
     ? "再按一次：結束 Writer 並撤銷寫入權"
     : active
-      ? "結束 Writer 並準備回寫"
-      : reviewReady ? "重新檢視回寫風險" : "結束 Writer 並準備回寫";
+      ? "結束並 apply-back"
+      : reviewReady ? "重新檢視 apply-back 風險" : "結束並 apply-back";
   completeButton.classList.toggle("danger", awaitingCompleteConfirm);
   byId("writer-delegate").disabled = !active;
   byId("writer-run-cancel").hidden = !executionBusy;
@@ -4127,7 +4127,7 @@ async function completeWriterLease() {
   await refreshPresence(true);
   if (!preview) {
     status.textContent = active
-      ? "階段 1／2 完成：Writer 已結束、寫入權已撤銷；但沒有取得回寫預覽。請按「重新檢視回寫風險」再試一次。"
+      ? "階段 1／2 完成：Writer 已結束、寫入權已撤銷；但沒有取得回寫預覽。請按「重新檢視 apply-back 風險」再試一次。"
       : "沒有取得回寫預覽，請稍後再試；主專案沒有變更。";
     return;
   }
@@ -4734,7 +4734,7 @@ function closeWriterApplyBackApproval() {
   byId("writer-apply-back-confirm").disabled = true;
   if (!view.decided) {
     byId("writer-live-status").textContent =
-      `${view.stageNote ? `${view.stageNote} ` : ""}回寫核准已關閉；變更仍保留在 Writer 的草稿區（獨立副本），主專案沒有變更，可按「重新檢視回寫風險」再看一次。`;
+      `${view.stageNote ? `${view.stageNote} ` : ""}回寫核准已關閉；變更仍保留在 Writer 的草稿區（獨立副本），主專案沒有變更，可按「重新檢視 apply-back 風險」再看一次。`;
   }
   view.returnFocus?.focus?.();
   view.returnFocus = null;
@@ -4771,9 +4771,9 @@ async function confirmWriterApplyBack() {
     view.diffState = "idle";
     view.scrolled = false;
     renderWriterApplyBackApproval();
-    status.textContent = `階段 2／2（回寫主專案）失敗：${humanError(error)}。可按「重新產生預覽」再試。`;
+    status.textContent = `階段 2／2（apply-back 主專案）失敗：${humanError(error)}。可按「重新產生預覽」再試。`;
     byId("writer-live-status").textContent =
-      `階段 2／2（回寫主專案）失敗：${humanError(error)}。可按「重新檢視回寫風險」重新產生預覽再試。`;
+      `階段 2／2（apply-back 主專案）失敗：${humanError(error)}。可按「重新檢視 apply-back 風險」重新產生預覽再試。`;
   }
   await refreshPresence(true);
   await poll();
