@@ -1987,15 +1987,42 @@ function officeWriterAgent() {
 }
 
 /*
- * Put the Writer's desk in the draft room ONCE per hand-over. The key is the Writer's identity, lease and
- * epoch; only when it changes does the desk get a new default position, so a desk the owner dragged
- * afterwards stays where it was dropped instead of being marched back every poll. When the lease ends
- * the desk's draft-room position is dropped and it returns to its grid home.
+ * What the draft room can truthfully say about a lease: the draft's id and its checkpoint SHA.
+ * The id comes from the lease itself or from the merge approval for the same task. The SHA comes only
+ * from fields the server types as a git head (MergeApprovalSummary.candidateHead and
+ * MergeApprovalBinding.candidateHead, both validated against HEAD_PATTERN, 40-64 hex, before they are
+ * stored) -- never from lease.checkpoint, which is free text written on completion. Anything else is
+ * reported as absent rather than guessed.
+ */
+function officeDraftIdentity(lease) {
+  if (!lease) return { candidateId: "", sha: "" };
+  const approval = (state.mergeApprovals || []).find((entry) => entry.taskId === lease.taskId);
+  const text = (value) => (typeof value === "string" ? value : "");
+  /* The typed source for the id is MergeApprovalBinding.candidatePath, whose last segment is the
+     draft's directory name (the candidate uuid); the explicit id fields are read first in case a
+     future payload carries one. */
+  const candidateId = text(lease.candidateId) || text(approval?.candidateId)
+    || text(approval?.binding?.candidateId) || workspaceLabel(text(approval?.binding?.candidatePath));
+  const sha = [approval?.candidateHead, approval?.binding?.candidateHead]
+    .map(text)
+    .find((value) => /^[0-9a-f]{40,64}$/u.test(value)) || "";
+  return { candidateId, sha };
+}
+
+/*
+ * Put the Writer's desk in the draft room ONCE per hand-over. The key is the Writer's stable identity,
+ * the lease id, its epoch and the resolved draft id -- not the task id or anything else that a routine
+ * poll, a task text update or an approval refresh can touch. Only when the key changes does the desk
+ * get a new default position, so a desk the owner dragged afterwards stays where it was dropped. When
+ * the lease ends the desk's draft-room position is dropped and it returns to its grid home.
  */
 function placeOfficeWriter() {
   const lease = activeWriterLease();
   const writerAgent = officeWriterAgent();
-  const key = writerAgent ? `${writerAgent}·${lease?.id || ""}·${lease?.epoch ?? ""}·${lease?.taskId || ""}` : "";
+  const identity = lease?.writer?.actorId || lease?.writer?.displayName || "";
+  const key = writerAgent
+    ? `${writerAgent}·${identity}·${lease?.id || ""}·${lease?.epoch ?? ""}·${officeDraftIdentity(lease).candidateId}`
+    : "";
   if (key === officeWriterKey) return;
   const previous = officeWriterKey.split("·")[0];
   if (previous && previous !== writerAgent) delete state.officePositions[previous];
@@ -2694,16 +2721,10 @@ function updateOfficeDraftRoom() {
     checkpoint.hidden = true;
     return;
   }
-  /* Only a real draft id gets called one. The task id is a different thing and is never shown as a
-     candidate; without an id the plate says the room is in use and nothing more. */
-  const approval = (state.mergeApprovals || []).find((entry) => entry.taskId === lease.taskId);
-  const candidateId = typeof lease.candidateId === "string" && lease.candidateId
-    ? lease.candidateId
-    : typeof approval?.candidateId === "string" ? approval.candidateId : "";
+  /* Only a real draft id gets called one; without one the plate says the room is in use and nothing
+     more. Likewise the checkpoint: a typed git head or nothing (see officeDraftIdentity). */
+  const { candidateId, sha } = officeDraftIdentity(lease);
   candidate.textContent = candidateId ? `草稿版 ${candidateId.slice(0, 8)}` : "草稿區使用中";
-  /* Likewise the checkpoint: a git SHA or nothing. lease.checkpoint is free text on completion. */
-  const sha = [lease.checkpoint, approval?.candidateHead, approval?.binding?.candidateHead]
-    .find((value) => typeof value === "string" && /^[0-9a-f]{7,64}$/u.test(value)) || "";
   checkpoint.hidden = !sha;
   checkpoint.textContent = sha ? `存檔點 ${sha.slice(0, 8)}` : "";
 }
