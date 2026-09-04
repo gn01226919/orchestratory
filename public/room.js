@@ -2399,18 +2399,27 @@ function officeChildRows() {
   return rows;
 }
 
-/*
- * The real draft-area id behind an approval, or nothing. The task id is a different identifier and
- * must not stand in for it: the footer names the thing the owner would look for on disk.
- * Approvals carry the candidate path (…/candidates/<candidateId>); the id is its last segment and
- * is only trusted when it has the shape the registry mints.
+/* @pure-start candidate-id-from-approval
+ * The real draft-area id behind an approval, or null. The task id is a different identifier and
+ * must not stand in for it: the footer names the thing the owner would look for on disk. The only
+ * place the id is carried today is the candidate path the registry builds as
+ * <data>/candidates/<candidateId>, so it is read from there and from nowhere looser: the segment
+ * before the last must be exactly `candidates` and the last must be a UUID. A trailing slash, a
+ * malformed id or any other directory yields null rather than a guess.
  */
-function mergeApprovalCandidateId(approval) {
-  const direct = approval?.candidateId || approval?.binding?.candidateId;
-  if (typeof direct === "string" && direct) return direct;
-  const tail = workspaceLabel(approval?.binding?.candidatePath);
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(tail) ? tail : "";
+const CANDIDATE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+
+function candidateIdFromApproval(approval) {
+  const direct = approval?.candidateId ?? approval?.binding?.candidateId;
+  if (typeof direct === "string" && CANDIDATE_ID_PATTERN.test(direct)) return direct;
+  const path = approval?.binding?.candidatePath;
+  if (typeof path !== "string") return null;
+  const parts = path.split("/");
+  const last = parts[parts.length - 1];
+  const parent = parts[parts.length - 2];
+  return parent === "candidates" && CANDIDATE_ID_PATTERN.test(last) ? last : null;
 }
+/* @pure-end candidate-id-from-approval */
 
 /* What the drawer last painted. A poll that changes nothing the drawer shows must not rebuild it:
    rebuilding drops the scroll position and whatever button had focus. */
@@ -2425,7 +2434,7 @@ function renderTaskCenter(force = false) {
     ["子 Agent", officeChildRows()],
   ];
   const approvals = mergeTaskSummary(state.mergeApprovals).pending
-    .map((approval) => ({ approval, candidateId: mergeApprovalCandidateId(approval) }))
+    .map((approval) => ({ approval, candidateId: candidateIdFromApproval(approval) }))
     .filter((entry) => entry.candidateId);
   const running = groups[0][1].length;
   const badge = byId("office-task-count");
@@ -3090,10 +3099,21 @@ function renderAgentCard(agent, messages = state.recent || []) {
 
 const OFFICE_DRAWER_IDS = Object.freeze(["office-drawer-chat", "office-task-center", "office-notifications", "writer-handoff"]);
 
+/*
+ * The rail's state model. Exactly one of the four drawer buttons is pressed, or none. While the ⚙
+ * menu is open the pressed state is suspended -- the menu is what the owner is operating, and two
+ * "active" controls on one rail would read as two things open at once -- and the open drawer is
+ * carried on aria-current instead, so it stays identifiable and comes back as pressed when the
+ * menu closes.
+ */
 function syncOfficeRail() {
+  const menuOpen = !(byId("office-settings-menu")?.hidden ?? true);
   for (const button of document.querySelectorAll(".office-rail-button[data-drawer]")) {
     const drawer = byId(button.dataset.drawer);
-    button.setAttribute("aria-pressed", String(Boolean(drawer && !drawer.hidden)));
+    const open = Boolean(drawer && !drawer.hidden);
+    button.setAttribute("aria-pressed", String(open && !menuOpen));
+    if (open && menuOpen) button.setAttribute("aria-current", "true");
+    else button.removeAttribute("aria-current");
   }
 }
 
@@ -3358,6 +3378,7 @@ function setOfficeSettingsMenu(open, { restoreFocus = true } = {}) {
   const wasOpen = !menu.hidden;
   menu.hidden = !open;
   byId("office-settings-toggle").setAttribute("aria-expanded", String(open));
+  syncOfficeRail();
   if (open) {
     syncOfficeSettingsMenu();
     menu.querySelector("button:not(:disabled)")?.focus();

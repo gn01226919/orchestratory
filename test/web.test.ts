@@ -3186,6 +3186,43 @@ test("a seat row distinguishes listening from merely present, in plain words", a
   }
 });
 
+/*
+ * The office task footer names a draft area by its candidate id, and the only place that id travels
+ * today is the candidate path the registry builds. Reading it back has to be strict: a task id, a
+ * mangled id, a trailing slash or some other directory under the data root must all come back as
+ * null, because the footer would otherwise print an identifier that is not on disk.
+ */
+test("the task footer takes a candidate id only from a well-formed candidates/<uuid> path", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const start = source.indexOf("/* @pure-start candidate-id-from-approval");
+  const end = source.indexOf("/* @pure-end candidate-id-from-approval */");
+  assert.ok(start > 0 && end > start, "room.js must expose the DOM-free candidate id reader");
+  const block = source.slice(start, end);
+  assert.doesNotMatch(
+    block,
+    /(?:\b(?:document|window|navigator|localStorage|state)\s*\.|\b(?:fetch|byId|api|setInterval|setTimeout|require|import)\s*\()/u,
+  );
+  const reader = runInNewContext(
+    `${block}\n({ candidateIdFromApproval });`,
+    Object.create(null) as object,
+    { timeout: 2_000 },
+  ) as { candidateIdFromApproval: (approval: unknown) => string | null };
+  const id = "1dca001d-0000-4000-8000-000000000001";
+  assert.equal(reader.candidateIdFromApproval({ binding: { candidatePath: `/data/candidates/${id}` } }), id);
+  assert.equal(reader.candidateIdFromApproval({ candidateId: id }), id, "an explicit id of the right shape is accepted");
+  // Malformed UUID: the registry never mints this, so it is not a draft area.
+  assert.equal(reader.candidateIdFromApproval({ binding: { candidatePath: "/data/candidates/1dca001d-not-a-uuid" } }), null);
+  // Trailing slash: the last segment is empty, and the id must not be fished out of the one before.
+  assert.equal(reader.candidateIdFromApproval({ binding: { candidatePath: `/data/candidates/${id}/` } }), null);
+  // Not under candidates/: a worktree or any other directory is a different thing entirely.
+  assert.equal(reader.candidateIdFromApproval({ binding: { candidatePath: `/data/worktrees/${id}` } }), null);
+  // And a task id is never a substitute.
+  assert.equal(reader.candidateIdFromApproval({ taskId: id, binding: { candidatePath: "/data/main" } }), null);
+  assert.equal(reader.candidateIdFromApproval(undefined), null);
+  // Wiring: the footer must consult the reader rather than carry its own parse.
+  assert.match(source, /candidateId: candidateIdFromApproval\(approval\)/u);
+});
+
 test("the ledger groups by LOCAL day and opens the newest one", async () => {
   const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
   const start = source.indexOf("/* @pure-start ledger-day-groups");
