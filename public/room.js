@@ -3766,9 +3766,13 @@ function syncOfficeSettingsMenu() {
       item.setAttribute("aria-checked", source.getAttribute("aria-pressed") || "false");
     }
   }
+  /* The topbar's rec button now shows only a dot and the latest number, so its text is no longer
+     a label. The action the menu item performs is the button's dataset.next; say that instead. */
   const rec = byId("rec-toggle");
   const recLabel = byId("office-rec-label");
-  if (rec && recLabel) recLabel.textContent = rec.textContent;
+  if (rec && recLabel) {
+    recLabel.textContent = rec.dataset.next === "on" ? "● 恢復收錄" : "⏸ 暫停收錄";
+  }
 }
 
 /*
