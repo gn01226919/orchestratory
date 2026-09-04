@@ -3582,3 +3582,87 @@ test("closing the records panel leaves the open approval gate exactly as the own
   assert.equal(state.mergeApprovalScrolled, true);
   assert.equal(state.mergeApproval.id, "a1");
 });
+
+/*
+ * Escape closes one surface at a time, top-most first. The top-bar popups (room menu, terminal
+ * drawer) float above the approval layer, so an Escape pressed while the room menu is open must
+ * close only the menu and hand focus back to its toggle -- the approval the owner is reviewing must
+ * still be there for the next Escape. Runs the real handler against a recording DOM stand-in.
+ */
+test("Escape closes the top-bar popup first and only then the approval layer", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const fn = (name: string) => {
+    const found = new RegExp(String.raw`^(?:async )?function ${name}\([\s\S]*?^\}$`, "mu").exec(source);
+    assert.ok(found, `${name}() is gone from public/room.js`);
+    return found[0];
+  };
+  assert.match(source, /document\.addEventListener\("keydown", handleEscapeKeydown\);/u);
+  type Node = {
+    id: string; hidden: boolean; value: string; disabled: boolean; attrs: Record<string, string>;
+    setAttribute: (k: string, v: string) => void; getAttribute: (k: string) => string | null; focus: () => void;
+  };
+  const focusLog: string[] = [];
+  const node = (id: string, init: Partial<Node> = {}): Node => ({
+    id, hidden: true, value: "", disabled: false, attrs: {},
+    setAttribute(k, v) { this.attrs[k] = String(v); },
+    getAttribute(k) { return this.attrs[k] ?? null; },
+    focus() { focusLog.push(this.id); },
+    ...init,
+  });
+  const nodes: Record<string, Node> = {};
+  for (const n of [
+    node("room-menu-panel", { hidden: false }),
+    node("room-menu-toggle", { attrs: { "aria-expanded": "true" } }),
+    node("agent-requests-panel", { hidden: true }),
+    node("agent-requests-open", { attrs: { "aria-expanded": "false" } }),
+    node("merge-history", { hidden: true }),
+    node("merge-approval", { hidden: false }),
+    node("merge-approval-confirmation", { value: "MERGE INTO MAIN" }),
+    node("merge-approval-confirm"),
+    node("merge-approval-cancel"),
+  ]) nodes[n.id] = n;
+  const state = {
+    mergeApproval: { id: "a1" }, mergeApprovalTicker: 7, mergeApprovalPoll: 8, mergeApprovalSubmitting: false,
+    mergeApprovalInputApprovalId: "a1", mergeApprovalScrolled: true, mergeApprovalBlockers: [],
+    mergeApprovalReturnFocus: nodes["merge-approval-cancel"],
+  };
+  const cleared: unknown[] = [];
+  const sandbox = {
+    state,
+    byId: (id: string) => nodes[id] ?? null,
+    document: { body: { classList: { add() {}, remove() {} } }, activeElement: null },
+    clearInterval: (handle: unknown) => { cleared.push(handle); },
+  };
+  const escape = { key: "Escape" };
+  runInNewContext(
+    `${fn("setRoomMenuOpen")}\n${fn("setAgentRequestsOpen")}\n${fn("closeMergeHistory")}\n${fn("renderMergeApprovalHistorySummary")}\n`
+      + `${fn("closeMergeApprovalDialog")}\n${fn("handleEscapeKeydown")}\n`
+      + "function mergeHistoryBuckets() { throw new Error('the summary must not be rendered here'); }\n"
+      + "globalThis.press = () => handleEscapeKeydown(escape);",
+    Object.assign(sandbox, { escape }),
+    { timeout: 2_000 },
+  );
+  const press = (sandbox as unknown as { press: () => void }).press;
+  press();
+  // First Escape: only the menu goes, focus returns to its toggle, the approval stays open and intact.
+  assert.equal(nodes["room-menu-panel"].hidden, true);
+  assert.equal(nodes["room-menu-toggle"].getAttribute("aria-expanded"), "false");
+  assert.deepEqual(focusLog, ["room-menu-toggle"]);
+  assert.equal(nodes["merge-approval"].hidden, false);
+  assert.equal(nodes["merge-approval-confirmation"].value, "MERGE INTO MAIN");
+  assert.equal(state.mergeApproval?.id, "a1");
+  assert.deepEqual(cleared, []);
+  // Second Escape: nothing floats above the approval layer any more, so it closes.
+  press();
+  assert.equal(nodes["merge-approval"].hidden, true);
+  assert.equal(state.mergeApproval, null);
+  assert.deepEqual(focusLog, ["room-menu-toggle", "merge-approval-cancel"]);
+  // And the drawer takes the same precedence as the menu.
+  nodes["merge-approval"].hidden = false;
+  nodes["agent-requests-panel"].hidden = false;
+  press();
+  assert.equal(nodes["agent-requests-panel"].hidden, true);
+  assert.equal(nodes["agent-requests-open"].getAttribute("aria-expanded"), "false");
+  assert.equal(nodes["merge-approval"].hidden, false);
+  assert.equal(focusLog.at(-1), "agent-requests-open");
+});

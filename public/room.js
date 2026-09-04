@@ -5788,18 +5788,25 @@ byId("merge-approval-cancel").addEventListener("click", closeMergeApprovalDialog
 byId("merge-approval").addEventListener("click", (event) => {
   if (event.target === byId("merge-approval")) closeMergeApprovalDialog();
 });
-document.addEventListener("keydown", (event) => {
+/*
+ * Esc 一次只關「最上面」的那一層，順序固定：頂欄浮層（房間選單／終端抽屜，焦點還給觸發按鈕）→
+ * 紀錄面板 → 核准併入層。頂欄浮層永遠疊在層之上，所以核准層開著時先按 Esc 只會收起選單，
+ * 不會把 Owner 正在審的核准層一起關掉。
+ */
+function handleEscapeKeydown(event) {
   if (event.key !== "Escape") return;
-  if (!byId("merge-history").hidden) closeMergeHistory();
-  else if (!byId("merge-approval").hidden) closeMergeApprovalDialog();
-  else if (byId("room-menu-panel") && !byId("room-menu-panel").hidden) {
+  const menuPanel = byId("room-menu-panel");
+  const drawer = byId("agent-requests-panel");
+  if (menuPanel && !menuPanel.hidden) {
     setRoomMenuOpen(false);
     byId("room-menu-toggle")?.focus();
-  } else if (!byId("agent-requests-panel").hidden) {
+  } else if (drawer && !drawer.hidden) {
     setAgentRequestsOpen(false);
     byId("agent-requests-open")?.focus();
-  }
-});
+  } else if (!byId("merge-history").hidden) closeMergeHistory();
+  else if (!byId("merge-approval").hidden) closeMergeApprovalDialog();
+}
+document.addEventListener("keydown", handleEscapeKeydown);
 byId("merge-approval-diff").addEventListener("scroll", () => {
   if (mergeDiffScrolledToBottom()) {
     state.mergeApprovalScrolled = true;
