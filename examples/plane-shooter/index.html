@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>飛機射擊</title>
+<style>
+  *{box-sizing:border-box}body{margin:0;background:#08111f;color:#fff;font:16px sans-serif;display:grid;place-items:center;min-height:100vh}
+  canvas{width:480px;max-width:100%;height:auto;background:linear-gradient(#071426,#123456);border:2px solid #57c7ff}
+</style>
+</head>
+<body>
+<canvas id="game" width="480" height="640"></canvas>
+<script>
+const canvas=document.querySelector("#game"),ctx=canvas.getContext("2d");
+const keys={},player={x:215,y:570,w:50,h:42,speed:300};
+let bullets,enemies,score,over,last,spawnTimer;
+addEventListener("keydown",e=>{
+  keys[e.code]=true;
+  if(["ArrowLeft","ArrowRight","Space"].includes(e.code))e.preventDefault();
+  if(over&&e.code==="KeyR")reset();
+});
+addEventListener("keyup",e=>keys[e.code]=false);
+function reset(){
+  player.x=215;bullets=[];enemies=[];score=0;over=false;spawnTimer=0;last=performance.now();
+}
+function hit(a,b){
+  return a.x<b.x+b.w&&a.x+a.w>b.x&&a.y<b.y+b.h&&a.y+a.h>b.y;
+}
+function update(dt){
+  if(over)return;
+  if(keys.ArrowLeft)player.x-=player.speed*dt;
+  if(keys.ArrowRight)player.x+=player.speed*dt;
+  player.x=Math.max(0,Math.min(canvas.width-player.w,player.x));
+  player.cool=(player.cool||0)-dt;
+  if(keys.Space&&player.cool<=0){
+    bullets.push({x:player.x+22,y:player.y-12,w:6,h:16});
+    player.cool=.2;
+  }
+  spawnTimer-=dt;
+  if(spawnTimer<=0){
+    const w=32+Math.random()*28;
+    enemies.push({x:Math.random()*(canvas.width-w),y:-50,w,h:34,speed:90+Math.random()*130});
+    spawnTimer=.45+Math.random()*.65;
+  }
+  bullets.forEach(b=>b.y-=480*dt);
+  enemies.forEach(e=>e.y+=e.speed*dt);
+  for(let i=enemies.length-1;i>=0;i--){
+    if(hit(player,enemies[i]))over=true;
+    for(let j=bullets.length-1;j>=0;j--){
+      if(hit(bullets[j],enemies[i])){
+        enemies.splice(i,1);bullets.splice(j,1);score+=10;break;
+      }
+    }
+  }
+  bullets=bullets.filter(b=>b.y+b.h>0);
+  enemies=enemies.filter(e=>e.y<canvas.height+60);
+}
+function ship(x,y,w,h,color){
+  ctx.fillStyle=color;
+  ctx.beginPath();ctx.moveTo(x+w/2,y);ctx.lineTo(x+w,y+h);ctx.lineTo(x+w/2,y+h*.75);
+  ctx.lineTo(x,y+h);ctx.closePath();ctx.fill();
+}
+function draw(){
+  ctx.clearRect(0,0,480,640);
+  ctx.fillStyle="#fff";
+  for(let i=0;i<45;i++)ctx.fillRect((i*83)%480,(i*137+performance.now()*.03)%640,2,2);
+  bullets.forEach(b=>{ctx.fillStyle="#ffe66d";ctx.fillRect(b.x,b.y,b.w,b.h)});
+  enemies.forEach(e=>ship(e.x,e.y,e.w,e.h,"#ff5263"));
+  ship(player.x,player.y,player.w,player.h,"#57c7ff");
+  ctx.font="bold 22px sans-serif";ctx.fillStyle="#fff";ctx.fillText(`分數：${score}`,16,32);
+  if(over){
+    ctx.fillStyle="#000b";ctx.fillRect(0,0,480,640);
+    ctx.textAlign="center";ctx.font="bold 42px sans-serif";ctx.fillStyle="#ff6575";
+    ctx.fillText("遊戲結束",240,290);
+    ctx.font="22px sans-serif";ctx.fillStyle="#fff";ctx.fillText(`得分：${score}`,240,335);
+    ctx.fillText("按 R 重新開始",240,375);ctx.textAlign="left";
+  }
+}
+function loop(now){
+  const dt=Math.min((now-last)/1000,.033);last=now;update(dt);draw();requestAnimationFrame(loop);
+}
+reset();requestAnimationFrame(loop);
+</script>
+</body>
+</html>
