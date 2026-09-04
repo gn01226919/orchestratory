@@ -736,6 +736,31 @@ function seatListeningState(session) {
 }
 /* @pure-end seat-listening-state */
 
+/* @pure-start seat-identity
+ * What tells two terminals of the same provider apart before the owner names them: the seat's own
+ * id and the workspace directory. The host pid is deliberately not shown -- the presence API
+ * withholds it from the browser and test/web.test.ts pins that. A terminal can read its own id
+ * from list_agents and say "I am 68589d86", which is the whole point of showing it here. Only
+ * the last path segment is shown, anywhere: the sidebar is 248px wide, and a full path under a
+ * home directory is a name that does not belong in the DOM.
+ */
+function workspaceLabel(workspace) {
+  const parts = String(workspace || "").split("/").filter((part) => part.length > 0);
+  return parts.length > 0 ? parts[parts.length - 1] : "";
+}
+
+function seatTag(seatId) {
+  return String(seatId || "").split("-")[0].slice(0, 8);
+}
+
+function seatIdentityText(session) {
+  const dir = workspaceLabel(session?.workspace);
+  const tag = seatTag(session?.id);
+  if (tag) return dir ? `席位 ${tag} · ${dir}` : `席位 ${tag}`;
+  return dir;
+}
+/* @pure-end seat-identity */
+
 /**
  * The day a message is filed under, and the group element that holds it.
  *
@@ -876,7 +901,19 @@ function renderPresencePanel() {
       const dot = document.createElement("i");
       dot.style.background = authorColor(session.provider);
       const label = document.createElement("b");
-      label.textContent = session.displayName || `${session.provider} 申請 ${index + 1}`;
+      /* Before approval a seat has no display name, and "claude 申請 1 / claude 申請 2" told the
+         owner nothing about which terminal was asking. The seat tag goes in the title: two seats in
+         the same workspace share the directory name, so the tag is the only thing that tells them
+         apart, and the title column is narrow enough (an approve button sits beside it) that a
+         directory name there was cut to "orchestrat…" in a real browser. The directory sits on the
+         line below, where wrapping is fine. */
+      const identityText = seatIdentityText(session);
+      const tag = seatTag(session.id);
+      label.textContent = session.displayName
+        || (tag ? `${session.provider} · ${tag}` : `${session.provider} 申請 ${index + 1}`);
+      /* The hover title repeats the identity text, not the full path: the same minimal-disclosure
+         line that keeps host_pid out of the browser keeps a home-directory path out of the DOM. */
+      identity.title = identityText;
       const listening = seatListeningState(session);
       const badge = document.createElement("span");
       badge.className = `seat-listening ${listening.cls}`;
@@ -886,11 +923,19 @@ function renderPresencePanel() {
       /* The answer first, the technical identity after it. The reader's question is what happens if
          they send something now; five terms of provenance ahead of it is five terms of delay. */
       detail.textContent = session.joined
-        ? `${listening.send} · Native Full-Trust · host 能力不變 · ${session.client || "MCP"} · ${session.collaborationMode === "room-first" ? "全程帳本協作" : "僅加入房間"} · ${session.syncTurns ? "終端對話同步" : "終端對話不入帳"}`
+        ? `${listening.send} · Native Full-Trust · host 能力不變 · ${session.collaborationMode === "room-first" ? "全程帳本協作" : "僅加入房間"} · ${session.syncTurns ? "終端對話同步" : "終端對話不入帳"}`
         : selected
           ? "已選取 · 請確認協作與對話同步模式"
-          : `${session.client || "MCP"} · 點擊選取`;
+          : `${workspaceLabel(session.workspace) ? `${workspaceLabel(session.workspace)} · ` : ""}點擊選取`;
       identity.append(dot, label, badge, detail);
+      /* A joined seat keeps its identity on its own short line instead of inside the capability
+         sentence, which was already long before it carried a pid and a directory. */
+      if (session.joined && identityText) {
+        const seatLine = document.createElement("small");
+        seatLine.className = "seat-identity";
+        seatLine.textContent = identityText;
+        identity.append(seatLine);
+      }
       identity.addEventListener("click", () => {
         state.selectedPresenceId = selected ? "" : session.id;
         renderPresencePanel();

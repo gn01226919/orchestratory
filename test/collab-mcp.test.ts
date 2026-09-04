@@ -6,7 +6,13 @@ import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { CollabToolBroker, handleCollabMcpMessage } from "../src/mcp/collab-server.ts";
+import {
+  CollabToolBroker,
+  handleCollabMcpMessage,
+  joinRequestLedgerLine,
+  presenceClientLabel,
+  seatTag,
+} from "../src/mcp/collab-server.ts";
 import { RoomLedger } from "../src/core/room-ledger.ts";
 import { RoomInboxStore } from "../src/core/room-inbox.ts";
 import { CollaborationService } from "../src/core/collaboration-service.ts";
@@ -2005,6 +2011,24 @@ test("asking a provider, writing the question, and then failing still marks the 
     "a reader will see this seat asking; the mark belongs with it",
   );
   assert.equal(ledger.verifyChain("demo"), true);
+});
+
+test("a join request names the seat by its tag and workspace directory, never by pid or full path", () => {
+  const workspace = "/tmp/workspaces/team-home/orchestratory協作器";
+  const first = "68589d86-81a6-4a0c-80bb-6ca1faacc791";
+  const second = "e1db70f4-a16e-4024-97b1-62dd06edbe74";
+  const line = joinRequestLedgerLine("claude", first, workspace);
+  assert.equal(line, "claude MCP 終端提出加入申請（席位 68589d86 · orchestratory協作器 · 等待 GUI 核准）");
+  assert.equal(seatTag(second), "e1db70f4");
+  assert.equal(presenceClientLabel("codex", "/tmp/work/demo/"), "codex MCP · demo");
+  /* Two terminals of the same provider in the same workspace differ only by seat; the line must too. */
+  assert.notEqual(line, joinRequestLedgerLine("claude", second, workspace));
+  /* The ledger is append-only, reaches the browser, and may be published: nothing above the
+     workspace directory leaves the process, and the host pid never does. Asserted against the
+     input itself, not against a scanner's exclusion list. */
+  assert.equal(line.includes(workspace), false);
+  assert.equal(line.includes("team-home"), false);
+  assert.doesNotMatch(line, /pid/u);
 });
 
 /*

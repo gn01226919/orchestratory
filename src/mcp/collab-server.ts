@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { cwd, ppid, stdin, stdout } from "node:process";
+import { basename } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { AppContext } from "../app.ts";
 import type {
@@ -2198,6 +2199,32 @@ export async function handleCollabMcpMessage(
   }
 }
 
+/*
+ * Two terminals of the same provider asking to join at the same moment used to write two
+ * identical ledger lines and two identical GUI rows, and the owner could not tell which was
+ * which. The seat's own id is the honest handle: it is already public to the GUI, and a terminal
+ * can read its own id from list_agents and say "I am 68589d86". The host pid is deliberately NOT
+ * used -- `publicInfo` withholds it from the browser and test/web.test.ts pins that -- and the
+ * ledger reaches the browser too. Only the last path segment of the workspace leaves the
+ * process: the ledger is append-only and may be published, and a path under a home directory
+ * is a name.
+ */
+export function seatTag(seatId: string): string {
+  return String(seatId).split("-")[0]!.slice(0, 8);
+}
+
+export function seatIdentityLabel(seatId: string, workspace: string): string {
+  return `席位 ${seatTag(seatId)} · ${basename(workspace)}`;
+}
+
+export function presenceClientLabel(provider: PresenceProvider, workspace: string): string {
+  return `${provider} MCP · ${basename(workspace)}`;
+}
+
+export function joinRequestLedgerLine(provider: PresenceProvider, seatId: string, workspace: string): string {
+  return `${provider} MCP 終端提出加入申請（${seatIdentityLabel(seatId, workspace)} · 等待 GUI 核准）`;
+}
+
 export async function runCollabMcpServer(app: AppContext, actor = "mcp-host"): Promise<void> {
   const collaboration = new CollaborationService(app.store.dataDirectory);
   const { ledger, presence } = collaboration;
@@ -2227,7 +2254,7 @@ export async function runCollabMcpServer(app: AppContext, actor = "mcp-host"): P
         provider: presenceProvider,
         workspace,
         hostPid: ppid,
-        client: `${presenceProvider} MCP`,
+        client: presenceClientLabel(presenceProvider, workspace),
       }).id;
       startHeartbeat();
     }
@@ -2258,7 +2285,7 @@ export async function runCollabMcpServer(app: AppContext, actor = "mcp-host"): P
             const before = presence.get(id);
             const requested = collaboration.requestExternalJoin(id, roomId, workspace);
             if (!before?.requested && !before?.joined && requested.requested) {
-              ledger.appendSystem(roomId, `${presenceProvider} MCP 終端提出加入申請（等待 GUI 核准）`);
+              ledger.appendSystem(roomId, joinRequestLedgerLine(presenceProvider, id, workspace));
             }
           },
           waitForRoomJoin: async ({ roomId, workspace, timeoutMs, signal }) => {
