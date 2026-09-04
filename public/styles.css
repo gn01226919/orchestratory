@@ -657,6 +657,31 @@ button.cancel-pending:hover { border-color: var(--warn); }
 .cubicle.is-writer .name-plate { border-color: #f0b25a; box-shadow: 0 0 0 2px rgb(240 178 90 / 22%), 0 0 14px rgb(240 178 90 / 42%); }
 .cubicle.is-writer .name-plate span::before { content: "✎ "; color: #f0b25a; }
 
+/*
+ * The owner's band: the front strip of the room. It is drawn as the floor's bottom edge (same border,
+ * same rounded corners) but sits below the scrolling viewport, so the owner's desk and the approval
+ * tray are always in view and never cover a seat, however tall the floor grows.
+ */
+.office-owner-band {
+  --office-band-h: calc(112px * var(--desk-scale, 1) + 66px);
+  position: relative;
+  flex: none;
+  z-index: 30;
+  height: var(--office-band-h);
+  margin: 0 8px;
+  overflow: visible;
+  border: 3px solid #4c3041;
+  border-top: 0;
+  border-radius: 0 0 14px 14px;
+  background: linear-gradient(180deg, #b26a40, #a35f3a);
+  box-shadow: 0 24px 60px rgb(0 0 0 / 46%), inset 0 -18px 30px rgb(59 28 34 / 26%);
+}
+.office-stage .office-viewport { padding-bottom: 0; }
+.office-stage .office-viewport .office-floor { border-bottom-width: 0; border-radius: 14px 14px 0 0; }
+.office-owner-band .cubicle.office-owner-desk { left: 50%; top: calc(56px * var(--desk-scale, 1) + 8px); cursor: pointer; }
+.office-owner-band .desk.office-owner-figure { left: 50%; top: calc(56px * var(--desk-scale, 1) - 4px); transition: none; }
+.office-owner-band .office-approval-tray { left: calc(50% + 85px * var(--desk-scale, 1) + 42px); top: calc(56px * var(--desk-scale, 1) + 10px); }
+
 /* The approval tray on the owner's desk. Red count while drafts wait; greyed out, no label, when none do. */
 .office-approval-tray {
   position: absolute;
@@ -825,9 +850,15 @@ button.cancel-pending:hover { border-color: var(--warn); }
   height: 52px;
   filter: none;
   image-rendering: pixelated;
-  /* zoom rather than transform: the walk/hop/breathe keyframes own transform, and zoom keeps the
-     figure's layout box in step with the desk it stands behind. */
-  zoom: var(--desk-scale, 1);
+}
+/* The figure scales through this wrapper (transform is free here; the figure's own transform belongs
+   to its walk/hop/breathe keyframes). The wrapper's layout box is the scaled size, so the figure keeps
+   standing where the desk expects it. */
+.orbie-scale {
+  width: calc(42px * var(--desk-scale, 1));
+  height: calc(52px * var(--desk-scale, 1));
+  transform: scale(var(--desk-scale, 1));
+  transform-origin: top left;
 }
 .orbie-shadow { position: absolute; left: 4px; right: 2px; bottom: -4px; height: 10px; border-radius: 50%; background: rgb(72 38 31 / 28%); transform: skewX(-16deg); }
 .orbie-body {
