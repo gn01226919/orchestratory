@@ -656,12 +656,19 @@ function wakeClock(at) {
  * function, one answer per state, and the difference between "queues" and "refused" stated where it
  * cannot drift.
  */
+/*
+ * `label` is the office word: the two-to-four character answer the pixel floor and the drawers
+ * have room for (可交辦 / 排隊中 / 等你核准 / 不可交辦). `text` stays the sidebar badge and is what
+ * test/web.test.ts pins; the two say the same thing at two lengths, and both live here so the
+ * office cannot drift from the row the way the earlier hand-written copies did.
+ */
 function seatListeningState(session) {
   const joined = Boolean(session?.joined);
   if (!joined) {
     return {
       key: "not-joined",
       mark: "·",
+      label: "還沒加入",
       text: "還沒加入",
       title: "這個終端還沒被核准進入房間。",
       send: "還不能送。它還沒加入房間。",
@@ -676,6 +683,7 @@ function seatListeningState(session) {
     return {
       key: "listening",
       mark: "●",
+      label: "可交辦",
       /* "正在收聽", not "正在待命". On this screen 待命 already means "approved for standby" (stage two,
          the approve/revoke buttons) and it is the difference between the two that this badge exists
          to show. One word cannot carry both halves of the distinction it is drawing. */
@@ -693,6 +701,7 @@ function seatListeningState(session) {
     return {
       key: "not-listening",
       mark: "○",
+      label: "排隊中",
       text: "沒在收聽",
       send: "它現在沒在收聽，送出的訊息會進收件匣排隊（每席最多 32 則還沒結束的交辦，滿了就送不出去）。",
       fix: "到那個終端機視窗，讓它再呼叫一次 room_wait。在那之前交辦會排隊等它，但距離你上次要求超過 12 小時、而且還在排隊的話就會過期（紀錄留著，也可以再按一次重新排隊）。"
@@ -709,6 +718,7 @@ function seatListeningState(session) {
     return {
       key: "awaiting-approval",
       mark: "◌",
+      label: "等你核准",
       text: "等你核准待命",
       /* Refused, not queued: postToExternal throws TARGET_AGENT_STANDBY_NOT_APPROVED before anything
          is enqueued. And the fix is a button right here, not a trip to the terminal. */
@@ -727,6 +737,7 @@ function seatListeningState(session) {
   return {
     key: "no-standby",
     mark: "–",
+    label: "不可交辦",
     text: "不能收工作",
     send: "還不能送。它沒有待命授權，交辦會被拒絕。",
     fix: "只有那個終端能自己再呼叫一次 room_wait 來申請待命，你在這裡按不回來。",
@@ -872,8 +883,11 @@ function renderPresencePanel() {
     (session) => session.joined && session.standbyRequested && !session.standbyApproved,
   ).length;
   const wakeableCount = sessions.filter((session) => session.wakeable).length;
-  byId("office-presence-count").textContent =
-    `${joinedCount} 已加入 · ${wakeableCount} 正在收聽 · ${state.managedAgents.length} 受控`;
+  const presenceCount = byId("office-presence-count");
+  if (presenceCount) {
+    presenceCount.textContent =
+      `${joinedCount} 已加入 · ${wakeableCount} 可交辦 · ${state.managedAgents.length} 子 Agent`;
+  }
   const room = state.rooms.find((entry) => entry.id === state.room);
   if (room) {
     room.pendingAgentRequests = pendingJoinCount;
@@ -1001,69 +1015,7 @@ function renderPresencePanel() {
         syncLabel.addEventListener("click", (event) => event.stopPropagation());
         syncLabel.append(syncInput, document.createTextNode(" 同步此終端的使用者／Assistant 可見對話"));
       }
-      const actions = document.createElement("div");
-      actions.className = "presence-actions";
-      /* First in the row, ahead of both destructive controls. Someone looking at a seat that is not
-         answering is reaching for "do something about this", and the two controls beside this one --
-         revoke standby, remove from room -- both make that seat harder to reach, not easier. The safe
-         action should be the one their hand lands on. */
-      /*
-       * Offered only where it can do its one job. On a listening seat there is nothing to record; on
-       * a seat with no standby authority a nudge cannot help, and offering it there would put a
-       * plausible-looking action next to a problem it does not touch -- which is how someone ends up
-       * clicking instead of doing the thing that works.
-       */
-      if (listening.key === "not-listening") {
-        const wake = document.createElement("button");
-        wake.type = "button";
-        wake.className = "presence-wake";
-        /* Not a bell. 🔔 means "summon" in every UI vocabulary there is, and it would be the most
-           conspicuous character in the row -- the text would say "record" while the icon said "ring",
-           and the icon is what gets believed. */
-        wake.textContent = "📝 在帳本記一筆：我找過它";
-        /* Does not promise the seat will see it, and the reason has narrowed rather than gone away.
-           There is now exactly one path that would show it: a terminal that REJOINS gets a briefing
-           with the newest fifty ledger lines, so a note still inside that window would be in front of
-           it. A seat that simply resumes standby gets no tail, and agents are told to re-enter
-           room_wait rather than to call room_read. So: possible on a rejoin, not otherwise, and never
-           something to count on. What we can state is what we do. */
-        /* Says what it is FOR, not only what it is not. The disclaimer was clean and the value
-           proposition was missing entirely, which leaves a reader with no answer to "then why would I
-           press this". The honest answer is small and it is real: a timestamped record, for you. */
-        wake.title = "在帳本記下「你在這個時間找過它」，給你自己留個時間點。這不會叫醒它，Orchestratory 沒辦法從這裡叫醒終端機，也不保證它會去讀帳本。要它真的做事，直接交辦——交辦會排隊等它。";
-        wake.addEventListener("click", () => void requestPresenceWake(session, wake));
-        actions.append(wake);
-      }
-      if (session.joined && session.standbyRequested && !session.standbyApproved) {
-        const standby = document.createElement("button");
-        standby.type = "button";
-        standby.textContent = "核准 room-wait 待命";
-        standby.className = "join";
-        standby.addEventListener("click", () => void changePresenceStandby(session, "approve", standby));
-        actions.append(standby);
-      } else if (session.joined && session.standbyApproved) {
-        const standby = document.createElement("button");
-        standby.type = "button";
-        standby.textContent = "撤銷 room-wait 待命";
-        /* Demoted while the seat is deaf. Revoking is the one destructive action on this row and, on a
-           seat that is not listening, it is also the action a reader is most likely to reach for --
-           it is the only standby control in sight and it sounds like it addresses the problem. It does
-           the opposite and cannot be undone from the GUI. */
-        standby.className = listening.key === "not-listening" ? "leave is-demoted" : "leave";
-        standby.title = listening.key === "not-listening"
-          ? "撤銷不會讓它重新收聽，反而會拿掉它的待命授權，而且只有那個終端能自己申請回來。"
-          : "撤銷之後這個席位不能再收工作，要由該終端自己重新呼叫 room_wait。";
-        standby.addEventListener("click", () => void changePresenceStandby(session, "revoke", standby));
-        actions.append(standby);
-      }
-      const membership = document.createElement("button");
-      membership.type = "button";
-      membership.textContent = session.joined ? "移出房間" : "核准加入房間";
-      membership.className = session.joined ? "leave" : "join";
-      membership.addEventListener("click", () => {
-        void changePresenceMembership(session, membership);
-      });
-      actions.append(membership);
+      const actions = seatActionButtons(session, listening);
       /*
        * 加入房間與 room-wait 待命是兩個不同的授權，但對使用者來說是同一個 Agent 的
        * 第一步與第二步；用漸進式卡片呈現，避免看起來像重複詢問。核准鈕就在同一列。
@@ -1149,6 +1101,80 @@ function renderPresencePanel() {
       restored.setSelectionRange(focusedInput.start, focusedInput.end);
     }
   }
+  renderSeatChips();
+  renderTaskCenter();
+}
+
+/*
+ * The three buttons a seat row can carry, built once for both the sidebar row and the office task
+ * drawer. The text, ordering and demotion rules are the ones the sidebar row settled on; the drawer
+ * must not get a second hand-written copy of them.
+ */
+function seatActionButtons(session, listening) {
+  const actions = document.createElement("div");
+  actions.className = "presence-actions";
+  /* First in the row, ahead of both destructive controls. Someone looking at a seat that is not
+     answering is reaching for "do something about this", and the two controls beside this one --
+     revoke standby, remove from room -- both make that seat harder to reach, not easier. The safe
+     action should be the one their hand lands on. */
+  /*
+   * Offered only where it can do its one job. On a listening seat there is nothing to record; on
+   * a seat with no standby authority a nudge cannot help, and offering it there would put a
+   * plausible-looking action next to a problem it does not touch -- which is how someone ends up
+   * clicking instead of doing the thing that works.
+   */
+  if (listening.key === "not-listening") {
+    const wake = document.createElement("button");
+    wake.type = "button";
+    wake.className = "presence-wake";
+    /* Not a bell. 🔔 means "summon" in every UI vocabulary there is, and it would be the most
+       conspicuous character in the row -- the text would say "record" while the icon said "ring",
+       and the icon is what gets believed. */
+    wake.textContent = "📝 在帳本記一筆：我找過它";
+    /* Does not promise the seat will see it, and the reason has narrowed rather than gone away.
+       There is now exactly one path that would show it: a terminal that REJOINS gets a briefing
+       with the newest fifty ledger lines, so a note still inside that window would be in front of
+       it. A seat that simply resumes standby gets no tail, and agents are told to re-enter
+       room_wait rather than to call room_read. So: possible on a rejoin, not otherwise, and never
+       something to count on. What we can state is what we do. */
+    /* Says what it is FOR, not only what it is not. The disclaimer was clean and the value
+       proposition was missing entirely, which leaves a reader with no answer to "then why would I
+       press this". The honest answer is small and it is real: a timestamped record, for you. */
+    wake.title = "在帳本記下「你在這個時間找過它」，給你自己留個時間點。這不會叫醒它，Orchestratory 沒辦法從這裡叫醒終端機，也不保證它會去讀帳本。要它真的做事，直接交辦——交辦會排隊等它。";
+    wake.addEventListener("click", () => void requestPresenceWake(session, wake));
+    actions.append(wake);
+  }
+  if (session.joined && session.standbyRequested && !session.standbyApproved) {
+    const standby = document.createElement("button");
+    standby.type = "button";
+    standby.textContent = "核准 room-wait 待命";
+    standby.className = "join";
+    standby.addEventListener("click", () => void changePresenceStandby(session, "approve", standby));
+    actions.append(standby);
+  } else if (session.joined && session.standbyApproved) {
+    const standby = document.createElement("button");
+    standby.type = "button";
+    standby.textContent = "撤銷 room-wait 待命";
+    /* Demoted while the seat is deaf. Revoking is the one destructive action on this row and, on a
+       seat that is not listening, it is also the action a reader is most likely to reach for --
+       it is the only standby control in sight and it sounds like it addresses the problem. It does
+       the opposite and cannot be undone from the GUI. */
+    standby.className = listening.key === "not-listening" ? "leave is-demoted" : "leave";
+    standby.title = listening.key === "not-listening"
+      ? "撤銷不會讓它重新收聽，反而會拿掉它的待命授權，而且只有那個終端能自己申請回來。"
+      : "撤銷之後這個席位不能再收工作，要由該終端自己重新呼叫 room_wait。";
+    standby.addEventListener("click", () => void changePresenceStandby(session, "revoke", standby));
+    actions.append(standby);
+  }
+  const membership = document.createElement("button");
+  membership.type = "button";
+  membership.textContent = session.joined ? "移出房間" : "核准加入房間";
+  membership.className = session.joined ? "leave" : "join";
+  membership.addEventListener("click", () => {
+    void changePresenceMembership(session, membership);
+  });
+  actions.append(membership);
+  return actions;
 }
 
 function managedAgentViewSignature(agents) {
@@ -1165,8 +1191,11 @@ function renderManagedAgents() {
   state.managedAgentViewSignature = managedAgentViewSignature(state.managedAgents);
   const joinedCount = state.presences.filter((session) => session.joined).length;
   const wakeableCount = state.presences.filter((session) => session.wakeable).length;
-  byId("office-presence-count").textContent =
-    `${joinedCount} 已加入 · ${wakeableCount} 正在收聽 · ${state.managedAgents.length} 受控`;
+  const presenceCount = byId("office-presence-count");
+  if (presenceCount) {
+    presenceCount.textContent =
+      `${joinedCount} 已加入 · ${wakeableCount} 可交辦 · ${state.managedAgents.length} 子 Agent`;
+  }
   for (const listId of ["sidebar-managed-agent-list", "office-managed-agent-list"]) {
     const list = byId(listId);
     if (!list) continue;
@@ -1202,6 +1231,8 @@ function renderManagedAgents() {
       list.append(row);
     }
   }
+  renderSeatChips();
+  renderTaskCenter();
 }
 
 async function changeManagedAgent(agent, button) {
@@ -1993,6 +2024,18 @@ function providerInfo(agent) {
   };
 }
 
+/*
+ * Office wording, applied where a notification enters the drawer rather than at every source. The
+ * office speaks one language and one vocabulary (候選 is 草稿版 everywhere on this side of the
+ * screen); the sources that raise these notifications also feed bilingual surfaces and keep their
+ * own text.
+ */
+function officeText(value) {
+  return String(value || "")
+    .replace(/\s*·\s*[A-Za-z][A-Za-z0-9 ,.'\-]*$/u, "")
+    .replaceAll("候選", "草稿版");
+}
+
 function addOfficeNotification(kind, title, detail, unread = true, action) {
   const latest = state.notifications[0];
   if (latest && latest.kind === kind && latest.title === title && latest.detail === detail) return;
@@ -2000,8 +2043,8 @@ function addOfficeNotification(kind, title, detail, unread = true, action) {
   state.notifications.unshift({
     id: state.notificationSequence,
     kind,
-    title: String(title).slice(0, 120),
-    detail: String(detail || "").slice(0, 240),
+    title: officeText(title).slice(0, 120),
+    detail: officeText(detail).slice(0, 240),
     at: new Date().toISOString(),
     unread,
     ...(action ? { action } : {}),
@@ -2010,72 +2053,124 @@ function addOfficeNotification(kind, title, detail, unread = true, action) {
   renderOfficeNotifications();
 }
 
+
+/*
+ * Which notifications still have a button that does something. A standby request the owner has
+ * not answered and a merge approval still pending are the two; everything else -- including those
+ * same two once they are decided or lapsed -- is information.
+ */
+function officeNotificationLive(item) {
+  if (item.action?.kind === "standby-approve") {
+    const session = (state.presences || []).find((entry) => entry.id === item.action.presenceId);
+    return Boolean(session?.joined && session.standbyRequested && !session.standbyApproved);
+  }
+  if (item.action?.kind === "merge-approval") {
+    return mergeApprovalPending((state.mergeApprovals || []).find((entry) => entry.id === item.action.approvalId));
+  }
+  return false;
+}
+
 function renderOfficeNotifications() {
   const list = byId("office-notification-list");
   if (!list) return;
   list.textContent = "";
+  const actionable = state.notifications.filter(officeNotificationLive);
+  const informational = state.notifications.filter((item) => !officeNotificationLive(item));
+  const groupHead = (text) => {
+    const head = document.createElement("small");
+    head.className = "office-drawer-group";
+    head.textContent = text;
+    return head;
+  };
+  const buildRow = (item) => {
+    const row = document.createElement("article");
+    row.className = `office-notification ${item.unread ? "is-unread" : ""}`;
+    row.dataset.kind = item.kind;
+    const title = document.createElement("b");
+    title.textContent = item.title;
+    const time = document.createElement("small");
+    time.textContent = item.at.slice(11, 16);
+    row.append(title, time);
+    return row;
+  };
   if (!state.notifications.length) {
     const empty = document.createElement("p");
     empty.className = "office-panel-empty";
     empty.textContent = "目前沒有通知。";
     list.append(empty);
-  } else {
-    for (const item of state.notifications) {
-      const row = document.createElement("article");
-      row.className = `office-notification ${item.unread ? "is-unread" : ""}`;
-      row.dataset.kind = item.kind;
-      const title = document.createElement("b");
-      title.textContent = item.title;
-      const detail = document.createElement("p");
-      detail.textContent = item.detail;
-      const time = document.createElement("small");
-      time.textContent = item.at.slice(11, 16);
-      row.append(title, detail, time);
+  }
+  if (actionable.length) {
+    list.append(groupHead("要你動手"));
+    for (const item of actionable) {
+      const row = buildRow(item);
+      row.classList.add("is-actionable");
+      const actions = document.createElement("div");
+      actions.className = "office-notification-actions";
+      if (item.action.kind === "standby-approve") {
+        const session = (state.presences || []).find((entry) => entry.id === item.action.presenceId);
+        row.dataset.kind = "presence";
+        const approve = document.createElement("button");
+        approve.type = "button";
+        approve.className = "office-notification-action primary";
+        approve.textContent = "核准";
+        approve.title = `核准 ${session.displayName || session.provider} 的 room-wait 待命：允許它收工作，不代表它隨時在收聽。`;
+        approve.addEventListener("click", () => void changePresenceStandby(session, "approve", approve));
+        const reject = document.createElement("button");
+        reject.type = "button";
+        reject.className = "office-notification-action";
+        reject.textContent = "拒絕";
+        reject.title = "拒絕後只有那個終端能自己再呼叫 room_wait 申請。";
+        reject.addEventListener("click", () => void changePresenceStandby(session, "revoke", reject));
+        actions.append(approve, reject);
+      } else {
+        row.dataset.kind = "proposal";
+        const open = document.createElement("button");
+        open.type = "button";
+        open.className = "office-notification-action primary";
+        open.textContent = "核准併入 ▸";
+        open.title = "打開核准併入的檢視；核准前 main 不會被修改。";
+        open.addEventListener("click", () => openMergeApprovalDialog(item.action.approvalId));
+        actions.append(open);
+      }
+      row.append(actions);
+      list.append(row);
+    }
+  }
+  if (informational.length) {
+    list.append(groupHead("知道就好"));
+    for (const item of informational) {
+      const row = buildRow(item);
+      if (item.detail) {
+        const detail = document.createElement("p");
+        detail.textContent = item.detail;
+        row.append(detail);
+      }
       if (item.action?.kind === "standby-approve") {
         const session = (state.presences || []).find((entry) => entry.id === item.action.presenceId);
-        if (session?.joined && session.standbyRequested && !session.standbyApproved) {
-          const approve = document.createElement("button");
-          approve.type = "button";
-          approve.className = "office-notification-action";
-          approve.textContent = `② 核准 ${session.displayName || session.provider} 的 room-wait 待命`;
-          approve.addEventListener("click", () => void changePresenceStandby(session, "approve", approve));
-          row.append(approve);
-        } else {
-          const done = document.createElement("small");
-          done.className = "office-notification-done";
-          /*
-           * "已處理" used to cover two opposite outcomes. room_wait's approval wait defaults to 30
-           * seconds, so an owner who does not click within half a minute leaves the seat back at
-           * no-standby -- the most ordinary human outcome there is -- and this panel, which is where
-           * the owner SAW the request, told them it had been handled while the seat's own badge said
-           * it could not receive work at all.
-           */
-          const seatState = session ? seatListeningState(session) : undefined;
-          done.textContent = !session
-            ? "席位已離線，不需處理"
-            : seatState?.key === "not-joined"
-              ? "② 這個席位已經離開房間，這則申請不需要處理了。"
-              : seatState?.key === "no-standby"
-              ? `② 這個申請已經失效，${session.displayName || session.provider} 現在收不到工作。${seatState.fix}`
-              : "② 待命已核准";
-          row.append(done);
-        }
+        const done = document.createElement("small");
+        done.className = "office-notification-done";
+        /*
+         * "已處理" used to cover two opposite outcomes. room_wait's approval wait defaults to 30
+         * seconds, so an owner who does not click within half a minute leaves the seat back at
+         * no-standby -- the most ordinary human outcome there is -- and this panel, which is where
+         * the owner SAW the request, told them it had been handled while the seat's own badge said
+         * it could not receive work at all.
+         */
+        const seatState = session ? seatListeningState(session) : undefined;
+        done.textContent = !session
+          ? "席位已離線，不需處理"
+          : seatState?.key === "not-joined"
+            ? "② 這個席位已經離開房間，這則申請不需要處理了。"
+            : seatState?.key === "no-standby"
+            ? `② 這個申請已經失效，${session.displayName || session.provider} 現在收不到工作。${seatState.fix}`
+            : "② 待命已核准";
+        row.append(done);
       }
       if (item.action?.kind === "merge-approval") {
-        const approval = (state.mergeApprovals || []).find((entry) => entry.id === item.action.approvalId);
-        if (mergeApprovalPending(approval)) {
-          const open = document.createElement("button");
-          open.type = "button";
-          open.className = "office-notification-action";
-          open.textContent = "檢視合併預覽 · Review merge preview";
-          open.addEventListener("click", () => openMergeApprovalDialog(item.action.approvalId));
-          row.append(open);
-        } else {
-          const done = document.createElement("small");
-          done.className = "office-notification-done";
-          done.textContent = "這筆合併核准已有結果 · already decided";
-          row.append(done);
-        }
+        const done = document.createElement("small");
+        done.className = "office-notification-done";
+        done.textContent = "這筆核准併入已有結果";
+        row.append(done);
       }
       list.append(row);
     }
@@ -2084,6 +2179,8 @@ function renderOfficeNotifications() {
   const badge = byId("office-notification-count");
   badge.textContent = String(unread);
   badge.hidden = unread === 0;
+  const title = byId("office-notification-title");
+  if (title) title.textContent = unread ? `通知 · ${unread}` : "通知";
 }
 
 function markOfficeNotificationsRead() {
@@ -2096,50 +2193,260 @@ function latestRunEvent(runId) {
   return events[events.length - 1];
 }
 
+
+/* Which task rows the owner has opened. Kept outside `state` because it is view chrome, not data. */
+const officeTaskExpanded = new Set();
+
+function officeClock(value) {
+  const ms = typeof value === "number" ? value : Date.parse(String(value || ""));
+  if (!Number.isFinite(ms)) return "—";
+  const date = new Date(ms);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/*
+ * One row of the task drawer: dot, name, one status word, ▸. Everything else waits behind the
+ * caret. `details` is a list of [term, value] pairs; `actions` is a list of buttons.
+ */
+function officeTaskRow({ key, color, name, status, statusCls = "", details = [], actions = [], title = "" }) {
+  const row = document.createElement("article");
+  row.className = "office-task-row";
+  const expanded = officeTaskExpanded.has(key);
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "office-task-row-head";
+  head.setAttribute("aria-expanded", String(expanded));
+  if (title) head.title = title;
+  const dot = document.createElement("i");
+  dot.style.background = color;
+  const label = document.createElement("b");
+  label.textContent = name;
+  const word = document.createElement("span");
+  word.className = `office-task-state ${statusCls}`;
+  word.textContent = status;
+  const caret = document.createElement("em");
+  caret.setAttribute("aria-hidden", "true");
+  caret.textContent = "▸";
+  head.append(dot, label, word, caret);
+  const body = document.createElement("div");
+  body.className = "office-task-row-body";
+  body.hidden = !expanded;
+  if (details.length) {
+    const dl = document.createElement("dl");
+    for (const [term, value] of details) {
+      if (!value) continue;
+      const dt = document.createElement("dt");
+      dt.textContent = term;
+      const dd = document.createElement("dd");
+      dd.textContent = value;
+      dl.append(dt, dd);
+    }
+    body.append(dl);
+  }
+  if (actions.length) {
+    const bar = document.createElement("div");
+    bar.className = "office-task-row-actions";
+    bar.append(...actions);
+    body.append(bar);
+  }
+  head.addEventListener("click", () => {
+    const open = body.hidden;
+    if (open) officeTaskExpanded.add(key);
+    else officeTaskExpanded.delete(key);
+    body.hidden = !open;
+    head.setAttribute("aria-expanded", String(open));
+    row.classList.toggle("is-open", open);
+  });
+  row.classList.toggle("is-open", expanded);
+  row.append(head, body);
+  return row;
+}
+
+function officeButton(text, onClick, cls = "") {
+  const button = document.createElement("button");
+  button.type = "button";
+  if (cls) button.className = cls;
+  button.textContent = text;
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+/*
+ * Everything currently being worked on, from the sources this page already holds: a pending
+ * room mention, busy managed seats, workflow provider work, live runs, active Writer leases and
+ * proposals waiting for confirmation. No new route; this is a regrouping of what the old task
+ * centre and the office floor each showed part of.
+ */
+function officeRunningRows() {
+  const rows = [];
+  const messages = state.recent || [];
+  const pending = detectPendingWork(messages);
+  const workflow = workflowAgentWork();
+  const covered = new Set();
+  if (pending) {
+    rows.push({
+      key: `room:${pending.target}`, color: authorColor(pending.target), name: pending.target,
+      status: `回覆 Room #${pending.seq}`, statusCls: "is-busy",
+      details: [["任務", pending.text], ["最近帳本", `#${pending.seq}`]],
+      actions: [officeButton("看對話", () => focusAgentComposer(pending.target))],
+    });
+  }
+  for (const agent of state.managedAgents) {
+    if (!agent.busy) continue;
+    rows.push({
+      key: `managed:${agent.id}`, color: authorColor(agent.provider), name: agent.displayName,
+      status: "即時回覆中", statusCls: "is-busy",
+      details: [["來源", `${agent.provider} · ${agent.model || "—"}`], ["權限", "GUI Managed · 對話唯讀"]],
+      actions: [officeButton("取消回覆", (event) => void changeManagedAgent(agent, event.currentTarget), "cancel")],
+    });
+  }
+  for (const [provider, work] of Object.entries(workflow)) {
+    covered.add(work.runId);
+    rows.push({
+      key: `workflow:${provider}:${work.runId}`, color: authorColor(provider), name: provider,
+      status: work.label, statusCls: "is-busy",
+      details: [["任務", work.detail], ["模型", work.model], ["RUN", String(work.runId || "").slice(0, 8)]],
+    });
+  }
+  for (const run of state.activeRuns || []) {
+    if (covered.has(run.id)) continue;
+    const event = latestRunEvent(run.id);
+    rows.push({
+      key: `run:${run.id}`, color: "#ef736d", name: run.workspaceLabel || "RUN",
+      status: `Round ${run.counters?.rounds ?? 0}`, statusCls: "is-busy",
+      details: [["最近事件", event?.summary || "Workflow 正在執行。"], ["呼叫", `${run.counters?.providerCalls ?? 0} 次`], ["RUN", String(run.id || "").slice(0, 8)]],
+    });
+  }
+  for (const lease of (state.writers?.leases || []).filter((entry) => entry.state === "active")) {
+    const busy = (state.writers?.busyLeaseIds || []).includes(lease.id);
+    const children = (state.writers?.delegations || []).filter((child) => child.parentLeaseId === lease.id && child.state === "active");
+    rows.push({
+      key: `lease:${lease.id}`, color: authorColor(lease.writer?.displayName || lease.writer?.provider), name: lease.writer?.displayName || "Writer",
+      status: `${lease.taskId} · ${workspaceLabel(lease.worktree).slice(0, 8)}`, statusCls: busy ? "is-busy" : "is-writer",
+      title: busy ? "Writer 正在執行" : "Writer 持有寫入權，目前沒在執行",
+      details: [
+        ["任務", lease.taskId],
+        ["草稿區", workspaceLabel(lease.worktree).slice(0, 8)],
+        ["存檔點", lease.checkpoint || "—"],
+        ["開始", officeClock(lease.grantedAtMs)],
+        ["狀態", `第 ${lease.epoch} 任 · ${children.length} 個子 Agent · ${busy ? "執行中" : "未 complete"}`],
+      ],
+      actions: [
+        officeButton("交辦", () => focusAgentComposer(lease.writer?.displayName)),
+        officeButton("Writer 抽屜 ▸", () => openOfficeDrawer("writer-handoff"), "primary"),
+      ],
+    });
+  }
+  for (const request of state.pendingWorkflowRequests || []) {
+    rows.push({
+      key: `request:${request.id}`, color: "#e7b45f", name: `提案 ${String(request.id || "").slice(0, 8)}`,
+      status: "等待確認", statusCls: "is-pending",
+      details: [["任務", String(request.task || "未命名任務").slice(0, 220)], ["Writer", request.writer?.provider || "claude"]],
+      actions: [Object.assign(document.createElement("a"), { href: "/", textContent: "到主工作區確認 →", className: "office-task-link" })],
+    });
+  }
+  return rows;
+}
+
+function officeSeatRows() {
+  const activeLeases = (state.writers?.leases || []).filter((entry) => entry.state === "active");
+  return (state.presences || []).map((session, index) => {
+    const listening = seatListeningState(session);
+    const tag = seatTag(session.id);
+    const isWriter = activeLeases.some((lease) => lease.writer?.displayName === session.displayName);
+    const details = [["席位", seatIdentityText(session)]];
+    const actions = [];
+    if (session.joined) {
+      details.push(
+        ["模式", `${session.collaborationMode === "room-first" ? "全程帳本協作" : "僅加入房間"} · ${session.syncTurns ? "終端對話同步" : "終端對話不入帳"}`],
+        ["交辦", listening.send],
+        ...(listening.fix ? [["怎麼辦", listening.fix]] : []),
+      );
+      actions.push(officeButton("交辦", () => focusAgentComposer(session.displayName)));
+    } else {
+      details.push(["申請", "等你核准加入房間；核准前不記錄它的內容。名稱與模式在左側「新增 Agents」設定。"]);
+    }
+    actions.push(...seatActionButtons(session, listening).children);
+    return {
+      key: `seat:${session.id}`, color: authorColor(session.provider),
+      name: session.displayName || (tag ? `${session.provider} · ${tag}` : `${session.provider} 申請 ${index + 1}`),
+      status: session.joined ? (isWriter ? `Writer · ${listening.label}` : listening.label) : "待核准加入",
+      statusCls: session.joined ? listening.cls : "is-pending",
+      title: listening.title,
+      details, actions,
+    };
+  });
+}
+
+function officeChildRows() {
+  const rows = state.managedAgents.map((agent) => ({
+    key: `child:${agent.id}`, color: authorColor(agent.provider), name: agent.displayName,
+    status: agent.busy ? "回覆中" : "唯讀 · 閒置", statusCls: agent.busy ? "is-busy" : "",
+    details: [["來源", `${agent.provider} · ${agent.model || "—"}`], ["權限", "GUI Managed · 對話唯讀 · Writer 需另行授權"]],
+    actions: [
+      officeButton("交辦", () => focusAgentComposer(agent.displayName)),
+      officeButton(agent.busy ? "取消回覆" : "移除子 Agent", (event) => void changeManagedAgent(agent, event.currentTarget), agent.busy ? "cancel" : "leave"),
+    ],
+  }));
+  for (const child of (state.writers?.delegations || []).filter((entry) => entry.state === "active")) {
+    rows.push({
+      key: `delegation:${child.id}`, color: authorColor(child.provider || child.displayName), name: child.displayName,
+      status: child.access === "write" ? "共用草稿區" : "跨類型唯讀",
+      details: [["來源", child.provider || "—"], ["權限", child.access === "write" ? "與 Writer 共用草稿區、序列執行；不可再轉派" : "唯讀；不可再轉派"]],
+    });
+  }
+  return rows;
+}
+
 function renderTaskCenter() {
   const list = byId("office-task-list");
   if (!list) return;
+  /* Rebuilding while the owner is typing into a row would drop the field and the caret with it. */
+  const active = document.activeElement;
+  if (active && list.contains(active) && /^(INPUT|SELECT|TEXTAREA)$/u.test(active.tagName)) return;
   list.textContent = "";
-  const pending = state.pendingWorkflowRequests || [];
-  const active = state.activeRuns || [];
-  byId("office-task-count").textContent = String(pending.length + active.length);
-  if (!pending.length && !active.length) {
-    const empty = document.createElement("p");
-    empty.className = "office-panel-empty";
-    empty.textContent = "目前沒有待確認或執行中的任務。";
-    list.append(empty);
-    return;
+  const groups = [
+    ["執行中", officeRunningRows()],
+    ["終端", officeSeatRows()],
+    ["子 Agent", officeChildRows()],
+  ];
+  for (const [name, rows] of groups) {
+    const head = document.createElement("small");
+    head.className = "office-drawer-group";
+    head.textContent = `${name} · ${rows.length}`;
+    list.append(head);
+    if (!rows.length) {
+      const empty = document.createElement("p");
+      empty.className = "office-task-empty";
+      empty.textContent = name === "執行中" ? "沒有人在忙。" : name === "終端" ? "還沒有終端申請加入。" : "還沒有子 Agent。";
+      list.append(empty);
+      continue;
+    }
+    for (const row of rows) list.append(officeTaskRow(row));
   }
-  for (const run of active) {
-    const event = latestRunEvent(run.id);
-    const card = document.createElement("article");
-    card.className = "office-task-card is-running";
-    const head = document.createElement("div");
-    const title = document.createElement("b");
-    title.textContent = `⛔ 執行中 · ${run.workspaceLabel}`;
-    const tag = document.createElement("small");
-    tag.textContent = `Round ${run.counters?.rounds ?? 0} · ${run.counters?.providerCalls ?? 0} calls`;
-    head.append(title, tag);
-    const detail = document.createElement("p");
-    detail.textContent = event?.summary || "Workflow 正在執行。";
-    card.append(head, detail);
-    list.append(card);
+  const footer = byId("office-task-footer");
+  const pendingApprovals = mergeTaskSummary(state.mergeApprovals).pending;
+  if (footer) {
+    footer.textContent = "";
+    footer.hidden = pendingApprovals.length === 0;
+    for (const approval of pendingApprovals) {
+      const code = (workspaceLabel(approval.binding?.candidatePath) || approval.taskId || approval.id).slice(0, 8);
+      const open = officeButton("", () => openMergeApprovalDialog(approval.id), "office-task-approval");
+      const label = document.createElement("span");
+      label.textContent = `📁 草稿版 ${code} 待核准`;
+      const go = document.createElement("b");
+      go.textContent = "核准併入 ▸";
+      open.append(label, go);
+      open.title = `${approval.taskId} · 需要 Owner 逐項檢視後核准；核准前 main 不會被修改。`;
+      footer.append(open);
+    }
   }
-  for (const request of pending) {
-    const card = document.createElement("article");
-    card.className = "office-task-card is-pending";
-    const head = document.createElement("div");
-    const title = document.createElement("b");
-    title.textContent = "等待確認 RUN";
-    const tag = document.createElement("small");
-    tag.textContent = String(request.id || "").slice(0, 8);
-    head.append(title, tag);
-    const detail = document.createElement("p");
-    detail.textContent = String(request.task || "未命名任務").slice(0, 220);
-    const assignment = document.createElement("small");
-    assignment.textContent = `Writer · ${request.writer?.provider || "claude"}`;
-    card.append(head, detail, assignment);
-    list.append(card);
+  const running = groups[0][1].length;
+  const badge = byId("office-task-count");
+  if (badge) {
+    badge.textContent = String(running + pendingApprovals.length);
+    badge.hidden = running + pendingApprovals.length === 0;
   }
 }
 
@@ -2540,6 +2847,38 @@ function isManagedAgent(agent) {
   return state.managedAgents.some((entry) => entry.displayName === agent);
 }
 
+/*
+ * The strip above the ledger: one chip per seat that can be addressed, each carrying the same
+ * mark and word as the task drawer. Clicking a chip does what clicking a desk does.
+ */
+function renderSeatChips() {
+  const strip = byId("office-seat-chips");
+  if (!strip) return;
+  strip.textContent = "";
+  const chips = [];
+  for (const session of (state.presences || []).filter((entry) => entry.joined && entry.displayName)) {
+    const listening = seatListeningState(session);
+    chips.push({ agent: session.displayName, text: `${listening.mark} ${session.displayName}`, cls: `seat-chip ${listening.cls}`, title: `${listening.label} · ${listening.title}`, color: authorColor(session.provider) });
+  }
+  for (const agent of state.managedAgents) {
+    chips.push({ agent: agent.displayName, text: `◇ ${agent.displayName}`, cls: `seat-chip is-managed ${agent.busy ? "is-busy" : ""}`, title: agent.busy ? "回覆中" : "GUI Managed · 對話唯讀", color: authorColor(agent.provider) });
+  }
+  for (const provider of ROOM_RESIDENT_PROVIDER_IDS) {
+    chips.push({ agent: provider, text: provider, cls: "seat-chip is-resident", title: "常駐模型；送出後才會喚醒", color: authorColor(provider) });
+  }
+  for (const chip of chips) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `${chip.cls} ${state.selectedAgent === chip.agent ? "is-selected" : ""}`;
+    button.textContent = chip.text;
+    button.title = chip.title;
+    button.style.setProperty("--chip", chip.color);
+    button.setAttribute("aria-pressed", String(state.selectedAgent === chip.agent));
+    button.addEventListener("click", () => focusAgentComposer(chip.agent));
+    strip.append(button);
+  }
+}
+
 function focusAgentComposer(agent) {
   if (!byId("writer-handoff")?.hidden) {
     const candidate = (state.writers?.candidates || []).find((entry) => entry.displayName === agent || entry.actorId === agent);
@@ -2556,10 +2895,12 @@ function focusAgentComposer(agent) {
   }
   const input = byId("office-chat-input");
   if (!input) return;
-  closeOfficeSidePanels();
+  /* A desk click lands in the conversation drawer with the seat's card docked above the composer. */
+  openOfficeDrawer("office-drawer-chat");
   document.querySelectorAll(".cubicle.is-selected, .desk.is-selected")
     .forEach((node) => node.classList.remove("is-selected"));
   renderAgentCard(agent);
+  renderSeatChips();
   document.querySelector(`.cubicle[data-agent="${agent}"]`)?.classList.add("is-selected");
   byId(`desk-${agent}`)?.classList.add("is-selected");
   if (agent === "you" || agent === "system") {
@@ -2648,43 +2989,82 @@ function selectedAgentWork(agent, messages) {
   return workflowAgentWork()[agent] || null;
 }
 
+
 function renderAgentCard(agent, messages = state.recent || []) {
   const card = byId("office-agent-card");
   if (!card || !agent || !OFFICE_AGENTS.includes(agent)) return;
   const info = providerInfo(agent);
   const work = selectedAgentWork(agent, messages);
   const last = [...messages].reverse().find((message) => message.author === agent && message.kind === "chat");
+  const stats = (state.stats || []).find((entry) => entry.author === agent);
   state.selectedAgent = agent;
   card.hidden = false;
   byId("office-agent-name").textContent = info.label.toUpperCase();
   byId("office-agent-dot").style.background = authorColor(agent);
   const seatBehindDesk = presenceForAgent(agent);
   const deskListening = seatBehindDesk ? seatListeningState(seatBehindDesk) : undefined;
-  byId("office-agent-status").textContent = work
+  const status = byId("office-agent-status");
+  status.textContent = work
     ? `⛔ ${work.label}`
     : deskListening
-      ? `${deskListening.mark} ${deskListening.text}`
-      : "可對話 · 閒置";
+      ? `${deskListening.mark} ${deskListening.label}`
+      : isManagedAgent(agent) ? "◇ 唯讀 · 閒置" : "閒置";
+  status.className = `seat-listening ${work ? "is-busy" : deskListening?.cls || ""}`;
+  status.title = work ? `請勿打擾：${work.detail || work.label}` : deskListening?.title || "";
   byId("office-agent-access").textContent = info.access;
   byId("office-agent-model").textContent = work?.model || info.model;
-  byId("office-agent-last").textContent = last ? `#${last.seq} · ${last.at.slice(11, 16)}` : "尚無發言";
-  byId("office-agent-detail").textContent = work
+  byId("office-agent-last").textContent = last ? `最近 #${last.seq} · ${last.at.slice(11, 16)}` : "尚無發言";
+  byId("office-agent-messages").textContent = `訊息 ${stats?.messages ?? 0} 則`;
+  /*
+   * Two lines, and a third only when the third is the answer to "will anything happen if I send
+   * this": a seat that cannot hear you gets its sentence and its fix on screen, not in a tooltip.
+   */
+  const detail = byId("office-agent-detail");
+  const deaf = Boolean(deskListening && deskListening.key !== "listening");
+  detail.hidden = !deaf && !work;
+  detail.textContent = work
     ? `請勿打擾：${work.detail || "Agent 正在處理已核准的工作。"}`
-    : agent === "you"
-      ? "這是你的 Owner 工位；所有高風險動作仍需要你明確批准。"
-      : isJoinedPresenceAgent(agent)
-        ? deskListening && deskListening.key !== "listening"
-          ? `${deskListening.send} 怎麼辦：${deskListening.fix}`
-          : `這是已加入的 ${providerForAgent(agent)} MCP 終端；點擊會預填 @${agent}，訊息進入房間收件匣，不另花模型額度。`
-        : isManagedAgent(agent)
-          ? `這是 Orchestratory 管理的即時子 Agent；可重複對話，每席同時只有一個進行中回覆，不會冒用外接終端。`
-        : `點擊已在輸入框預填 @${agent}；仍需按送出才會喚醒模型。`;
+    : deaf
+      ? `${deskListening.send} 怎麼辦：${deskListening.fix}`
+      : "";
+  byId("office-agent-mention").hidden = agent === "you" || agent === "system";
+}
+
+
+const OFFICE_DRAWER_IDS = Object.freeze(["office-drawer-chat", "office-task-center", "office-notifications", "writer-handoff"]);
+
+function syncOfficeRail() {
+  for (const button of document.querySelectorAll(".office-rail-button[data-drawer]")) {
+    const drawer = byId(button.dataset.drawer);
+    button.setAttribute("aria-pressed", String(Boolean(drawer && !drawer.hidden)));
+  }
 }
 
 function closeOfficeSidePanels(except = "") {
-  for (const id of ["office-task-center", "office-notifications", "writer-handoff"]) {
+  for (const id of OFFICE_DRAWER_IDS) {
     if (id !== except) byId(id).hidden = true;
   }
+  syncOfficeRail();
+}
+
+/* One drawer at a time. Opening one closes the others and refreshes what that drawer shows. */
+function openOfficeDrawer(id) {
+  const panel = byId(id);
+  if (!panel) return;
+  closeOfficeSidePanels(id);
+  panel.hidden = false;
+  if (id === "office-task-center") renderTaskCenter();
+  if (id === "office-notifications") {
+    renderOfficeNotifications();
+    markOfficeNotificationsRead();
+  }
+  if (id === "writer-handoff") prepareWriterDrawer();
+  if (id === "office-drawer-chat") {
+    renderSeatChips();
+    const stream = byId("office-chat-stream");
+    if (stream) stream.scrollTop = stream.scrollHeight;
+  }
+  syncOfficeRail();
 }
 
 function fireWire(from, to) {
@@ -2718,7 +3098,7 @@ function renderOfficeChat(messages) {
   if (!recent.length) {
     const empty = document.createElement("div");
     empty.className = "office-chat-empty";
-    empty.textContent = "還沒有對話；點選場景中的 agent 開始。";
+    empty.textContent = "還沒有對話；點一個工位或席位晶片開始。";
     stream.append(empty);
     return;
   }
@@ -2850,37 +3230,107 @@ function switchView(view) {
   if (office) {
     buildOffice();
     updateOffice(state.recent || []);
+    if (OFFICE_DRAWER_IDS.every((id) => byId(id)?.hidden)) openOfficeDrawer("office-task-center");
+    else renderTaskCenter();
+    syncOfficeRail();
+    syncOfficeSettingsMenu();
     void refreshOfficeControlPlane();
   }
 }
 byId("view-office").addEventListener("click", () => switchView("office"));
 byId("view-ledger").addEventListener("click", () => switchView("ledger"));
 
+
 function toggleOfficePanel(id) {
   const panel = byId(id);
-  const opening = panel.hidden;
-  closeOfficeSidePanels(opening ? id : "");
-  panel.hidden = !opening;
-  if (opening) {
-    byId("office-agent-card").hidden = true;
-    state.selectedAgent = "";
-    document.querySelectorAll(".cubicle.is-selected, .desk.is-selected")
-      .forEach((node) => node.classList.remove("is-selected"));
+  if (!panel) return;
+  if (!panel.hidden) {
+    closeOfficeSidePanels("");
+    return;
   }
-  if (id === "office-task-center" && opening) renderTaskCenter();
-  if (id === "office-notifications" && opening) markOfficeNotificationsRead();
+  openOfficeDrawer(id);
 }
 
-byId("office-task-toggle").addEventListener("click", () => toggleOfficePanel("office-task-center"));
-byId("office-task-close").addEventListener("click", () => { byId("office-task-center").hidden = true; });
-byId("office-notification-toggle").addEventListener("click", () => toggleOfficePanel("office-notifications"));
-byId("office-notification-close").addEventListener("click", () => { byId("office-notifications").hidden = true; });
+for (const button of document.querySelectorAll(".office-rail-button[data-drawer]")) {
+  button.addEventListener("click", () => toggleOfficePanel(button.dataset.drawer));
+}
+for (const button of document.querySelectorAll("[data-drawer-close]")) {
+  button.addEventListener("click", () => {
+    byId(button.dataset.drawerClose).hidden = true;
+    syncOfficeRail();
+  });
+}
 byId("office-notification-clear").addEventListener("click", markOfficeNotificationsRead);
 byId("office-agent-close").addEventListener("click", () => {
   byId("office-agent-card").hidden = true;
   state.selectedAgent = "";
   document.querySelectorAll(".cubicle.is-selected, .desk.is-selected")
     .forEach((node) => node.classList.remove("is-selected"));
+  renderSeatChips();
+});
+byId("office-agent-mention").addEventListener("click", () => {
+  if (state.selectedAgent) focusAgentComposer(state.selectedAgent);
+});
+
+/*
+ * ⚙ menu. Every item forwards to the stage toolbar's own button, so the two can never disagree
+ * about what a toggle does; the toolbar itself is hidden by CSS. Checkbox items mirror the source
+ * button's aria-pressed after each click.
+ */
+function syncOfficeSettingsMenu() {
+  for (const item of document.querySelectorAll("#office-settings-menu [data-office-action]")) {
+    const source = byId(item.dataset.officeAction);
+    item.disabled = !source;
+    if (source && item.getAttribute("role") === "menuitemcheckbox") {
+      item.setAttribute("aria-checked", source.getAttribute("aria-pressed") || "false");
+    }
+  }
+  const rec = byId("rec-toggle");
+  const recLabel = byId("office-rec-label");
+  if (rec && recLabel) recLabel.textContent = rec.textContent;
+}
+
+function setOfficeSettingsMenu(open) {
+  const menu = byId("office-settings-menu");
+  if (!menu) return;
+  menu.hidden = !open;
+  byId("office-settings-toggle").setAttribute("aria-expanded", String(open));
+  if (open) syncOfficeSettingsMenu();
+}
+
+byId("office-settings-toggle").addEventListener("click", () => setOfficeSettingsMenu(byId("office-settings-menu").hidden));
+for (const item of document.querySelectorAll("#office-settings-menu [data-office-action]")) {
+  item.addEventListener("click", () => {
+    byId(item.dataset.officeAction)?.click();
+    syncOfficeSettingsMenu();
+    if (item.getAttribute("role") !== "menuitemcheckbox") setOfficeSettingsMenu(false);
+  });
+}
+byId("office-disclaimer-open").addEventListener("click", () => {
+  setOfficeSettingsMenu(false);
+  byId("office-disclaimer").hidden = false;
+  byId("office-disclaimer-close").focus();
+});
+byId("office-disclaimer-close").addEventListener("click", () => {
+  byId("office-disclaimer").hidden = true;
+  byId("office-settings-toggle").focus();
+});
+byId("office-disclaimer").addEventListener("click", (event) => {
+  if (event.target === event.currentTarget) byId("office-disclaimer").hidden = true;
+});
+document.addEventListener("click", (event) => {
+  const menu = byId("office-settings-menu");
+  if (!menu || menu.hidden) return;
+  if (menu.contains(event.target) || byId("office-settings-toggle").contains(event.target)) return;
+  /* A menu item forwards its click to the hidden toolbar button, and that synthetic click bubbles
+     here too; it is the menu acting, not the owner clicking away from it. */
+  if (event.target.closest?.(".office-toolbar, [data-office-toolbar]")) return;
+  setOfficeSettingsMenu(false);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (!byId("office-settings-menu").hidden) setOfficeSettingsMenu(false);
+  else if (!byId("office-disclaimer").hidden) byId("office-disclaimer").hidden = true;
 });
 
 byId("managed-agent-create").addEventListener("submit", async (event) => {
@@ -3022,6 +3472,8 @@ function renderWriterControl() {
   const reviewReady = active ? undefined : reviewReadyWriterLease();
   const terminal = active || reviewReady ? undefined : terminalWriterLease();
   const summary = byId("writer-active-summary");
+  const summaryName = byId("writer-active-name");
+  const summaryMeta = byId("writer-active-meta");
   const children = active
     ? (state.writers?.delegations || []).filter((child) => child.parentLeaseId === active.id && child.state === "active")
     : [];
@@ -3035,33 +3487,39 @@ function renderWriterControl() {
   for (const child of children) {
     const option = document.createElement("option");
     option.value = child.id;
-    option.textContent = `${child.displayName} · ${child.access === "write" ? "共享 Writer worktree（序列執行）" : "跨類型唯讀"}`;
+    option.textContent = `${child.displayName} · ${child.access === "write" ? "共用草稿區（序列執行）" : "跨類型唯讀"}`;
     executor.append(option);
   }
   executor.value = children.some((child) => child.id === selectedExecutor) ? selectedExecutor : "";
   const executionId = executor.value || active?.id || "";
   const executionBusy = Boolean(executionId && (state.writers?.busyLeaseIds || []).includes(executionId));
   summary.classList.toggle("is-active", Boolean(active));
-  summary.textContent = active
-    ? `${active.writer.displayName} · ${active.taskId} · epoch ${active.epoch}${active.companionId ? " · via Writer Companion" : ""} · ${children.length} 個子 Agent`
+  const shown = active || reviewReady || terminal;
+  summaryName.textContent = shown ? `${shown.writer.displayName} · 第 ${shown.epoch} 任` : "尚未指派 Writer";
+  summaryMeta.textContent = active
+    ? `${active.taskId} · 草稿區 ${workspaceLabel(active.worktree).slice(0, 8)}${active.companionId ? " · via Writer Companion" : ""} · ${children.length} 個子 Agent`
     : reviewReady
-      ? `${reviewReady.writer.displayName} · ${reviewReady.taskId} · 寫作完成，尚未回寫主專案`
+      ? `${reviewReady.taskId} · 寫作完成，尚未 apply-back`
       : terminal?.taskPhase === "applied"
-        ? `${terminal.writer.displayName} · ${terminal.taskId} · 已由 Owner 核准並回寫主專案`
+        ? `${terminal.taskId} · 已由 Owner 核准並 apply-back`
         : terminal?.taskPhase === "applying"
-          ? `${terminal.writer.displayName} · ${terminal.taskId} · 回寫狀態待人工確認（fail-closed）`
-      : "尚未指派 Writer";
+          ? `${terminal.taskId} · apply-back 狀態待人工確認（fail-closed）`
+      : "指派後會建立獨立草稿區；交接時舊任與子 Agent 的寫入權立即失效。";
   byId("writer-assign").textContent = active ? "交接 Writer" : "指派 Writer";
+  byId("writer-handover").disabled = !active;
   const completeButton = byId("writer-complete");
   if (!active) state.writerCompleteConfirm = "";
   const awaitingCompleteConfirm = Boolean(active) &&
     state.writerCompleteConfirm === `${active.taskId}:${active.epoch}`;
   completeButton.disabled = !active && !reviewReady;
+  /* test/web.test.ts pins these two labels; the drawer keeps them rather than the mock-up's shorter
+     "結束並 apply-back", because "準備回寫" is the honest tense -- pressing it revokes write access and
+     only PREPARES the apply-back preview. */
   completeButton.textContent = awaitingCompleteConfirm
     ? "再按一次：結束 Writer 並撤銷寫入權"
     : active
       ? "結束 Writer 並準備回寫"
-      : reviewReady ? "重新檢視回寫風險" : "完成 Writer";
+      : reviewReady ? "重新檢視回寫風險" : "結束 Writer 並準備回寫";
   completeButton.classList.toggle("danger", awaitingCompleteConfirm);
   byId("writer-delegate").disabled = !active;
   byId("writer-run-cancel").hidden = !executionBusy;
@@ -3108,9 +3566,9 @@ async function assignWriter() {
   }
   const active = activeWriterLease();
   try {
-    status.textContent = active ? "正在凍結舊 Writer 並建立交接 checkpoint…" : "正在建立隔離 worktree 與 Writer Lease…";
+    status.textContent = active ? "正在凍結舊 Writer 並建立交接存檔點…" : "正在建立獨立草稿區與 Writer Lease…";
     if (active) {
-      if (!checkpoint) throw new Error("交接前必須填寫 checkpoint");
+      if (!checkpoint) throw new Error("交接前必須填寫存檔點");
       await api("/api/rooms/writers/switch", {
         method: "POST",
         body: JSON.stringify({ room: state.room, taskId: active.taskId, expectedEpoch: active.epoch, checkpoint, candidate }),
@@ -3123,7 +3581,7 @@ async function assignWriter() {
     }
     byId("writer-checkpoint").value = "";
     await refreshPresence(true);
-    status.textContent = active ? "Writer 已交接；舊 epoch 與子權限已撤銷。" : "Writer 已指派並建立隔離 worktree。";
+    status.textContent = active ? "Writer 已交接；舊任與子 Agent 的寫入權已撤銷。" : "Writer 已指派並建立獨立草稿區。";
   } catch (error) {
     status.textContent = `Writer 操作失敗：${humanError(error)}`;
   }
@@ -3139,11 +3597,11 @@ async function completeWriterLease() {
   const checkpoint = byId("writer-checkpoint").value.trim();
   const status = byId("writer-live-status");
   if (!active && !reviewReady) {
-    status.textContent = "目前沒有可完成或待回寫的 Writer 任務。";
+    status.textContent = "目前沒有可結束或待 apply-back 的 Writer 任務。";
     return;
   }
   if (active && !checkpoint) {
-    status.textContent = "完成前必須填寫 checkpoint。";
+    status.textContent = "結束前必須填寫存檔點。";
     return;
   }
   if (active) {
@@ -3153,7 +3611,7 @@ async function completeWriterLease() {
     if (state.writerCompleteConfirm !== confirmKey) {
       state.writerCompleteConfirm = confirmKey;
       status.textContent = `這個動作會先結束 Writer ${active.writer.displayName}（${active.taskId} · epoch ${active.epoch}），` +
-        `立即撤銷它與 ${children.length} 個子 Agent 的寫入權，之後才產生回寫預覽；` +
+        `立即撤銷它與 ${children.length} 個子 Agent 的寫入權，之後才產生 apply-back 預覽；` +
         "撤銷後不能繼續寫作，只能重新指派 Writer。確定的話請再按一次按鈕。";
       renderWriterControl();
       return;
@@ -3858,46 +4316,60 @@ async function delegateWriter() {
     byId("writer-child-label").value = "";
     await refreshPresence(true);
     status.textContent = value.delegation.access === "write"
-      ? `${value.delegation.displayName} 已取得同一 Writer worktree 的受控寫入權；系統會與 Writer／其他子 Agent 序列執行。`
+      ? `${value.delegation.displayName} 已取得同一草稿區的受控寫入權；系統會與 Writer／其他子 Agent 序列執行。`
       : `${value.delegation.displayName} 已加入，但因跨類型而保持唯讀。`;
   } catch (error) {
     status.textContent = `派駐失敗：${humanError(error)}`;
   }
 }
 
-function setWriterHandoff(open) {
-  const panel = byId("writer-handoff");
-  const form = byId("writer-handoff-form");
-  const result = byId("writer-handoff-result");
-  const task = byId("writer-task");
-  panel.hidden = !open;
-  if (!open) return;
-  closeOfficeSidePanels("writer-handoff");
-  byId("office-agent-card").hidden = true;
-  state.selectedAgent = "";
-  result.hidden = true;
-  form.hidden = false;
-  byId("writer-handoff-status").textContent = "";
+
+/* What the Writer drawer needs fresh each time it opens: statuses cleared, a task id to work on. */
+function prepareWriterDrawer() {
   byId("writer-live-status").textContent = "";
   state.writerCompleteConfirm = "";
   const taskInput = byId("writer-task-id");
   if (!taskInput.value.trim()) {
-    /* 有進行中或待回寫的 lease 時沿用它的 taskId，不要蓋掉待核准的任務。 */
+    /* 有進行中或待 apply-back 的 lease 時沿用它的 taskId，不要蓋掉待核准的任務。 */
     taskInput.value = pendingWriterLease()?.taskId || `task-${Date.now().toString(36)}`;
   }
   renderWriterControl();
-  const draft = byId("office-chat-input").value
-    .replace(MENTION_DRAFT_PATTERN, "")
-    .trim();
-  if (!task.value.trim() && draft) task.value = draft;
-  task.focus();
 }
 
-byId("writer-handoff-toggle").addEventListener("click", () => {
-  setWriterHandoff(byId("writer-handoff").hidden);
+function setWriterHandoff(open) {
+  if (!open) {
+    byId("writer-handoff").hidden = true;
+    syncOfficeRail();
+    return;
+  }
+  openOfficeDrawer("writer-handoff");
+}
+
+byId("writer-handover").addEventListener("click", () => {
+  const active = activeWriterLease();
+  byId("writer-live-status").textContent = active
+    ? `交接：選好人選、填交接存檔點，再按「交接 Writer」；${active.writer.displayName} 的寫入權會在那一刻失效。`
+    : "目前沒有 Writer 可交接。";
+  byId("writer-candidate").focus();
 });
-byId("writer-handoff-close").addEventListener("click", () => setWriterHandoff(false));
-byId("writer-handoff-cancel").addEventListener("click", () => setWriterHandoff(false));
+/* 清空 only clears the proposal form; the drawer that hosts it stays where it is. */
+byId("writer-handoff-cancel").addEventListener("click", () => {
+  byId("writer-task").value = "";
+  byId("writer-acceptance").value = "";
+  byId("writer-handoff-status").textContent = "";
+  byId("writer-handoff-form").hidden = false;
+  byId("writer-handoff-result").hidden = true;
+});
+/* Opening the proposal fold carries the composer draft over, as the old panel did on open. */
+byId("office-workflow-proposal").addEventListener("toggle", () => {
+  const fold = byId("office-workflow-proposal");
+  if (!fold.open) return;
+  const task = byId("writer-task");
+  const draft = byId("office-chat-input").value.replace(MENTION_DRAFT_PATTERN, "").trim();
+  if (!task.value.trim() && draft) task.value = draft;
+  renderWriterControl();
+  task.focus();
+});
 byId("writer-assign").addEventListener("click", assignWriter);
 byId("writer-complete").addEventListener("click", completeWriterLease);
 byId("writer-delegate").addEventListener("click", delegateWriter);
@@ -3968,7 +4440,8 @@ byId("office-chat-form").addEventListener("submit", async (event) => {
     delete input.dataset.managedAgentId;
     document.querySelectorAll(".cubicle.is-selected, .desk.is-selected")
       .forEach((node) => node.classList.remove("is-selected"));
-    byId("office-chat-hint").textContent = "點一個工位就能指名交辦；沒有指名的話，這則只會留在房間帳本裡，不會進任何人的收件匣";
+    byId("office-chat-hint").textContent = "點一個工位或席位晶片就能指名交辦；沒有指名的話，這則只會留在房間帳本裡，不會進任何人的收件匣";
+    renderSeatChips();
     await poll();
   } catch (error) {
     if (error.message === "ROOM_MENTION_CANCELLED") {
