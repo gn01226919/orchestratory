@@ -206,10 +206,22 @@ export function assertDataDirectoryOverride(value: string): string {
        */
       const code = (error as NodeJS.ErrnoException | undefined)?.code;
       if (code !== "ENOENT") {
+        /*
+         * The errno and how deep the walk got, never the path itself. The first version of this
+         * message interpolated `existing`, which is an absolute path -- written, of all rounds, in
+         * the one that was removing paths from error messages elsewhere. The repository scanner
+         * could not see it because nothing in the source is a path; it only becomes one at runtime.
+         *
+         * The depth is what the reader actually needs: they set the value, so they know the string,
+         * and "the third segment answered EACCES" tells them which parent to look at without this
+         * process repeating anything back.
+         */
+        const depth = trailing.length + 1;
         throw new Error(
-          `INVALID_DATA_DIRECTORY:UNRESOLVABLE — ${DATA_DIRECTORY_ENVIRONMENT_KEY} 的路徑無法解析`
-          + `（${existing} 回報 ${code ?? "未知錯誤"}）。這不是「還沒建立」，而是「查不下去」，`
-          + "所以不能假設它安全。請確認路徑拼寫、父目錄權限，以及外接或網路磁碟已經掛載。"
+          `INVALID_DATA_DIRECTORY:UNRESOLVABLE — ${DATA_DIRECTORY_ENVIRONMENT_KEY} 的路徑無法解析：`
+          + `從尾端數來第 ${depth} 段回報 ${code ?? "未知錯誤"}。這不是「還沒建立」，而是「查不下去」，`
+          + "所以不能假設它安全。請確認該層的拼寫與權限，以及外接或網路磁碟是否已掛載。"
+          + "（訊息刻意不回吐路徑；`orchestratory data inventory` 會在本機顯示解析結果。）"
           + "未設定這個變數時會使用預設位置；設錯不會靜默退回預設。",
         );
       }

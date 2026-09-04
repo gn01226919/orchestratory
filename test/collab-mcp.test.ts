@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
+import { realpathSync } from "node:fs";
 import {
   CollabToolBroker,
   handleCollabMcpMessage,
@@ -2074,12 +2075,21 @@ interface CapabilityWorld {
   service: CollaborationService;
   root: string;
   seatTwo: string;
-  close(): void;
+  close(): Promise<void>;
 }
 
 async function capabilityWorld(degraded: boolean): Promise<CapabilityWorld> {
-  const root = await mkdtemp(join(tmpdir(), "orchestratory-capability-root-"));
-  const data = await mkdtemp(join(tmpdir(), "orchestratory-capability-data-"));
+  /*
+   * Canonical from the start. `WorkspacePolicy` resolves what it is given, and on macOS $TMPDIR is
+   * /var/folders/... which resolves to /private/var/folders/... -- so a fixture that hands the
+   * unresolved spelling to the room binding and the resolved one to the policy makes them disagree,
+   * and every room-first tool fails with ROOM_FIRST_WORKSPACE_MISMATCH before reaching its own work.
+   * That failure is identical in both worlds, so the differencing still reads "no inbox dependency"
+   * -- the right answer for the wrong reason, which is the failure mode this whole guard exists to
+   * stop being possible.
+   */
+  const root = realpathSync(await mkdtemp(join(tmpdir(), "orchestratory-capability-root-")));
+  const data = realpathSync(await mkdtemp(join(tmpdir(), "orchestratory-capability-data-")));
   await execFileAsync("git", ["init", "-b", "main"], { cwd: root });
   await writeFile(join(root, "README.md"), "main\n", "utf8");
   await execFileAsync("git", ["add", "README.md"], { cwd: root });
@@ -2098,6 +2108,7 @@ async function capabilityWorld(degraded: boolean): Promise<CapabilityWorld> {
   }
 
   const service = new CollaborationService(data, { presence: { leaseMs: 120_000 } });
+  const workflowRequests = new WorkflowRequestStore(data);
   assert.equal(service.inboxAvailable, !degraded, "the world was not built in the state it claims");
   service.ledger.createRoom("demo", root);
   const join1 = service.registerExternal({ provider: "codex", workspace: root, hostPid: 9_101 });
@@ -2141,7 +2152,7 @@ async function capabilityWorld(degraded: boolean): Promise<CapabilityWorld> {
     requestRoomJoin: () => undefined,
     waitForRoomJoin: async () => true,
     cancelRoomJoin: () => undefined,
-    workflowRequests: new WorkflowRequestStore(data),
+    workflowRequests,
   });
 
   return {
@@ -2149,7 +2160,19 @@ async function capabilityWorld(degraded: boolean): Promise<CapabilityWorld> {
     service,
     root,
     seatTwo: join2.id,
-    close: () => service.close(),
+    /*
+     * Everything this world opened, closed, and both temporary trees removed. The first version
+     * closed only the collaboration service, which left a WorkflowRequestStore connection and two
+     * directories per world -- four per test, in a change whose subject was a constructor that
+     * leaked stores. A fixture that leaks while testing leaks is not a small irony; it is the same
+     * defect, in the file that is supposed to notice it.
+     */
+    close: async () => {
+      service.close();
+      workflowRequests.close();
+      await rm(root, { recursive: true, force: true });
+      await rm(data, { recursive: true, force: true });
+    },
   };
 }
 
@@ -2205,8 +2228,8 @@ async function outcomeOf(
 test("the tools a degraded inbox stops are measured by running them, not by reading the source", async (t) => {
   const healthy = await capabilityWorld(false);
   const degraded = await capabilityWorld(true);
-  t.after(() => healthy.close());
-  t.after(() => degraded.close());
+  t.after(async () => await healthy.close());
+  t.after(async () => await degraded.close());
 
   /* The dispatch is still the population. If it grows, this guard must be told, not quietly left
      measuring a subset -- which is exactly what the seventeen-of-twenty-seven table did. */
@@ -2231,6 +2254,31 @@ test("the tools a degraded inbox stops are measured by running them, not by read
     const brokenByInbox = !after.ok && /ROOM_INBOX_UNAVAILABLE/u.test(after.message);
     if (NOT_JUDGED_BY_ERROR.has(tool)) {
       assert.equal(brokenByInbox, false, `${tool} is asserted on its payload, not its error`);
+      /*
+       * And the payload is actually read, which the first version of this only claimed. Both tools
+       * swallow their failure, so "it did not throw" says nothing at all -- it is exactly what a
+       * swallowed failure looks like. What distinguishes them is whether the answer is still there.
+       */
+      assert.equal(after.ok, true, `${tool} swallows its failure, so it must still return -- got: ${after.message} | healthy: ${before.ok ? "ok" : before.message}`);
+      const payload = JSON.parse(after.payload) as Record<string, unknown>;
+      if (tool === "compare_agents") {
+        const answers = payload.answers as Array<{ error?: string }> | undefined;
+        assert.ok(Array.isArray(answers) && answers.length > 0, "compare_agents must answer");
+        assert.equal(
+          answers.some((answer) => /ROOM_INBOX_UNAVAILABLE/u.test(answer?.error ?? "")),
+          false,
+          "compare_agents must not be quietly reporting an inbox failure inside its payload",
+        );
+      }
+      if (tool === "room_join_request") {
+        const healthyPayload = JSON.parse(before.payload) as Record<string, unknown>;
+        assert.ok("briefing" in healthyPayload, "the healthy join must carry a briefing");
+        assert.equal(
+          "briefing" in payload,
+          false,
+          "the degraded join must lose exactly the briefing -- not the call, and not nothing",
+        );
+      }
       continue;
     }
     if (brokenByInbox) {
@@ -2266,8 +2314,8 @@ test("the join briefing is the one dependency that fails quietly, and it is asse
    */
   const healthy = await capabilityWorld(false);
   const degraded = await capabilityWorld(true);
-  t.after(() => healthy.close());
-  t.after(() => degraded.close());
+  t.after(async () => await healthy.close());
+  t.after(async () => await degraded.close());
   const briefing = healthy.service.roomBriefing({ roomId: "demo", workspace: healthy.root });
   assert.ok(briefing.seats.length > 0, "the healthy briefing must list seats or this proves nothing");
   assert.throws(

@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { safeSummary } from "../src/security/redact.ts";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -1645,4 +1646,33 @@ test("failure classes say what to do, and never repeat what the failure said", (
   assert.equal(described.includes(secret), false, "the path must not survive into the description");
   assert.equal(described.includes(leaky.message), false, "nothing the failure said may be echoed");
   assert.match(described, /STORE_UNAVAILABLE:room-inbox:PERMISSION/u);
+});
+
+test("the original failure stays reachable locally and never reaches the wire", async (t) => {
+  /*
+   * `cause` is how a person debugging keeps the real error after it has been classified, and it is
+   * the obvious place for the path to escape from: the message is scrubbed, and then the thing it
+   * was scrubbed of travels attached to it.
+   *
+   * Today nothing serialises it -- the MCP layer sends `error.message` through `safeSummary`, and no
+   * caller reads `.cause`. That was true by accident until this test, which is the difference
+   * between a property and a coincidence. If a future error path starts sending the whole object,
+   * or summarising `cause` alongside `message`, this goes red before it ships.
+   */
+  const secret = "/Users/example/private/data.sqlite";
+  const original = Object.assign(new Error(`EACCES: permission denied, open '${secret}'`), {
+    code: "EACCES",
+  });
+  const wrapped = new Error(describeStoreFailure("room-inbox", original), { cause: original });
+
+  /* Local debugging keeps everything. */
+  assert.equal(wrapped.cause, original, "the original must remain reachable in-process");
+  assert.ok(String((wrapped.cause as Error).message).includes(secret));
+
+  /* The wire gets the message, summarised, and nothing else -- the exact shape collab-server.ts and
+     workspace-server.ts both use for their JSON-RPC error field. */
+  const onTheWire = safeSummary(wrapped instanceof Error ? wrapped.message : "MCP_ERROR", 200);
+  assert.equal(onTheWire.includes(secret), false, "the path must not survive summarisation");
+  assert.equal(onTheWire.includes("EACCES: permission denied"), false, "nor may the original text");
+  assert.match(onTheWire, /STORE_UNAVAILABLE:room-inbox:PERMISSION/u);
 });
