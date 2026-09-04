@@ -37,13 +37,13 @@
           </div>
         </div>
         <div class="topbar-chips" aria-label="房間概況">
-          <button id="agent-requests-open" class="agent-requests-open topbar-chip" type="button" aria-expanded="false" aria-controls="agent-requests-panel" aria-label="終端席位與子 Agent 面板">
+          <button id="topbar-terminal-open" class="topbar-chip" type="button" aria-controls="office-task-center" aria-label="終端：開啟任務清單的「終端」分組">
             <span>終端</span><b id="topbar-terminal-count" class="topbar-chip-count">0</b><b id="agent-request-count" class="topbar-chip-alert" hidden>0</b>
           </button>
-          <button id="topbar-managed-open" class="topbar-chip" type="button" aria-controls="agent-requests-panel" aria-label="子 Agent：開啟終端面板並建立受控即時 Agent">
+          <button id="topbar-managed-open" class="topbar-chip" type="button" aria-controls="office-task-center" aria-label="子 Agent：開啟任務清單的「子 Agent」分組">
             <span>子 Agent</span><b id="topbar-managed-count" class="topbar-chip-count">0</b>
           </button>
-          <button id="topbar-task-open" class="topbar-chip" type="button" aria-label="任務：開啟任務清單">
+          <button id="topbar-task-open" class="topbar-chip" type="button" aria-controls="office-task-center" aria-label="任務：開啟任務清單的「執行中」分組">
             <span>任務</span><b id="topbar-task-count" class="topbar-chip-count">0</b>
           </button>
         </div>
@@ -63,8 +63,9 @@
         <button id="rec-toggle" class="topbar-rec" type="button" title="切換收錄" aria-label="收錄狀態：點一下切換暫停或恢復收錄"><i class="dot on" id="topbar-rec-dot" aria-hidden="true"></i><b id="topbar-rec-state">…</b></button>
         <button id="stop-all" type="button" class="danger topbar-stop" title="緊急停止：停止所有執行中的工作流" aria-label="緊急停止：停止所有執行中的工作流">■</button>
       </header>
-      <section id="agent-requests-panel" class="agent-requests-panel topbar-drawer" hidden aria-label="Agent 加入與待命申請">
-        <div class="topbar-drawer-head"><b>終端與子 Agent</b><button id="agent-requests-close" type="button" aria-label="關閉終端面板，回到頂欄">×</button></div>
+      <section id="agent-requests-panel" class="agent-requests-panel topbar-drawer" hidden aria-label="終端加入設定與受控即時 Agent">
+        <div class="topbar-drawer-head"><b>終端加入設定 · 受控即時 Agent</b><button id="agent-requests-close" type="button" aria-label="關閉終端面板，回到任務清單">×</button></div>
+        <p class="topbar-drawer-note">待核准加入的終端在這裡取名、選協作模式；已加入的席位與子 Agent 在任務清單的「終端」「子 Agent」分組管理。</p>
         <button id="agent-requests-disclaimer" class="office-inline-link" type="button" aria-haspopup="dialog" aria-controls="office-disclaimer">ⓘ 外接終端＝Native Full-Trust，能力仍由 host 掌管 · 免責與說明 ▸</button>
         <div id="sidebar-presence-list" class="office-presence-list"></div>
         <form id="managed-agent-create" class="managed-agent-create">
@@ -81,7 +82,6 @@
           <button class="primary" type="submit">＋ 建立受控即時 Agent</button>
           <small id="managed-agent-create-status" aria-live="polite"></small>
         </form>
-        <div id="sidebar-managed-agent-list" class="office-presence-list managed-agent-list"></div>
       </section>
       <main class="main">
         <div id="ledger" class="stream" aria-live="polite">
@@ -153,6 +153,7 @@
                   <button id="office-task-close" type="button" data-drawer-close="office-task-center" aria-label="關閉任務清單">×</button>
                 </header>
                 <div id="office-task-list" class="office-task-list"></div>
+                <button id="agent-requests-open" class="office-task-settings" type="button" aria-expanded="false" aria-controls="agent-requests-panel">⚙ 終端加入設定 · ＋ 受控即時 Agent ▸</button>
                 <details id="office-workflow-proposal" class="office-task-proposal">
                   <summary>＋ 建立傳統 workflow 提案</summary>
                   <p>只建立傳統 coding workflow 提案，之後到主工作區確認；有進行中的 Writer 時會改為交給它執行。</p>

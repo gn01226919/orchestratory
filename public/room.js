@@ -905,13 +905,20 @@ function renderPresencePanel() {
     const list = byId(listId);
     if (!list) continue;
     list.textContent = "";
-    if (!sessions.length) {
+    /* The topbar panel lists only seats still waiting to join: naming and mode are decided there and
+       nowhere else. A joined seat's row -- its state, its standby buttons, its wake receipt -- is
+       the task drawer's, and a second copy of it here would be the duplicate the drawer replaced. */
+    const shown = listId === "sidebar-presence-list" ? sessions.filter((session) => !session.joined) : sessions;
+    if (!shown.length) {
       const empty = document.createElement("p");
-      empty.textContent = "目前沒有在線終端提出加入申請；帳本中的舊名稱只是歷史紀錄，離線後不建立空工位。";
+      empty.textContent = sessions.length
+        ? "目前沒有待核准加入的終端；已加入的席位在任務清單的「終端」分組。"
+        : "目前沒有在線終端提出加入申請；帳本中的舊名稱只是歷史紀錄，離線後不建立空工位。";
       list.append(empty);
       continue;
     }
-    sessions.forEach((session, index) => {
+    shown.forEach((session) => {
+      const index = sessions.indexOf(session);
       const row = document.createElement("div");
       const selected = state.selectedPresenceId === session.id;
       row.className = `office-presence-row ${session.joined ? "is-joined" : ""} ${selected ? "is-selected" : ""}`;
@@ -1074,12 +1081,7 @@ function renderPresencePanel() {
        * "noop" is about the click itself, so it is NOT gated on the seat being silent. It cannot be:
        * the only way to produce it is the seat turning out to be listening.
        */
-      const wakeEntry = (state.wakeNotices || {})[session.id];
-      const wakeNotice = !wakeEntry
-        ? ""
-        : wakeEntry.kind === "noop"
-          ? (Date.now() - wakeEntry.at < WAKE_NOOP_NOTICE_MS ? wakeEntry.text : "")
-          : (listening.key === "not-listening" ? wakeEntry.text : "");
+      const wakeNotice = seatWakeNotice(session, listening);
       if (wakeNotice) {
         const notice = document.createElement("small");
         notice.className = "presence-stage-hint is-wake-notice";
@@ -1110,6 +1112,20 @@ function renderPresencePanel() {
   }
   renderSeatChips();
   renderTaskCenter();
+}
+
+/*
+ * The receipt for "在帳本記一筆", for every row that carries the button (the topbar panel's row and
+ * the task drawer's). One reading of the two lifetimes, not two: "noop" is about the click and
+ * expires on a clock, "recorded" is about a silence and lasts as long as the silence does.
+ */
+function seatWakeNotice(session, listening) {
+  const wakeEntry = (state.wakeNotices || {})[session.id];
+  return !wakeEntry
+    ? ""
+    : wakeEntry.kind === "noop"
+      ? (Date.now() - wakeEntry.at < WAKE_NOOP_NOTICE_MS ? wakeEntry.text : "")
+      : (listening.key === "not-listening" ? wakeEntry.text : "");
 }
 
 /*
@@ -1664,10 +1680,10 @@ function renderRoomCatalog() {
   badge.textContent = String(globalPending);
   badge.hidden = globalPending === 0;
   const pendingProjects = state.rooms.filter((room) => roomPendingCount(room) > 0);
-  const opener = byId("agent-requests-open");
-  if (opener) opener.title = pendingProjects.length === 1 && pendingProjects[0]?.id !== state.room
+  const chip = byId("topbar-terminal-open");
+  if (chip) chip.title = pendingProjects.length === 1 && pendingProjects[0]?.id !== state.room
     ? `終端席位（${pendingProjects[0].projectName} 有申請 · ${globalPending} 件）`
-    : globalPending > 0 ? `終端席位（${globalPending} 件申請待核准）` : "終端席位與子 Agent";
+    : globalPending > 0 ? `終端席位（${globalPending} 件申請待核准）` : "終端席位：開啟任務清單的「終端」分組";
   const menuLabel = byId("room-menu-label");
   const current = state.rooms.find((room) => room.id === selected);
   if (menuLabel) menuLabel.textContent = current ? (current.projectName || current.id) : (state.rooms.length ? "選擇房間" : "Room 控制室");
@@ -1766,13 +1782,28 @@ byId("ledger").addEventListener("click", (event) => {
   if (ref) void toggleQuote(ref);
 });
 byId("room-select").addEventListener("change", () => void selectRoom(byId("room-select").value));
-byId("agent-requests-open").addEventListener("click", async () => {
+/*
+ * The three topbar chips are counts, and a count is a question ("which three?"). The answer is the
+ * matching group of the task drawer, so each chip opens the drawer at its group rather than a
+ * second list of the same seats. The terminal chip keeps one extra step: when the current room has
+ * nothing pending and exactly one other room does, it switches there first, because the alert on
+ * the chip is a global count and the drawer only shows the current room.
+ */
+byId("topbar-terminal-open")?.addEventListener("click", async () => {
   const current = state.rooms.find((room) => room.id === state.room);
   const pendingRooms = state.rooms.filter((room) => roomPendingCount(room) > 0);
   if (roomPendingCount(current) === 0 && pendingRooms.length === 1) {
     byId("room-select").value = pendingRooms[0].id;
     await selectRoom(pendingRooms[0].id);
   }
+  openOfficeTaskGroup("終端");
+  void refreshPresence(true);
+});
+byId("topbar-managed-open")?.addEventListener("click", () => openOfficeTaskGroup("子 Agent"));
+byId("topbar-task-open")?.addEventListener("click", () => openOfficeTaskGroup("執行中"));
+/* The topbar panel keeps only what the drawer's rows cannot do -- naming and mode for a seat that
+   has not joined yet, and creating a managed agent -- and is opened from the drawer's own door. */
+byId("agent-requests-open").addEventListener("click", () => {
   const opening = byId("agent-requests-panel").hidden;
   setAgentRequestsOpen(opening);
   if (opening) void refreshPresence(true);
@@ -1803,14 +1834,6 @@ function setAgentRequestsOpen(open) {
   if (open) setRoomMenuOpen(false);
 }
 byId("room-menu-toggle")?.addEventListener("click", () => setRoomMenuOpen(byId("room-menu-panel").hidden));
-byId("topbar-managed-open")?.addEventListener("click", () => {
-  if (byId("agent-requests-panel").hidden) byId("agent-requests-open").click();
-  byId("managed-agent-label")?.focus();
-});
-byId("topbar-task-open")?.addEventListener("click", () => {
-  if (byId("office").hidden) switchView("office");
-  byId("office-task-toggle")?.click();
-});
 byId("room-select").addEventListener("change", () => setRoomMenuOpen(false));
 document.addEventListener("click", (event) => {
   const menu = byId("room-menu");
@@ -2518,8 +2541,10 @@ function officeSeatRows() {
       );
       actions.push(officeButton("交辦", () => focusAgentComposer(session.displayName)));
     } else {
-      details.push(["申請", "等你核准加入房間；核准前不記錄它的內容。名稱與模式在左側「新增 Agents」設定。"]);
+      details.push(["申請", "等你核准加入房間；核准前不記錄它的內容。要取名或改協作模式，用下方「終端加入設定」。"]);
     }
+    const wakeNotice = seatWakeNotice(session, listening);
+    if (wakeNotice) details.push(["紀錄", wakeNotice]);
     actions.push(...seatActionButtons(session, listening).children);
     return {
       key: `seat:${session.id}`, color: authorColor(session.provider),
@@ -3501,6 +3526,23 @@ function openOfficeDrawer(id) {
     if (stream) stream.scrollTop = stream.scrollHeight;
   }
   syncOfficeRail();
+}
+
+/*
+ * Open the task drawer with one of its groups in view. Group heads are rebuilt on every render, so
+ * the head is looked up by name after the drawer has rendered rather than held on to, and it is lit
+ * for a moment so the eye lands on the heading the chip named rather than on the top of the list.
+ */
+function openOfficeTaskGroup(name) {
+  if (byId("office").hidden) switchView("office");
+  openOfficeDrawer("office-task-center");
+  const list = byId("office-task-list");
+  const head = [...(list?.querySelectorAll(".office-drawer-group") || [])]
+    .find((node) => node.textContent.startsWith(`${name} ·`));
+  if (!head) return;
+  head.scrollIntoView({ block: "start" });
+  head.classList.add("is-target");
+  setTimeout(() => head.classList.remove("is-target"), 1400);
 }
 
 function fireWire(from, to) {
