@@ -935,11 +935,6 @@ button.cancel-pending:hover { border-color: var(--warn); }
   .floor-lamp, .coffee-table { display: none; }
   .cubicle { width: clamp(138px, 22%, 180px); }
 }
-@media (max-width: 620px) {
-  .office { min-height: 470px; overflow: auto; }
-  .office-floor { width: 760px; min-height: 430px; margin-inline: 0; transform-origin: top left; }
-  .office-caption { align-self: flex-start; }
-}
 
 /* Live MCP terminal membership: explicit join before any Room recording. */
 .office-presence {
@@ -1407,11 +1402,6 @@ button.cancel-pending:hover { border-color: var(--warn); }
   .office { grid-template-columns: minmax(0, 1fr) 250px; gap: 8px; }
   .office-chat-message p { font-size: 10px; }
 }
-@media (max-width: 880px) {
-  .office { grid-template-columns: 1fr; grid-template-rows: minmax(410px, 1fr) 260px; overflow-y: auto; }
-  .office-chat { min-height: 250px; }
-  .office-chat-stream { min-height: 110px; }
-}
 
 /* ── Office polish: richer depth, lighting and workstation details ─────── */
 .office-stage {
@@ -1765,7 +1755,6 @@ button.cancel-pending:hover { border-color: var(--warn); }
   .workstation-mat { opacity: .35; }
 }
 @media (max-width: 880px) {
-  .office-stage { min-height: 410px; }
   .ambient-beam { opacity: .2; }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -2230,6 +2219,8 @@ button.cancel-pending:hover { border-color: var(--warn); }
   box-shadow: 0 18px 42px rgb(0 0 0 / 56%), inset 0 1px rgb(255 255 255 / 4%);
 }
 .office-settings-menu[hidden] { display: none; }
+/* The menu hangs off the rail to the left of the column; at 250px (≤1080px) the column would clip it. */
+.office-chat.is-menu-open { overflow: visible; }
 .office-settings-menu button {
   display: flex;
   align-items: center;
@@ -2356,8 +2347,6 @@ button.cancel-pending:hover { border-color: var(--warn); }
 @media (max-width: 880px) {
   .office-toolbar { flex-direction: column; }
   .office-toolbar-actions { width: 100%; justify-content: flex-start; }
-  .office { grid-template-columns: minmax(0, 1fr); }
-  .office-chat { height: 440px; }
 }
 @media (max-width: 560px) {
   .office-toolbar-actions button { flex: 1; }
@@ -2921,4 +2910,20 @@ body.view-office #ledger, body.view-office #post-form { display: none; }
   .topbar .merge-outcome-nav .merge-history-open span::before { content: "▤"; font-size: 12px; }
   .workspace-onboarding.merge-approval { top: 0; }
   .topbar-drawer { top: 122px; }
+}
+
+/* ── 窄版辦公室（≤880px）：右欄收成只剩 rail，抽屜以浮層蓋在舞台上，預設收起 ──
+   Stacking the right column under the stage left the floor 274px tall at 640px wide -- less than
+   one row of desks. The rail stays as the door to the drawers (badges included); an open drawer
+   floats over the stage's right edge and closes from its × or its rail button. Placed at the end
+   of the file so it wins over the same-weight .office and .office-chat rules above. */
+@media (max-width: 880px) {
+  .office { grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: minmax(0, 1fr); gap: 8px; overflow: hidden; }
+  .office-stage { min-height: 0; }
+  .office-chat { position: relative; top: auto; max-height: none; margin: 8px 0; }
+  .office-chat:not(.is-open) .office-drawers { display: none; }
+  .office-chat:not(.is-open) .office-rail { border-right: 0; }
+  /* The ⚙ menu hangs off the rail to the left; a 54px column with overflow hidden would clip it. */
+  .office-chat:not(.is-open) { overflow: visible; }
+  .office-chat.is-open { position: absolute; top: 8px; right: 8px; bottom: 8px; width: min(calc(100% - 16px), 400px); z-index: 32; margin: 0; }
 }

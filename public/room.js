@@ -1639,7 +1639,7 @@ async function selectRoom(id) {
   const roomInfo = state.rooms.find((room) => room.id === id);
   byId("office-chat-room").textContent = roomInfo?.projectName || id || "LIVE";
   byId("office-chat-room").title = roomInfo ? `${roomInfo.workspace} · 內部 Room ID：${id}` : id;
-  closeOfficeSidePanels();
+  resetOfficeDrawers();
   byId("office-agent-card").hidden = true;
   state.selectedAgent = "";
   const next = new URL(window.location.href);
@@ -3492,14 +3492,36 @@ const OFFICE_DRAWER_IDS = Object.freeze(["office-drawer-chat", "office-task-cent
  */
 function syncOfficeRail() {
   const menuOpen = !(byId("office-settings-menu")?.hidden ?? true);
+  let anyOpen = false;
   for (const button of document.querySelectorAll(".office-rail-button[data-drawer]")) {
     const drawer = byId(button.dataset.drawer);
     const open = Boolean(drawer && !drawer.hidden);
+    anyOpen = anyOpen || open;
     button.setAttribute("aria-pressed", String(open && !menuOpen));
     if (open && menuOpen) button.setAttribute("aria-current", "true");
     else button.removeAttribute("aria-current");
   }
+  /* Below 880px the right column is the rail alone and an open drawer floats over the stage; the
+     CSS reads this one class, so the column never has to know which drawer is the open one. */
+  document.querySelector(".office-chat")?.classList.toggle("is-open", anyOpen);
 }
+
+/*
+ * The drawers' resting state. Wide: the task drawer, which is the office's table of contents.
+ * Narrow (≤880px): nothing, because a drawer there covers the stage and the stage is what the
+ * owner came to see. Used when the office is shown, when the room changes, and when the window
+ * crosses the breakpoint.
+ */
+const OFFICE_NARROW = window.matchMedia("(max-width: 880px)");
+function resetOfficeDrawers() {
+  closeOfficeSidePanels("");
+  if (!OFFICE_NARROW.matches && !byId("office").hidden) openOfficeDrawer("office-task-center");
+}
+OFFICE_NARROW.addEventListener("change", () => {
+  if (byId("office").hidden) return;
+  if (OFFICE_NARROW.matches) closeOfficeSidePanels("");
+  else if (OFFICE_DRAWER_IDS.every((id) => byId(id)?.hidden)) openOfficeDrawer("office-task-center");
+});
 
 function closeOfficeSidePanels(except = "") {
   for (const id of OFFICE_DRAWER_IDS) {
@@ -3540,7 +3562,9 @@ function openOfficeTaskGroup(name) {
   const head = [...(list?.querySelectorAll(".office-drawer-group") || [])]
     .find((node) => node.textContent.startsWith(`${name} ·`));
   if (!head) return;
-  head.scrollIntoView({ block: "start" });
+  /* Scroll the list, not the page: scrollIntoView would also drag the document, and at narrow
+     widths that pushes the topbar off the top of the window. */
+  list.scrollTop += head.getBoundingClientRect().top - list.getBoundingClientRect().top;
   head.classList.add("is-target");
   setTimeout(() => head.classList.remove("is-target"), 1400);
 }
@@ -3711,7 +3735,7 @@ function switchView(view) {
   if (office) {
     buildOffice();
     updateOffice(state.recent || []);
-    if (OFFICE_DRAWER_IDS.every((id) => byId(id)?.hidden)) openOfficeDrawer("office-task-center");
+    if (OFFICE_DRAWER_IDS.every((id) => byId(id)?.hidden)) resetOfficeDrawers();
     else renderTaskCenter();
     syncOfficeRail();
     syncOfficeSettingsMenu();
@@ -3786,6 +3810,7 @@ function setOfficeSettingsMenu(open, { restoreFocus = true } = {}) {
   const wasOpen = !menu.hidden;
   menu.hidden = !open;
   byId("office-settings-toggle").setAttribute("aria-expanded", String(open));
+  document.querySelector(".office-chat")?.classList.toggle("is-menu-open", open);
   syncOfficeRail();
   if (open) {
     syncOfficeSettingsMenu();
