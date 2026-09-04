@@ -2704,7 +2704,7 @@ test("ending a wait is offered only when the record names both a phrase and its 
   assert.match(body, /不會終止任何程序/u);
   assert.match(body, /不會寫入 main/u);
   assert.match(body, /不會修復紀錄/u);
-  assert.match(body, /不代表產品判斷 merge 已/u);
+  assert.match(body, /不代表產品判斷併入已/u);
   assert.match(body, /\/api\/rooms\/merge-promotions\/release/u);
   assert.doesNotMatch(body, /merge-approvals\/approve|promoteMainMerge|reset --hard/u);
 });

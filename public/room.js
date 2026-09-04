@@ -4580,16 +4580,16 @@ function renderPromotionWaitRelease(item, entry) {
   const what = document.createElement("p");
   what.textContent = `這筆紀錄正在等：${release.code}`
     + `${typeof release.pid === "number" ? ` · 發起程序 pid ${release.pid}` : ""}`
-    + `${typeof release.pgid === "number" ? ` · merge 程序群組 ${release.pgid}` : ""}`;
+    + `${typeof release.pgid === "number" ? ` · 併入程序群組 ${release.pgid}` : ""}`;
   const warn = document.createElement("p");
-  warn.textContent = "結束等待不會終止任何程序、不會寫入 main、不會修復紀錄，也不代表產品判斷 merge 已"
+  warn.textContent = "釋放這筆等待不會終止任何程序、不會寫入 main、不會修復紀錄，也不代表產品判斷併入已"
     + "結束。它只表示你已自行查看過這些編號。確認語逐字如下，按下即等於你說出這句話：";
   const phrase = document.createElement("code");
   phrase.textContent = release.confirmation;
   const act = document.createElement("button");
   act.type = "button";
   act.className = "merge-history-release";
-  act.textContent = "結束這個等待 · End this wait";
+  act.textContent = "釋放這筆等待";
   act.addEventListener("click", async () => {
     act.disabled = true;
     try {
@@ -4607,7 +4607,7 @@ function renderPromotionWaitRelease(item, entry) {
     } catch (error) {
       act.disabled = false;
       const failed = document.createElement("p");
-      failed.textContent = `未送出 · not sent: ${error && error.message ? error.message : "unknown"}`;
+      failed.textContent = `未送出：${error && error.message ? error.message : "unknown"}`;
       box.append(failed);
     }
   });
@@ -4793,15 +4793,14 @@ function renderUnattestedAcknowledgement(host, unattested) {
   box.className = "merge-history-action";
   const explain = document.createElement("p");
   explain.textContent = `這個服務重新啟動過，因此 ${unattested.length} 筆紀錄它無法親自證實——`
-    + "紀錄本身、trace 與稽核檔都是同帳號可改寫的位元。在你確認之前，這個專案不會開始新的 Merge。 · "
-    + "This service restarted, so it cannot vouch for these records itself; nothing stored locally can.";
+    + "紀錄本身、trace 與稽核檔都是同帳號可改寫的位元。在你確認已檢查之前，這個專案不會開始新的併入。";
   const warn = document.createElement("p");
   warn.textContent = "按下這個按鈕不會修復任何紀錄、不會寫入 main、不會結束任何仍在執行的程序，"
     + "也不代表產品驗證過什麼。它只記錄「你看過了」，而且只對目前這個服務有效，重新啟動後會再問一次。";
   const confirm = document.createElement("button");
   confirm.type = "button";
   confirm.className = "merge-history-acknowledge";
-  confirm.textContent = "我已自行檢查這個專案，沒有更早的 Merge 還在執行 · I checked this project myself";
+  confirm.textContent = "確認已檢查：我已自行檢查這個專案，沒有更早的併入還在執行";
   confirm.addEventListener("click", async () => {
     confirm.disabled = true;
     try {
@@ -4818,7 +4817,7 @@ function renderUnattestedAcknowledgement(host, unattested) {
       // with no message is indistinguishable from having worked.
       confirm.disabled = false;
       const failed = document.createElement("p");
-      failed.textContent = `未送出 · not sent: ${error && error.message ? error.message : "unknown"}`;
+      failed.textContent = `未送出：${error && error.message ? error.message : "unknown"}`;
       box.append(failed);
     }
   });
