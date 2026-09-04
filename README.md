@@ -167,9 +167,15 @@ grok   mcp add             orchestrator -- orchestrator mcp --actor grok
 
 ## 團隊成員
 
+**隊伍**：TitApeX　|　**主賽道**：AI Agents & Automation（AI Agent 與自動化）
+
 | 姓名 | 分工 |
 | --- | --- |
-| _待填_ | _待填_ |
+| Daniel Chen（[@gn01226919](https://github.com/gn01226919)） | 全部：產品設計、架構、實作、安全審查、文件 |
+
+單人團隊。開發過程本身即為本專案的使用情境——Claude、Codex、Grok 三家 agent 在同一個 Room
+協作，所有交辦、回覆、核准與拒絕都留在帳本裡（`examples/plane-shooter/` 就是其中一次真實的
+完整閉環：Codex 產出、Claude 席位審出兩處語法錯誤並修正、Owner 逐字核准後才寫入 main）。
 
 ## License
 
@@ -177,9 +183,19 @@ grok   mcp add             orchestrator -- orchestrator mcp --actor grok
 
 - **原始碼完全公開**，任何人都可以檢視、稽核、重現建置。
 - **非商業用途自由使用與修改**：個人、研究、教育、非營利與政府機構皆可。
-- **商業使用權未包含在本授權中**，由版權人保留；商業授權另洽（見 [`NOTICE`](NOTICE)）。
+- **商業使用權未包含在本授權中**，由版權人保留。
 
 依 OSI 定義這屬於 **source-available**：與 MIT/Apache 的差別**只在商業使用是否一併開放**，本專案刻意保留該項權利。程式碼的公開性、可稽核性與可重現性不受影響。
+
+### 商業使用
+
+**要在公司或商業專案裡使用，需要另外一份授權——而那份授權是開放洽談的，不是不給。**
+
+這個專案本來就是為了解決一個實際的工作問題而寫的，商業場景正是它最有價值的地方。
+保留商業權利的用意是讓這件事**可以持續做下去**，不是把人擋在門外。
+
+有興趣的個人、團隊或公司，請透過 [GitHub profile](https://github.com/gn01226919) 聯絡
+（見 [`NOTICE`](NOTICE)）。**非商業用途完全不需要問，直接用。**
 
 ## 文件
 
