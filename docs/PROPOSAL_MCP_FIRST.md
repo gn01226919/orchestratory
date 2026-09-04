@@ -423,6 +423,24 @@ tracked／ignored／probe 路徑，以及完整 preview 中每個非刪除、候
 ~~**目前仍無 MCP／HTTP 出口**：`promoteMainMerge` 只有測試會呼叫。~~ **2026-08-14：**仍無 Agent
 MCP 出口；本機 Owner HTTP 已接線，且同一操作會實際修改 canonical main。成功判準與 history 契約見上節。
 
+**2026-08-20 P0-3 更正：** ~~restart-time observer 可從 durable promotion row／trace／audit 重新收斂
+`applied` 或 `rolled-back`。~~ 這些 store 與無金鑰 `row_hash` 都可由同 uid hook 改寫，不能構成正向
+證據。`promoteMainMerge` 的活程序在握有 child handle／pid／trace fd 並完成同一呼叫的 repository observation
+後，才以 volatile `promotionId→exact row_hash` attestation 回傳 terminal result。`promotions()`、
+`promotionForApproval()` 與 same-task/cross-task main-write gates 都必須先驗該 attestation；位元變更或 restart
+一律回 `promotion-attestation` unreadable／`MAIN_MERGE_PROMOTION_RECORD_UNATTESTED`。Restart-time observer
+仍可做唯讀觀察並保存明確標成 `untrustedConvergenceClaim` 的提示，但不得標 candidate merged、交還 gate、
+執行 rollback/reset/abort/kill 或重跑 merge。這不新增 Agent MCP promotion 出口，也不改變 single-use approval。
+
+**2026-08-21 ADR-041 補正：** 上段把邊界寫成「terminal result」，範圍不足。排他標記是
+`ON(main_path) WHERE state='applying'` 的 partial unique index，**任何**其他 state 都會釋放它，因此需要
+attestation 的是「離開 `applying` 的轉移」，兩道 main-write gate 也不得以 state 清單過濾候選列。此外
+Owner 宣告（結束等待／disown group／release 不可讀紀錄）先前是從 observation JSON 讀回來的，而那是 hook
+寫得進去、hash 重算得出的位元；現在必須由**本程序**受理，否則具名 `MERGE_DECLARATION_NOT_FIRST_HAND`
+並繼續等待。跨重啟的人工出口是 Owner 對 **daemon** 的專案級宣告（`POST /api/rooms/merge-promotions/acknowledge`
+＋ GUI 內獨立控制），**不新增任何 Agent MCP 出口**、不寫入任何持久狀態、只在該程序有效。同名 CLI 動詞
+只是診斷——CLI 程序說完就結束，它產生的 attestation 到不了會執行 merge 的程序。
+
 若發生 drift、scope expansion 或未預覽 conflict：
 
 ```ts

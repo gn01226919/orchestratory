@@ -190,7 +190,7 @@ test("promotion records are listable and releasable from the CLI, and the two ar
   // `promotions()` re-observes every unsettled record, which moves the authoritative row, appends to
   // the audit chain and appends to the room ledger. Measured against `orphan-refs` as a control,
   // which changed none of the three. The writing is bar item 13 working; the label was the defect.
-  assert.match(helpText(), /re-observes and updates unsettled records/u);
+  assert.match(helpText(), /re-observes and names unsettled records/u);
   assert.doesNotMatch(helpText(), /promotions <workspace> {4}# read-only/u);
   assert.match(helpText(), /kills nothing, never writes main/u);
   // Writing to main deliberately has no product-side exit, and help must not imply otherwise.
@@ -222,7 +222,7 @@ test("promotion records are listable and releasable from the CLI, and the two ar
   assert.match(blocked, /PROMOTION_OWNER_AND_MERGE_STILL_RUNNING \(pid 4242\)/u);
   assert.match(blocked, /and on {6}pid 4343/u);
   assert.match(blocked, /--pid 4242 --pgid 4343/u);
-  assert.match(blocked, /Listing re-observes each unsettled record and updates it; nothing here writes to main\./u);
+  assert.match(blocked, /Listing re-observes and names unsettled records; it never treats persistent bytes as proof or writes main\./u);
   assert.match(blocked, /Releasing a record stops it waiting; it never kills a process either\./u);
   // The header must not claim to be read-only while the call that produced it writes.
   assert.doesNotMatch(blocked, /Read-only\./u);
@@ -247,6 +247,25 @@ test("promotion records are listable and releasable from the CLI, and the two ar
   assert.match(unreadable, /alive {7}merge pid 5151/u);
   assert.match(unreadable, /--pgid 5151/u);
   assert.match(unreadable, /MAY BE WRITING TO MAIN/u);
+
+  const unattested = describePromotions({
+    mainPath: "/workspace/project",
+    promotions: [{
+      id, taskId, state: "unreadable", unreadable: true,
+      unreadableReason: "promotion-attestation", storedState: "applied",
+      holdsProjectExclusiveMarker: true,
+    } as unknown as Parameters<typeof describePromotions>[0]["promotions"][number]],
+  });
+  assert.match(unattested, /left 'applying' before this process started/u);
+  assert.match(unattested, /persistent bytes are not proof of who ended it/u);
+  // Bar item 11 applies to this state too: a record that refuses must print the way out of it, and
+  // the way out of THIS one is not a release — it names a different verb, and says so.
+  assert.match(unattested, /acknowledge --confirm/u);
+  assert.doesNotMatch(unattested, /integrity check fails/u,
+    "an unattested record was reported as a corrupt one; they have different exits");
+  assert.match(unattested, /stored {6}applied/u);
+  assert.match(unattested, /exclusive {3}held/u);
+  assert.doesNotMatch(unattested, /Merge succeeded|state {7}applied/u);
 
   // FINDING F-5/F-1 (sixth round). An empty `alive` list means one of two opposite things, and the
   // owner is the one deciding whether to hand back a marker over a merge that may be writing. The
@@ -309,6 +328,13 @@ test("promotion records are listable and releasable from the CLI, and the two ar
     abandonPromotionEntirely: async (input: { pid: number; pgid: number }) => {
       calls.push(`both:${input.pid}:${input.pgid}`); return undefined;
     },
+    acknowledgeUnattestedPromotions: async (input: { confirmation: string }) => {
+      calls.push(`acknowledge:${input.confirmation}`);
+      return {
+        acknowledged: [{ id, taskId, storedState: "applied" }],
+        skipped: [{ id: "99999999-9999-4999-8999-999999999999", taskId, reason: "row-integrity" }],
+      };
+    },
   } as unknown as PromotionReleasePort;
   const run = async (args: string[]): Promise<string> => await runCandidatePromotionsCommand({
     args, roomId: "demo", mainPath: "/workspace/project", registry: port, decidedBy: "local-cli",
@@ -335,4 +361,35 @@ test("promotion records are listable and releasable from the CLI, and the two ar
   // nothing on the record to quote. It must reach the same action, with a pgid that is not a number.
   await run(["release", id, "--confirm", "P"]);
   assert.deepEqual(calls, ["group:77", "owner:88", "both:88:77", "group:NaN"]);
+
+  // The fifth verb, and it is a verb rather than a fifth shape of `release`: it quotes no number
+  // because the records it covers have already left `applying`, and it answers a different question
+  // — not "stop waiting for this pid" but "I checked the project and nothing earlier is running".
+  calls.length = 0;
+  await assert.rejects(
+    run(["acknowledge"]), /CANDIDATE_PROMOTION_ACKNOWLEDGE_CONFIRMATION_REQUIRED/u,
+  );
+  await assert.rejects(run(["acknowledge", "--confirm"]), /CONFIRM_VALUE_REQUIRED/u);
+  assert.equal(calls.length, 0, "a refused invocation must not reach the acknowledgement");
+  const acknowledged = await run(["acknowledge", "--confirm", "PHRASE"]);
+  assert.deepEqual(calls, ["acknowledge:PHRASE"]);
+  // The report has to say what was accepted AND that nothing was written, or an owner reasonably
+  // reads a successful-looking command as the product having verified something.
+  assert.match(acknowledged, /Acknowledged unattested promotion records .*: 1/u);
+  assert.match(acknowledged, new RegExp(`${id}\\s+task ${taskId}\\s+claimed applied`, "u"));
+  assert.match(acknowledged, /This wrote nothing/u);
+  assert.match(acknowledged, /main was not touched/u);
+  // The most important sentence this command prints. A review found that the CLI's own process ends
+  // when this returns, so the proof it just produced can never reach the daemon that runs
+  // promotions — a command that let the owner believe otherwise would be worse than no command.
+  assert.match(acknowledged, /does NOT unblock a promotion/u);
+  // A refused record is reported, with the reason and the verb that can actually clear it. Silence
+  // would leave the owner believing the project was free when one record still holds it.
+  assert.match(acknowledged, /SKIPPED 99999999-9999-4999-8999-999999999999.*row-integrity/u);
+  assert.match(acknowledged, /still holding this project/u);
+  assert.match(acknowledged, /cannot be trusted/u);
+  assert.match(acknowledged, /release <id>/u);
+  assert.match(acknowledged, /web daemon's own process/u);
+  // And it must not be reachable as a release: the two are separate verbs on purpose.
+  assert.doesNotMatch(acknowledged, /Released as/u);
 });

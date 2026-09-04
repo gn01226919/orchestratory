@@ -981,8 +981,9 @@ Owner 已在真實 promotion 畫面看到 durable「Merge 成功」，但結果 
 
 - 只影響 GUI Managed/Owner Web 呈現；Native Full-Trust、Room exact-seat、candidate/main 與 approval authority
   均不改變。
-- Durable 結果與 recovery artifacts 仍完整保留；同帳號瀏覽器擴充套件仍可竄改畫面，最終核對面是 History、
-  main HEAD 與 audit chain。
+- Durable 結果 claim 與 recovery artifacts 仍完整保留；同帳號瀏覽器擴充套件仍可竄改畫面。~~History 與
+  audit chain 可在 restart 後自行證明成功。~~ ADR-040 起兩者只供人工核對；自動正向成功只存在原 live
+  execution response，restart 後需另查 main HEAD/tree 與 recovery refs。
 
 ## ADR-039：Supervisor 讀取採 process-group deadline，iCloud 採 manifest-bound local mirror
 
@@ -1375,3 +1376,119 @@ store 的開檔路徑。本輪不做，也不宣稱已緩解。
 
 **殘留（沿用 ADR-044，未新增緩解）：** `#seatRoomMark` 與 `#seatWroteSince` 仍吞掉讀取錯誤；
 briefing 的 byte 上限；`#hasStartDeclaration` 的空 catch。
+
+
+<!-- ADR-046 原本在 P0-3 那條線上編號為 ADR-040。兩條線在 8/21 前後各自走到 040，
+     035–039 一字不差，分岔就發生在這個編號。main 那份先落地，所以保留 040；
+     這份改號 046，並把它與 ADR-047 之間的交叉引用一併更新。 -->
+
+## ADR-046：封存 restart-time observeMain 收斂，正向終局只採 live first-hand attestation
+
+**日期：** 2026-08-20
+**狀態：** Accepted
+
+本 ADR 取代 ADR-035／ADR-036 中「restart-time durable observation 可自行重建 terminal success／rollback」的
+部分；其餘 snapshot-bound approval、live promotion 與 UI navigation 決策不變。
+
+### 背景
+
+真實攻擊測試先建立一筆成功 promotion，再改寫 terminal row 的 state/observation 並依產品演算法重算無金鑰
+SHA-256。舊路徑因 `#resolvePromotion()` 對 `applied`／`rolled-back` 直接 return，history、transport retry 與
+下一次 main-write gate 都接受 forged convergence。把 row hash 再放進本機 audit HMAC 不是可接受修法：
+Native Full-Trust hook 以同一 macOS uid 執行，能讀寫相鄰 store，也能取得同帳號 key；那只能增加完整性層，
+不能誠實宣稱防偽。
+
+### 決策
+
+1. 只有實際 spawn merge、握有 child handle／pid／預先開啟 trace fd，並在同一呼叫內完成 repository observation
+   的活 `CandidateRegistry` 可以產生 terminal positive fact。證據以 volatile `promotionId→exact row_hash` 保存，
+   不落盤。
+2. Listing、exact approval retry、same-task gate 與 cross-task main gate 對任何 terminal row 都驗 volatile
+   attestation。row 位元改變或程序重啟即 fail closed：public view 為
+   `unreadableReason=promotion-attestation`、stored state 只作 claim，project gate 邏輯上保持占用；retry 回
+   `MAIN_MERGE_PROMOTION_RECORD_UNATTESTED`。
+3. Restart-time observer 仍可唯讀 main 並具名記錄「若相信 persisted binding 會得到什麼」為
+   `untrustedConvergenceClaim`，但強制維持 `applying`、把 `authorizedMergeCommit` comparison 清為 unknown、
+   不標 candidate merged、不交還 gate。
+4. 不加入任何自動 reset、rollback、merge abort、kill、重跑 merge、push、cleanup 或 recovery deletion。
+   這遵守 D-014：產品只觀察、具名與拒絕。
+
+### 代價與後續
+
+- 合法 terminal row 在 daemon restart 後也只是一筆可人工核對的歷史 claim；這是無更高權限 trust boundary
+  時的必然可用性成本，不以同 uid HMAC 假裝解決。
+- Unattested terminal 的人工出口與第二個 `applying` 死結一起由 D-018／P0-4 設計；在出口完成前方向固定為
+  fail closed，不以「方便」把 persisted claim 升回成功。
+- 若產品要跨重啟自動收斂，必須另建不同 OS 身分、root-owned helper、硬體金鑰或外部簽章服務，並重新做
+  identity、availability、rollback 與 threat review。Native Full-Trust 同帳號繞過仍然存在。
+
+## ADR-047：釋放排他標記的狀態一律需要本程序第一手事實，並提供 Owner 的專案級出口
+
+**日期：** 2026-08-21
+**狀態：** Accepted
+
+本 ADR 修正 ADR-046 的兩個過寬與一個過窄之處，不推翻它的核心裁決（restart-time 自動收斂已封存）。
+
+### ADR-046 留下的三個問題
+
+1. **只保護 terminal，漏掉其他釋放狀態。** 真正的排他標記是 SQLite partial unique index
+   `ON candidate_merge_promotions(main_path) WHERE state='applying'`，因此**任何** `state !== 'applying'`
+   都會釋放它。ADR-046 只對 `applied`／`rolled-back` 驗 attestation，而 `#assertMainNotBusy` 的查詢也只列這
+   兩個加 `applying`；把一列改寫成 `needs-manual-review` 就完全不會被 SELECT 到，專案閘門憑一個
+   owner-writable 欄位即開啟。枚舉釋放狀態本身就是缺陷（[[PITFALLS]] #103、#150）。
+2. **Owner 宣告仍讀自 row。** `abandonedMergeAccount()`／`disownedMergeGroup()`／`recordedMergeConclusion()`
+   三個分支只以 `recordTrusted`（＝row hash 重算得出）為前提，而該 hash 是無金鑰 SHA-256、演算法公開、
+   檔案路徑由產品自己放進 hook 環境（[[PITFALLS]] #127）。因此「Owner 結束了等待」是 merge 可以替自己寫的
+   一句話。
+3. **把合法的第一手結論一起封掉。** ADR-046 的 restart 分支對 `applied`／`rolled-back` 無差別覆寫，連
+   **本程序**握有 child handle 的收斂與 **本程序**收到的 Owner 宣告都被推回 `applying`，於是 Owner 自己的
+   出口也不見了，且合法 history 在第一次 restart 後永久卡住整個專案。
+
+### 決策
+
+1. **判準改為「離開 `applying` 這個轉移」，不是狀態清單。** `#assertNoUnresolvedPromotion` 與
+   `#assertMainNotBusy` 都不再過濾 state；每一列若不再持有標記，就必須出示本程序的 attestation，否則以
+   `MAIN_MERGE_PROMOTION_RECORD_UNATTESTED` 拒絕。
+2. **Owner 宣告必須是本程序處理的。** `mergeWriteConclusion` 新增 call-supplied `ownerDeclaredFirstHand`；
+   row 若載有宣告而本程序沒處理過，回具名的 `MERGE_DECLARATION_NOT_FIRST_HAND` 並繼續等待。四個宣告入口
+   （`abandonMergeProcessGroup` 兩個分支、`abandonPromotionOwnerProcess`、`abandonPromotionEntirely`、
+   unreadable release）在**durable 寫入之前**登記到 volatile ledger，順序刻意如此：中途崩潰留下的是
+   「有宣告沒有 row」（不下結論），而不是「有 row 沒有宣告」（會憑位元下結論）。
+3. **Restart 分支只擋轉移。** 已經離開 `applying` 的列不再被推回 `applying`——那會重新扣住 durable row
+   已釋放的標記，並在 Owner 一使用出口就把它抵銷。要靠第一手掙得的是**釋放標記的那一步**。
+4. **新增 Owner 的專案級出口** `acknowledgeUnattestedPromotions()`／CLI
+   `candidates promotions <workspace> acknowledge --confirm <phrase>`。它**不寫入任何東西**：不動 row、不
+   修復紀錄、不標 candidate merged、不碰 main、不送訊號。它只產生與 live 路徑同型的 volatile、
+   綁定 exact row hash 的 attestation。作用域是專案而非單筆，否則每次未來 promotion 的成本會隨過去
+   promotion 數線性成長，而讓正常操作像事故的控制會被繞過（[[PITFALLS]] #152）。
+
+### 代價與殘餘風險
+
+- 合法的歷史 promotion 在 daemon restart 後仍只是 claim；Owner 每個 session 需確認一次。這是沒有更高
+  信任錨時的誠實成本，不以同 uid HMAC 假裝解決。
+- `acknowledge` 是 Owner 承擔責任的宣告，不是產品的推論。產品沒有能力分辨「本產品完成的 promotion」與
+  「hook 寫的一列」，文件與 CLI 輸出都必須這樣講，不得暗示它驗證過什麼。
+- D-014 未變：本 ADR 不新增任何 reset／checkout／rollback／abort／kill／重跑 merge／push／cleanup。
+- Native Full-Trust、GUI Managed、candidate/main、Room exact-seat 與 merge approval 邊界均不變。
+- **Attestation 綁程序，因此跨程序不轉移。** Owner 在 CLI 程序做的宣告，daemon 程序不知道，反之亦然——
+  兩者之間沒有不可偽造的傳遞方式，這是同一條邊界的必然結果而不是遺漏。實務上請在**即將動作的那個
+  程序**做宣告（要 promotion 就在 daemon／GUI 做）。
+- **出口必須開在會執行 promotion 的那個程序，這一點由審查逼出來並已修正。** 第一版只做了 CLI 動詞，
+  而 CLI 每次呼叫都 `new CollaborationService()` → 執行 → `close()` → 程序結束；真正執行 merge 的是長壽的
+  web daemon，它從未聽到那句話。也就是說第一版的出口**在任何 promotion 用得到它之前就消失了**，而同一個
+  問題也讓既有的 `release` 動詞對 daemon 失效。
+  現行做法：Owner 出口是 `POST /api/rooms/merge-promotions/acknowledge`（沿用既有 Origin＋CSRF＋session
+  守衛），以及 Merge 紀錄畫面中一個獨立按鈕。它與 approve **是不同的路由、不同的片語**，刻意不合併——
+  一句話不得同時授權兩件不相干的事。回應與稽核紀錄都明寫 `verifiedByProduct: false`、
+  `promotionStoreMutation: false`、`mainMutation: false`、`scope: "this-process-only"`。
+  CLI 動詞保留為**診斷**：它會印出「這不會解開 promotion，因為那由另一個程序執行」，並顯示這些紀錄被接受
+  後會長什麼樣子。
+- **Agent MCP 出口刻意不加**，且本輪未新增。
+- **一次宣告只授權一次離開 `applying`。** 第 2 輪審查找到的可重現缺口：所有 attestation 檢查都對「仍持有
+  標記」的列免驗，因此把已 settle 的列改回 `applying` 就能繞過 row-hash 綁定，讓記憶體裡的宣告被花用第二
+  次。volatile ledger 因此記錄 `settled`；本產品沒有任何路徑會把紀錄放回 `applying`，所以事後在那裡看到它
+  就是被改寫過，一律 fail closed 並具名 `MAIN_MERGE_PROMOTION_RECORD_UNATTESTED`（listing 與兩道 gate 說
+  同一句話）。有突變驗證。
+- **同帳號 hook 能不能直接呼叫 Owner 出口？** 該端點在 daemon 的 POST 區塊內，需要 session cookie 與記憶體
+  中的 CSRF token；且它**只對已不持有標記的列生效**，因此即使被呼叫，也無法釋放一筆仍在 `applying` 的活
+  promotion。瀏覽器／擴充套件遭入侵仍是 F14 既有殘餘風險，未因本輪改變。

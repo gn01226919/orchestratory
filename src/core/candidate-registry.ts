@@ -342,6 +342,30 @@ export const MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION =
   + " AND MAY BE WRITING TO MAIN";
 
 /**
+ * The owner's phrase for records that left `applying` before this process existed.
+ *
+ * Amendment (W) is what makes this necessary, and the necessity is the honest cost of it. Nothing
+ * stored locally distinguishes a promotion this product finished from one a repository hook wrote:
+ * the row, the trace, the audit database and any key beside them are all writable by the same uid,
+ * and the row hash is unkeyed SHA-256 the product's own algorithm will recompute for anyone
+ * ([[PITFALLS]] #127). So after a restart every record that already left `applying` is a CLAIM, and
+ * a claim may not hand the project's exclusive marker to the next promotion.
+ *
+ * The way out is deliberately not a better inference — there isn't one without a different OS
+ * identity — but the owner saying so, in this process, once. It is scoped to the project rather
+ * than to one record on purpose: the alternative taxes every future promotion by the number of past
+ * ones, and a control that makes normal operation feel like an incident is a control that gets
+ * worked around ([[PITFALLS]] #152).
+ *
+ * What it does NOT do: repair a row, write to main, kill anything, mark a candidate merged, or turn
+ * a claim into a success. It records that this owner, in this session, accepts responsibility for
+ * having looked. Each acknowledgement is bound to the exact row hash it saw, so a record rewritten
+ * afterwards blocks again.
+ */
+export const MERGE_UNATTESTED_ACKNOWLEDGE_CONFIRMATION =
+  "I HAVE CHECKED THIS PROJECT MYSELF AND NO EARLIER PROMOTION IS STILL RUNNING";
+
+/**
  * Written into every consumed authorization so no downstream caller has to infer the limits of what
  * the owner agreed to. A merge approval authorizes one merge of one snapshot into main; it is not a
  * push, publish, deploy, delete or cleanup approval, and it never becomes one.
@@ -636,6 +660,15 @@ export type MergePromotionPending =
 export interface MergePromotionObservation {
   /** Stable, path-free code naming what the observation found. */
   code: string;
+  /**
+   * The gate-releasing state this observation would have moved to, had the bytes it combined with
+   * its live repository reads been trustworthy.
+   *
+   * Retained as a named hint so the owner can see what the record claims, and never used to release
+   * a task or project gate. Any state other than `applying` belongs here, not just the two terminal
+   * ones: `needs-manual-review` frees the same SQLite partial index that `applied` does.
+   */
+  untrustedConvergenceClaim?: { state: Exclude<MergePromotionState, "applying">; code: string };
   /** main's HEAD as read after the attempt; null when it could not be read. */
   mainHead: string | null;
   /**
@@ -802,6 +835,15 @@ export interface MergePromotionObservation {
    * a reader has to be able to see which positive evidence moved it off that default.
    */
   mergeConclusion?: MergeConclusionReason;
+  /**
+   * The reader that produced this observation could not vouch for `mergeConclusion` above.
+   *
+   * Carried beside the sentence rather than replacing it: what was observed is a fact about the
+   * merge, and who is reading is a fact about the process. A restart loses the second and must not
+   * be allowed to erase the first — an owner asked to account for a promotion needs to see what the
+   * record says it saw.
+   */
+  mergeConclusionUnattested?: true;
   observedAt: string;
 }
 
@@ -900,6 +942,8 @@ export interface UnreadableMergePromotion {
   taskId: string;
   state: "unreadable";
   unreadable: true;
+  /** Why this record cannot be used as a positive convergence fact. */
+  unreadableReason?: "row-integrity" | "promotion-attestation";
   /**
    * The value of the row's own `state` column, present only where it matters: after the owner has
    * released such a row from the project's exclusive marker.
@@ -2283,6 +2327,23 @@ export type MergeConclusionReason =
   | "MERGE_GROUP_DISOWNED_BY_OWNER"
   /** The owner declared the record should stop waiting for a merge nothing could account for. */
   | "MERGE_ACCOUNT_ABANDONED_BY_OWNER"
+  /**
+   * The owner declared, to this process, that they had checked the project themselves and no earlier
+   * promotion was still running. Only reachable for records that no longer hold the marker.
+   */
+  | "MERGE_RECORD_ACKNOWLEDGED_BY_OWNER"
+  /**
+   * The row carries an owner declaration that THIS process did not handle.
+   *
+   * The three declaration branches below used to be reached on the strength of `recordTrusted`
+   * alone, and `recordTrusted` means "the row hash verifies" — an unkeyed SHA-256 over public
+   * columns, in a file the merge's own hooks can write, recomputed with the product's own algorithm
+   * ([[PITFALLS]] #127). So "the owner ended this wait" was a sentence the merge could write about
+   * itself. It is still reported, by name, because the owner's real declaration looks exactly like
+   * this after a restart and they need to see that re-declaring is the way out; what it no longer
+   * does is end a wait or release a gate.
+   */
+  | "MERGE_DECLARATION_NOT_FIRST_HAND"
   /** A group this record names has a leader answering "alive". */
   | "MERGE_GROUP_STILL_RUNNING"
   /**
@@ -2472,6 +2533,30 @@ function mergeWriteConclusion(
      * they have no `leaderExitObserved` to gate in the first place.
      */
     untrustedProgramsRan?: boolean;
+    /**
+     * Amendment (W): WHAT the owner declared to THIS process about this promotion.
+     *
+     * A property of the call, for the same reason `leaderExitObserved` is one, and defaulting to
+     * empty for the same reason: every reader that was not the one the owner spoke to gets nothing,
+     * and nothing is what keeps a gate held. There is deliberately nowhere to persist it.
+     *
+     * It carries the CONTENT rather than a flag, because a flag keyed only to the promotion id
+     * survives a rewrite of the row it was about — the settle would then be made from fields a hook
+     * had swapped in after the owner spoke. What the owner said is a first-hand fact and is read
+     * from here; the row is only where it was recorded for them to see.
+     */
+    ownerDeclaration?: { accountAbandoned?: true; groupDisowned?: true; acknowledged?: true };
+    /**
+     * A conclusion THIS process already reached first-hand about this promotion.
+     *
+     * The replacement for reading `observation.mergeConclusion` back out of the row. That replay
+     * existed for a real reason — recording a conclusion erases the evidence that produced it, so
+     * without it the very next read re-opens a record this process had already settled — and the
+     * reason survives amendment (W). What does not survive is the STORAGE: the row is bytes a hook
+     * can write, and memory is not. Absent for every process that did not reach the conclusion
+     * itself, which is what makes a restart forget it.
+     */
+    concludedHere?: MergeConclusionReason;
   },
 ): MergeWriteConclusion {
   const firstHandGroup = options.firstHandGroup ?? null;
@@ -2509,24 +2594,19 @@ function mergeWriteConclusion(
   // over a group this record can point at.
   if (standing.survivors.length > 0) return open("MERGE_GROUP_SURVIVORS_STILL_ALIVE");
   if (options.recordTrusted) {
-    if (abandonedMergeAccount(row) !== null) {
+    // Amendment (W). Every branch in this block used to read the owner's decision back out of the
+    // row, and the row is bytes: `recordTrusted` proves the hash recomputes, which is exactly what
+    // an attacker who wrote the row can also make true. What settles now is what the owner said to
+    // THIS process, held whole in its own memory and passed in on the call.
+    const declared = options.ownerDeclaration ?? {};
+    if (declared.accountAbandoned === true) {
       return settled("MERGE_ACCOUNT_ABANDONED_BY_OWNER", true);
     }
-    if (disownedMergeGroup(row) !== null) return settled("MERGE_GROUP_DISOWNED_BY_OWNER", true);
-    // An earlier observation of THIS row recorded which of the two positive facts it had. It is read
-    // back rather than re-derived because the act of recording it erases the evidence that produced
-    // it: `#observeMain` writes `mergePgid: null` once a group is established to be over,
-    // deliberately, so a dead number stops answering "still writing" for the rest of the row's life
-    // — and without this the very next read would re-open a record that had already been concluded.
-    //
-    // Amendment (T): these bytes are as writable as every other byte in the row, so reading them
-    // back can end a WAIT and nothing more. Anything other than a first-hand leader exit is carried
-    // as a declaration, and a first-hand exit read back by a LATER process is not first-hand for
-    // that process — `leaderClosedFirstHand` comes from the call, not from here. Both roads therefore lead away
-    // from a destructive command, which is what the eleventh round's blocker turned on.
-    const recorded = recordedMergeConclusion(row);
-    if (recorded !== null) {
-      return settled(recorded, recorded !== "MERGE_LEADER_EXIT_OBSERVED");
+    if (declared.groupDisowned === true) return settled("MERGE_GROUP_DISOWNED_BY_OWNER", true);
+    if (declared.acknowledged === true) return settled("MERGE_RECORD_ACKNOWLEDGED_BY_OWNER", true);
+    // Replayed from this process's own memory, in the position the row-read replay used to occupy.
+    if (options.concludedHere !== undefined) {
+      return settled(options.concludedHere, options.concludedHere !== "MERGE_LEADER_EXIT_OBSERVED");
     }
   }
   // Amendment (V-3). The survivor check above asks the operating system what is left of the merge's
@@ -2548,6 +2628,27 @@ function mergeWriteConclusion(
   // the rest of that group is the check above, which has already returned by the time this is
   // reached (amendment (U)), and what escaped the group entirely is the check just above.
   if (leaderClosedFirstHand) return settled("MERGE_LEADER_EXIT_OBSERVED");
+  // Reported only after the first-hand branches above have had their turn, and that order is
+  // load-bearing in the direction that matters. Placed before them it pre-empted the one caller that
+  // genuinely watched the merge leader close — a row carrying a conclusion an EARLIER observation of
+  // this same process wrote would stop it concluding at all, which is a hook gaining something by
+  // writing bytes even though the bytes are never read for their content.
+  //
+  // The claim is still named rather than ignored: after a restart the owner's real declaration looks
+  // exactly like this, and they need to see that re-declaring is the way out. What it no longer does
+  // is end a wait.
+  //
+  // `recordedMergeConclusion` is in this list rather than replayed. It existed because recording a
+  // conclusion erases the evidence that produced it (`#observeMain` nulls `mergePgid` once a group is
+  // established to be over), so a later read would re-open a settled record. Within one process the
+  // in-memory declaration does that job; across processes, replaying it is precisely the persisted
+  // positive fact this round archives.
+  if (options.recordTrusted
+    && (abandonedMergeAccount(row) !== null
+      || disownedMergeGroup(row) !== null
+      || recordedMergeConclusion(row) !== null)) {
+    return open("MERGE_DECLARATION_NOT_FIRST_HAND");
+  }
   // Everything below is a HINT, reported by name so the record can say WHY it cannot conclude, and
   // concluding nothing.
   //
@@ -2886,7 +2987,11 @@ function inspectPidCommand(pid: number): string {
  * measured failure: a promotion frozen on `applying` with nothing anywhere naming what to inspect.
  */
 function promotionPending(
-  row: PromotionRow, trace: TraceMergeReading, options: { approvalSpent: boolean },
+  row: PromotionRow, trace: TraceMergeReading,
+  options: {
+    approvalSpent: boolean;
+    ownerDeclaration?: { accountAbandoned?: true; groupDisowned?: true; acknowledged?: true };
+  },
 ): MergePromotionPending | undefined {
   if (row.state === "applied" || row.state === "rolled-back") return undefined;
   // Every source, not just `observation_json`. This function is the gate in front of every
@@ -2902,6 +3007,9 @@ function promotionPending(
   // was ever invoked, and it is the one input here that a repository hook cannot reach.
   const conclusion = mergeWriteConclusion(row, trace, {
     approvalSpent: options.approvalSpent, recordTrusted: true,
+    // Amendment (W): threaded through rather than defaulted, because "is this record still waiting"
+    // and "may this record be concluded" have to give the same answer about the same declaration.
+    ...(options.ownerDeclaration === undefined ? {} : { ownerDeclaration: options.ownerDeclaration }),
   });
   const standing = conclusion.standing;
   const blocking = standing.blocking;
@@ -3654,6 +3762,53 @@ export class CandidateRegistry {
    * not authenticated, and it never turns a refusal into a permission.
    */
   readonly #promotionResolvedAt = new Map<string, number>();
+  /**
+   * Everything THIS live process established first-hand about a promotion.
+   *
+   * Deliberately volatile: persisting any of it beside the row would put it back within reach of the
+   * same-uid repository hook whose forgery P0-3 closes. A restart loses it, and losing it is the
+   * point — after a restart there is no local byte that distinguishes a promotion this product
+   * finished from one a hook wrote, so the honest answer is "cannot determine", never "safe".
+   *
+   * `attested` is the exact `row_hash` at the moment this process wrote a state that releases a
+   * gate. Binding to the hash rather than to the id means a later rewrite of the row invalidates the
+   * attestation instead of inheriting it.
+   *
+   * `ownerDeclared` is set by the declaration entry points BEFORE they take effect. Without it, the
+   * three declaration branches in `mergeWriteConclusion` read the owner's decision back out of
+   * `observation_json`, and that is bytes an unkeyed SHA-256 cannot defend ([[PITFALLS]] #127): a
+   * hook that writes `mergeGroupDisowned` and recomputes the hash would end its own wait.
+   */
+  readonly #firstHandPromotions = new Map<string, {
+    attested?: string;
+    /**
+     * WHAT the owner declared to this process, not merely THAT they declared something.
+     *
+     * Storing a bare flag against the promotion id was a defect a reviewer reproduced: the flag
+     * survived any later rewrite of the row, so a hook could wait for a legitimate declaration and
+     * then swap the row's declaration fields underneath it — the process would go on answering
+     * "yes, the owner told me", and the settle would be made from the REWRITTEN fields. The
+     * declaration is a first-hand fact and so it has to be held whole, in memory, and read from
+     * here rather than from the row ([[PITFALLS]] #133).
+     */
+    declared: { accountAbandoned?: true; groupDisowned?: true; acknowledged?: true };
+    /** A conclusion this process reached first-hand, kept so a later read does not re-open it. */
+    concluded?: MergeConclusionReason;
+    /**
+     * This process has already used a declaration to take this promotion OUT of `applying`.
+     *
+     * A reviewer reproduced the gap this closes. `#promotionAttested` answers `true` for any row
+     * that still holds the marker — correct, because a record that never left needs nothing to
+     * excuse it — so rewinding a settled row back to `state='applying'` walks straight past the
+     * hash-bound attestation, and the declaration in memory would then settle it a SECOND time,
+     * from whatever bytes the rewrite left behind.
+     *
+     * A declaration authorises exactly one departure from `applying`. Nothing this product does
+     * puts a record back, so finding one there afterwards is not a state to resolve — it is a
+     * record that was rewritten, and it fails closed.
+     */
+    settled?: true;
+  }>();
   /**
    * Notified after an observation path has durably invalidated a drifted approval. The registry owns
    * durable state and knows nothing about the audit chain or the room ledger, so the record that has
@@ -5006,6 +5161,10 @@ export class CandidateRegistry {
         promotions.push(this.#unreadableView(row));
         continue;
       }
+      if (!this.#promotionAttested(row)) {
+        promotions.push(this.#unattestedClaimView(row));
+        continue;
+      }
       promotions.push(this.#publicPromotion(await this.#resolvePromotion(row)));
     }
     return promotions;
@@ -5037,6 +5196,9 @@ export class CandidateRegistry {
     this.#assertPromotionRow(row);
     if (row.room_id !== roomId || row.main_path !== mainPath) {
       throw new Error("MAIN_MERGE_PROMOTION_SCOPE_MISMATCH");
+    }
+    if (!this.#promotionAttested(row)) {
+      throw new Error("MAIN_MERGE_PROMOTION_RECORD_UNATTESTED");
     }
     return this.#publicPromotion(await this.#resolvePromotion(row));
   }
@@ -6534,8 +6696,12 @@ export class CandidateRegistry {
    * a task that could never be promoted again.
    */
   async #assertNoUnresolvedPromotion(taskId: string, options: { authenticated: boolean }): Promise<void> {
+    // Every row for this task, with no state filter. Amendment (W): the previous list named the
+    // states this build knows about, and a gate that enumerates what may hold it is a gate that a
+    // value outside the list walks through ([[PITFALLS]] #103, #150). What decides is now the same
+    // condition SQLite's partial index uses, asked per row and answered below.
     const rows = this.#db.prepare(
-      "SELECT * FROM candidate_merge_promotions WHERE task_id=? AND state IN ('applying','needs-manual-review')",
+      "SELECT * FROM candidate_merge_promotions WHERE task_id=?",
     ).all(taskId) as unknown as PromotionRow[];
     for (const row of rows) {
       try {
@@ -6544,6 +6710,26 @@ export class CandidateRegistry {
         // A promotion row that fails its own hash is not evidence that main is fine.
         throw new Error("MAIN_MERGE_PROMOTION_UNRESOLVED");
       }
+      // A record this process already took out of `applying` is not in `applying` again by any route
+      // this product owns. Named here as well as in the listing, so the gate and the screen give the
+      // owner the same sentence rather than two different ones about the same row.
+      if (this.#promotionRewound(row)) {
+        throw new Error("MAIN_MERGE_PROMOTION_RECORD_UNATTESTED");
+      }
+      // The two gates ask different questions and must not share a predicate. THIS one asks whether
+      // the task may be acted on, and only a genuinely terminal outcome answers it: a row saying
+      // `needs-manual-review` means a human still has to look AT THIS TASK, and it keeps refusing
+      // even though it has already let the rest of the project proceed. Collapsing the two was
+      // measured letting a token be spent against a main nobody could describe.
+      if (row.state === "applied" || row.state === "rolled-back") {
+        if (this.#promotionAttested(row)) continue;
+        // Terminal by the column, and nothing in this process ended it. Refused by name; the exit is
+        // the project-wide acknowledgement, live, rather than the product believing a file.
+        throw new Error("MAIN_MERGE_PROMOTION_RECORD_UNATTESTED");
+      }
+      // `needs-manual-review`, and anything a future schema adds. Not enumerated as a way in: the
+      // default for this gate is refusal, and only the two states above are a way out of it.
+      if (row.state !== "applying") throw new Error("MAIN_MERGE_PROMOTION_UNRESOLVED");
       // Cheap first, and it is also the commonest answer: a promotion still being written is decided
       // by two `kill(pid, 0)` probes and no Git at all.
       if (this.#promotionPending(row) !== undefined) {
@@ -6564,6 +6750,14 @@ export class CandidateRegistry {
       if (resolved.state === "applying" || resolved.state === "needs-manual-review") {
         throw new Error("MAIN_MERGE_PROMOTION_UNRESOLVED");
       }
+      // Asked AGAIN about the row this call ends on, not only about the one it started with.
+      // `#resolvePromotion` can return a row another process wrote — its own write can lose the
+      // compare-and-set and it then reports what the store holds — and a terminal state arriving
+      // that way carries no attestation from HERE. Without this the whole check could be walked past
+      // by losing a race, which is not a thing an attacker has to be lucky to arrange.
+      if (!this.#promotionAttested(resolved)) {
+        throw new Error("MAIN_MERGE_PROMOTION_RECORD_UNATTESTED");
+      }
     }
   }
 
@@ -6583,10 +6777,16 @@ export class CandidateRegistry {
   async #assertMainNotBusy(
     mainPath: string, taskId: string, options: { authenticated: boolean },
   ): Promise<void> {
+    // No state filter, for the reason given on the per-task gate. This is the one that the P0-3 WIP
+    // still left open: it enumerated `applied` and `rolled-back`, so a row rewritten to
+    // `needs-manual-review` was not SELECTed at all and the project stood open to the next
+    // promotion on the strength of one owner-writable column.
     const rows = this.#db.prepare(
-      "SELECT * FROM candidate_merge_promotions WHERE main_path=? AND task_id<>? AND state='applying'",
+      "SELECT * FROM candidate_merge_promotions WHERE main_path=? AND task_id<>?",
     ).all(mainPath, taskId) as unknown as PromotionRow[];
     for (const row of rows) {
+      // Same order, same reason as the per-task gate: an owner-released row is unreadable by design.
+      if (!CandidateRegistry.#holdsExclusiveMarker(row) && this.#promotionAttested(row)) continue;
       try {
         this.#assertPromotionRow(row);
       } catch {
@@ -6610,6 +6810,13 @@ export class CandidateRegistry {
           probeReadable: requirement.probeReadable,
         });
       }
+      if (!CandidateRegistry.#holdsExclusiveMarker(row)) {
+        throw new Error("MAIN_MERGE_PROMOTION_RECORD_UNATTESTED");
+      }
+      // Same statement as the per-task gate makes, for the same reason.
+      if (this.#promotionRewound(row)) {
+        throw new Error("MAIN_MERGE_PROMOTION_RECORD_UNATTESTED");
+      }
       if (this.#promotionPending(row) !== undefined) {
         throw new Error("MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY");
       }
@@ -6621,8 +6828,14 @@ export class CandidateRegistry {
       this.#promotionResolvedAt.set(row.id, this.#now());
       // A crashed promotion converges here exactly as it does for its own task: re-observed, never
       // retried. Only a row that is STILL applying afterwards holds the marker.
-      if ((await this.#resolvePromotion(row)).state === "applying") {
+      const resolved = await this.#resolvePromotion(row);
+      if (resolved.state === "applying") {
         throw new Error("MAIN_MERGE_PROMOTION_MAIN_PATH_BUSY");
+      }
+      // Same re-check, same reason as the per-task gate: the row this call ends on is the one whose
+      // release has to have been earned, and it is not always the row it began with.
+      if (!this.#promotionAttested(resolved)) {
+        throw new Error("MAIN_MERGE_PROMOTION_RECORD_UNATTESTED");
       }
     }
   }
@@ -6709,7 +6922,21 @@ export class CandidateRegistry {
         ? {} : { mergeAccountAbandoned: previous.mergeAccountAbandoned }),
       ...(previous.ownerBootAtSec === undefined ? {} : { ownerBootAtSec: previous.ownerBootAtSec }),
       // Named rather than left to be inferred from which command `recovery` ended up holding.
-      mergeConclusion: conclusion.reason,
+      //
+      // `MERGE_DECLARATION_NOT_FIRST_HAND` is deliberately not written over an earlier value. It is
+      // not an observation ABOUT THE MERGE — it is a statement about who is reading — and letting it
+      // replace one would erase the only record of what was actually seen, leaving an owner who
+      // restarts unable to check the thing they are being asked to account for ([[PITFALLS]] #128).
+      // What the restart does lose is the destructive command, and that is decided by
+      // `leaderClosedFirstHand` rather than by this field.
+      ...(conclusion.reason === "MERGE_DECLARATION_NOT_FIRST_HAND"
+        ? (previous.mergeConclusion === undefined
+          ? {} : { mergeConclusion: previous.mergeConclusion })
+        : { mergeConclusion: conclusion.reason }),
+      // Carried beside it, so "this reader cannot vouch for the sentence above" is visible rather
+      // than implied by its absence.
+      ...(conclusion.reason === "MERGE_DECLARATION_NOT_FIRST_HAND"
+        ? { mergeConclusionUnattested: true as const } : {}),
       // Amendment (N): the one write that records the merge's group is the only evidence that group
       // exists, and its failure used to leave no trace at all. Named here so a reader can tell
       // "this record never had the number" from "this promotion never spawned git".
@@ -7028,6 +7255,9 @@ export class CandidateRegistry {
       updated_at_ms: Math.max(row.started_at_ms, this.#now()),
     });
     if (mainMutated) this.#markCandidateMerged(row.task_id);
+    // This exact process watched the merge leader and performed the repository observation above.
+    // Keep that proof in memory only; persisting it would make it forgeable by the same hook.
+    this.#attestPromotion(next);
     this.#emitPromotion(next, "settled");
     return { row: next, mainMutated };
   }
@@ -7127,6 +7357,11 @@ export class CandidateRegistry {
     // bit-for-bit indistinguishable from work the owner staged themselves, so an automatic rollback
     // here would be this product deleting the owner's work while reporting success.
     const observed = await this.#observeMain(row, conclusion);
+    // Captured before anything below can hold the marker. Whether main's HEAD is now the authorized
+    // merge is a fact about the REPOSITORY; whether the marker may be handed back is a fact about
+    // processes. The two were deliberately kept apart ([[PITFALLS]] #135), and reading this after the
+    // survivor hold silently merged them again.
+    const observedApplied = observed.state === "applied";
     // The approval was spent only if it reached `consumed`. An intent row beside an approval that is
     // still answerable means the crash happened before anything could run, and that is not a state
     // anyone needs to inspect by hand. It is the same reading `promotionPending` above was given, so
@@ -7141,26 +7376,57 @@ export class CandidateRegistry {
     if (!spent && observed.state === "rolled-back") {
       observed.observation.code = "APPROVAL_NEVER_SPENT_NO_GIT_COMMAND_RAN";
     }
-    // The same gate `#settlePromotion` applies, for the same reason: leaving `applying` hands the
-    // project's exclusive marker back. This path never has first-hand evidence about the merge
-    // process — by definition, the process that had it is gone — so what it may act on is a
-    // conclusion the owner declared, or one of the two outcomes the repository evidences itself.
-    // Amendment (U): `gitNeverSpawnedFirstHand` is false here, always and by construction. The
-    // process that could have known whether a merge process was ever created is the one that is
-    // gone; this reader can only read files, and the file that used to answer it (`trace.spawned`)
-    // was measured being erased by a merge driver running inside the merge this record is about.
+    // P0-3, amendment (W). Leaving `applying` releases the project's exclusive marker, so the
+    // question this branch answers is not "what does the repository look like" but "who says this
+    // promotion is over". There are exactly two answers this process may act on, and both are held
+    // in its own memory: it watched the merge leader close (`leaderClosedFirstHand`), or the owner
+    // declared to IT that the wait should end (`byOwnerDeclaration`, which amendment (W) now gates
+    // on `#ownerDeclaredHere`).
+    //
+    // Everything else is a persistent value, and every persistent value that would bind a repository
+    // read to THIS promotion is writable by the same-uid hook the merge itself runs: the row, the
+    // trace, the audit database, and any local HMAC key. The WIP this replaces clobbered the two
+    // legitimate answers along with the forged one, which is what froze the owner's own way out.
+    const firstHandConclusion = conclusion.leaderClosedFirstHand || conclusion.byOwnerDeclaration;
+    // Asked FIRST, because a process the merge left behind is a more specific reason to hold the
+    // marker than "nobody can vouch for this transition", and it names itself. Running it after the
+    // branches below overwrote `AUTHORIZED_MERGE_COMMIT_OBSERVED_WITH_MERGE_GROUP_SURVIVORS` — a
+    // fact about a pid this code just probed — with a sentence about untrusted bytes.
+    this.#holdMarkerOverSurvivors(observed, conclusion);
+    // The guard is on the TRANSITION, not on the resulting state, and the difference is load-bearing
+    // in both directions. Guarding the state would push a record that had ALREADY left `applying`
+    // back into it on every read — re-taking a marker the durable row had released, and undoing the
+    // owner's acknowledgement the moment they used it. What must be earned is the step that frees
+    // the marker; a record that is past that step is governed by the attestation the gates check.
+    const leavesMarker = CandidateRegistry.#stateHoldsMarker(row.state)
+      && !CandidateRegistry.#stateHoldsMarker(observed.state);
+    //
+    // The two branches below reach the same state and differ only in what they NAME, and the order
+    // is chosen so the more specific name wins. "Nothing accounted for this merge" says WHY nothing
+    // concluded; "a persisted claim has no attestation" would be true of that case as well, and
+    // saying it there would tell an owner their record was forged when it was merely interrupted.
     if (!conclusion.concluded
       && !selfEvidencingOutcome(observed, { gitNeverSpawnedFirstHand: false })) {
       observed.observation.code = "MERGE_UNACCOUNTED_FOR_NOTHING_CONCLUDED";
       observed.state = "applying";
       observed.headAfter = null;
+    } else if (leavesMarker && !firstHandConclusion) {
+      observed.observation.untrustedConvergenceClaim = {
+        state: observed.state as Exclude<MergePromotionState, "applying">,
+        code: observed.observation.code,
+      };
+      observed.observation.code = "PERSISTED_PROMOTION_CONVERGENCE_UNATTESTED";
+      // This boolean was computed by comparing live Git state to fields in the untrusted row. Keep
+      // the current HEAD itself, but do not export the comparison as a positive fact.
+      observed.observation.authorizedMergeCommit = null;
+      observed.state = "applying";
+      observed.headAfter = null;
     }
-    // Amendment (V-4), on this path for the same reason it is on the other one: a reader that arrives
-    // later and finds the merge commit in main plus a process group the merge left behind must not
-    // hand the project's exclusive marker back either. The candidate is still marked merged, because
-    // that is about main's HEAD and not about the marker.
-    const mainMutated = observed.state === "applied";
-    this.#holdMarkerOverSurvivors(observed, conclusion);
+    // Only a first-hand conclusion may move main's own record of the candidate. `observedApplied` is
+    // a live Git read compared against fields from an owner-writable row, so on its own it is a
+    // claim, and marking the candidate merged would turn that claim into a durable positive fact
+    // through a second table.
+    const mainMutated = firstHandConclusion && observedApplied;
     if (observed.state !== "applied") this.#recoveryHint(row, observed.observation, conclusion);
     try {
       const next = this.#writePromotion(row, {
@@ -7170,6 +7436,9 @@ export class CandidateRegistry {
         updated_at_ms: Math.max(row.started_at_ms, this.#now()),
       });
       if (mainMutated) this.#markCandidateMerged(row.task_id);
+      // Written after the durable row, and only for a transition this process can vouch for: the
+      // attestation is what every gate reads instead of the row's own state column.
+      this.#attestPromotion(next);
       // Only a transition is worth a ledger entry: re-observation runs on every read, and an entry
       // per read would bury the ones that mean something.
       if (next.state !== row.state) this.#emitPromotion(next, "re-observed");
@@ -7449,6 +7718,7 @@ export class CandidateRegistry {
   #promotionPending(row: PromotionRow): MergePromotionPending | undefined {
     return promotionPending(row, this.#promotionTrace(row), {
       approvalSpent: this.#promotionApprovalSpent(row),
+      ownerDeclaration: this.#ownerDeclarationHere(row),
     });
   }
 
@@ -7460,9 +7730,158 @@ export class CandidateRegistry {
   }
 
   #unreadableView(row: PromotionRow): UnreadableMergePromotion {
-    return unreadablePromotionView(row, this.#promotionTrace(row), {
+    const view = unreadablePromotionView(row, this.#promotionTrace(row), {
       approvalSpent: this.#promotionApprovalSpent(row),
     });
+    return {
+      ...view,
+      unreadableReason: "row-integrity",
+      // Re-derived from the SAME condition the main-write gates apply, rather than from the state
+      // column alone. The two used to be able to disagree about one row: the column said the record
+      // had left `applying`, so the screen reported the marker as free, while the gate refused
+      // because nothing in this process could vouch for the departure. Whichever answer is right,
+      // the owner must not be shown the other one.
+      //
+      // Written as the gates' own test — they skip a row only when it has left `applying` AND this
+      // process can vouch for the departure. The negation alone is not that test: `#promotionAttested`
+      // answers `true` for a row that is still `applying`, because a record that never left needs no
+      // excuse, so `!attested` reported the marker as FREE over a live merge. Measured by the
+      // source-subset matrix, which is the only place that reads this field while a merge is writing.
+      holdsProjectExclusiveMarker: CandidateRegistry.#holdsExclusiveMarker(row)
+        || !this.#promotionAttested(row),
+    };
+  }
+
+  /**
+   * Whether a row's state still holds the project's exclusive marker.
+   *
+   * Deliberately expressed as "not `applying`" rather than as a list of the three states that
+   * release it. The marker SQLite itself enforces is the partial unique index
+   * `ON(main_path) WHERE state='applying'`, so ANY other value in that column frees it — including
+   * one this build has never heard of. Enumerating the releasing states is how the eleventh round's
+   * blocker was reintroduced by the P0-3 WIP: it attested `applied` and `rolled-back` and left
+   * `needs-manual-review` able to open the project to the next promotion with nothing but bytes
+   * ([[PITFALLS]] #103, #150 — the N+1 shape is not a gap in the list, it is the list).
+   */
+  static #stateHoldsMarker(state: string): boolean {
+    return state === "applying";
+  }
+
+  static #holdsExclusiveMarker(row: PromotionRow): boolean {
+    return CandidateRegistry.#stateHoldsMarker(row.state);
+  }
+
+  /**
+   * A row that no longer holds the marker is a historical claim, not its own proof. Only the live
+   * process that concluded it — from its own child handle, or from an owner declaration it handled
+   * itself — may use it to release a gate. A restart intentionally loses the attestation.
+   */
+  #promotionAttested(row: PromotionRow): boolean {
+    const entry = this.#firstHandPromotions.get(row.id);
+    if (CandidateRegistry.#holdsExclusiveMarker(row)) {
+      // A record this process already took out of `applying` cannot be in `applying` again unless
+      // something outside this product put it there. That is not a promotion to re-decide.
+      return entry?.settled !== true;
+    }
+    return entry?.attested === CandidateRegistry.#attestationDigest(row);
+  }
+
+  /**
+   * What an attestation is bound to: the row's CONTENT, recomputed here, not the `row_hash` column.
+   *
+   * A reviewer found the difference and it matters. Binding to the stored string means a rewrite
+   * that changes the columns while LEAVING the old hash in place keeps the attestation valid — the
+   * gate then skips a row it cannot read, while `promotions()`, which verifies before it reports,
+   * calls the same row unreadable. One of the two is wrong about the same bytes, and the one that
+   * decides whether main may be written is the one that must not be.
+   *
+   * Deliberately computed with the product's own column ordering rather than read from the row, and
+   * deliberately NOT dependent on the row verifying: a record the owner released is unreadable by
+   * design and still has to be bindable, or releasing it would have no lasting effect.
+   */
+  static #attestationDigest(row: PromotionRow): string {
+    return mergePromotionHash(row);
+  }
+
+  /** Whether this process has already spent a declaration taking this record out of `applying`. */
+  #promotionRewound(row: PromotionRow): boolean {
+    return CandidateRegistry.#holdsExclusiveMarker(row)
+      && this.#firstHandPromotions.get(row.id)?.settled === true;
+  }
+
+  /** Records that THIS process wrote a gate-releasing state for this exact row. */
+  #attestPromotion(row: PromotionRow): void {
+    if (CandidateRegistry.#holdsExclusiveMarker(row)) return;
+    const entry = this.#firstHandPromotions.get(row.id);
+    const digest = CandidateRegistry.#attestationDigest(row);
+    if (entry === undefined) {
+      this.#firstHandPromotions.set(row.id, { attested: digest, declared: {}, settled: true });
+      return;
+    }
+    entry.attested = digest;
+    // The departure has happened. Any later sighting of this record in `applying` is a rewrite.
+    entry.settled = true;
+  }
+
+  /**
+   * Records WHAT the owner declared to this process about this promotion.
+   *
+   * Called before the declaration takes effect, so that a crash between here and the durable write
+   * leaves the record waiting rather than concluded — the fail-closed direction.
+   */
+  #recordOwnerDeclaration(
+    promotionId: string, kind: "accountAbandoned" | "groupDisowned" | "acknowledged",
+  ): void {
+    const entry = this.#firstHandPromotions.get(promotionId);
+    if (entry === undefined) this.#firstHandPromotions.set(promotionId, { declared: { [kind]: true } });
+    else entry.declared[kind] = true;
+  }
+
+  /**
+   * A conclusion this process reached first-hand, or `undefined`.
+   *
+   * Withheld from a rewound record for the same reason the declaration is: the departure it
+   * describes has already happened, and a record found back in `applying` did not get there by any
+   * route this product owns.
+   */
+  #concludedHere(row: PromotionRow): MergeConclusionReason | undefined {
+    if (this.#promotionRewound(row)) return undefined;
+    return this.#firstHandPromotions.get(row.id)?.concluded;
+  }
+
+  /** Remembers a first-hand conclusion so a later read in this process does not re-open it. */
+  #rememberConclusion(promotionId: string, reason: MergeConclusionReason): void {
+    const entry = this.#firstHandPromotions.get(promotionId);
+    if (entry === undefined) this.#firstHandPromotions.set(promotionId, { declared: {}, concluded: reason });
+    else entry.concluded ??= reason;
+  }
+
+  /** Exactly what this process was told, for the one caller allowed to conclude from it. */
+  #ownerDeclarationHere(row: PromotionRow): { accountAbandoned?: true; groupDisowned?: true; acknowledged?: true } {
+    // Withheld from a rewound record. The owner authorised one departure from `applying`, and it
+    // already happened; handing the same sentence back would let a rewrite spend it twice.
+    if (this.#promotionRewound(row)) return {};
+    return this.#firstHandPromotions.get(row.id)?.declared ?? {};
+  }
+
+  /**
+   * How a gate-releasing row reads when no live process can vouch for the transition that produced
+   * it. The stored value is carried as a CLAIM so the owner can see what the record says, and the
+   * marker is reported as held so nothing downstream reads "we could not tell" as "it is safe".
+   *
+   * Logical rather than the SQLite partial index on purpose: the index is already free — that is
+   * exactly the condition being compensated for — and every main-writing gate checks this instead.
+   */
+  #unattestedClaimView(row: PromotionRow): UnreadableMergePromotion {
+    return {
+      id: row.id,
+      taskId: row.task_id,
+      state: "unreadable",
+      unreadable: true,
+      unreadableReason: "promotion-attestation",
+      storedState: row.state,
+      holdsProjectExclusiveMarker: true,
+    };
   }
 
   /** Everything a path needs to decide whether this promotion may be concluded about. */
@@ -7476,15 +7895,25 @@ export class CandidateRegistry {
       untrustedProgramsRan?: boolean;
     } = {},
   ): MergeWriteConclusion {
-    return mergeWriteConclusion(row, this.#promotionTrace(row), {
+    const conclusion = mergeWriteConclusion(row, this.#promotionTrace(row), {
       approvalSpent: this.#promotionApprovalSpent(row),
       recordTrusted: true,
+      // Amendment (W): supplied from this process's volatile ledger, never from the row.
+      ownerDeclaration: this.#ownerDeclarationHere(row),
+      ...(this.#concludedHere(row) === undefined ? {} : { concludedHere: this.#concludedHere(row)! }),
       ...(options.leaderExitObserved === undefined
         ? {} : { leaderExitObserved: options.leaderExitObserved }),
       ...(options.firstHandGroup === undefined ? {} : { firstHandGroup: options.firstHandGroup }),
       ...(options.untrustedProgramsRan === undefined
         ? {} : { untrustedProgramsRan: options.untrustedProgramsRan }),
     });
+    // Kept the moment it is reached, and only when THIS process is the one that reached it. The
+    // next read in this process replays it from here instead of from the row, which is what stops a
+    // settled record being re-opened without putting the fact back where a hook can write it.
+    if (conclusion.concluded && (conclusion.leaderClosedFirstHand || conclusion.byOwnerDeclaration)) {
+      this.#rememberConclusion(row.id, conclusion.reason);
+    }
+    return conclusion;
   }
 
   #promotionTrace(row: PromotionRow): TraceMergeReading {
@@ -7577,6 +8006,12 @@ export class CandidateRegistry {
         throw new Error("MERGE_GROUP_ABANDON_CONFIRMATION_MISMATCH");
       }
       const at = new Date(this.#now()).toISOString();
+      // Amendment (W). Recorded BEFORE the durable write, and in this process's memory rather than
+      // beside the row: the field about to be written is bytes a repository hook can also write, and
+      // what makes THIS one the owner's is that this process took the phrase from them. The order is
+      // the fail-closed one — a crash in between leaves a declaration with no row (concludes nothing)
+      // rather than a row with no declaration (would conclude on bytes).
+      this.#recordOwnerDeclaration(row.id, "accountAbandoned");
       const abandoned = {
         ...JSON.parse(row.observation_json) as MergePromotionObservation,
         mergeAccountAbandoned: { at, decidedBy },
@@ -7616,6 +8051,12 @@ export class CandidateRegistry {
       throw new Error("MERGE_GROUP_ABANDON_PGID_MISMATCH");
     }
     const observation = JSON.parse(row.observation_json) as MergePromotionObservation;
+    // Amendment (W). Recorded BEFORE the durable write, and in this process's memory rather than
+    // beside the row: the field about to be written is bytes a repository hook can also write, and
+    // what makes THIS one the owner's is that this process took the phrase from them. The order is
+    // the fail-closed one — a crash in between leaves a declaration with no row (concludes nothing)
+    // rather than a row with no declaration (would conclude on bytes).
+    this.#recordOwnerDeclaration(row.id, "groupDisowned");
     const disowned = {
       ...observation,
       mergePgid: null,
@@ -7706,6 +8147,17 @@ export class CandidateRegistry {
     // case as its own state and it is refused above with the phrase that releases both. A second
     // check for it here would be unreachable, and unreachable guards cannot be tested.
     const observation = JSON.parse(row.observation_json) as MergePromotionObservation;
+    // Amendment (W). Recorded BEFORE the durable write, and in this process's memory rather than
+    // beside the row: the field about to be written is bytes a repository hook can also write, and
+    // what makes THIS one the owner's is that this process took the phrase from them. The order is
+    // the fail-closed one — a crash in between leaves a declaration with no row (concludes nothing)
+    // rather than a row with no declaration (would conclude on bytes).
+    // Deliberately NOT recorded as a merge declaration. This release says one thing — stop
+    // waiting for the process that STARTED the promotion — and says nothing about the merge.
+    // Registering it as one made the record settle here, which skipped the merge account the
+    // owner still has to give and made the next declaration report "nothing is waiting".
+    // The owner-process disown remains a row field read by `ownerProcessAlive`; on its own it
+    // releases no gate, because the record stays `applying` until the MERGE is accounted for.
     const disowned = {
       ...observation,
       ownerProcessDisowned: {
@@ -7792,6 +8244,12 @@ export class CandidateRegistry {
     const survivors = this.#promotionConclusion(row).standing;
     const running = survivors.blocking?.state === "merge-running" || survivors.survivors.length > 0;
     const at = new Date(this.#now()).toISOString();
+    // Amendment (W). Recorded BEFORE the durable write, and in this process's memory rather than
+    // beside the row: the field about to be written is bytes a repository hook can also write, and
+    // what makes THIS one the owner's is that this process took the phrase from them. The order is
+    // the fail-closed one — a crash in between leaves a declaration with no row (concludes nothing)
+    // rather than a row with no declaration (would conclude on bytes).
+    this.#recordOwnerDeclaration(row.id, "groupDisowned");
     const disowned = {
       ...observation,
       mergePgid: null,
@@ -7817,6 +8275,94 @@ export class CandidateRegistry {
       mainMutation: false,
     });
     return this.#publicPromotion(await this.#resolvePromotion(updated));
+  }
+
+  /**
+   * The owner's way past records that left `applying` before this process started.
+   *
+   * This is the exit amendment (W) owes the owner, and it is the whole of it: without one, the first
+   * restart after any successful merge leaves the project permanently unpromotable, and a control
+   * with no exit is a control that gets removed rather than obeyed.
+   *
+   * It writes NOTHING. No row moves, no state is repaired, no candidate is marked merged, no command
+   * touches main and no process is signalled — D-014 is unchanged. What it produces is the same
+   * volatile, hash-bound attestation the live paths produce, from the same place they get it: an
+   * owner talking to THIS process. A record rewritten after being acknowledged stops matching its
+   * hash and blocks again.
+   *
+   * Scoped to the project and applied to every unattested record at once, deliberately. The
+   * per-record alternative charges each future promotion one confirmation per past promotion, which
+   * grows without bound and turns a safety control into an obstacle.
+   *
+   * The count is returned rather than assumed: the caller shows the owner exactly what they are
+   * accepting, and an empty answer is a legitimate one — it means nothing was being held.
+   */
+  async acknowledgeUnattestedPromotions(input: {
+    roomId: string;
+    mainPath: string;
+    confirmation: unknown;
+    decidedBy: string;
+  }): Promise<{
+    acknowledged: Array<{ id: string; taskId: string; storedState: string }>;
+    skipped: Array<{ id: string; taskId: string; reason: "row-integrity" }>;
+    confirmation: string;
+    decidedBy: string;
+  }> {
+    this.#assertOpen();
+    const roomId = text(input.roomId, "CANDIDATE_ROOM_INVALID", 48);
+    if (!ROOM_PATTERN.test(roomId)) throw new Error("CANDIDATE_ROOM_INVALID");
+    const mainPath = await canonicalWorkspace(input.mainPath);
+    const decidedBy = text(input.decidedBy, "MERGE_DECISION_ACTOR_INVALID", 64);
+    // Checked before anything is listed, so a wrong phrase never becomes a survey of what the owner
+    // would have to accept.
+    if (input.confirmation !== MERGE_UNATTESTED_ACKNOWLEDGE_CONFIRMATION) {
+      throw new Error("MERGE_UNATTESTED_ACKNOWLEDGE_CONFIRMATION_MISMATCH");
+    }
+    const rows = this.#db.prepare(
+      "SELECT * FROM candidate_merge_promotions WHERE room_id=? AND main_path=? LIMIT ?",
+    ).all(roomId, mainPath, MAX_LIST) as unknown as PromotionRow[];
+    const acknowledged: Array<{ id: string; taskId: string; storedState: string }> = [];
+    // Returned rather than swallowed: a record this call would not touch is exactly what the owner
+    // needs to be told about, because the project stays held until they use its own exit.
+    const skipped: Array<{ id: string; taskId: string; reason: "row-integrity" }> = [];
+    for (const row of rows) {
+      // Records still holding the marker are NOT acknowledged here. A promotion that may still be
+      // running has its own named releases, each of which quotes a number the owner had to read;
+      // folding them into one project-wide phrase would let a live merge be waved past.
+      // A row that fails its own integrity check is refused here, and the reason is sharper than
+      // "different problem, different exit". This loop decides that a record is not in flight by
+      // reading its `state` column — and on an unreadable row that column is one of the bytes that
+      // cannot be trusted. Accepting it would mean using a value from a record nobody can read to
+      // decide that the project is free.
+      //
+      // Their exit is the dedicated unreadable release, which is the one that PROBES the processes
+      // the record names and escalates to the longer phrase when anything might still be alive. The
+      // project-wide phrase here carries none of that, and substituting it would quietly drop the
+      // protection rather than reuse it.
+      try {
+        this.#assertPromotionRow(row);
+      } catch {
+        skipped.push({ id: row.id, taskId: row.task_id, reason: "row-integrity" });
+        continue;
+      }
+      if (CandidateRegistry.#holdsExclusiveMarker(row)) continue;
+      if (this.#promotionAttested(row)) continue;
+      this.#attestPromotion(row);
+      // The phrase the owner typed is, in words, the statement `mergeWriteConclusion` needs: no
+      // earlier promotion here is still running. So this is registered as their declaration too, not
+      // only as an attestation — otherwise a re-observation would find nothing accounting for the
+      // merge and push the record back into `applying`, re-taking the marker the owner just cleared
+      // and making the exit look broken.
+      //
+      // Safe because of the line above it: a record still holding the marker never reaches here, so
+      // this can never end a wait over a merge that might still be writing. That is the difference
+      // between this phrase and the per-record ones, and it is why those still quote a pid.
+      this.#recordOwnerDeclaration(row.id, "acknowledged");
+      acknowledged.push({ id: row.id, taskId: row.task_id, storedState: row.state });
+    }
+    return {
+      acknowledged, skipped, decidedBy, confirmation: MERGE_UNATTESTED_ACKNOWLEDGE_CONFIRMATION,
+    };
   }
 
   /** The stored row exactly as SQLite holds it, integrity UNVERIFIED. Callers must decide. */
@@ -7897,6 +8443,12 @@ export class CandidateRegistry {
     } catch {
       observation = { unparsedObservation: String(row.observation_json).slice(0, 4_096) };
     }
+    // Amendment (W). Recorded BEFORE the durable write, and in this process's memory rather than
+    // beside the row: the field about to be written is bytes a repository hook can also write, and
+    // what makes THIS one the owner's is that this process took the phrase from them. The order is
+    // the fail-closed one — a crash in between leaves a declaration with no row (concludes nothing)
+    // rather than a row with no declaration (would conclude on bytes).
+    this.#recordOwnerDeclaration(row.id, "accountAbandoned");
     observation.unreadableRecordReleased = {
       at,
       decidedBy,
@@ -7980,6 +8532,12 @@ export class CandidateRegistry {
     // Re-read, and rendered by the same function every listing uses. A hand-built answer here is how
     // this call came to report two fields no later read could produce.
     const stored = this.#promotionRowRaw(id);
+    // Amendment (W). The row has just left `applying`, which frees the project's exclusive marker,
+    // and this process is the one the owner typed the phrase at — so this is exactly the transition
+    // an attestation is for. It is bound to the hash the row has NOW, unreadable and all: the point
+    // is not that the row verifies (it does not, which is why it needed releasing) but that a later
+    // rewrite of it invalidates the release instead of inheriting it.
+    if (stored !== undefined) this.#attestPromotion(stored);
     return stored === undefined
       ? {
         id, taskId, state: "unreadable", unreadable: true,

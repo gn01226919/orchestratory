@@ -25,6 +25,7 @@ import {
   MERGE_UNACCOUNTED_ABANDON_CONFIRMATION,
   MERGE_UNREADABLE_ABANDON_CONFIRMATION,
   MERGE_UNREADABLE_LIVE_ABANDON_CONFIRMATION,
+  MERGE_UNATTESTED_ACKNOWLEDGE_CONFIRMATION,
   MAX_PROMOTION_RESTORE_JSON_BYTES,
   type CandidateTask,
   type MergeApproval,
@@ -61,6 +62,7 @@ interface Fixture {
   data: string;
   path: string;
   registry: CandidateRegistry;
+  service?: CollaborationService;
   task: CandidateTask;
 }
 
@@ -83,6 +85,8 @@ async function fixture(t: TestContext, options: {
   beforeInitialCommit?: (source: string) => Promise<void>;
   /** Runs after the candidate exists and BEFORE it is completed, so its head stays the one bound. */
   beforeComplete?: (context: { source: string; candidatePath: string }) => Promise<void>;
+  /** Use the production CollaborationService so promotion rows are paired with the keyed audit chain. */
+  service?: boolean;
 } = {}): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), "orchestratory-promotion-"));
   const source = join(root, "source");
@@ -108,8 +112,9 @@ async function fixture(t: TestContext, options: {
    */
   t.after(async () => await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 
-  const registry = new CandidateRegistry(data);
-  t.after(() => registry.close());
+  const service = options.service ? new CollaborationService(data) : undefined;
+  const registry = service?.candidates ?? new CandidateRegistry(data);
+  t.after(() => service?.close() ?? registry.close());
   const task = await registry.start({
     actor: "codex1", clientRequestId: key(), roomId: "demo", mainPath: source, task: "promotion",
   });
@@ -119,7 +124,7 @@ async function fixture(t: TestContext, options: {
     actor: "codex1", clientRequestId: key(), taskId: task.taskId, roomId: "demo", mainPath: source,
     summary: "ready for owner review",
   });
-  return { root, source, data, path: registry.path, registry, task };
+  return { root, source, data, path: registry.path, registry, ...(service ? { service } : {}), task };
 }
 
 async function raise(f: Fixture): Promise<MergeApproval> {
@@ -430,8 +435,41 @@ test("legacy complete restore rows remain readable while malformed v2 truncation
     return restore;
   });
   const legacyReader = new CandidateRegistry(f.data);
+  // ⛔ This used to assert a readable `applied` here. Amendment (W): a reader that did not watch the
+  // merge cannot tell a promotion this product finished from one a repository hook wrote — the row,
+  // the trace, the audit database and any key beside them share the owner's uid, and the row hash is
+  // the product's own unkeyed SHA-256. So the legacy payload is still PARSED (that is what this test
+  // is about, and it is why the reason below is not `row-integrity`), and what it may no longer do is
+  // count as convergence.
+  const legacyListed = (await legacyReader.promotions({ roomId: "demo", mainPath: f.source }))[0];
+  assert.equal(legacyListed?.state, "unreadable");
+  assert.ok(legacyListed !== undefined && "unreadable" in legacyListed);
+  assert.equal(legacyListed.unreadableReason, "promotion-attestation",
+    "a legacy-but-well-formed restore payload was reported as a corrupt row rather than an unattested claim");
+  assert.equal(legacyListed.storedState, "applied");
+  assert.equal(legacyListed.holdsProjectExclusiveMarker, true);
+  // The owner's exit, and the only one: they say they looked. It writes nothing, and it is scoped to
+  // this reader — the next `new CandidateRegistry` asks again, which is asserted below.
+  const acknowledged = await legacyReader.acknowledgeUnattestedPromotions({
+    roomId: "demo",
+    mainPath: f.source,
+    confirmation: MERGE_UNATTESTED_ACKNOWLEDGE_CONFIRMATION,
+    decidedBy: "local-cli",
+  });
+  assert.equal(acknowledged.acknowledged.length, 1);
   assert.equal(readable((await legacyReader.promotions({ roomId: "demo", mainPath: f.source }))[0]).state, "applied");
   legacyReader.close();
+
+  // A wrong phrase is refused before anything is surveyed, and a fresh process starts held again.
+  const secondReader = new CandidateRegistry(f.data);
+  await assert.rejects(
+    secondReader.acknowledgeUnattestedPromotions({
+      roomId: "demo", mainPath: f.source, confirmation: "yes", decidedBy: "local-cli",
+    }),
+    /MERGE_UNATTESTED_ACKNOWLEDGE_CONFIRMATION_MISMATCH/u,
+  );
+  assert.equal((await secondReader.promotions({ roomId: "demo", mainPath: f.source }))[0]?.state, "unreadable");
+  secondReader.close();
 
   rewritePromotionRestore(f.path, (restore) => ({
     ...restore,
@@ -444,6 +482,26 @@ test("legacy complete restore rows remain readable while malformed v2 truncation
   const listed = (await malformedReader.promotions({ roomId: "demo", mainPath: f.source }))[0];
   assert.equal(listed?.state, "unreadable",
     "a malformed restore payload with a recomputed unkeyed row hash was treated as an applied fact");
+  // The two unreadable reasons must stay distinguishable, or this test stops testing the restore
+  // payload at all and becomes a second copy of the attestation test ([[PITFALLS]] #106).
+  assert.ok(listed !== undefined && "unreadable" in listed);
+  assert.equal(listed.unreadableReason, "row-integrity");
+  // And the project-wide acknowledgement refuses it outright, reporting it rather than swallowing
+  // it. The reason is not tidiness: this call decides a record is not in flight by reading its
+  // `state` column, and on a row whose integrity check failed that column is one of the bytes that
+  // cannot be trusted. Its exit is the dedicated unreadable release, which probes the processes the
+  // record names and escalates the phrase when any might still be alive.
+  const refused = await malformedReader.acknowledgeUnattestedPromotions({
+    roomId: "demo", mainPath: f.source,
+    confirmation: MERGE_UNATTESTED_ACKNOWLEDGE_CONFIRMATION, decidedBy: "local-cli",
+  });
+  assert.equal(refused.acknowledged.length, 0);
+  assert.equal(refused.skipped.length, 1);
+  assert.equal(refused.skipped[0]?.reason, "row-integrity");
+  const afterAcknowledge = (await malformedReader.promotions({ roomId: "demo", mainPath: f.source }))[0];
+  assert.equal(afterAcknowledge?.state, "unreadable");
+  assert.ok(afterAcknowledge !== undefined && "unreadable" in afterAcknowledge);
+  assert.equal(afterAcknowledge.unreadableReason, "row-integrity");
 });
 
 for (const hookName of ["pre-merge-commit", "post-merge"]) {
@@ -1073,6 +1131,23 @@ test("a merge orphaned by a crash that finishes is later observed as applied, no
   // frozen on "undetermined" was so dangerous — nothing on the surface contradicted it.
   assert.equal(await status(f.source), "");
 
+  // Amendment (W). Before the owner says anything, this reader has combined a live look at main with
+  // fields it read out of the promotion row — and WHICH commit is "the authorized merge" is one of
+  // those fields. So the interpretation is kept, by name and in full, and it is not acted on: the
+  // record stays `applying`, the comparison is not exported as a positive fact, and the project's
+  // exclusive marker is not handed to the next promotion.
+  const claimed = readable((await reopened.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  assert.equal(claimed.state, "applying");
+  assert.equal(claimed.observation.code, "PERSISTED_PROMOTION_CONVERGENCE_UNATTESTED");
+  assert.equal(claimed.observation.authorizedMergeCommit, null,
+    "a comparison against owner-writable row fields was exported as a positive fact");
+  assert.equal(claimed.observation.untrustedConvergenceClaim?.code,
+    "AUTHORIZED_MERGE_COMMIT_OBSERVED_WITH_MERGE_STATE_LEFT_BEHIND",
+    "the interpretation was discarded rather than named — the owner cannot check what they cannot see");
+
+  // The owner ends the wait, in this process, with the phrase the record printed. That is the one
+  // input a repository hook cannot write, and it is what lets the reads below conclude.
+  await ownerEndsTheWait(reopened, f);
   const observed = readable((await reopened.promotions({ roomId: "demo", mainPath: f.source }))[0]);
   // Killed after committing but before git cleared MERGE_HEAD, so this is not finished — but it is
   // named, and it is not "undetermined": the record says the authorized merge is in main.
@@ -1146,10 +1221,12 @@ test("crash reconciliation does not change one byte of the repository, .git incl
       // The precondition that makes this mean something: the crash really did leave main altered, so
       // a reconciliation that "tidied up" would have plenty to do and the digest would move.
       const before = await treeDigest(f.source);
-      // Amendment (T): the shape that has to be walked through the owner's exit is the one where
-      // main was left half-applied. The one where the orphan committed the authorized merge is its
-      // own evidence — main's HEAD IS the write — and converges without anybody being asked.
-      if (scenario.killOrphan) await ownerEndsTheWait(reopened, f);
+      // ⛔ Amendment (T) walked only the half-applied shape through the owner's exit, on the reasoning
+      // that "main's HEAD IS the write" makes the finished merge its own evidence. Amendment (W)
+      // withdraws that: WHICH commit counts as authorized is read out of the promotion row, and the
+      // row is bytes the merge's own hooks can write and re-hash. So both shapes now cost the owner
+      // the same declaration, and neither one lets this reader leave `applying` on its own.
+      await ownerEndsTheWait(reopened, f);
       const first = readable((await reopened.promotions({ roomId: "demo", mainPath: f.source }))[0]);
       assert.equal(first.state, "needs-manual-review");
       assert.ok((first.observation.differences ?? []).length > 0, "the crash left main unchanged");
@@ -1220,6 +1297,19 @@ test("an owner who restores main themselves clears a needs-manual-review promoti
   // Reopened in a new registry, so the answer comes from the repository and durable state alone.
   const reopened = new CandidateRegistry(f.data);
   t.after(() => reopened.close());
+  // Amendment (W). "Durable state alone" is exactly what this reader may not build a positive fact
+  // on: the record left `applying` before this process existed, and nothing stored locally says
+  // whether this product ended it or a hook wrote that it had. So it reads as a claim first, and the
+  // way past it is the owner saying they looked — the same thing they just did in their terminal.
+  const held = (await reopened.promotions({ roomId: "demo", mainPath: f.source }))[0];
+  assert.ok(held !== undefined && "unreadable" in held);
+  assert.equal(held.unreadableReason, "promotion-attestation");
+  assert.equal(held.storedState, "needs-manual-review");
+  const acknowledged = await reopened.acknowledgeUnattestedPromotions({
+    roomId: "demo", mainPath: f.source,
+    confirmation: MERGE_UNATTESTED_ACKNOWLEDGE_CONFIRMATION, decidedBy: "local-cli",
+  });
+  assert.equal(acknowledged.acknowledged.length, 1);
   const resolved = readable((await reopened.promotions({ roomId: "demo", mainPath: f.source }))[0]);
   assert.equal(resolved.state, "rolled-back");
   assert.equal(resolved.observation.code, "MAIN_OBSERVED_IDENTICAL_TO_PRE_PROMOTION_FINGERPRINTS");
@@ -1633,18 +1723,34 @@ exit 0
   assert.equal(await status(f.source), "", "main was expected to be clean after the orphan finished");
   assert.equal(groupAlive(pgid), true, "the backgrounded hook child was expected to still be alive");
 
-  // Previously this stayed on `applying` — "still being written" — for the rest of the row's life.
-  const observed = await settledPromotion(reopened, f.source);
-  assert.notEqual(observed.state, "applying", "the record is still frozen on a lingering group");
-  assert.equal(observed.observation.code, "AUTHORIZED_MERGE_COMMIT_OBSERVED_WITH_MERGE_STATE_LEFT_BEHIND");
-  assert.equal(observed.mainHeadAfter, mergedHead);
+  // ⛔ This used to converge on its own once the group's leader had gone. Amendment (W): leaving
+  // `applying` hands the project's exclusive marker to the next promotion, and the only inputs this
+  // reader has for that decision are a live look at main plus fields it read out of the promotion
+  // row — which is where "which commit was authorized" comes from, and which the merge's own hooks
+  // can write. So the exit is still one step, and the owner takes it. What the test is named for
+  // survives intact: the record is not frozen for the rest of its life.
+  const observed = await settledPromotion(reopened, f.source, 5);
+  // ⛔ This used to assert the record had left `applying` by itself. Amendment (W): leaving it hands
+  // the project's exclusive marker to the next promotion, and the only inputs this reader has are a
+  // live look at main plus fields it read out of the promotion row — including which commit was
+  // "authorized", which the merge's own hooks can write. What the test is named for is unchanged and
+  // is asserted at the end: the record does not stay stuck for the rest of its life.
+  assert.equal(observed.state, "applying", "a reader with no first-hand fact concluded anyway");
+  // Named, not discarded. Whether the interpretation sits in `code` or is carried beside it as the
+  // claim it is, the owner must be able to see that main already has the merge — a record that
+  // refuses AND says nothing is how [[PITFALLS]] #128 gets repeated.
+  const interpretation = observed.observation.untrustedConvergenceClaim?.code
+    ?? observed.observation.code;
+  assert.match(interpretation, /AUTHORIZED_MERGE_COMMIT_OBSERVED|MERGE_GROUP_SURVIVORS/u,
+    `the record named nothing an owner could check: ${JSON.stringify(observed.observation)}`);
   // Amendment (T) changed what `pending` says here, and the change is honest rather than incidental.
-  // The record is no longer frozen — that is the assertion above, and it is the one this test is
-  // named for — but nothing this process watched says the merge process is over, so the record goes
-  // on naming the group instead of reporting "nothing is in the way". What it must NOT say is that
-  // a merge is still writing main, because a leader that has exited is not that.
+  // Nothing this process watched says the merge process is over, so the record goes on naming the
+  // group instead of reporting "nothing is in the way". What it must NOT say is that a merge is
+  // still writing main, because a leader that has exited is not that.
   assert.notEqual(observed.pending?.code, "MERGE_SUBPROCESS_STILL_RUNNING");
   assert.notEqual(observed.pending?.code, "PROMOTION_OWNER_AND_MERGE_STILL_RUNNING");
+  assert.ok(!/reset --hard/u.test(observed.observation.recovery ?? ""),
+    "a destructive command was offered over a group this record can still point at");
   // The survivors are reported by name rather than silently ignored, with a read-only command.
   assert.equal(observed.observation.mergeGroupSurvivors?.pgid, pgid);
   assert.match(observed.observation.mergeGroupSurvivors?.inspect ?? "", new RegExp(`ps .*-g ${pgid}$`, "u"));
@@ -1661,7 +1767,11 @@ exit 0
   assert.equal(settled.state, "applying", `state ${settled.state}: ${settled.observation.code}`);
   assert.equal(settled.observation.code, "AUTHORIZED_MERGE_COMMIT_OBSERVED_WITH_MERGE_GROUP_SURVIVORS");
   assert.equal(settled.observation.authorizedMergeCommit, true);
-  assert.equal(reopened.get(f.task.taskId)?.status, "merged");
+  // ⛔ This used to assert `merged` here. Amendment (W): the candidate's own status is a durable
+  // positive fact, and reaching it from a live Git read compared against owner-writable row fields
+  // is exactly the step this round withdrew. It becomes `merged` once the owner has said so, which
+  // is asserted at the end of this test.
+  assert.equal(reopened.get(f.task.taskId)?.status, "completed");
   // And the group really was still alive throughout, so this is not a race that resolved itself.
   assert.equal(groupAlive(pgid), true);
 
@@ -1670,9 +1780,13 @@ exit 0
   // declaration, no write to main.
   process.kill(-pgid, "SIGKILL");
   await waitForGroupExit(pgid);
-  const free = await settledPromotion(reopened, f.source);
+  // The survivor is gone, so disowning destroys no evidence this test still needs, and the owner's
+  // single declaration is the whole of the exit. Amendment (W) costs exactly this: one step, taken
+  // by a person, instead of a reader deciding from bytes it cannot vouch for.
+  const free = await endEveryWait(reopened, f.source, f.task.taskId);
   assert.equal(free.state, "applied", `still ${free.state}: ${free.observation.code}`);
   assert.equal(free.mainHeadAfter, mergedHead);
+  assert.equal(reopened.get(f.task.taskId)?.status, "merged");
 });
 
 /*
@@ -1940,6 +2054,41 @@ function forgePromotionRow(path: string, edit: (current: {
 }
 
 /**
+ * Turns a real terminal promotion into a different terminal claim and recomputes the public hash.
+ * A repository hook has every byte needed to do this: candidate-registry.sqlite is derivable from
+ * GIT_TRACE2_EVENT and `mergePromotionHash()` has no key. The keyed audit chain is deliberately not
+ * touched, so this is the attack P0-3 requires the production read path to distinguish.
+ */
+function forgeTerminalPromotionClaim(path: string, state: "applied" | "rolled-back"): void {
+  const db = new DatabaseSync(path);
+  try {
+    const row = db.prepare(
+      "SELECT * FROM candidate_merge_promotions WHERE state IN ('applied','rolled-back') LIMIT 1",
+    ).get() as unknown as Record<string, string | number | null>;
+    assert.ok(row !== undefined, "there was no terminal promotion to forge");
+    const observation = JSON.parse(String(row.observation_json)) as Record<string, unknown>;
+    const observationJson = JSON.stringify({
+      ...observation,
+      code: state === "applied" ? "FORGED_APPLIED_CLAIM" : "FORGED_ROLLED_BACK_CLAIM",
+      authorizedMergeCommit: state === "applied",
+    });
+    const base = [
+      row.id, row.approval_id, row.task_id, row.room_id, row.main_path, row.main_branch,
+      row.candidate_head, row.recovery_ref, row.main_head_before, row.main_head_after,
+      row.restore_json, observationJson, state, row.owner_pid, row.started_at_ms, row.updated_at_ms,
+    ];
+    const pgid = row.merge_pgid;
+    const boot = row.merge_boot_at_sec;
+    const rowHash = createHash("sha256").update(JSON.stringify(
+      pgid === null && boot === null ? base : [...base, pgid, boot],
+    ), "utf8").digest("hex");
+    assert.equal(Number(db.prepare(
+      "UPDATE candidate_merge_promotions SET state=?,observation_json=?,row_hash=? WHERE id=?",
+    ).run(state, observationJson, rowHash, String(row.id)).changes), 1);
+  } finally { db.close(); }
+}
+
+/**
  * Rewrites the APPROVAL row to say it was never spent, recomputing its hash the same way.
  *
  * This is amendment (O)'s first positive fact — "the approval was never spent, so no Git command
@@ -2123,6 +2272,14 @@ test("the owner can stop a promotion waiting on a process group, without anythin
   await rm(join(f.source, ".git", "hooks", "pre-merge-commit"), { force: true });
   const converged = readable((await reopened.promotions({ roomId: "demo", mainPath: f.source }))[0]);
   assert.equal(converged.state, "rolled-back");
+  // Amendment (W), and this is the honest cost of it rather than a wrinkle in the test: an
+  // attestation belongs to the process that heard the owner, and `f.registry` is not that process —
+  // `reopened` is. There is no non-forgeable way for one to learn what the other was told, so the
+  // process that is about to act asks once, with the same phrase.
+  await f.registry.acknowledgeUnattestedPromotions({
+    roomId: "demo", mainPath: f.source,
+    confirmation: MERGE_UNATTESTED_ACKNOWLEDGE_CONFIRMATION, decidedBy: "local-cli",
+  });
   const second = await raise(f);
   const retried = await promote(f, second, await grant(f, second));
   assert.equal(retried.promotion.state, "applied");
@@ -2506,6 +2663,14 @@ test("a kill inside the approval-consuming write waits for the owner, and the ta
     approvalId: approval.id, roomId: "demo", mainPath: f.source, decidedBy: "local-web",
     reason: "restarting after a crash",
   });
+  // Amendment (W), and this is the honest cost of it rather than a wrinkle in the test: an
+  // attestation belongs to the process that heard the owner, and `f.registry` is not that process —
+  // `reopened` is. There is no non-forgeable way for one to learn what the other was told, so the
+  // process that is about to act asks once, with the same phrase.
+  await f.registry.acknowledgeUnattestedPromotions({
+    roomId: "demo", mainPath: f.source,
+    confirmation: MERGE_UNATTESTED_ACKNOWLEDGE_CONFIRMATION, decidedBy: "local-cli",
+  });
   const second = await raise(f);
   const retried = await promote(f, second, await grant(f, second));
   assert.equal(retried.promotion.state, "applied");
@@ -2528,7 +2693,21 @@ test("a kill inside the final-result write is resolved by re-observation, not le
 
   const reopened = new CandidateRegistry(f.data);
   t.after(() => reopened.close());
-  const settled = await settledPromotion(reopened, f.source);
+  // ⛔ This used to converge to `applied` on its own. Amendment (W): the reader is a new process, so
+  // it has no first-hand fact about who ended this promotion, and "which commit was authorized"
+  // comes out of the row — bytes the merge's own hooks can write and re-hash. The interpretation is
+  // kept by name, and it is not acted on.
+  const claimed = await settledPromotion(reopened, f.source, 5);
+  assert.equal(claimed.state, "applying");
+  assert.equal(claimed.observation.untrustedConvergenceClaim?.code,
+    "AUTHORIZED_MERGE_COMMIT_OBSERVED_IN_MAIN",
+    `the interpretation was discarded rather than named: ${JSON.stringify(claimed.observation)}`);
+  assert.notEqual(reopened.get(f.task.taskId)?.status, "merged",
+    "a claim this reader cannot vouch for was written into a second table as a positive fact");
+
+  // The owner ends the wait, in this process. That is the whole of the exit, and everything the
+  // test was originally about follows from it unchanged.
+  const settled = await endEveryWait(reopened, f.source, f.task.taskId);
   assert.equal(settled.state, "applied");
   assert.equal(settled.observation.code, "AUTHORIZED_MERGE_COMMIT_OBSERVED_IN_MAIN");
   assert.equal(settled.mainHeadAfter, await head(f.source));
@@ -3370,6 +3549,12 @@ test("the owner can stop a promotion waiting on its own owner process, but not w
   await execFileAsync("git", ["reset", "--hard", beforeHead], { cwd: f.source });
   await rm(join(f.source, ".git", "hooks", "pre-merge-commit"), { force: true });
   assert.equal((await settledPromotion(reopened, f.source, 50)).state, "rolled-back");
+  // Amendment (W): `reopened` heard the owner, `f.registry` did not, and there is no non-forgeable
+  // way for one to learn what the other was told. The process that is about to act asks once.
+  await f.registry.acknowledgeUnattestedPromotions({
+    roomId: "demo", mainPath: f.source,
+    confirmation: MERGE_UNATTESTED_ACKNOWLEDGE_CONFIRMATION, decidedBy: "local-cli",
+  });
   const second = await raise(f);
   assert.equal((await promote(f, second, await grant(f, second))).promotion.state, "applied");
 });
@@ -4021,18 +4206,42 @@ test("an unreadable record whose processes are gone is released with the shorter
   assert.equal(unreadable(released).holdsProjectExclusiveMarker, false);
   reader.close();
 
-  // A different instance, a different read, the same two answers — and the release requirement is
-  // gone because there is no longer a marker to release.
+  // A different instance. ⛔ This used to assert the release had SURVIVED into it. Amendment (W):
+  // a release is a first-hand fact — the owner said it to one process — and the only place it could
+  // be kept for another is storage the merge's own hooks can write. So the new instance reports the
+  // record as still holding the project, and the owner says it again. Everything else this test is
+  // about is unchanged and asserted either side of that: the row is never repaired, the release is
+  // recorded and readable, main never moves, and a second release is still refused.
   const later = new CandidateRegistry(f.data);
   t.after(() => later.close());
-  const after = unreadable((await later.promotions({ roomId: "demo", mainPath: f.source }))[0]);
-  assert.equal(after.state, "unreadable", "nothing here repairs the row");
-  assert.equal(after.storedState, "needs-manual-review");
-  assert.equal(after.holdsProjectExclusiveMarker, false);
-  assert.equal(after.releasedFromExclusiveMarker?.decidedBy, "local-web");
-  assert.match(after.releasedFromExclusiveMarker?.at ?? "", /^\d{4}-\d{2}-\d{2}T/u);
-  assert.equal(after.release, undefined);
-  // Releasing it twice is refused: the marker is not there to give up a second time.
+  const held = unreadable((await later.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  assert.equal(held.state, "unreadable", "nothing here repairs the row");
+  assert.equal(held.holdsProjectExclusiveMarker, true,
+    "a release this process never heard was carried in on the strength of stored bytes");
+  // ⛔ An earlier attempt cleared this with the project-wide phrase. It must not: this record is
+  // unreadable, so its `state` column is not evidence that nothing is running, and the phrase that
+  // covers it is the unreadable release's own — the one that probes. Refused and REPORTED, so the
+  // owner is told the project is still held and why.
+  const acknowledged = await later.acknowledgeUnattestedPromotions({
+    roomId: "demo", mainPath: f.source,
+    confirmation: MERGE_UNATTESTED_ACKNOWLEDGE_CONFIRMATION, decidedBy: "local-web",
+  });
+  assert.equal(acknowledged.acknowledged.length, 0);
+  assert.equal(acknowledged.skipped[0]?.reason, "row-integrity");
+  // So the record is still held, and the assertions below describe that rather than a release that
+  // survived a restart. This is the named gap this round leaves: an unreadable record that has
+  // already left `applying` has no daemon-side exit, because the release verb that probes still
+  // requires `applying`. Recorded in VERIFICATION rather than papered over here.
+  const stillHeld = unreadable((await later.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  assert.equal(stillHeld.holdsProjectExclusiveMarker, true);
+  assert.equal(stillHeld.storedState, "needs-manual-review");
+  // What the release DID durably record is still there and still readable, which is the half of this
+  // test that never depended on the release surviving into another process.
+  assert.equal(stillHeld.releasedFromExclusiveMarker?.decidedBy, "local-web");
+  assert.match(stillHeld.releasedFromExclusiveMarker?.at ?? "", /^\d{4}-\d{2}-\d{2}T/u);
+  // Releasing it twice is refused: the durable state has already left `applying`, and this release
+  // is the one verb that still reads that column — deliberately, because it is also the one that
+  // probes. Recorded as the gap this round leaves; see docs/VERIFICATION.md.
   await assert.rejects(
     later.abandonMergeProcessGroup({ ...args, confirmation: MERGE_UNREADABLE_ABANDON_CONFIRMATION }),
     /MAIN_MERGE_PROMOTION_NOT_BLOCKED/u,
@@ -5227,6 +5436,13 @@ test("a v5 promotion database upgrades by name, and a newer one is refused befor
   t.after(() => upgraded.close());
   assert.equal(schemaVersion(f.path), 7, "opening a v5 database must move it to the version it now is");
   assert.deepEqual(upgraded.integrity(), { schemaVersion: 7, quickCheck: "ok", rowsValid: true });
+  // Amendment (W): a registry that did not run this promotion cannot vouch for its terminal state,
+  // so the owner says they looked. This test is about the UPGRADE preserving the row, and that is
+  // still what is asserted either side of it — the acknowledgement changes no bytes.
+  await upgraded.acknowledgeUnattestedPromotions({
+    roomId: "demo", mainPath: f.source,
+    confirmation: MERGE_UNATTESTED_ACKNOWLEDGE_CONFIRMATION, decidedBy: "local-cli",
+  });
   assert.equal(readable((await upgraded.promotions({ roomId: "demo", mainPath: f.source }))[0]).state, "applied");
   const after = new DatabaseSync(f.path);
   const upgradedRow = after.prepare("SELECT row_hash FROM candidate_merge_promotions LIMIT 1")
@@ -5267,6 +5483,13 @@ test("a real v6 8K promotion table upgrades transactionally to the v7 UTF-8 byte
   assert.equal(row.row_hash, storedHash, "the table rebuild changed a hash-bound row");
   assert.match(sql, /length\(CAST\(restore_json AS BLOB\)\) BETWEEN 2 AND 65536/u);
   assert.doesNotMatch(sql, /length\(restore_json\) BETWEEN 2 AND 8000/u);
+  // Amendment (W): a registry that did not run this promotion cannot vouch for its terminal state,
+  // so the owner says they looked. This test is about the UPGRADE preserving the row, and that is
+  // still what is asserted either side of it — the acknowledgement changes no bytes.
+  await upgraded.acknowledgeUnattestedPromotions({
+    roomId: "demo", mainPath: f.source,
+    confirmation: MERGE_UNATTESTED_ACKNOWLEDGE_CONFIRMATION, decidedBy: "local-cli",
+  });
   assert.equal(readable((await upgraded.promotions({ roomId: "demo", mainPath: f.source }))[0]).state, "applied");
 });
 
@@ -6084,6 +6307,363 @@ for (const wipe of [false, true]) {
  * =============================================================================================
  */
 
+/**
+ * Rewrites the one `applying` row into a state that is NOT terminal but still frees the project's
+ * exclusive marker, recomputing exactly the unkeyed SHA-256 the row calls `row_hash`.
+ *
+ * The marker is a partial unique index `ON(main_path) WHERE state='applying'`, so this is every bit
+ * as much a release as writing `applied` — and it was the half the first P0-3 pass left open,
+ * because both the attestation check and the project gate's own SELECT enumerated the two terminal
+ * states. A record rewritten this way was not examined at all.
+ */
+/**
+ * Rewinds a settled promotion row back to `applying`, recomputing the product's unkeyed row hash.
+ *
+ * The shape a reviewer found: every gate excuses a record that still holds the marker, because a
+ * record that never left needs no excuse. So putting one BACK is the way past a hash-bound proof.
+ */
+/**
+ * Rewrites a settled row's CONTENT while leaving its `row_hash` column exactly as it was.
+ *
+ * The row now fails its own integrity check — which is the point.  A reviewer found that an
+ * attestation bound to the stored hash STRING survives this, so the gate skipped a record it could
+ * not read while the listing, which verifies before it reports, called the same record unreadable.
+ */
+function corruptPromotionKeepingItsStoredHash(path: string): void {
+  const db = new DatabaseSync(path);
+  try {
+    const row = db.prepare(
+      "SELECT id, observation_json FROM candidate_merge_promotions WHERE state<>'applying' LIMIT 1",
+    ).get() as unknown as { id: string; observation_json: string };
+    assert.ok(row !== undefined, "there was no settled promotion to corrupt");
+    const observation = JSON.parse(String(row.observation_json)) as Record<string, unknown>;
+    const rewritten = JSON.stringify({ ...observation, code: "CONTENT_REWRITTEN_HASH_KEPT" });
+    assert.equal(Number(db.prepare(
+      "UPDATE candidate_merge_promotions SET observation_json=? WHERE id=?",
+    ).run(rewritten, String(row.id)).changes), 1);
+  } finally { db.close(); }
+}
+
+test("an attestation does not survive a rewrite that keeps the row's stored hash", async (t) => {
+  const f = await fixture(t, { service: true });
+  const approval = await raise(f);
+  assert.equal((await promote(f, approval, await grant(f, approval))).promotion.state, "applied");
+  // Attested, and readable, and the project is free — this is the state being attacked.
+  assert.equal(
+    (await f.registry.promotions({ roomId: "demo", mainPath: f.source }))[0]?.state, "applied",
+  );
+
+  // The rewrite does not touch `row_hash`. Against a proof bound to that column it would be
+  // invisible; against one bound to the CONTENT it is exactly what breaks the binding.
+  corruptPromotionKeepingItsStoredHash(f.path);
+  const listed = (await f.registry.promotions({ roomId: "demo", mainPath: f.source }))[0];
+  assert.ok(listed !== undefined && "unreadable" in listed,
+    `a rewritten record kept an attestation bound to its old hash: ${JSON.stringify(listed)}`);
+  assert.equal(listed.holdsProjectExclusiveMarker, true,
+    "the screen said the project was free while the gate below refuses — they must not disagree");
+
+  // Second task: the gate has to reach the same answer the screen just gave.
+  const second = await f.registry.start({
+    actor: "codex1", clientRequestId: key(), roomId: "demo", mainPath: f.source, task: "second",
+  });
+  await commit(second.candidatePath, "second.txt", "second work\n", "second work");
+  await f.registry.complete({
+    actor: "codex1", clientRequestId: key(), taskId: second.taskId, roomId: "demo",
+    mainPath: f.source, summary: "second ready",
+  });
+  const preview = await f.registry.previewMainMerge({
+    taskId: second.taskId, roomId: "demo", mainPath: f.source,
+  });
+  const secondApproval = await f.registry.requestMainMerge({
+    actor: "codex1", clientRequestId: key(), taskId: second.taskId, roomId: "demo",
+    mainPath: f.source, completionId: preview.completionId, previewDigest: preview.previewDigest,
+  });
+  const secondToken = (await f.registry.grantMainMerge({
+    approvalId: secondApproval.id, roomId: "demo", mainPath: f.source,
+    previewDigest: secondApproval.binding.previewDigest,
+    confirmation: MERGE_APPROVAL_CONFIRMATION, decidedBy: "local-web",
+  })).approvalToken;
+  const headBefore = await head(f.source);
+  await assert.rejects(
+    f.registry.promoteMainMerge({
+      approvalId: secondApproval.id, token: secondToken, action: MERGE_APPROVAL_GRANT,
+      taskId: second.taskId, roomId: "demo", mainPath: f.source,
+    }),
+    (error: Error) => error.message.length > 0 && error.message !== "OK",
+  );
+  assert.equal(await head(f.source), headBefore);
+});
+
+function rewindPromotionToApplying(path: string): void {
+  const db = new DatabaseSync(path);
+  try {
+    const row = db.prepare(
+      "SELECT * FROM candidate_merge_promotions WHERE state<>'applying' LIMIT 1",
+    ).get() as unknown as Record<string, string | number | null>;
+    assert.ok(row !== undefined, "there was no settled promotion to rewind");
+    const observation = JSON.parse(String(row.observation_json)) as Record<string, unknown>;
+    const observationJson = JSON.stringify({ ...observation, code: "FORGED_REWOUND_CLAIM" });
+    const base = [
+      row.id, row.approval_id, row.task_id, row.room_id, row.main_path, row.main_branch,
+      row.candidate_head, row.recovery_ref, row.main_head_before, row.main_head_after,
+      row.restore_json, observationJson, "applying", row.owner_pid, row.started_at_ms,
+      row.updated_at_ms,
+    ];
+    const pgid = row.merge_pgid;
+    const boot = row.merge_boot_at_sec;
+    const rowHash = createHash("sha256").update(JSON.stringify(
+      pgid === null && boot === null ? base : [...base, pgid, boot],
+    ), "utf8").digest("hex");
+    assert.equal(Number(db.prepare(
+      "UPDATE candidate_merge_promotions SET state='applying',observation_json=?,row_hash=? WHERE id=?",
+    ).run(observationJson, rowHash, String(row.id)).changes), 1);
+  } finally { db.close(); }
+}
+
+test("a declaration spent once cannot settle a record the merge rewound to applying", async (t) => {
+  const f = await fixture(t, { service: true });
+  const gate = join(f.root, "hook-should-fail");
+  await writeFile(gate, "yes\n", "utf8");
+  await hook(f, "pre-merge-commit", `#!/bin/sh\n[ -f ${JSON.stringify(gate)} ] && exit 1\nexit 0\n`);
+  const approval = await raise(f);
+  assert.equal((await promote(f, approval, await grant(f, approval))).promotion.state, "applying");
+  await rm(gate);
+
+  // One real declaration, to this process, which legitimately takes the record out of `applying`.
+  assert.equal((await endEveryWait(f.registry, f.source, f.task.taskId)).state, "rolled-back");
+
+  // Now the rewrite. It cannot beat the hash-bound attestation on a settled row, so it does not try:
+  // it puts the record back where no attestation is required, leaving the earlier declaration as the
+  // only thing standing between it and a second settlement.
+  rewindPromotionToApplying(f.path);
+  const rewound = (await f.registry.promotions({ roomId: "demo", mainPath: f.source }))[0];
+  assert.ok(rewound !== undefined && "unreadable" in rewound,
+    `a rewound record was settled a second time by a spent declaration: ${JSON.stringify(rewound)}`);
+  assert.equal(rewound.unreadableReason, "promotion-attestation");
+  assert.equal(rewound.holdsProjectExclusiveMarker, true);
+
+  // And both gates agree with the listing.
+  await assert.rejects(
+    f.registry.requestMainMerge({
+      actor: "codex1", clientRequestId: key(), taskId: f.task.taskId, roomId: "demo",
+      mainPath: f.source, completionId: approval.binding.completionId,
+      previewDigest: approval.binding.previewDigest,
+    }),
+    /MAIN_MERGE_PROMOTION_RECORD_UNATTESTED/u,
+  );
+});
+
+function forgeReleasingPromotionClaim(path: string, state: string): void {
+  const db = new DatabaseSync(path);
+  try {
+    const row = db.prepare(
+      "SELECT * FROM candidate_merge_promotions WHERE state='applying' LIMIT 1",
+    ).get() as unknown as Record<string, string | number | null>;
+    assert.ok(row !== undefined, "there was no applying promotion to forge");
+    const observation = JSON.parse(String(row.observation_json)) as Record<string, unknown>;
+    const observationJson = JSON.stringify({ ...observation, code: "FORGED_RELEASING_CLAIM" });
+    const base = [
+      row.id, row.approval_id, row.task_id, row.room_id, row.main_path, row.main_branch,
+      row.candidate_head, row.recovery_ref, row.main_head_before, row.main_head_after,
+      row.restore_json, observationJson, state, row.owner_pid, row.started_at_ms, row.updated_at_ms,
+    ];
+    const pgid = row.merge_pgid;
+    const boot = row.merge_boot_at_sec;
+    const rowHash = createHash("sha256").update(JSON.stringify(
+      pgid === null && boot === null ? base : [...base, pgid, boot],
+    ), "utf8").digest("hex");
+    assert.equal(Number(db.prepare(
+      "UPDATE candidate_merge_promotions SET state=?,observation_json=?,row_hash=? WHERE id=?",
+    ).run(state, observationJson, rowHash, String(row.id)).changes), 1);
+  } finally { db.close(); }
+}
+
+test("an owner declaration does not carry over to a record the merge rewrote afterwards", async (t) => {
+  const f = await fixture(t, { service: true });
+  // A hook that fails leaves main exactly as it was and the record `applying`, with a live process
+  // group the owner has to disown. That declaration is the thing being attacked here.
+  const gate = join(f.root, "hook-should-fail");
+  await writeFile(gate, "yes\n", "utf8");
+  await hook(f, "pre-merge-commit", `#!/bin/sh\n[ -f ${JSON.stringify(gate)} ] && exit 1\nexit 0\n`);
+  const approval = await raise(f);
+  const held = await promote(f, approval, await grant(f, approval));
+  assert.equal(held.promotion.state, "applying");
+  await rm(gate);
+
+  // The owner really does declare, to this process, with the phrase the record printed.
+  const declared = await endEveryWait(f.registry, f.source, f.task.taskId);
+  assert.equal(declared.state, "rolled-back");
+
+  // Now the merge's own hook rewrites the record and recomputes the product's unkeyed SHA-256. The
+  // declaration this process heard was about the record as it stood; it must not be usable as proof
+  // about the bytes that replaced it. Keeping the proof against the promotion ID alone was a real
+  // defect: the flag outlived every rewrite of the thing it was about ([[PITFALLS]] #133).
+  forgeTerminalPromotionClaim(f.path, "applied");
+  const rewritten = (await f.registry.promotions({ roomId: "demo", mainPath: f.source }))[0];
+  assert.ok(rewritten !== undefined && "unreadable" in rewritten,
+    `a rewritten record inherited an earlier declaration: ${JSON.stringify(rewritten)}`);
+  assert.equal(rewritten.unreadableReason, "promotion-attestation");
+  assert.equal(rewritten.holdsProjectExclusiveMarker, true);
+
+  // And the gate agrees with the listing, which is the half that matters.
+  await assert.rejects(
+    f.registry.requestMainMerge({
+      actor: "codex1", clientRequestId: key(), taskId: f.task.taskId, roomId: "demo",
+      mainPath: f.source, completionId: approval.binding.completionId,
+      previewDigest: approval.binding.previewDigest,
+    }),
+    /MAIN_MERGE_PROMOTION_RECORD_UNATTESTED/u,
+  );
+});
+
+test("a forged non-terminal releasing state cannot open the project to the next promotion", async (t) => {
+  const f = await fixture(t, { service: true });
+  // A hook that fails leaves main byte-for-byte as it was and the record `applying` — so the only
+  // thing standing between the next promotion and this project is the marker, which is exactly what
+  // this test is about. Using a clean-main shape keeps the refusal below attributable: a dirty main
+  // would be refused by a different gate and the assertion would prove nothing ([[PITFALLS]] #109).
+  const gate = join(f.root, "hook-should-fail");
+  await writeFile(gate, "yes\n", "utf8");
+  await hook(f, "pre-merge-commit", `#!/bin/sh\n[ -f ${JSON.stringify(gate)} ] && exit 1\nexit 0\n`);
+  const approval = await raise(f);
+  const held = await promote(f, approval, await grant(f, approval));
+  assert.equal(held.mainMutated, false);
+  assert.equal(held.promotion.state, "applying", "the record was expected to still hold the marker");
+  await rm(gate);
+
+  // The second task is prepared to the point of a granted token BEFORE anything is forged, and that
+  // ordering is the test rather than an incidental detail. `#assertMainNotBusy` runs in
+  // `promoteMainMerge` and nowhere else, so any read of the first record in between would re-observe
+  // it and the probe would never reach the gate it names ([[PITFALLS]] #129 — measured: an earlier
+  // draft of this test asserted the listing first, the re-observation pushed the forged row back to
+  // `applying`, and the failure it produced was about a completely different line).
+  const second = await f.registry.start({
+    actor: "codex1", clientRequestId: key(), roomId: "demo", mainPath: f.source, task: "second",
+  });
+  await commit(second.candidatePath, "second.txt", "second work\n", "second work");
+  await f.registry.complete({
+    actor: "codex1", clientRequestId: key(), taskId: second.taskId, roomId: "demo",
+    mainPath: f.source, summary: "second ready",
+  });
+  const preview = await f.registry.previewMainMerge({
+    taskId: second.taskId, roomId: "demo", mainPath: f.source,
+  });
+  const secondApproval = await f.registry.requestMainMerge({
+    actor: "codex1", clientRequestId: key(), taskId: second.taskId, roomId: "demo",
+    mainPath: f.source, completionId: preview.completionId, previewDigest: preview.previewDigest,
+  });
+  const secondToken = (await f.registry.grantMainMerge({
+    approvalId: secondApproval.id, roomId: "demo", mainPath: f.source,
+    previewDigest: secondApproval.binding.previewDigest,
+    confirmation: MERGE_APPROVAL_CONFIRMATION, decidedBy: "local-web",
+  })).approvalToken;
+
+  // The merge's own hook runs as the owner with no sandbox, and the database path is one this
+  // product puts into `GIT_TRACE2_EVENT` itself. It does not need `applied`: the marker is a partial
+  // unique index `WHERE state='applying'`, so ANY other value frees it — and `needs-manual-review`
+  // is the one that reads as routine.
+  forgeReleasingPromotionClaim(f.path, "needs-manual-review");
+
+  const headBefore = await head(f.source);
+  await assert.rejects(
+    f.registry.promoteMainMerge({
+      approvalId: secondApproval.id, token: secondToken, action: MERGE_APPROVAL_GRANT,
+      taskId: second.taskId, roomId: "demo", mainPath: f.source,
+    }),
+    /MAIN_MERGE_PROMOTION_RECORD_UNATTESTED/u,
+  );
+  // Refused, and refused without writing: D-014 is unchanged by this gate.
+  assert.equal(await head(f.source), headBefore);
+  assert.equal(await status(f.source), "");
+
+  // And only now the read surface, which must say the same thing rather than a softer version of it.
+  const forged = (await f.registry.promotions({ roomId: "demo", mainPath: f.source }))
+    .find((entry) => entry.taskId === f.task.taskId);
+  assert.ok(forged !== undefined && "unreadable" in forged,
+    `a forged releasing claim was presented as a readable record: ${JSON.stringify(forged)}`);
+  assert.equal(forged.unreadableReason, "promotion-attestation");
+  assert.equal(forged.holdsProjectExclusiveMarker, true,
+    "a forged non-terminal releasing state handed back the project-wide promotion gate");
+});
+
+test("a recomputed unkeyed hash cannot turn a forged terminal promotion into durable convergence", async (t) => {
+  const f = await fixture(t, { service: true });
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const genuine = await promote(f, approval, token);
+  assert.equal(genuine.promotion.state, "applied");
+  assert.equal(genuine.promotion.observation.authorizedMergeCommit, true);
+
+  // Change a positive fact after the keyed audit event was committed, then recompute exactly the
+  // same unkeyed SHA-256 the row calls `row_hash`. Before P0-3 the terminal early return accepted
+  // this as a normal applied record and the project-wide gate never looked at it again.
+  forgeTerminalPromotionClaim(f.path, "applied");
+  const forged = (await f.registry.promotions({ roomId: "demo", mainPath: f.source }))[0];
+  assert.ok(forged !== undefined && forged.state === "unreadable" && forged.unreadable === true,
+    `the forged terminal row was presented as convergence: ${JSON.stringify(forged)}`);
+  assert.equal(forged.unreadableReason, "promotion-attestation");
+  assert.equal(forged.storedState, "applied");
+  assert.equal(forged.holdsProjectExclusiveMarker, true,
+    "an unattested terminal claim released the project-wide promotion gate");
+
+  // A second task is still allowed to prepare and preview; only the main-writing action is refused.
+  // That keeps D-014's boundary precise: observe and name the problem, do not rewrite or roll back.
+  const second = await f.registry.start({
+    actor: "codex1", clientRequestId: key(), roomId: "demo", mainPath: f.source, task: "second",
+  });
+  await commit(second.candidatePath, "second.txt", "second work\n", "second work");
+  await f.registry.complete({
+    actor: "codex1", clientRequestId: key(), taskId: second.taskId, roomId: "demo",
+    mainPath: f.source, summary: "second ready",
+  });
+  const preview = await f.registry.previewMainMerge({
+    taskId: second.taskId, roomId: "demo", mainPath: f.source,
+  });
+  const secondApproval = await f.registry.requestMainMerge({
+    actor: "codex1", clientRequestId: key(), taskId: second.taskId, roomId: "demo",
+    mainPath: f.source, completionId: preview.completionId, previewDigest: preview.previewDigest,
+  });
+  const secondToken = (await f.registry.grantMainMerge({
+    approvalId: secondApproval.id, roomId: "demo", mainPath: f.source,
+    previewDigest: secondApproval.binding.previewDigest,
+    confirmation: MERGE_APPROVAL_CONFIRMATION, decidedBy: "local-web",
+  })).approvalToken;
+  await assert.rejects(
+    f.registry.promoteMainMerge({
+      approvalId: secondApproval.id, token: secondToken, action: MERGE_APPROVAL_GRANT,
+      taskId: second.taskId, roomId: "demo", mainPath: f.source,
+    }),
+    /MAIN_MERGE_PROMOTION_RECORD_UNATTESTED/u,
+  );
+});
+
+test("a restart cannot promote a persisted terminal claim into first-hand convergence", async (t) => {
+  const f = await fixture(t, { service: true });
+  const approval = await raise(f);
+  const token = await grant(f, approval);
+  const genuine = await promote(f, approval, token);
+  assert.equal(genuine.promotion.state, "applied");
+  const mainBeforeRead = await head(f.source);
+
+  // The live process had the child handle and may report its own result. A new process has only
+  // owner-writable bytes; even an intact row and intact audit trail do not recreate first-hand proof.
+  f.service?.close();
+  const reopened = new CollaborationService(f.data);
+  t.after(() => reopened.close());
+  const persisted = (await reopened.candidates.promotions({ roomId: "demo", mainPath: f.source }))[0];
+  assert.ok(persisted !== undefined && persisted.state === "unreadable" && persisted.unreadable === true);
+  assert.equal(persisted.unreadableReason, "promotion-attestation");
+  assert.equal(persisted.storedState, "applied");
+  assert.equal(persisted.holdsProjectExclusiveMarker, true);
+  await assert.rejects(
+    reopened.candidates.promotionForApproval({
+      approvalId: approval.id, roomId: "demo", mainPath: f.source,
+    }),
+    /MAIN_MERGE_PROMOTION_RECORD_UNATTESTED/u,
+  );
+  assert.equal(await head(f.source), mainBeforeRead, "the fail-closed read changed canonical main");
+});
+
 test("a hook that rewrites both in-row sources to a dead number, hash and all, still cannot conclude", async (t) => {
   const f = await fixture(t);
   const live = await liveMerge(t, f);
@@ -6251,11 +6831,24 @@ test("the rollback the process that watched the merge die may offer is not offer
   const restarted = new CandidateRegistry(f.data);
   t.after(() => restarted.close());
   const later = readable((await restarted.promotions({ roomId: "demo", mainPath: f.source }))[0]);
+  // What was OBSERVED survives the restart, and must: an owner asked to account for this promotion
+  // has to be able to see what the record says it saw ([[PITFALLS]] #128).
   assert.equal(later.observation.mergeConclusion, "MERGE_LEADER_EXIT_OBSERVED");
+  // And beside it, visibly rather than by absence, the fact that THIS reader cannot vouch for it.
+  assert.equal(later.observation.mergeConclusionUnattested, true);
   assert.notEqual(later.observation.recoveryKind, "reset-to-pre-promotion",
     "a restart was handed a destructive command for a merge it never watched");
-  assert.equal(later.observation.recoveryKind, "search-for-unaccounted-merge");
-  assert.ok(!(later.observation.recovery ?? "").includes("reset --hard"));
+  // ⛔ This used to assert `search-for-unaccounted-merge`, which a restart reached by replaying the
+  // stored conclusion as a declaration. Amendment (W) stops that replay, so the restart cannot
+  // conclude at all — and amendment (T) already decided what a record that cannot conclude offers:
+  // nothing, because the read-only search belongs to `pending`, which is asserted below. Bar item 11
+  // is satisfied there, and by the same function, rather than by a `recovery` line on a waiting row.
+  assert.equal(later.observation.recoveryKind, undefined);
+  assert.equal(later.observation.recovery, undefined);
+  assert.ok(later.pending !== undefined, "a waiting record named no way out ([[PITFALLS]] bar 11)");
+  assert.ok(typeof later.pending?.release === "string" && later.pending.release.length > 0);
+  assert.ok(typeof later.pending?.inspect === "string" && later.pending.inspect.length > 0);
+  assert.ok(!/reset --hard/u.test(later.pending?.inspect ?? ""));
   const report = await runCandidatePromotionsCommand({
     args: [], roomId: "demo", mainPath: f.source, registry: restarted, decidedBy: "local-cli",
   });
@@ -6895,10 +7488,17 @@ test("half of the merge-group column pair is damage in either direction, and bot
     ).run(pgid, boot, rehash(row, pgid, boot), String(row.id));
     db.close();
   };
+  // Reports the REASON rather than the bare state. Amendment (W) makes every one of these readers a
+  // new process, so all of them answer `unreadable` and the state alone stops distinguishing
+  // anything — the test would keep passing while measuring nothing ([[PITFALLS]] #106). The reason is
+  // the distinction this test is actually about: `row-integrity` means the pair check refused the
+  // row, `promotion-attestation` means the row is fine and only this reader cannot vouch for it.
   const stateNow = async (): Promise<string> => {
     const reader = new CandidateRegistry(f.data);
     try {
-      return (await reader.promotions({ roomId: "demo", mainPath: f.source }))[0]?.state ?? "missing";
+      const entry = (await reader.promotions({ roomId: "demo", mainPath: f.source }))[0];
+      if (entry === undefined) return "missing";
+      return "unreadable" in entry ? `unreadable/${entry.unreadableReason ?? "unnamed"}` : entry.state;
     } finally { reader.close(); }
   };
 
@@ -6906,7 +7506,8 @@ test("half of the merge-group column pair is damage in either direction, and bot
   // columns existed carries. It must stay readable, or every upgraded database reads as tampered
   // ([[PITFALLS]] #100).
   write(null, null);
-  assert.equal(await stateNow(), "applied");
+  assert.equal(await stateNow(), "unreadable/promotion-attestation",
+    "both NULL was treated as a damaged pair rather than as the settled shape it is");
 
   // A whole pair, with the payload naming the same group — the shape the product itself writes.
   // Readable, which is what stops "refuse any non-null column" from satisfying the two cases below.
@@ -6919,15 +7520,16 @@ test("half of the merge-group column pair is damage in either direction, and bot
     }));
   };
   restore();
-  assert.equal(await stateNow(), "applied");
+  assert.equal(await stateNow(), "unreadable/promotion-attestation",
+    "a whole pair naming the same group was treated as damage");
 
   // Half of that pair, each way round. The hash is recomputed to match, so what is being measured is
   // the pair check and not the integrity check.
   write(4_242, null);
-  assert.equal(await stateNow(), "unreadable", "a pgid with no boot beside it was accepted");
+  assert.equal(await stateNow(), "unreadable/row-integrity", "a pgid with no boot beside it was accepted");
   restore();
   write(null, boot);
-  assert.equal(await stateNow(), "unreadable", "a boot with no pgid beside it was accepted");
+  assert.equal(await stateNow(), "unreadable/row-integrity", "a boot with no pgid beside it was accepted");
 });
 
 /*
@@ -7774,7 +8376,14 @@ test("a merge driver that silences every source cannot make an untouched main a 
   const entry = readable((await registry.promotions({ roomId: "demo", mainPath: f.source }))[0]);
   assert.equal(entry.state, "applying",
     "an absence moved a record into a terminal state while a merge was about to write main");
+  // The name says WHY nothing concluded, and here that is the more specific of the two available:
+  // the driver silenced every source, so nothing accounts for this merge. The alternative
+  // (`PERSISTED_PROMOTION_CONVERGENCE_UNATTESTED`) is also true of this record but says less — it
+  // would tell an owner their row was forged when what happened is that it went quiet.
   assert.equal(entry.observation.code, "MERGE_UNACCOUNTED_FOR_NOTHING_CONCLUDED");
+  // What must not change is the state, and it does not.
+  assert.equal(entry.observation.authorizedMergeCommit, null,
+    "a comparison bound only by the forged row escaped as a positive fact");
   assert.equal(entry.pending?.code, "MERGE_IDENTITY_UNACCOUNTED");
   assert.equal(entry.observation.recovery, undefined);
 

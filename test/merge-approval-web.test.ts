@@ -9,7 +9,9 @@ import { randomUUID } from "node:crypto";
 import { createAppContext } from "../src/app.ts";
 import { startWebServer } from "../src/ui/web.ts";
 import { CollaborationService } from "../src/core/collaboration-service.ts";
-import { MERGE_APPROVAL_CONFIRMATION } from "../src/core/candidate-registry.ts";
+import {
+  MERGE_APPROVAL_CONFIRMATION, MERGE_UNATTESTED_ACKNOWLEDGE_CONFIRMATION,
+} from "../src/core/candidate-registry.ts";
 
 const execFileAsync = promisify(execFile);
 const author = ["-c", "user.name=Merge Web Test", "-c", "user.email=test@example.invalid"];
@@ -214,7 +216,27 @@ test("the merge approval dialog contract lists, inspects, approves once, and ref
   const restarted = new CollaborationService(data);
   const restartedHistory = await restarted.candidates.promotions({ roomId: "demo", mainPath: workspace });
   assert.equal(restartedHistory[0]?.id, entries[0]?.id);
-  assert.equal(restartedHistory[0]?.state, "applied");
+  // ⛔ This used to assert `applied` here, and that is exactly the sentence amendment (W) withdrew.
+  // Nothing stored locally distinguishes a promotion this product finished from one a repository
+  // hook wrote — the row, the trace and the audit database are all writable by the same uid — so a
+  // process that did not run the merge reports the record as a claim and keeps holding the project.
+  // The LIVE path above still answers `applied`, which is the half that never depended on storage.
+  const rebuilt = restartedHistory[0];
+  assert.ok(rebuilt !== undefined && "unreadable" in rebuilt);
+  assert.equal(rebuilt.unreadableReason, "promotion-attestation");
+  assert.equal(rebuilt.storedState, "applied");
+  assert.equal(rebuilt.holdsProjectExclusiveMarker, true);
+  // And the owner's exit works on this same instance: one declaration, no durable write.
+  const accepted = await restarted.candidates.acknowledgeUnattestedPromotions({
+    roomId: "demo", mainPath: workspace,
+    confirmation: MERGE_UNATTESTED_ACKNOWLEDGE_CONFIRMATION, decidedBy: "local-web",
+  });
+  assert.equal(accepted.acknowledged.length, 1);
+  assert.equal(accepted.skipped.length, 0);
+  const afterAcknowledgement = await restarted.candidates.promotions({
+    roomId: "demo", mainPath: workspace,
+  });
+  assert.equal(afterAcknowledgement[0]?.state, "applied");
   restarted.close();
 
   for (const body of [

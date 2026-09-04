@@ -66,14 +66,45 @@ digest、`mirroredAt` 與 staleness，任何不一致／過期均 fail closed �
   不靜默重算。Single-use 由持久狀態的 compare-and-set 保證，並行消耗只有一個成功。
 - 截斷或模擬出衝突的 preview 完全不可核准：Owner 不對看不到的內容簽名。
 - 本機 Web 最終動作不把 raw approval token 交給瀏覽器。server 在同一呼叫內 grant 並立即 promotion；
-  response loss 後的重送只依 durable `approval_id` 回讀同一筆 promotion，不能再次執行 Git。只有
-  `state=applied` 且 `authorizedMergeCommit=true` 的重新觀察可顯示成功。
-- Merge 結果檔案來自 tamper-evident promotion rows 與 audit chain，不來自 browser storage。只有
-  applied＋authorized observation＋非空 main HEAD after 能標成「已 Merge」；讀不到、row malformed、
+  response loss 後的重送只能在同一 live process 內回讀仍匹配 volatile first-hand attestation 的 promotion，
+  不能再次執行 Git。重啟或 row 改寫後回 `MAIN_MERGE_PROMOTION_RECORD_UNATTESTED`，不得從持久化 claim
+  補造成功。
+- Merge 結果檔案來自 promotion rows 與 audit trail，不來自 browser storage；但兩者都只是不可信紀錄，
+  **不是防偽簽章**。只有活程序第一手 attested 的 applied＋authorized observation＋非空 main HEAD after
+  能標成「已 Merge」；讀不到、row malformed、terminal attestation 遺失、
   audit chain 失效、`applying`、`needs-manual-review` 或缺少正向事實都不得折疊成「沒有紀錄」「已安全」
   或綠色成功。關閉檔案只關閉 dialog，不刪除 durable row；sidebar 不顯示任何 archive count。Classifier
   只可在確有 review bucket 時顯示不帶數字的人工檢查提示；rejected／expired／invalidated 等 terminal-only
   rows 不得觸發。讀取失敗只在 dialog 內具名，而非沿用未標示的成功數字、偽稱已清除或重新建立任務徽章。
+- 無金鑰 `row_hash` 只偵測偶發損壞；owner-only mode、audit HMAC 或另一個同 uid 檔案不能抵抗 Native
+  Full-Trust hook，因為 hook 可讀寫同帳號 persistent state。故 attestation 只存在執行程序記憶體，
+  exact row hash 變更或 restart 即失效；task/project main-write gate 一律拒絕。這項控制不提供 OS 級隔離，
+  也不自動 reset／rollback／abort／kill／重跑 merge；需要跨重啟的不可偽造收斂必須改用不同 OS 身分、
+  root-owned helper 或外部簽章服務。
+- **需要 attestation 的不是「terminal」，是「離開 `applying`」。** 排他標記是 SQLite partial unique index
+  `ON(main_path) WHERE state='applying'`，任何其他值都會釋放它，所以判準是「不是 `applying` 就要有正向理由」，
+  不是列舉 `applied`／`rolled-back`／`needs-manual-review`。兩道 gate 因此不再過濾 state。
+- **Owner 宣告必須由本程序處理。** `mergeAccountAbandoned`／`mergeGroupDisowned`／`mergeConclusion` 都是
+  observation JSON 裡的欄位，merge 自己的 hook 寫得進去也重算得出 hash；因此「Owner 結束了等待」不得只憑
+  row 成立。四個宣告入口在 durable 寫入**之前**登記 volatile 記錄，row 載有宣告而本程序未處理時回
+  `MERGE_DECLARATION_NOT_FIRST_HAND` 並繼續等待。
+- **跨重啟的人工出口是 Owner 的宣告，不是產品的推論，而且必須開在會執行 promotion 的程序上。**
+  出口是 `POST /api/rooms/merge-promotions/acknowledge`（既有 Origin＋CSRF＋session 守衛，未知欄位 400，
+  片語不符在列出任何東西之前就 400）與 Merge 紀錄畫面的獨立按鈕；與 approve 是不同路由、不同片語，不得
+  合併。它只產生 volatile、綁定 exact row hash 的 attestation 與宣告：不寫 row、不修復紀錄、不標 candidate
+  merged、不碰 main、不送訊號，且只在該程序有效，restart 後重新詢問。同名的 CLI 動詞只是診斷，它會明說
+  自己不能解開 promotion。文件、回應與 UI 文案都不得暗示它驗證過任何事——產品沒有能力分辨本產品完成的
+  promotion 與 hook 寫的一列。
+- **Attestation 綁定的是 row 的內容摘要，不是 `row_hash` 欄位。** 綁欄位會讓「改內容、保留舊 hash」的重寫
+  維持 attestation 有效，使 main-write gate 跳過一列它讀不懂的紀錄，而先驗證再回報的 listing 卻說它
+  unreadable——同一批位元有兩個相反答案，而其中決定能否寫 main 的那個不得是錯的。公開視圖的
+  `holdsProjectExclusiveMarker` 亦改由閘門的同一判準推導。
+- **一次宣告只授權一次離開 `applying`。** 所有 attestation 檢查都對「仍持有標記」的列免驗，因此把已 settle
+  的列改回 `applying` 是繞過綁定的路徑；volatile ledger 記錄 `settled`，本產品沒有任何路徑會把紀錄放回
+  `applying`，事後看到即 fail closed。
+- **Owner 宣告的內容也必須來自記憶體，不只是「有沒有宣告過」。** 只用 promotion id 記一個旗標，會讓那個
+  旗標活過它所描述的那一列被改寫之後；宣告的內容因此整份保存在記憶體，結論由它決定，row 只是給 Owner
+  看的紀錄。`recordedMergeConclusion` 的重播已一併移除——那正是跨程序的持久化正向事實。
 - Merge 成功卡片的返回 Room 控制是成功分支專用的 client-only navigation：不帶 token、沒有 API／MCP
   request、不再執行 Git，也不刪除 durable history。任何失敗、rolled-back、讀不到或人工檢查狀態均不得
   建立該控制；關閉 dialog 不能被當作 acknowledge、修復或新的正向事實。

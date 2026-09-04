@@ -4299,6 +4299,29 @@ function mergeHistoryBuckets(promotions, unpromotedApprovals) {
 }
 /* @pure-end merge-history-buckets */
 
+/* @pure-start merge-history-unattested
+ * Records the daemon says are still holding this project, because it cannot vouch for them.
+ *
+ * BOTH conditions, and the reason is the one that took two attempts to get right.  This control
+ * decides a record is not in flight from its `state` column — and on a row whose integrity check
+ * failed, that column is one of the bytes nobody can trust.  So a corrupt row is not offered this
+ * button even though it is holding the project: its exit is the dedicated unreadable release, which
+ * probes the processes the record names and escalates the phrase when any of them might be alive.
+ * Offering the project-wide phrase instead would drop that protection rather than reuse it.
+ *
+ * `holdsProjectExclusiveMarker` is the SAME condition the main-write gates apply, re-derived by the
+ * daemon on every read, so the button appears exactly when a promotion would be refused for a reason
+ * this button can actually address.
+ */
+function mergeHistoryUnattested(promotions) {
+  return (Array.isArray(promotions) ? promotions : []).filter(
+    (entry) => entry?.state === "unreadable"
+      && entry?.holdsProjectExclusiveMarker === true
+      && entry?.unreadableReason === "promotion-attestation",
+  );
+}
+/* @pure-end merge-history-unattested */
+
 /* @pure-start merge-records-attention */
 function mergeRecordsAttention(buckets) {
   return Boolean(buckets)
@@ -4397,6 +4420,7 @@ function renderPromotionHistoryEntry(host, entry) {
     action.textContent = "不要再次 apply。先重新讀取 observation；若仍停在此區，依 recovery ref 人工核對 main。 · Never re-apply; refresh observation, then inspect main against the recovery ref if unresolved.";
     item.append(action);
   }
+  renderPromotionWaitRelease(item, entry);
   host.append(item);
 }
 
@@ -4428,6 +4452,90 @@ function historyCopyable(list, label, value, copiedNote) {
   });
   detail.append(shown, copy);
   list.append(term, detail);
+}
+
+/* @pure-start merge-wait-release
+ * What a record says it is waiting on, and what ending that wait requires right now.
+ *
+ * Returns null unless the daemon reported BOTH a phrase and, where the record names one, the number
+ * it names — the same two pieces of evidence the terminal has always demanded.  A record that names
+ * no way out gets no control, because inventing one here would mean guessing at a pid.
+ */
+function mergeWaitRelease(entry) {
+  const pending = entry && typeof entry === "object" ? entry.pending : null;
+  if (!pending || typeof pending !== "object") return null;
+  if (typeof pending.release !== "string" || !pending.release) return null;
+  const both = pending.code === "PROMOTION_OWNER_AND_MERGE_STILL_RUNNING";
+  const owner = pending.code === "OWNER_PROCESS_STILL_RUNNING";
+  const pid = typeof pending.pid === "number" ? pending.pid : null;
+  const also = pending.alsoBlockedBy && typeof pending.alsoBlockedBy === "object"
+    ? pending.alsoBlockedBy.pid : null;
+  if (both) {
+    if (typeof pid !== "number" || typeof also !== "number") return null;
+    return { confirmation: pending.release, pid, pgid: also, code: pending.code };
+  }
+  if (owner) {
+    if (typeof pid !== "number") return null;
+    return { confirmation: pending.release, pid, code: pending.code };
+  }
+  // Everything else is about the merge's own group. `MERGE_IDENTITY_UNACCOUNTED` is the one state
+  // with no number to quote — the phrase carries it — so a missing pid is allowed only there.
+  if (typeof pid === "number") return { confirmation: pending.release, pgid: pid, code: pending.code };
+  return pending.code === "MERGE_IDENTITY_UNACCOUNTED"
+    ? { confirmation: pending.release, code: pending.code }
+    : null;
+}
+/* @pure-end merge-wait-release */
+
+/*
+ * The owner ending one wait, told to the daemon rather than to a terminal that is about to exit.
+ *
+ * These declarations were reachable only from the CLI, which was survivable while the daemon could
+ * read one back out of the promotion row.  It no longer may — those bytes are writable by the
+ * merge's own hooks — so without this control a merge that ran a hook stays unaccounted for with
+ * nothing the owner can do from here.
+ */
+function renderPromotionWaitRelease(item, entry) {
+  const release = mergeWaitRelease(entry);
+  if (!release) return;
+  const box = document.createElement("section");
+  box.className = "merge-history-action";
+  const what = document.createElement("p");
+  what.textContent = `這筆紀錄正在等：${release.code}`
+    + `${typeof release.pid === "number" ? ` · 發起程序 pid ${release.pid}` : ""}`
+    + `${typeof release.pgid === "number" ? ` · merge 程序群組 ${release.pgid}` : ""}`;
+  const warn = document.createElement("p");
+  warn.textContent = "結束等待不會終止任何程序、不會寫入 main、不會修復紀錄，也不代表產品判斷 merge 已"
+    + "結束。它只表示你已自行查看過這些編號。確認語逐字如下，按下即等於你說出這句話：";
+  const phrase = document.createElement("code");
+  phrase.textContent = release.confirmation;
+  const act = document.createElement("button");
+  act.type = "button";
+  act.className = "merge-history-release";
+  act.textContent = "結束這個等待 · End this wait";
+  act.addEventListener("click", async () => {
+    act.disabled = true;
+    try {
+      await api("/api/rooms/merge-promotions/release", {
+        method: "POST",
+        body: JSON.stringify({
+          room: state.room,
+          promotionId: entry.id,
+          ...(typeof release.pid === "number" ? { pid: release.pid } : {}),
+          ...(typeof release.pgid === "number" ? { pgid: release.pgid } : {}),
+          confirmation: release.confirmation,
+        }),
+      });
+      await refreshMergeHistory();
+    } catch (error) {
+      act.disabled = false;
+      const failed = document.createElement("p");
+      failed.textContent = `未送出 · not sent: ${error && error.message ? error.message : "unknown"}`;
+      box.append(failed);
+    }
+  });
+  box.append(what, warn, phrase, act);
+  item.append(box);
 }
 
 function renderApprovalHistoryEntry(host, approval, reviewRequired = false) {
@@ -4590,9 +4698,57 @@ function renderMergeHistory() {
   if (!reviewCount) {
     mergeHistoryEmpty(reviewHost, "目前沒有需人工檢查的 promotion 或核准。 · Nothing currently requires review.");
   }
+  renderUnattestedAcknowledgement(reviewHost, mergeHistoryUnattested(state.mergeHistory));
   if (!buckets.notStartedApprovals.length) {
     mergeHistoryEmpty(unpromotedHost, "目前沒有已結案但未開始 Merge 的核准。 · No closed approvals that stopped before Merge.");
   }
+}
+
+/*
+ * The owner's way of telling THIS daemon that they checked the project themselves.
+ *
+ * It is rendered here, and only here, because this is the one screen that lists the records it is
+ * about.  The wording is deliberately about what the owner is doing rather than about what the
+ * product found: the product cannot tell a promotion it finished from one a repository hook wrote,
+ * and a button that implied otherwise would be the same measured falsehood this whole round removed.
+ */
+function renderUnattestedAcknowledgement(host, unattested) {
+  if (!host || !unattested.length) return;
+  const box = document.createElement("section");
+  box.className = "merge-history-action";
+  const explain = document.createElement("p");
+  explain.textContent = `這個服務重新啟動過，因此 ${unattested.length} 筆紀錄它無法親自證實——`
+    + "紀錄本身、trace 與稽核檔都是同帳號可改寫的位元。在你確認之前，這個專案不會開始新的 Merge。 · "
+    + "This service restarted, so it cannot vouch for these records itself; nothing stored locally can.";
+  const warn = document.createElement("p");
+  warn.textContent = "按下這個按鈕不會修復任何紀錄、不會寫入 main、不會結束任何仍在執行的程序，"
+    + "也不代表產品驗證過什麼。它只記錄「你看過了」，而且只對目前這個服務有效，重新啟動後會再問一次。";
+  const confirm = document.createElement("button");
+  confirm.type = "button";
+  confirm.className = "merge-history-acknowledge";
+  confirm.textContent = "我已自行檢查這個專案，沒有更早的 Merge 還在執行 · I checked this project myself";
+  confirm.addEventListener("click", async () => {
+    confirm.disabled = true;
+    try {
+      await api("/api/rooms/merge-promotions/acknowledge", {
+        method: "POST",
+        body: JSON.stringify({
+          room: state.room,
+          confirmation: "I HAVE CHECKED THIS PROJECT MYSELF AND NO EARLIER PROMOTION IS STILL RUNNING",
+        }),
+      });
+      await refreshMergeHistory();
+    } catch (error) {
+      // Failure is named where the owner is looking, and the button comes back: a disabled control
+      // with no message is indistinguishable from having worked.
+      confirm.disabled = false;
+      const failed = document.createElement("p");
+      failed.textContent = `未送出 · not sent: ${error && error.message ? error.message : "unknown"}`;
+      box.append(failed);
+    }
+  });
+  box.append(explain, warn, confirm);
+  host.append(box);
 }
 
 async function refreshMergeHistory() {

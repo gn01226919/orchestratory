@@ -1518,6 +1518,119 @@ export class CollaborationService {
     return approval;
   }
 
+  /**
+   * The owner telling THIS process — the one that runs promotions — that they have checked the
+   * project and no earlier promotion is still running.
+   *
+   * It exists because of where the proof has to live. A promotion record that left `applying` before
+   * this process started is a claim: the row, the trace and the audit database are all writable by
+   * the same uid as the merge's own hooks, so nothing stored locally distinguishes a promotion this
+   * product finished from one a hook wrote. The only input that is not bytes is a person, and a
+   * person's statement is only proof to the process that heard it — which is why the CLI cannot
+   * stand in here: it starts, answers, and exits before any promotion runs.
+   *
+   * It writes NOTHING to the promotion store: no row moves, no record is repaired, no candidate is
+   * marked merged, no Git command runs and no process is signalled. D-014 is unchanged. The audit
+   * entry below is a trail of what the owner said, not a fact the product may later read back as
+   * permission — after a restart it asks again.
+   */
+  async acknowledgeUnattestedPromotions(input: {
+    roomId: string;
+    workspace: string;
+    confirmation: string;
+    decidedBy: "local-web" | "local-tui";
+  }): Promise<{
+    acknowledged: Array<{ id: string; taskId: string; storedState: string }>;
+    skipped: Array<{ id: string; taskId: string; reason: "row-integrity" }>;
+  }> {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    const result = await this.candidates.acknowledgeUnattestedPromotions({
+      roomId: input.roomId,
+      mainPath: input.workspace,
+      confirmation: input.confirmation,
+      decidedBy: input.decidedBy,
+    });
+    this.audit.append({
+      // Deliberately no `taskId`: this statement is about the PROJECT, and attaching it to one task
+      // would make it look narrower than it is.
+      roomId: input.roomId,
+      type: "candidate.unattested-promotions-acknowledged", actor: "you",
+      action: "main-merge-acknowledge", outcome: "allowed",
+      detail: {
+        decidedBy: input.decidedBy,
+        acknowledged: result.acknowledged.length,
+        skipped: result.skipped.length,
+        // The ids and the state each record CLAIMED, so the owner can look them up later. Marked as
+        // claims rather than states, because that is exactly what this call did not verify.
+        claims: result.acknowledged.map((entry) => ({
+          promotionId: entry.id, taskId: entry.taskId, claimedState: entry.storedState,
+        })),
+        // Said in the trail as well as in the UI: a reader of this entry must not mistake it for the
+        // product having established anything about the repository.
+        verifiedByProduct: false,
+        promotionStoreMutation: false,
+        mainMutation: false,
+      },
+    });
+    return result;
+  }
+
+  /**
+   * The owner's three existing release declarations, reachable by the process that runs promotions.
+   *
+   * They were always CLI-only, and that was survivable while a declaration was read back out of the
+   * promotion row: the terminal wrote it, the daemon read it. Amendment (W) removed that path
+   * because the row is bytes a repository hook can write, and doing so left these verbs unable to
+   * reach the one process that acts on them — so every merge that runs a hook ends in `applying`
+   * with no way for the owner to account for it. This is the same route the acknowledgement takes,
+   * for the same reason.
+   *
+   * It dispatches exactly as the CLI does — on which numbers the owner quoted — and adds nothing:
+   * every check, phrase and refusal belongs to the registry methods below. Nothing here writes main,
+   * signals a process, or repairs a record.
+   */
+  async releasePromotionWait(input: {
+    roomId: string;
+    workspace: string;
+    promotionId: string;
+    pid?: number;
+    pgid?: number;
+    confirmation: string;
+    decidedBy: "local-web" | "local-tui";
+  }): Promise<unknown> {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    const common = {
+      promotionId: input.promotionId, roomId: input.roomId, mainPath: input.workspace,
+      confirmation: input.confirmation, decidedBy: input.decidedBy,
+    };
+    const pid = input.pid;
+    const pgid = input.pgid;
+    // The same three-way dispatch the terminal uses, and the same meaning: which release is intended
+    // is decided by which numbers the record showed and the owner quoted back.
+    const released = pid !== undefined && pgid !== undefined
+      ? await this.candidates.abandonPromotionEntirely({ ...common, pid, pgid })
+      : pid !== undefined
+        ? await this.candidates.abandonPromotionOwnerProcess({ ...common, pid })
+        : await this.candidates.abandonMergeProcessGroup({ ...common, pgid: pgid ?? Number.NaN });
+    this.audit.append({
+      roomId: input.roomId,
+      type: "candidate.promotion-wait-released", actor: "you",
+      action: "main-merge-release-wait", outcome: "allowed",
+      detail: {
+        promotionId: input.promotionId,
+        decidedBy: input.decidedBy,
+        // The numbers the owner quoted, so the trail says what they were told and accepted.
+        ownerPid: pid ?? null,
+        mergePgid: pgid ?? null,
+        // None of these is something this call established; it stopped a wait and nothing else.
+        verifiedByProduct: false,
+        processSignalled: false,
+        mainMutation: false,
+      },
+    });
+    return released;
+  }
+
   async candidateStatus(input: {
     presenceId: string;
     roomId: string;

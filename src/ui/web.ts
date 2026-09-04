@@ -1342,6 +1342,81 @@ export async function startWebServer(
           });
           return;
         }
+        if (url.pathname === "/api/rooms/merge-promotions/release") {
+          // The three existing owner releases, reachable by the daemon. Separate from `approve` and
+          // from `acknowledge`: this one quotes a number the record showed, which is the evidence
+          // that the owner read it rather than clicked past it.
+          if (typeof body !== "object" || body === null || Array.isArray(body)) {
+            throw new Error("INVALID_MERGE_RELEASE_REQUEST");
+          }
+          const value = body as Record<string, unknown>;
+          if (Object.keys(value).some((key) => !["room", "promotionId", "pid", "pgid", "confirmation"].includes(key))
+            || typeof value.room !== "string" || typeof value.promotionId !== "string"
+            || typeof value.confirmation !== "string"
+            || (value.pid !== undefined && !Number.isSafeInteger(value.pid))
+            || (value.pgid !== undefined && !Number.isSafeInteger(value.pgid))) {
+            throw new Error("INVALID_MERGE_RELEASE_REQUEST");
+          }
+          const info = ledger.getRoom(value.room);
+          if (!info) throw new Error("ROOM_NOT_FOUND");
+          const workspace = await app.workspaces.assertAllowed(info.workspace);
+          const promotion = await collaboration.releasePromotionWait({
+            roomId: value.room,
+            workspace,
+            promotionId: value.promotionId,
+            ...(typeof value.pid === "number" ? { pid: value.pid } : {}),
+            ...(typeof value.pgid === "number" ? { pgid: value.pgid } : {}),
+            confirmation: value.confirmation,
+            decidedBy: "local-web",
+          });
+          json(response, 200, {
+            promotion,
+            // Said here for the same reason it is said everywhere else this round: stopping a wait
+            // is not a finding about the repository, and nothing was signalled or repaired.
+            verifiedByProduct: false,
+            processSignalled: false,
+            mainMutation: false,
+            scope: "this-process-only",
+          });
+          return;
+        }
+        if (url.pathname === "/api/rooms/merge-promotions/acknowledge") {
+          // The owner saying, to the process that runs promotions, that they checked the project.
+          // It is a separate route from `approve` on purpose: it is a different statement, it takes
+          // a different phrase, and folding it into the merge confirmation would make one sentence
+          // authorise two unrelated things. It writes nothing to the promotion store and cannot
+          // start, retry or complete a merge.
+          if (typeof body !== "object" || body === null || Array.isArray(body)) {
+            throw new Error("INVALID_MERGE_ACKNOWLEDGE_REQUEST");
+          }
+          const value = body as Record<string, unknown>;
+          if (Object.keys(value).some((key) => !["room", "confirmation"].includes(key))
+            || typeof value.room !== "string" || typeof value.confirmation !== "string") {
+            throw new Error("INVALID_MERGE_ACKNOWLEDGE_REQUEST");
+          }
+          const info = ledger.getRoom(value.room);
+          if (!info) throw new Error("ROOM_NOT_FOUND");
+          const workspace = await app.workspaces.assertAllowed(info.workspace);
+          const result = await collaboration.acknowledgeUnattestedPromotions({
+            roomId: value.room, workspace, confirmation: value.confirmation, decidedBy: "local-web",
+          });
+          json(response, 200, {
+            acknowledged: result.acknowledged,
+            // Reported rather than dropped: a record this call refused is exactly what the owner
+            // needs to see, because the project stays held until they use that record's own exit.
+            skipped: result.skipped,
+            // Stated in the response for the same reason it is stated in the audit entry and on the
+            // screen: nothing here verified anything, and a caller that reads a 200 as "the product
+            // checked" would be reading it wrong.
+            verifiedByProduct: false,
+            promotionStoreMutation: false,
+            mainMutation: false,
+            // It lives in this process's memory. A restart of the daemon asks again, and that is not
+            // a defect to be worked around by persisting it — persisting it is what a hook can write.
+            scope: "this-process-only",
+          });
+          return;
+        }
         if (url.pathname === "/api/rooms/writers/grant") {
           if (typeof body !== "object" || body === null || Array.isArray(body)) throw new Error("INVALID_WRITER_GRANT_REQUEST");
           const value = body as Record<string, unknown>;

@@ -194,9 +194,9 @@ export function describeOrphanRecoveryRefs(input: {
 /**
  * The three release actions and the listing, as the CLI sees them.
  *
- * The listing is NOT read-only: it re-observes every unsettled record and updates it. That is the
- * convergence bar item 13 requires, and calling it "read-only" here was the same untrue adjective
- * the command's own header used to print ([[PITFALLS]] #116).
+ * The listing does not write main. It may persist a newly observed warning, but P0-3 deliberately
+ * archives restart-time automatic convergence: a reader without the original child handle cannot
+ * turn owner-writable row/trace bytes into a settled result.
  *
  * Narrower than `CandidateRegistry` on purpose: this command may observe promotions and stop a
  * record from waiting, and it must not be able to reach `promoteMainMerge` — writing to main stays
@@ -220,6 +220,18 @@ export interface PromotionReleasePort {
     promotionId: string; roomId: string; mainPath: string; pid: number; pgid: number;
     confirmation: string; decidedBy: string;
   }): Promise<unknown>;
+  /**
+   * The exit for records that left `applying` before this process started.
+   *
+   * Named on the port for the same reason the three releases are: this command may say "I looked and
+   * nothing is running", and it may not reach anything that writes main.
+   */
+  acknowledgeUnattestedPromotions(input: {
+    roomId: string; mainPath: string; confirmation: string; decidedBy: string;
+  }): Promise<{
+    acknowledged: ReadonlyArray<{ id: string; taskId: string; storedState: string }>;
+    skipped: ReadonlyArray<{ id: string; taskId: string; reason: string }>;
+  }>;
 }
 
 function flagValue(args: readonly string[], name: string): string | undefined {
@@ -251,8 +263,9 @@ function optionalPid(args: readonly string[], name: string): number {
  *
  * This function is pure. The CALL that produced its input is not, and saying otherwise was a
  * measured falsehood: `registry.promotions()` re-observes every unsettled record, which is how a
- * promotion converges after a crash, and converging one WRITES — the authoritative row moves from
- * `applying` to a settled state, the audit chain gains an entry and the room ledger gains a line.
+ * promotion is re-observed after a crash. P0-3 no longer lets that read move the row to a terminal
+ * state; it may only persist a named unresolved warning. The audit chain and Room ledger remain
+ * trails, not positive convergence evidence.
  * The review that found this measured it against `orphan-refs` as a control: that command left the
  * row, the audit count and all three SQLite digests untouched, and this one changed every one of
  * them. The half re-measured here is the writing itself, in `test/merge-promotion.test.ts`. The
@@ -276,16 +289,22 @@ export function describePromotions(input: {
     return `No promotion records for ${input.mainPath}.\n`;
   }
   const lines = [`Promotion records for ${input.mainPath}: ${input.promotions.length}`];
-  lines.push("Listing re-observes each unsettled record and updates it; nothing here writes to main.");
+  lines.push("Listing re-observes and names unsettled records; it never treats persistent bytes as proof or writes main.");
   lines.push("Releasing a record stops it waiting; it never kills a process either.");
   for (const promotion of input.promotions) {
     lines.push("");
     lines.push(promotion.id);
     lines.push(`  task        ${promotion.taskId}`);
     if (promotion.state === "unreadable") {
-      // An unreadable row is reported as unreadable and never repaired, but the two facts an owner
-      // needs are still derivable from columns a failed hash does not make unreadable.
-      lines.push("  state       unreadable (this row's integrity check fails; nothing here repairs it)");
+      // Two different problems with two different exits, so they are never collapsed into one
+      // sentence. An integrity failure is released per record with the numbers that record names;
+      // a missing attestation is not about THIS record at all — it is about this process not having
+      // been the one that ended it — and the exit is the project-wide `acknowledge` verb.
+      const reason = promotion.unreadableReason === "promotion-attestation"
+        ? "left 'applying' before this process started; persistent bytes are not proof of who ended it"
+          + " — clear with: candidates promotions <workspace> acknowledge --confirm <phrase>"
+        : "this row's integrity check fails; nothing here repairs it";
+      lines.push(`  state       unreadable (${reason})`);
       lines.push(`  stored      ${promotion.storedState ?? "unknown"}`);
       lines.push(`  exclusive   ${promotion.holdsProjectExclusiveMarker
         ? "held — every other task in this project is refused while it is"
@@ -436,6 +455,49 @@ export async function runCandidatePromotionsCommand(input: {
   const { args, roomId, mainPath, registry } = input;
   if (args.length === 0) {
     return describePromotions({
+      mainPath, promotions: await registry.promotions({ roomId, mainPath }),
+    });
+  }
+  if (args[0] === "acknowledge") {
+    // A separate verb from `release`, because it answers a different question. `release` stops ONE
+    // record waiting on numbers the owner read off it; this one says the owner checked the project
+    // and no earlier promotion is still running. It quotes no pid because there is none to quote —
+    // the records it covers have already left `applying` — so the phrase carries the whole weight.
+    const phrase = flagValue(args, "--confirm");
+    if (phrase === undefined) throw new Error("CANDIDATE_PROMOTION_ACKNOWLEDGE_CONFIRMATION_REQUIRED");
+    const result = await registry.acknowledgeUnattestedPromotions({
+      roomId, mainPath, confirmation: phrase, decidedBy: input.decidedBy,
+    });
+    const lines = [`Acknowledged unattested promotion records for ${mainPath}: ${result.acknowledged.length}`];
+    // Zero is a legitimate answer and is printed as one: it means nothing was being held, not that
+    // the command failed. Silence here would read as "something went wrong".
+    for (const entry of result.acknowledged) {
+      lines.push(`  ${entry.id}  task ${entry.taskId}  claimed ${entry.storedState}`);
+    }
+    for (const entry of result.skipped) {
+      lines.push(`  SKIPPED ${entry.id}  task ${entry.taskId}  ${entry.reason}`);
+    }
+    if (result.skipped.length > 0) {
+      lines.push("");
+      lines.push("A skipped record is still holding this project. It was refused because this verb");
+      lines.push("decides a record is not running by reading its state column, and on a record whose");
+      lines.push("integrity check fails that column cannot be trusted. Its own release is the one that");
+      lines.push("probes the processes it names: candidates promotions <workspace> release <id> …");
+    }
+    lines.push("");
+    lines.push("This wrote nothing: no row moved, no record was repaired, main was not touched and");
+    lines.push("nothing was killed.");
+    lines.push("");
+    // Said plainly, because the alternative is a command that looks like it unblocked something and
+    // did not. An acknowledgement is proof held in the MEMORY of the process that heard it, and this
+    // command's process ends when it returns — so what follows is the listing as this process now
+    // reads it, and nothing more. A promotion is run by the local web daemon, in its own process,
+    // which has not heard this and will go on refusing until it does.
+    lines.push("It is proof held by THIS process only, and this process exits when this command");
+    lines.push("returns. It does NOT unblock a promotion: that runs in the web daemon's own process,");
+    lines.push("which did not hear it. What follows is only how these records read once acknowledged.");
+    lines.push("");
+    return lines.join("\n") + describePromotions({
       mainPath, promotions: await registry.promotions({ roomId, mainPath }),
     });
   }

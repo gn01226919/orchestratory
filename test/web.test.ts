@@ -453,6 +453,75 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   const sharedLedger = new RoomLedger(app.store.dataDirectory);
   sharedLedger.createRoom("demo", await realpath(workspace));
   sharedLedger.close();
+  // The owner's acknowledgement endpoint. It exists because the proof it produces lives in the
+  // memory of the process that runs promotions, and the CLI is not that process — it starts, answers
+  // and exits. Asserted here, on the real server, because "there is a way out" is the claim.
+  const postAcknowledge = async (body: unknown, headers: Record<string, string> = {}) =>
+    await fetch(`${server.url}/api/rooms/merge-promotions/acknowledge`, {
+      method: "POST",
+      headers: {
+        Cookie: cookie, Origin: server.url, "X-CSRF-Token": bootstrapBody.csrf,
+        "Content-Type": "application/json", ...headers,
+      },
+      body: JSON.stringify(body),
+    });
+  // Shares the POST guards rather than inventing its own: no CSRF token, no acknowledgement.
+  assert.equal((await postAcknowledge(
+    { room: "demo", confirmation: "x" }, { "X-CSRF-Token": "wrong" },
+  )).status, 403);
+  // Unknown fields are refused rather than ignored — a field this handler does not read is a field
+  // whose meaning it cannot honour.
+  assert.equal((await postAcknowledge(
+    { room: "demo", confirmation: "x", taskId: "anything" },
+  )).status, 400);
+  assert.equal((await postAcknowledge({ room: "demo" })).status, 400);
+  // A wrong phrase is refused before anything is surveyed: a near-miss must not become a listing of
+  // what the owner would have been accepting.
+  const wrongPhrase = await postAcknowledge({ room: "demo", confirmation: "yes" });
+  assert.equal(wrongPhrase.status, 400);
+  // The exact phrase is accepted, and the response says plainly what it did NOT do. Zero records is
+  // the honest answer for a project that has never promoted, and it is still a success.
+  const acknowledged = await postAcknowledge({
+    room: "demo",
+    confirmation: "I HAVE CHECKED THIS PROJECT MYSELF AND NO EARLIER PROMOTION IS STILL RUNNING",
+  });
+  assert.equal(acknowledged.status, 200);
+  assert.deepEqual((await acknowledged.json()) as unknown, {
+    acknowledged: [],
+    skipped: [],
+    verifiedByProduct: false,
+    promotionStoreMutation: false,
+    mainMutation: false,
+    scope: "this-process-only",
+  });
+
+  // The release route shares the same guards and the same schema discipline.
+  const postRelease = async (body: unknown, headers: Record<string, string> = {}) =>
+    await fetch(`${server.url}/api/rooms/merge-promotions/release`, {
+      method: "POST",
+      headers: {
+        Cookie: cookie, Origin: server.url, "X-CSRF-Token": bootstrapBody.csrf,
+        "Content-Type": "application/json", ...headers,
+      },
+      body: JSON.stringify(body),
+    });
+  assert.equal((await postRelease(
+    { room: "demo", promotionId: "p", confirmation: "P" }, { "X-CSRF-Token": "wrong" },
+  )).status, 403);
+  assert.equal((await postRelease({ room: "demo", promotionId: "p" })).status, 400);
+  assert.equal((await postRelease(
+    { room: "demo", promotionId: "p", confirmation: "P", taskId: "x" },
+  )).status, 400);
+  // A pid that is not a safe integer is refused rather than coerced: a release lands on a number.
+  assert.equal((await postRelease(
+    { room: "demo", promotionId: "p", confirmation: "P", pid: 1.5 },
+  )).status, 400);
+  // A well-formed request for a promotion that does not exist is refused by the registry, not
+  // rounded down to a success.
+  assert.equal((await postRelease(
+    { room: "demo", promotionId: "11111111-1111-4111-8111-111111111111", confirmation: "P" },
+  )).status >= 400, true);
+
   const roomsByProject = await fetch(`${server.url}/api/rooms`, { headers: { Cookie: cookie } });
   const roomsByProjectBody = (await roomsByProject.json()) as {
     rooms: Array<{
@@ -2535,6 +2604,12 @@ test("Merge outcome archive counts only verified success as merged", async () =>
   const missingObservation = { id: "missing-observation", state: "applied", mainHeadAfter: "b".repeat(40) };
   const missingHead = { id: "missing-head", state: "applied", observation: { authorizedMergeCommit: true } };
   const rolledBack = { id: "rolled-back", state: "rolled-back", mainHeadAfter: "c".repeat(40) };
+  const unattested = {
+    id: "unattested", state: "unreadable", storedState: "applied",
+    unreadableReason: "promotion-attestation",
+    // Even if hostile input carries old positive-looking fields, the non-applied public state wins.
+    mainHeadAfter: "d".repeat(40), observation: { authorizedMergeCommit: true },
+  };
   const approvals = [
     { id: "expired", state: "expired" },
     { id: "rejected", state: "rejected" },
@@ -2543,7 +2618,7 @@ test("Merge outcome archive counts only verified success as merged", async () =>
     { id: "approved-without-row", state: "approved" },
   ];
   const buckets = classifier.mergeHistoryBuckets(
-    [verified, missingObservation, missingHead, rolledBack],
+    [verified, missingObservation, missingHead, rolledBack, unattested],
     approvals,
   );
   assert.equal(classifier.mergeHistorySucceeded(verified), true);
@@ -2551,21 +2626,153 @@ test("Merge outcome archive counts only verified success as merged", async () =>
   assert.equal(classifier.mergeHistorySucceeded(missingHead), false);
   assert.equal(classifier.mergeHistorySucceeded({ ...verified, state: "needs-manual-review" }), false);
   assert.equal(classifier.mergeHistorySucceeded({ ...verified, mainHeadAfter: "" }), false);
+  assert.equal(classifier.mergeHistorySucceeded(unattested), false);
   assert.equal(classifier.mergeHistorySucceeded(undefined), false);
   assert.deepEqual(Array.from(buckets.mergedPromotions), [verified]);
-  assert.deepEqual(Array.from(buckets.reviewPromotions), [missingObservation, missingHead, rolledBack]);
+  assert.deepEqual(Array.from(buckets.reviewPromotions), [missingObservation, missingHead, rolledBack, unattested]);
   assert.deepEqual(Array.from(buckets.notStartedApprovals), approvals.slice(0, 3));
   assert.deepEqual(Array.from(buckets.reviewApprovals), approvals.slice(3));
-  assert.equal(buckets.otherCount, 8);
+  assert.equal(buckets.otherCount, 9);
   const everyRow = [
     ...buckets.mergedPromotions,
     ...buckets.reviewPromotions,
     ...buckets.notStartedApprovals,
     ...buckets.reviewApprovals,
   ];
-  assert.equal(everyRow.length, 9, "the mutually exclusive buckets preserve every input row");
-  assert.equal(new Set(everyRow).size, 9, "no row can appear in two outcome buckets");
-  assert.equal(buckets.mergedPromotions.length + buckets.otherCount, 9);
+  assert.equal(everyRow.length, 10, "the mutually exclusive buckets preserve every input row");
+  assert.equal(new Set(everyRow).size, 10, "no row can appear in two outcome buckets");
+  assert.equal(buckets.mergedPromotions.length + buckets.otherCount, 10);
+});
+
+test("ending a wait is offered only when the record names both a phrase and its number", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const start = source.indexOf("/* @pure-start merge-wait-release");
+  const end = source.indexOf("/* @pure-end merge-wait-release */");
+  assert.ok(start > 0 && end > start, "room.js must expose the DOM-free wait-release selector");
+  const block = source.slice(start, end);
+  assert.doesNotMatch(
+    block,
+    /(?:\b(?:document|window|navigator|localStorage|state)\s*\.|\b(?:fetch|byId|api|setInterval|setTimeout|require|import)\s*\()/u,
+  );
+  const selector = runInNewContext(
+    `${block}\n({ mergeWaitRelease });`,
+    Object.create(null) as object,
+    { timeout: 2_000 },
+  ) as { mergeWaitRelease: (entry: unknown) => Record<string, unknown> | null };
+  const call = (entry: unknown): string =>
+    JSON.stringify(selector.mergeWaitRelease(entry) ?? null);
+
+  // Nothing to end.
+  assert.equal(call({}), "null");
+  assert.equal(call({ pending: {} }), "null");
+  // A phrase with no number, in a state that HAS one to quote, is not actionable: the control would
+  // have to guess a pid, and guessing one is how a release lands on the wrong process.
+  assert.equal(call({ pending: { code: "MERGE_END_NOT_OBSERVED", release: "P" } }), "null");
+  assert.equal(call({ pending: { code: "OWNER_PROCESS_STILL_RUNNING", release: "P" } }), "null");
+  assert.equal(
+    call({ pending: { code: "PROMOTION_OWNER_AND_MERGE_STILL_RUNNING", release: "P", pid: 7 } }),
+    "null", "the both-processes state needs BOTH numbers, and only one was reported",
+  );
+  // The one state that legitimately names no number carries it all in the phrase.
+  assert.equal(
+    call({ pending: { code: "MERGE_IDENTITY_UNACCOUNTED", release: "P" } }),
+    JSON.stringify({ confirmation: "P", code: "MERGE_IDENTITY_UNACCOUNTED" }),
+  );
+  // The three shapes that are actionable, each quoting exactly what the record showed.
+  assert.equal(
+    call({ pending: { code: "MERGE_END_NOT_OBSERVED", release: "P", pid: 9 } }),
+    JSON.stringify({ confirmation: "P", pgid: 9, code: "MERGE_END_NOT_OBSERVED" }),
+  );
+  assert.equal(
+    call({ pending: { code: "OWNER_PROCESS_STILL_RUNNING", release: "P", pid: 9 } }),
+    JSON.stringify({ confirmation: "P", pid: 9, code: "OWNER_PROCESS_STILL_RUNNING" }),
+  );
+  assert.equal(
+    call({
+      pending: {
+        code: "PROMOTION_OWNER_AND_MERGE_STILL_RUNNING", release: "P", pid: 9,
+        alsoBlockedBy: { pid: 11 },
+      },
+    }),
+    JSON.stringify({ confirmation: "P", pid: 9, pgid: 11, code: "PROMOTION_OWNER_AND_MERGE_STILL_RUNNING" }),
+  );
+
+  // The copy, for the same reason the acknowledgement's copy is asserted: the control must not read
+  // as the product having decided the merge is over.
+  const offer = source.slice(source.indexOf("function renderPromotionWaitRelease"));
+  const body = offer.slice(0, offer.indexOf("\n  box.append(what, warn, phrase, act);"));
+  assert.match(body, /不會終止任何程序/u);
+  assert.match(body, /不會寫入 main/u);
+  assert.match(body, /不會修復紀錄/u);
+  assert.match(body, /不代表產品判斷 merge 已/u);
+  assert.match(body, /\/api\/rooms\/merge-promotions\/release/u);
+  assert.doesNotMatch(body, /merge-approvals\/approve|promoteMainMerge|reset --hard/u);
+});
+
+test("the acknowledgement offer is narrow, and says what it is not", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const start = source.indexOf("/* @pure-start merge-history-unattested");
+  const end = source.indexOf("/* @pure-end merge-history-unattested */");
+  assert.ok(start > 0 && end > start, "room.js must expose the DOM-free unattested selector");
+  const block = source.slice(start, end);
+  assert.doesNotMatch(
+    block,
+    /(?:\b(?:document|window|navigator|localStorage|state)\s*\.|\b(?:fetch|byId|api|setInterval|setTimeout|require|import)\s*\()/u,
+  );
+  const selector = runInNewContext(
+    `${block}\n({ mergeHistoryUnattested });`,
+    Object.create(null) as object,
+    { timeout: 2_000 },
+  ) as { mergeHistoryUnattested: (promotions: unknown) => Array<{ id: string }> };
+
+  const unattested = {
+    id: "unattested", state: "unreadable", unreadableReason: "promotion-attestation",
+    holdsProjectExclusiveMarker: true,
+  };
+  // A corrupt row that is STILL holding the project has to be offered the way out too: it is the
+  // condition a promotion is refused on, and excluding it left that project with no exit at all.
+  const corrupt = {
+    id: "corrupt", state: "unreadable", unreadableReason: "row-integrity",
+    holdsProjectExclusiveMarker: true,
+  };
+  // One that has already been let go is not offered anything, whatever its reason says.
+  const released = {
+    id: "released", state: "unreadable", unreadableReason: "row-integrity",
+    holdsProjectExclusiveMarker: false,
+  };
+  const applied = { id: "applied", state: "applied", observation: { authorizedMergeCommit: true } };
+  const applying = { id: "applying", state: "applying" };
+  // Joined rather than compared as arrays: the selector runs in another realm, so its Array is a
+  // different constructor and a strict deep comparison fails on the prototype rather than the values.
+  const ids = (input: unknown): string =>
+    selector.mergeHistoryUnattested(input).map((entry) => entry.id).join(",");
+  assert.equal(
+    ids([unattested, corrupt, released, applied, applying]), "unattested",
+    "a corrupt row was offered a phrase that skips the probe its own release performs",
+  );
+  assert.equal(ids(undefined), "");
+  assert.equal(
+    ids([{ id: "not-holding", state: "unreadable" }]), "",
+    "a record the daemon does not say is holding the project must not be offered a way out of it",
+  );
+  assert.equal(
+    ids([{ id: "readable", state: "applied", holdsProjectExclusiveMarker: true }]), "",
+    "only a record the daemon reports as unreadable is in question here",
+  );
+
+  // The wording the owner reads is part of the control. A button that implied the product had
+  // checked something would be the same measured falsehood this round removed, so the copy is
+  // asserted rather than left to drift.
+  const offer = source.slice(source.indexOf("function renderUnattestedAcknowledgement"));
+  const body = offer.slice(0, offer.indexOf("\nasync function refreshMergeHistory"));
+  assert.match(body, /不會修復任何紀錄/u);
+  assert.match(body, /不會寫入 main/u);
+  assert.match(body, /不代表產品驗證過什麼/u);
+  assert.match(body, /重新啟動後會再問一次/u);
+  assert.match(body, /I HAVE CHECKED THIS PROJECT MYSELF AND NO EARLIER PROMOTION IS STILL RUNNING/u);
+  assert.match(body, /\/api\/rooms\/merge-promotions\/acknowledge/u);
+  // It must not be able to reach anything that writes main.
+  assert.doesNotMatch(body, /merge-approvals\/approve|promoteMainMerge|reset --hard/u);
 });
 
 test("Merge pending badge accepts only active unexpired requested approvals", async () => {

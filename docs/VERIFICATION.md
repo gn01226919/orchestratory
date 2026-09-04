@@ -7,6 +7,122 @@
 > host 驗收。下表其餘舊測試保留作為 GUI Managed 回歸證據，不得拿來冒充 Native Full-Trust、
 > 已安裝 runtime 或 main merge decision 已完成。
 
+## 2026-08-20 · P0-3 observeMain forgery／封存 candidate
+
+| Requirement | Direct evidence | Expected result |
+|---|---|---|
+| 先重現 terminal row＋無金鑰 hash 偽造 | `a recomputed unkeyed hash cannot turn a forged terminal promotion into durable convergence` 先建立真實 applied row，改寫 terminal code/state 並用 exact production column order 重算 SHA-256；修正前回傳 forged applied，修正後為 `unreadable/promotion-attestation` | forged claim 不進成功分類，project gate held，第二 task promotion 拒絕 `MAIN_MERGE_PROMOTION_RECORD_UNATTESTED` |
+| Persisted row/audit 不重建第一手事實 | `a restart cannot promote a persisted terminal claim into first-hand convergence` 在完全合法成功後關閉 service、重開同一 data directory | intact applied row 仍降級為 unattested；exact retry fail closed；main HEAD 在讀取前後不變 |
+| hook／trace／approval 不能放寬 | 既有直接攻擊：`a hook that rewrites both in-row sources…`、`an approval rewritten…`、`a merge driver that silences every source…` | 全部維持 applying/unreadable；無第二次 Git apply、無 destructive recovery |
+| GUI/CLI 不把 claim 顯示為成功 | `test/web.test.ts` classifier 將 `state=unreadable, storedState=applied` 放入 review；`test/main-cli.test.ts` 顯示 first-hand attestation 缺失、stored claim 與 held gate | 無綠色 Merge success、無 archive count 冒充待辦 |
+| D-014 | `#resolvePromotion()` 只讀 Git；restart-time terminal interpretation 改存 `untrustedConvergenceClaim`，強制 `state=applying`、`authorizedMergeCommit=null`，不呼叫 `#markCandidateMerged` | 不 reset／rollback／abort／kill／merge retry／push／cleanup／delete |
+
+安全取捨：沒有採用「把 row hash 放進本機 HMAC」方案，因為 Native Full-Trust hook 與 daemon 同 uid，
+key 仍可取得。正向 attestation 只存在活程序記憶體；因此合法 history 在 restart 後也需人工核對。
+~~跨重啟的人工出口歸 D-018／P0-4，未完成前保持 fail closed。~~ 已由下節（ADR-041）實作。
+本節不得被引用為 merged、shipped 或 frozen runtime 已更新。
+
+## 2026-08-21 · ADR-041 釋放狀態的第一手邊界與 Owner 專案級出口
+
+| Requirement | Direct evidence | Expected result |
+|---|---|---|
+| 偽造非 terminal 的釋放狀態不得解開 project gate | 新增 `a forged non-terminal releasing state cannot open the project to the next promotion`：hook 失敗使 task A 停在 `applying`、main 乾淨；task B 先備妥 granted token，**之後才**改寫 A 的 row 為 `needs-manual-review` 並重算無金鑰 hash | 修正前（WIP `426c07f2`，隔離 worktree 實測）該測試以 **`Missing expected rejection`** 失敗——第二筆 promotion 未被拒絕、直接寫了 main；修正後回 `MAIN_MERGE_PROMOTION_RECORD_UNATTESTED`，`head`／`status` 均未變 |
+| 探針必須真的抵達它具名的閘門 | 同一支測試的第一版把 listing 斷言放在 promote 之前，WIP 的重新觀察先把 forged row 推回 `applying`，失敗落點與宣稱完全無關（[[PITFALLS]] #129）。改為「B 全部備妥 → forge → promote → 最後才 listing」才重現 | `#assertMainNotBusy` 只在 `promoteMainMerge` 呼叫，中間任何讀取都會使該格失效 |
+| Task gate 與 project gate 不共用判準 | `an approval cannot be spent while the task's last promotion is unresolved`：同程序宣告後 row 為 `needs-manual-review`，project 已釋放而 task 仍拒絕 | `MAIN_MERGE_PROMOTION_UNRESOLVED`，不是 single-use 檢查順手擋下 |
+| Owner 宣告必須本程序處理 | `mergeWriteConclusion` 的三個 row-read 分支改需 call-supplied `ownerDeclaredFirstHand`；四個宣告入口在 durable 寫入前登記 | row 自稱宣告而本程序未處理時回 `MERGE_DECLARATION_NOT_FIRST_HAND` 並繼續等待，且仍印得出出路 |
+| 不得把已釋放的列推回 `applying` | restart 分支改為只擋「離開 `applying` 的轉移」 | Owner acknowledge 後的列不會在下一次讀取時被重新扣住標記 |
+| 跨重啟人工出口存在且不寫入 | `legacy complete restore rows…`：acknowledge 後可讀為 `applied`；錯誤片語先被拒；新程序重新持有 | `acknowledgeUnattestedPromotions` 不動 row、不修復 corrupt row（`row-integrity` 維持不變）、不碰 main |
+| 兩種 unreadable 原因不得混同 | 同一支測試同時斷言 `promotion-attestation` 與 `row-integrity` | 否則該測試會退化成 attestation 測試的副本（[[PITFALLS]] #106） |
+| 重啟後的 HTTP／service 讀取同樣不得自行宣稱成功 | `merge-approval-web.test.ts` 的 daemon-restart 段：live approve 回應仍為 `applied`（那一半不依賴儲存），但 `new CollaborationService(data)` 重建後的讀取回 `unreadable/promotion-attestation`、`storedState: applied`、標記仍持有；同一實例做一次 acknowledge 後即可讀為 `applied` | 出口在 daemon 側可用，且不需任何持久化寫入 |
+| D-014 不變 | 本輪未新增任何 reset／checkout／rollback／abort／kill／merge retry／push／cleanup | `crash reconciliation does not change one byte of the repository` 兩個 scenario 均維持 |
+| 出口必須開在會執行 promotion 的程序上 | 審查指出第一版只有 CLI 動詞，而 CLI 每次 `new CollaborationService()`→執行→`close()`→程序結束；真正 promotion 的是長壽 web daemon。已新增 `POST /api/rooms/merge-promotions/acknowledge` 與 Merge 紀錄畫面的獨立按鈕 | 真實 HTTP 實測：缺 CSRF→403；未知欄位→400；缺欄位→400；錯片語→400（在列出任何東西之前）；正確片語→200 且回應為 `verifiedByProduct:false / promotionStoreMutation:false / mainMutation:false / scope:"this-process-only"` |
+| 出口與核准不得共用一句話 | `acknowledge` 是獨立路由、獨立片語，與 `MERGE INTO MAIN` 不共用 | UI 測試斷言按鈕文案不含 approve 路徑、`promoteMainMerge` 或 `reset --hard` |
+| 出口不得看起來像驗證 | `the acknowledgement offer is narrow, and says what it is not`：pure selector 只挑 `unreadableReason === "promotion-attestation"`，**不挑** `row-integrity`（修復 corrupt row 不是它做的事）；並斷言 UI 文案逐句寫明「不會修復紀錄／不會寫入 main／不代表產品驗證過什麼／重新啟動後會再問一次」 | corrupt row 不被提供這個按鈕；`undefined` 與無 reason 的列都回空 |
+| Owner 宣告的內容必須在記憶體，不只是旗標 | 審查指出只綁 promotion id 的旗標會活過它所描述的那一列被改寫；已改為整份宣告內容存記憶體，結論由它決定，並移除 `recordedMergeConclusion` 的跨程序重播 | ~~我沒有做出能隔離這條路徑的重現探針，故記為原則性收緊。~~ **已被第 2 輪審查證偽——重現方式我當時想錯了方向** |
+| 一次宣告只授權**一次**離開 `applying` | 第 2 輪審查指出可重現的缺口：每一道閘門都對「仍持有標記」的列免驗（合理，沒離開過就不需要理由），所以把已 settle 的列**改回 `applying`** 就繞過 row-hash 綁定，記憶體裡的宣告會再 settle 一次，配上攻擊者選的位元。新增 `a declaration spent once cannot settle a record the merge rewound to applying`：合法宣告一次 → `rolled-back` → 改回 `applying` 並重算 hash | 記錄為 `unreadable/promotion-attestation`、標記仍持有、兩道 gate 皆回 `MAIN_MERGE_PROMOTION_RECORD_UNATTESTED`。**突變驗證**：把 `#promotionRewound` 改成永遠 `false`、`settled` 檢查改成永遠通過，該測試立刻變紅（「a rewound record was settled a second time」），證明守衛承重且探針確實抵達它 |
+| Attestation 綁的是內容，不是 `row_hash` 欄位 | 第 3 輪審查指出：`#assertMainNotBusy` 在驗證完整性之前就信任 `#promotionAttested`，而 attestation 綁在 `row_hash` **字串**上，因此「改內容、保留舊 hash」的重寫能維持 attestation 有效——閘門跳過一列它讀不懂的紀錄，而會先驗證再回報的 `promotions()` 卻說它 unreadable。新增 `an attestation does not survive a rewrite that keeps the row's stored hash` | attestation 改綁 `mergePromotionHash(row)`（本產品自己重算的內容摘要）。**突變驗證**：改回綁 `row_hash` 欄位，該測試立刻變紅，訊息正是「畫面說專案是空的，而下面的閘門拒絕——兩者不得不一致」 |
+| 畫面與閘門必須對同一列說同一句話 | `#unreadableView` 的 `holdsProjectExclusiveMarker` 改為由**閘門所用的同一個判準**重新推導，不再只看 state 欄位 | 同一列不會出現「畫面說標記已釋放、閘門卻拒絕」 |
+| Acknowledge 不得覆蓋 corrupt 紀錄 | Codex 確認回合（第 3 輪 blocker 的複查）指出：讓 acknowledge 覆蓋 corrupt row，等於用**該列自己的 `state` 欄位**判斷「不在執行中」，而那正是一列讀不懂的紀錄裡不可信的位元；而且它繞過了 unreadable release 會**探測該列指名的程序並升級確認語**的保護 | acknowledge 對 integrity 失敗的列一律拒絕，並在回應／稽核／CLI 輸出中以 `skipped` 具名回報與其正確出口；GUI 按鈕同步收窄回 `promotion-attestation` |
+| ~~Corrupt 紀錄也必須有出口~~（已由上一列取代） | 我先前把 GUI 按鈕限制成只對 `promotion-attestation` 出現，理由是「修復 corrupt row 不是它做的事」——但那讓一列已離開 `applying` 的 corrupt row **完全沒有出口**（`release` 只接受 `applying`）。改為依 `holdsProjectExclusiveMarker` 判定，也就是閘門實際拒絕的條件 | 按鈕出現的時機＝promotion 會被拒絕的時機；acknowledging 仍然不修復任何紀錄，該列繼續顯示為 unreadable 並說明原因 |
+| 我自己的錯誤方向，記錄在案 | 我先前斷定這條路徑「隔離不出來」，是因為只想像「改寫成**別的釋放狀態**」；真正的縫是**改回 `applying`**——那是所有 attestation 檢查一致免驗的位置 | 規則：檢查若對某個狀態「免驗」，就要問「有沒有辦法把紀錄搬回那個狀態」。[[PITFALLS]] #129 的同族：不是閘門沒守住，是探針沒走到 |
+
+### 已知且刻意的契約變更
+
+不是把測試改綠，是把安全狀態機定義清楚後同步兩邊。每一項都保留了原測試真正在測的東西，只是把
+「產品自己下結論」換成「Owner 宣告一次」。
+
+1. **新程序不再自動收斂。** `a merge orphaned by a crash that finishes`、`crash reconciliation…` 的
+   finished shape、`an owner who restores main themselves…`、`a kill inside the final-result write…`
+   原本要求新程序自行走到 `applied`／`rolled-back`／`needs-manual-review`。之後同樣的收斂需要一次
+   Owner 宣告或專案級 acknowledge；測試改為斷言「claim 被具名保留、未被採信」與「出口存在且有效」。
+2. **release 不再跨程序保持有效。** `an unreadable record whose processes are gone is released with
+   the shorter phrase, and stays released`：release 是第一手事實，唯一能替另一個程序保存它的地方，正是
+   merge 的 hook 寫得到的儲存。新程序改為回報該紀錄仍持有專案，Owner 再說一次。該測試原本真正在測的
+   東西全部保留：紀錄從不被修復、release 有被記錄且可讀、main 全程未動、二次 release 仍被拒絕。
+3. **attestation 綁程序，因此跨程序不轉移。** 數支測試中「A registry 宣告、B registry 接著動作」的
+   段落，改為由 B 自己問一次。這是同一條邊界的必然結果，不是遺漏。
+
+### ✅ 2026-08-25 · 真實瀏覽器驗收（candidate → main 核准閘門 ＋ 本輪新增的 Owner 出口）
+
+Gate digest：`bf432e2210ef0401bbdaeab751211f45df08db39e72cd41b9fd07fc2cfe7b5e0`
+
+**怎麼跑的（不是宣稱，是實際操作）**：以 candidate 自己的 `src/` 與 `public/` 啟一個只綁 loopback 的
+server（`127.0.0.1:4319`），資料目錄與 repository 全部是新建的暫存目錄，**未接觸 Owner 的正式資料目錄**。
+世界由腳本真實建立：一個 200 行的 main、一個改動同檔並新增檔案的 candidate、一次**真實成功的 promotion**，
+以及一筆處於待核准的 approval。以 Chrome 自動化實際點擊與輸入。
+
+**實際觀察到的（每一項都有量測值）**：
+
+| 觀察項 | 實測 |
+|---|---|
+| 捲動閘門確實擋住 | diff `scrollTop 0`、內容 358 > 可視 283；提交鈕 `aria-disabled="true"` |
+| **輸入正確片語並按下提交，仍未送出** | 打入 `MERGE INTO MAIN` 後點擊，approval 仍為 `requested`——這是閘門的核心事實 |
+| 捲到底後解鎖 | `scrolledToBottom: true` → `aria-disabled: "false"`；畫面顯示「變更清單已捲到底：輸入 MERGE INTO MAIN 即可解鎖」 |
+| blockers 區塊 | 無 blocker 時正確隱藏；其文案說明「一般 blocker 不鎖輸入，逾時／終局核准不能復活」 |
+| TTL 倒數真的在動 | `#merge-approval-ttl` 由 `12:05` → 2.5 秒後 `12:02` |
+| 促進前揭露在捲動區內 | hook 目錄與其雜湊、可指名程式的設定鍵、會覆蓋 main 的檔案掃描、復原點（base/main/candidate HEAD 與 recovery ref）全部要捲過才能到底 |
+| **重啟後的紀錄不冒充成功** | 上一個程序真正成功的 promotion，在新程序讀取時為 `unreadable`、欄位全部「未讀到」、歸入「需要檢查 2」，綠色「已 Merge」為 **0** |
+| **acknowledge 控制（本輪新增）** | 出現且僅一個；文案四項誠實聲明齊備（不修復紀錄／不寫入 main／不代表產品驗證過什麼／重新啟動後會再問一次） |
+| **按下後端到端生效** | `unreadable/promotion-attestation`（標記持有）→ `applied` ＋ `AUTHORIZED_MERGE_COMMIT_OBSERVED_IN_MAIN`；已 Merge 0→1、需檢查 2→0、按鈕消失 |
+| **acknowledge 確實不寫入持久狀態** | 事後以**全新程序**讀同一個資料目錄，仍是 `unreadable/promotion-attestation`、`storedState: applied`、標記仍持有 |
+
+**未在本次瀏覽器驗收中觀察到的**：`end-this-wait` 控制沒有出現，因為這個世界裡沒有任何停在 `applying`
+且指名了 pid／pgid 的紀錄——該控制依設計只在紀錄自己說得出號碼時才出現。它的行為由
+`ending a wait is offered only when the record names both a phrase and its number` 與端點的真實 HTTP
+測試覆蓋；**本列不得被引用為它已通過瀏覽器驗收**。
+
+**設置過程中被產品正確擋下、值得記錄的兩件事**：(1) 先請求 A 的核准再促進 B，會讓 A 因 main HEAD 漂移而
+`invalidated`——漂移失效機制正確運作；(2) room 必須以 canonical 路徑建立，否則 `/var` 與 `/private/var`
+兩種拼法會讓房間永遠不出現（[[PITFALLS]] #41）。
+
+### 本輪明確留下的缺口（fail closed，不是被忽略）
+
+- **一列 integrity 失敗、且已離開 `applying` 的紀錄，在 daemon 側沒有出口。** acknowledge 依上表拒絕它；
+  而會探測程序的 unreadable release 仍要求 `state === 'applying'`。兩者都是刻意的 fail-closed 選擇，但合起來
+  代表這種紀錄會持續持有專案。
+  正確的修法不是放寬其中一邊，而是**讓 unreadable release 不再讀那個不可信的 state 欄位**——它本來就有自己的
+  探測與片語升級，足以承擔這個判斷。這需要重做它的併發保護（目前 UPDATE 的 WHERE 子句用的就是該欄位），
+  屬於獨立一輪的工作。
+- **這個缺口是連續第四次「精確貼合上一輪 probe 的落點」之後才停下來的。** [[PITFALLS]] #117／#123 明文說這是
+  打地鼠、根因在標準；交接單也規定三輪審查後仍有 blocker 就記錄並推進。本輪照做：把洞收斂成具名限制、
+  補上回歸，然後停止修補。
+
+### 我自己造成的回歸，以及它的修補
+
+`release`／`abandon*` 這組動詞以前**是靠把宣告寫進 row 來跨程序傳話的**：終端寫、daemon 讀回。amendment (W)
+關掉那條路（因為那是 hook 寫得到的位元）之後，這組動詞對 daemon 一併失效——後果比 acknowledge 那個嚴重：
+任何跑過 hook 的 merge 都會停在 `applying` 等 Owner 宣告，而 GUI 沒有地方能做。這不是既有缺口，是本輪造成的。
+
+已用同一個形狀補上：`POST /api/rooms/merge-promotions/release`（既有 Origin＋CSRF＋session 守衛）＋ Merge
+紀錄畫面中每一筆等待紀錄旁的控制。
+
+| Requirement | Direct evidence | Expected result |
+|---|---|---|
+| 三種既有 release 都能送達 daemon | service 端依「Owner 引用了哪些號碼」做與 CLI 完全相同的三向分派，所有檢查、片語與拒絕仍屬 registry，端點不新增任何判斷 | 不寫 main、不送訊號、不修復紀錄；稽核紀錄記下 Owner 引用的號碼與 `verifiedByProduct:false` |
+| 端點守衛與 schema | 真實 HTTP：缺 CSRF→403；缺欄位→400；未知欄位→400；`pid: 1.5`→400（不強制轉型）；不存在的 promotion→≥400，不被降級成成功 | |
+| 控制只在紀錄自己說得出出路時出現 | `ending a wait is offered only when the record names both a phrase and its number`：有片語但缺號碼的可動作狀態一律回 null；`PROMOTION_OWNER_AND_MERGE_STILL_RUNNING` 需**兩個**號碼；只有 `MERGE_IDENTITY_UNACCOUNTED` 允許沒有號碼（片語本身承載） | 介面不得猜 pid——猜錯就是把 release 落在別的程序上 |
+| 文案不得像是產品下了結論 | 斷言逐句包含「不會終止任何程序／不會寫入 main／不會修復紀錄／不代表產品判斷 merge 已結束」，且不含 approve 路徑、`promoteMainMerge`、`reset --hard` | |
+
 ## 2026-08-20 · P0-2 supervisor bounded-read／mirror freshness candidate
 
 | Requirement | Evidence | Status |

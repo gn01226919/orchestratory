@@ -138,7 +138,8 @@ checkpoint，彙整：
   可由同一 dialog 明確要求重新讀取 live state，系統建立**不同 approval id** 的新 snapshot-bound request、
   自動切換並恢復輸入。此操作不得自動 grant／Merge；若舊 approval 已有 promotion row 或狀態不確定，
   必須導向 Merge 紀錄人工核對，不得提供重複 apply 出口。
-- 只有 durable positive observation 已顯示「Merge 成功」後，結果卡片才可提供「完成並回到 Room 主畫面」；
+- 只有本次 live process 的 first-hand attested positive observation 已顯示「Merge 成功」後，結果卡片才可
+  提供「完成並回到 Room 主畫面」；
   該控制只關閉 dialog、切回帳本直播並聚焦發言框，不得新增 HTTP／MCP 呼叫、再次 promotion 或清除 durable
   Merge 紀錄。`rolled-back`、`needs-manual-review`、讀不到與其他不確定結果不得顯示成功返回控制。
 - Durable promotion restore point 必須以 UTF-8 bytes 設定有限上界，不得只把 SQLite TEXT 上限無界放大。
@@ -149,13 +150,40 @@ checkpoint，彙整：
   歷史總數 badge。Durable 結果檔案必須是獨立、無數字徽章的「Merge 紀錄」入口；只有 classifier
   找到 `needs-manual-review`、malformed／不完整 promotion 或沒有 promotion 的非終局 approval 時，入口
   才顯示不帶數字的「需檢查」提示。Dialog 內才分成
-  「已 Merge」「需要檢查」「未進入 Merge」：只有 promotion=`applied`、
-  `authorizedMergeCommit=true` 且非空 `mainHeadAfter` 才能計入綠色「已 Merge」；缺任一正向事實的
+  「已 Merge」「需要檢查」「未進入 Merge」：只有**仍持有本次 live process 第一手 attestation**的
+  promotion=`applied`、`authorizedMergeCommit=true` 且非空 `mainHeadAfter` 才能計入綠色「已 Merge」；
+  persisted terminal row 即使 row hash 正確，重啟後也必須回 `unreadableReason=promotion-attestation`，
+  不得以 row、hook、trace、audit 或無金鑰 hash 重建正向事實。缺任一正向事實的
   promotion、malformed row 或沒有 promotion 的非終局 approval 都進「需要檢查」；只有 rejected／expired／
-  invalidated 且沒有 promotion 的 approval 才進「未進入 Merge」。結果必須在 daemon restart 後仍可依
-  Room/workspace 查核，並顯示 approval/promotion/task、前後 HEAD、candidate HEAD、recovery ref、狀態、
+  invalidated 且沒有 promotion 的 approval 才進「未進入 Merge」。~~結果在 daemon restart 後仍可重建為
+  已 Merge。~~ 重啟後只能依 Room/workspace 查核**記錄與未證實 claim**，並顯示
+  approval/promotion/task、前後 HEAD、candidate HEAD、recovery ref、狀態、
   時間、observation 與已觀察到的 hooks；不得包含 approval token 或秘密。關閉檔案不刪除、不歸零；
   讀取失敗只在紀錄 dialog 內具名，不得在側欄重新出現數字或把讀不到說成零筆。
+
+- Promotion 的正向收斂證據不得持久化在同帳號 hook 可寫的 store。只有執行 merge 的活程序握有的 child
+  handle／pid／trace fd 與同一呼叫的 repository observation 可產生 terminal attestation；attestation 僅在
+  記憶體，row 位元改變或程序重啟即失效。失效時 task 與 project main-write gate 均 fail closed，且
+  `promotionForApproval` 回 `MAIN_MERGE_PROMOTION_RECORD_UNATTESTED`。本項只觀察、具名與拒絕；不得自動
+  reset、rollback、abort、重跑 merge、標記 candidate merged 或把讀不到改寫成安全。
+- 需要第一手事實的判準是「**離開 `applying` 這個轉移**」，不是 terminal 狀態清單。排他標記是
+  `ON(main_path) WHERE state='applying'` 的 partial unique index，任何其他值都會釋放它，因此兩道 main-write
+  gate 都不得以 state 清單過濾候選列。已經離開 `applying` 的列不得被重新推回 `applying`。
+- Task gate 與 project gate 必須各有判準：`needs-manual-review` 釋放 project 的排他標記，但**不**解除該
+  task 的拒絕；只有 `applied`／`rolled-back` 且仍有 attestation 才解除 task gate。
+- Owner 宣告（結束等待、disown process group、release 不可讀紀錄）只有在**本程序**受理時才成立。
+  Observation JSON 內的宣告欄位是 hook 可寫的位元，單獨不得結束等待或釋放閘門；此時必須具名
+  `MERGE_DECLARATION_NOT_FIRST_HAND` 並繼續等待，且仍必須印得出可執行的出路。
+- 必須提供跨重啟的 Owner 人工出口，作用域為專案、需精確確認片語、綁定當下 exact row hash、且
+  **不做任何持久化寫入**（不動 row、不修復 corrupt row、不標 candidate merged、不碰 main、不送訊號）。
+  它只在該程序有效，重啟後重新詢問。文件、HTTP 回應與 UI 文案必須說明它是 Owner 的責任宣告，不是產品的
+  驗證。
+- **出口必須開在會執行 promotion 的那個程序上。** attestation 只存在記憶體，因此一個「說完就結束」的
+  CLI 程序無法把它交給稍後才執行 merge 的長壽 daemon；只有 CLI 出口等於沒有出口。出口因此是 daemon 的
+  HTTP 端點與 GUI 內的獨立控制，且與 merge 核准是**不同路由、不同片語**——一句話不得同時授權兩件事。
+  同名 CLI 動詞只能作為診斷，並必須明說自己不能解開 promotion。
+- Owner 宣告必須**整份內容**保存在記憶體，不得只記「有沒有宣告過」：只綁 promotion id 的旗標會活過它所
+  描述的那一列被改寫之後。持久化的 conclusion 不得跨程序重播。
 
 Promotion 的 live safety gate 必須在 promotion 環境下用 Git 自己解析 clean/smudge attributes；除
 main 目前的 tracked／ignored／代表性 probe 路徑外，還必須逐一詢問完整 preview 中候選 merge 將寫入的
