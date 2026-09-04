@@ -1748,16 +1748,36 @@ byId("agent-requests-open").addEventListener("click", async () => {
     byId("room-select").value = pendingRooms[0].id;
     await selectRoom(pendingRooms[0].id);
   }
-  const panel = byId("agent-requests-panel");
-  const opening = panel.hidden;
-  panel.hidden = !opening;
-  byId("agent-requests-open").setAttribute("aria-expanded", String(opening));
+  const opening = byId("agent-requests-panel").hidden;
+  setAgentRequestsOpen(opening);
   if (opening) void refreshPresence(true);
 });
 byId("agent-requests-close")?.addEventListener("click", () => {
-  byId("agent-requests-panel").hidden = true;
-  byId("agent-requests-open").setAttribute("aria-expanded", "false");
+  setAgentRequestsOpen(false);
+  byId("agent-requests-open").focus();
 });
+
+/*
+ * 頂欄一次只開一個浮層：房間選單與終端抽屜互斥；aria-expanded 跟著真實狀態走。
+ * Esc 與關閉鈕都把焦點還給開它的那顆按鈕（見 keydown 與 agent-requests-close）。
+ */
+function setRoomMenuOpen(open) {
+  const panel = byId("room-menu-panel");
+  const toggle = byId("room-menu-toggle");
+  if (!panel || !toggle) return;
+  panel.hidden = !open;
+  toggle.setAttribute("aria-expanded", String(open));
+  if (open) setAgentRequestsOpen(false);
+}
+function setAgentRequestsOpen(open) {
+  const panel = byId("agent-requests-panel");
+  const opener = byId("agent-requests-open");
+  if (!panel || !opener) return;
+  panel.hidden = !open;
+  opener.setAttribute("aria-expanded", String(open));
+  if (open) setRoomMenuOpen(false);
+}
+byId("room-menu-toggle")?.addEventListener("click", () => setRoomMenuOpen(byId("room-menu-panel").hidden));
 byId("topbar-managed-open")?.addEventListener("click", () => {
   if (byId("agent-requests-panel").hidden) byId("agent-requests-open").click();
   byId("managed-agent-label")?.focus();
@@ -1766,10 +1786,11 @@ byId("topbar-task-open")?.addEventListener("click", () => {
   if (byId("office").hidden) switchView("office");
   byId("office-task-toggle")?.click();
 });
-byId("room-select").addEventListener("change", () => byId("room-menu")?.removeAttribute("open"));
+byId("room-select").addEventListener("change", () => setRoomMenuOpen(false));
 document.addEventListener("click", (event) => {
   const menu = byId("room-menu");
-  if (menu?.open && !menu.contains(event.target)) menu.removeAttribute("open");
+  const panel = byId("room-menu-panel");
+  if (menu && panel && !panel.hidden && !menu.contains(event.target)) setRoomMenuOpen(false);
 });
 byId("older-history").addEventListener("click", () => {
   byId("older-history").disabled = true;
@@ -5364,13 +5385,7 @@ function renderMergeApproval() {
     blockerCount.textContent = `阻擋項目 · ${blockers.length}`;
     blockerCount.classList.toggle("is-blocked", blockers.length > 0);
   }
-  const historySummary = byId("merge-approval-history-summary");
-  if (historySummary) {
-    if (state.mergeHistoryLoaded && state.mergeHistoryRoom === state.room) {
-      const buckets = mergeHistoryBuckets(state.mergeHistory, state.mergeUnpromotedApprovals);
-      historySummary.textContent = `已併入 ${buckets.mergedPromotions.length} · 需檢查 ${buckets.reviewPromotions.length + buckets.reviewApprovals.length} · 未進入 ${buckets.notStartedApprovals.length}`;
-    } else historySummary.textContent = "尚未讀取";
-  }
+  renderMergeApprovalHistorySummary();
   byId("merge-approval-phrase").textContent = mergeConfirmationPhrase();
   renderMergeApprovalPicker();
   renderMergeRisks(approval);
@@ -5398,6 +5413,19 @@ function renderMergeApproval() {
   /* 內容比視窗短時本來就已經在底部；展開檔案會讓它重新變成未讀完。 */
   state.mergeApprovalScrolled = mergeDiffScrolledToBottom();
   updateMergeApprovalGate();
+}
+
+/*
+ * 左欄「▤ 併入紀錄」旁的一行摘要。獨立成函式，因為紀錄面板關閉時只該更新這一行：
+ * 走 renderMergeApproval() 會重建 diff、把捲動歸零、重算 gate——等於把 Owner 剛通過的 scroll-gate 無聲關掉。
+ */
+function renderMergeApprovalHistorySummary() {
+  const historySummary = byId("merge-approval-history-summary");
+  if (!historySummary) return;
+  if (state.mergeHistoryLoaded && state.mergeHistoryRoom === state.room) {
+    const buckets = mergeHistoryBuckets(state.mergeHistory, state.mergeUnpromotedApprovals);
+    historySummary.textContent = `已併入 ${buckets.mergedPromotions.length} · 需檢查 ${buckets.reviewPromotions.length + buckets.reviewApprovals.length} · 未進入 ${buckets.notStartedApprovals.length}`;
+  } else historySummary.textContent = "尚未讀取";
 }
 
 async function loadMergeApproval(approvalId) {
@@ -5643,8 +5671,8 @@ function closeMergeHistory() {
   navStatus.textContent = state.mergeHistoryLoaded
     ? "紀錄面板已關閉；歷史仍保留於「併入紀錄」，不會顯示成待處理數字。"
     : "紀錄面板已關閉；目前數量仍是未知，請重新開啟後重試。";
-  /* 核准併入層若還開著，左欄的紀錄摘要要跟著更新。 */
-  if (state.mergeApproval && !byId("merge-approval")?.hidden) renderMergeApproval();
+  /* 核准併入層若還開著，只更新左欄那一行摘要：不重建 diff、不動輸入框、焦點、倒數與 gate 狀態。 */
+  renderMergeApprovalHistorySummary();
   state.mergeHistoryReturnFocus?.focus?.();
   state.mergeHistoryReturnFocus = null;
 }
@@ -5764,6 +5792,13 @@ document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   if (!byId("merge-history").hidden) closeMergeHistory();
   else if (!byId("merge-approval").hidden) closeMergeApprovalDialog();
+  else if (byId("room-menu-panel") && !byId("room-menu-panel").hidden) {
+    setRoomMenuOpen(false);
+    byId("room-menu-toggle")?.focus();
+  } else if (!byId("agent-requests-panel").hidden) {
+    setAgentRequestsOpen(false);
+    byId("agent-requests-open")?.focus();
+  }
 });
 byId("merge-approval-diff").addEventListener("scroll", () => {
   if (mergeDiffScrolledToBottom()) {
@@ -5813,7 +5848,10 @@ bootstrap().catch((error) => {
   }
   for (const id of ["summarize", "rec-toggle", "stop-all", "office-chat-send"]) {
     const button = byId(id);
-    if (button) button.disabled = true;
+    if (!button) continue;
+    button.disabled = true;
+    /* 停用要說得出原因：緊急停止在載入失敗時沒有可停的工作流，不是壞掉。 */
+    button.title = `${button.getAttribute("aria-label") || button.title || button.textContent.trim()}（Room 載入失敗，此控制已停用）`;
   }
   const ledger = byId("ledger");
   if (ledger) {

@@ -11,11 +11,11 @@
   <body>
     <div class="app">
       <header class="topbar" aria-label="控制室頂欄">
-        <details class="room-menu" id="room-menu">
-          <summary class="room-menu-summary" aria-label="專案／房間選單">
+        <div class="room-menu" id="room-menu">
+          <button id="room-menu-toggle" class="room-menu-summary" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="room-menu-panel" aria-label="專案／房間選單">
             <i class="dot on" id="room-menu-dot" aria-hidden="true"></i><b id="room-menu-label">Room 控制室</b><span aria-hidden="true">▾</span>
-          </summary>
-          <div class="room-menu-panel">
+          </button>
+          <div class="room-menu-panel" id="room-menu-panel" hidden role="group" aria-label="專案／房間選單">
             <label class="field" for="room-select">專案／房間
               <select id="room-select"><option value="">載入中…</option></select>
             </label>
@@ -35,36 +35,36 @@
             </div>
             <div id="connection" class="conn">連線中…</div>
           </div>
-        </details>
+        </div>
         <div class="topbar-chips" aria-label="房間概況">
-          <button id="agent-requests-open" class="agent-requests-open topbar-chip" type="button" aria-expanded="false" aria-controls="agent-requests-panel">
+          <button id="agent-requests-open" class="agent-requests-open topbar-chip" type="button" aria-expanded="false" aria-controls="agent-requests-panel" aria-label="終端席位與子 Agent 面板">
             <span>終端</span><b id="topbar-terminal-count" class="topbar-chip-count">0</b><b id="agent-request-count" class="topbar-chip-alert" hidden>0</b>
           </button>
-          <button id="topbar-managed-open" class="topbar-chip" type="button" aria-controls="agent-requests-panel">
+          <button id="topbar-managed-open" class="topbar-chip" type="button" aria-controls="agent-requests-panel" aria-label="子 Agent：開啟終端面板並建立受控即時 Agent">
             <span>子 Agent</span><b id="topbar-managed-count" class="topbar-chip-count">0</b>
           </button>
-          <button id="topbar-task-open" class="topbar-chip" type="button">
+          <button id="topbar-task-open" class="topbar-chip" type="button" aria-label="任務：開啟任務清單">
             <span>任務</span><b id="topbar-task-count" class="topbar-chip-count">0</b>
           </button>
         </div>
         <section class="merge-outcome-nav" aria-label="核准併入與併入紀錄">
           <div id="merge-active-task" class="merge-active-task" hidden>
-            <button id="merge-approvals-open" class="agent-requests-open merge-approvals-open" type="button" aria-haspopup="dialog" aria-controls="merge-approval" disabled>
+            <button id="merge-approvals-open" class="agent-requests-open merge-approvals-open" type="button" aria-haspopup="dialog" aria-controls="merge-approval" aria-label="0 件草稿版待核准併入 main" disabled>
               <span>⑂</span><b id="merge-approval-count" aria-label="0 件待核准">0</b>
             </button>
           </div>
-          <button id="merge-history-open" class="agent-requests-open merge-history-open" type="button" aria-haspopup="dialog" aria-controls="merge-history">
+          <button id="merge-history-open" class="agent-requests-open merge-history-open" type="button" aria-haspopup="dialog" aria-controls="merge-history" aria-label="開啟併入紀錄；紀錄數量尚未讀取">
             <span>▤ 併入紀錄</span>
             <em id="merge-records-attention" class="merge-records-attention" hidden>需檢查</em>
           </button>
           <p class="merge-outcome-nav-title sr-only">稽核紀錄（不是待辦）；完成、拒絕或逾期後會從待處理區消失，歷史只在紀錄面板內保留。</p>
           <p id="merge-outcome-nav-status" class="merge-outcome-nav-status sr-only" aria-live="polite"></p>
         </section>
-        <button id="rec-toggle" class="topbar-rec" type="button" title="切換收錄"><i class="dot on" id="topbar-rec-dot" aria-hidden="true"></i><b id="topbar-rec-state">…</b></button>
-        <button id="stop-all" type="button" class="danger topbar-stop" title="緊急停止" aria-label="緊急停止">■</button>
+        <button id="rec-toggle" class="topbar-rec" type="button" title="切換收錄" aria-label="收錄狀態：點一下切換暫停或恢復收錄"><i class="dot on" id="topbar-rec-dot" aria-hidden="true"></i><b id="topbar-rec-state">…</b></button>
+        <button id="stop-all" type="button" class="danger topbar-stop" title="緊急停止：停止所有執行中的工作流" aria-label="緊急停止：停止所有執行中的工作流">■</button>
       </header>
       <section id="agent-requests-panel" class="agent-requests-panel topbar-drawer" hidden aria-label="Agent 加入與待命申請">
-        <div class="topbar-drawer-head"><b>終端與子 Agent</b><button id="agent-requests-close" type="button" aria-label="關閉終端面板">×</button></div>
+        <div class="topbar-drawer-head"><b>終端與子 Agent</b><button id="agent-requests-close" type="button" aria-label="關閉終端面板，回到頂欄">×</button></div>
         <p><b>外接終端＝Native Full-Trust</b>：<code>room_join_request</code> 只申請加入房間，不會改變 host 原有的 sandbox、approval、工具、檔案、shell、network 或 subagent 能力；能力仍由 Codex／Claude Code host 掌管。加入後呼叫 <code>room_wait</code> 才會另行申請待命，這也只控制協作收件，不是能力授權。原生旁路無法攔截。</p>
         <div id="sidebar-presence-list" class="office-presence-list"></div>
         <form id="managed-agent-create" class="managed-agent-create">

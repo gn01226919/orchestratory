@@ -3491,3 +3491,94 @@ test("the ledger groups by LOCAL day and opens the newest one", async () => {
   assert.equal([...empty.groups].length, 0);
   assert.equal(empty.openKey, "");
 });
+
+/*
+ * The records panel can be opened from inside the merge approval layer. Closing it used to call
+ * renderMergeApproval(), which rebuilds the diff region and sets scrollTop back to 0 -- so the
+ * scroll-gate the owner had just passed was silently closed again, and the typed phrase, the
+ * enabled state of the final button and the focus target could all move underneath them. This
+ * runs the real closeMergeHistory() against a recording DOM stand-in and asserts that the only
+ * thing it touches in the open approval layer is the one-line records summary.
+ */
+test("closing the records panel leaves the open approval gate exactly as the owner left it", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const fn = (name: string) => {
+    const found = new RegExp(String.raw`^(?:async )?function ${name}\([\s\S]*?^\}$`, "mu").exec(source);
+    assert.ok(found, `${name}() is gone from public/room.js`);
+    return found[0];
+  };
+  const bucketsStart = source.indexOf("/* @pure-start merge-history-buckets");
+  const bucketsEnd = source.indexOf("/* @pure-end merge-history-buckets */");
+  assert.ok(bucketsStart > 0 && bucketsEnd > bucketsStart);
+  const closeSource = fn("closeMergeHistory");
+  // The guard itself, stated on the source: no full re-render from the close path.
+  assert.doesNotMatch(closeSource, /renderMergeApproval\(|renderMergeDiff\(|loadMergeApproval\(|updateMergeApprovalGate\(/u);
+  assert.match(closeSource, /renderMergeApprovalHistorySummary\(\);/u);
+
+  type Node = {
+    id: string; hidden: boolean; textContent: string; value: string; scrollTop: number; disabled: boolean;
+    attrs: Record<string, string>; setAttribute: (k: string, v: string) => void; getAttribute: (k: string) => string | null;
+    focus: () => void; classList: { add: () => void; remove: () => void; toggle: () => void; contains: () => boolean };
+  };
+  const focusLog: string[] = [];
+  const node = (id: string, init: Partial<Node> = {}): Node => ({
+    id, hidden: false, textContent: "", value: "", scrollTop: 0, disabled: false, attrs: {},
+    setAttribute(k, v) { this.attrs[k] = String(v); },
+    getAttribute(k) { return this.attrs[k] ?? null; },
+    focus() { focusLog.push(this.id); },
+    classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+    ...init,
+  });
+  const nodes: Record<string, Node> = {};
+  for (const n of [
+    node("merge-history", { hidden: false }),
+    node("merge-outcome-nav-status"),
+    node("merge-approval", { hidden: false }),
+    node("merge-approval-diff", { scrollTop: 358 }),
+    node("merge-approval-confirmation", { value: "MERGE INTO MAIN", disabled: false }),
+    node("merge-approval-confirm", { attrs: { "aria-disabled": "false" }, disabled: false }),
+    node("merge-approval-ttl", { textContent: "04:11（12:52:24 到期）" }),
+    node("merge-approval-scroll-hint", { textContent: "變更清單已捲到底" }),
+    node("merge-approval-history-summary", { textContent: "尚未讀取" }),
+    node("merge-approval-history-open"),
+  ]) nodes[n.id] = n;
+  const state = {
+    room: "demo",
+    mergeApproval: { id: "a1", taskId: "t1", state: "requested", expired: false },
+    mergeApprovalScrolled: true,
+    mergeHistoryLoaded: true,
+    mergeHistoryRoom: "demo",
+    mergeHistory: [
+      { id: "p1", state: "applied", mainHeadAfter: "abc", observation: { authorizedMergeCommit: true } },
+      { id: "p2", state: "applying", observation: {} },
+    ],
+    mergeUnpromotedApprovals: [{ id: "a0", state: "expired", retry: { eligible: true } }],
+    mergeHistoryReturnFocus: nodes["merge-approval-history-open"],
+  };
+  const sandbox = {
+    state,
+    byId: (id: string) => nodes[id] ?? null,
+    document: { body: { classList: { add() {}, remove() {} } }, activeElement: null },
+  };
+  runInNewContext(
+    `${source.slice(bucketsStart, bucketsEnd)}\n${fn("renderMergeApprovalHistorySummary")}\n${closeSource}\ncloseMergeHistory();`,
+    sandbox,
+    { timeout: 2_000 },
+  );
+  // What closing must do.
+  assert.equal(nodes["merge-history"].hidden, true);
+  assert.equal(nodes["merge-approval-history-summary"].textContent, "已併入 1 · 需檢查 1 · 未進入 1");
+  assert.deepEqual(focusLog, ["merge-approval-history-open"], "focus returns to the control that opened the panel");
+  assert.equal(state.mergeHistoryReturnFocus, null);
+  // What closing must NOT do: the open approval layer is left exactly as the owner had it.
+  assert.equal(nodes["merge-approval"].hidden, false);
+  assert.equal(nodes["merge-approval-diff"].scrollTop, 358, "the scroll-gate the owner passed stays passed");
+  assert.equal(nodes["merge-approval-confirmation"].value, "MERGE INTO MAIN");
+  assert.equal(nodes["merge-approval-confirmation"].disabled, false);
+  assert.equal(nodes["merge-approval-confirm"].getAttribute("aria-disabled"), "false");
+  assert.equal(nodes["merge-approval-confirm"].disabled, false);
+  assert.equal(nodes["merge-approval-ttl"].textContent, "04:11（12:52:24 到期）");
+  assert.equal(nodes["merge-approval-scroll-hint"].textContent, "變更清單已捲到底");
+  assert.equal(state.mergeApprovalScrolled, true);
+  assert.equal(state.mergeApproval.id, "a1");
+});
