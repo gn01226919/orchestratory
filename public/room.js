@@ -217,23 +217,23 @@ const ROOM_ERROR_MESSAGES = {
   WRITER_LEASE_NOT_ACTIVE: "目前沒有進行中的 Writer Lease。",
   WRITER_LEASE_ALREADY_ACTIVE: "這個任務已經有進行中的 Writer；請先完成或交接。",
   WRITER_EPOCH_STALE: "Writer 狀態已被其他操作更新；請重新開啟面板再試。",
-  WRITER_CHECKPOINT_REQUIRED: "完成或交接前必須填寫 checkpoint。",
-  WRITER_NOT_REVIEW_READY: "這個任務還沒進入待回寫狀態。",
+  WRITER_CHECKPOINT_REQUIRED: "完成或交接前必須填寫存檔點。",
+  WRITER_NOT_REVIEW_READY: "這個任務還沒進入待 apply-back 狀態。",
   WRITER_TASK_ALREADY_RUNNING: "這個任務正在執行中，請等它結束。",
-  WRITER_TASK_ALREADY_APPLIED: "這個任務已經回寫過主專案，不會重複套用。",
+  WRITER_TASK_ALREADY_APPLIED: "這個任務已經 apply-back 過主專案，不會重複套用。",
   WRITER_BASE_COMMIT_REQUIRED: "此專案尚無基準 commit；請先在終端建立第一個 commit，再指派 Writer。",
   WRITER_CANDIDATE_WRITE_NOT_ALLOWED: "這個人選不能擔任 Writer（沒有寫入能力）。",
   WRITER_RUN_FAILED: "Writer 執行失敗；主專案沒有被修改。",
-  DELEGATION_TASK_ALREADY_RUNNING: "同一個 task worktree 正在執行中，系統會序列執行，請稍候。",
+  DELEGATION_TASK_ALREADY_RUNNING: "同一個任務草稿區正在執行中，系統會序列執行，請稍候。",
   DELEGATION_WRITE_NOT_ALLOWED: "跨類型子 Agent 只能唯讀，無法取得寫入權。",
   DELEGATION_NOT_ACTIVE: "這個子 Agent 已失效。",
-  APPLY_BACK_NOT_FOUND_OR_EXPIRED: "回寫預覽已失效或逾時，請重新產生預覽。",
+  APPLY_BACK_NOT_FOUND_OR_EXPIRED: "apply-back 預覽已失效或逾時，請重新產生預覽。",
   APPLY_BACK_CONFIRMATION_MISMATCH: "確認文字不相符，沒有任何主專案檔案被修改。",
   APPLY_BACK_SOURCE_CHANGED: "來源自預覽後已變動，為安全起見已中止；請重新產生預覽。",
-  APPLY_BACK_SOURCE_FILE_CHANGED: "有檔案在預覽後被改動，已中止回寫；請重新產生預覽。",
-  APPLY_BACK_SOURCE_HEAD_CHANGED: "主專案 HEAD 已變動，已中止回寫；請重新產生預覽。",
-  APPLY_BACK_WORKTREE_HEAD_CHANGED: "Writer worktree 已變動，已中止回寫；請重新產生預覽。",
-  APPLY_BACK_FAILED: "回寫失敗；系統已停止，請檢查預覽與復原區。",
+  APPLY_BACK_SOURCE_FILE_CHANGED: "有檔案在預覽後被改動，已中止 apply-back；請重新產生預覽。",
+  APPLY_BACK_SOURCE_HEAD_CHANGED: "主專案 HEAD 已變動，已中止 apply-back；請重新產生預覽。",
+  APPLY_BACK_WORKTREE_HEAD_CHANGED: "Writer 草稿區已變動，已中止 apply-back；請重新產生預覽。",
+  APPLY_BACK_FAILED: "apply-back 失敗；系統已停止，請檢查預覽與可復原區。",
   SESSION_PROVIDER_CALL_LIMIT_REACHED: "這次啟動已達模型呼叫硬上限（owner 設定檔可調）。請重新啟動 Orchestrator。",
   CHAT_TURN_ALREADY_RUNNING: "上一個回答還在生成，請稍候。",
   PROVIDER_FAILED: "模型程序失敗，請確認對應的 CLI 已登入後重試。",
@@ -384,7 +384,7 @@ function renderDeliveryReceipt(body, seq) {
   const targetState = target ? seatListeningState(target) : undefined;
   const deliveryLabel = delivery.state === "queued" && targetState
     ? targetState.key === "listening"
-      ? "它正在收聽，正在送過去"
+      ? "它可交辦，正在送過去"
       : `已排隊：${targetState.text}`
     : DELIVERY_LABELS[delivery.state] || delivery.state;
   text.textContent = `${deliveryLabel} · ${delivery.targetDisplayName} · 嘗試 ${delivery.attempt}/${delivery.maxAttempts}`;
@@ -1068,7 +1068,7 @@ function renderPresencePanel() {
        * Each kind shown for as long as what it says stays true.
        *
        * "recorded" is about an ongoing silence: left standing after the seat returns it would sit
-       * under a "正在收聽" badge, with the button and the "怎麼辦" line already gone, reading as "I
+       * under a "● 可交辦" badge, with the button and the "怎麼辦" line already gone, reading as "I
        * rang and it came back" -- every time, as the ordinary ending, not as a race.
        *
        * "noop" is about the click itself, so it is NOT gated on the seat being silent. It cannot be:
@@ -1350,7 +1350,7 @@ async function requestPresenceWake(session, button) {
      * On the no-op path the click has just proved the panel is stale: the seat is listening and this
      * row still says it is not. `refreshPresence` is throttled to five seconds and `poll()` does not
      * force it, so without this the receipt would read "它其實已經在收聽了" beside a badge saying
-     * "○ 沒在收聽", a wake button, and instructions to go restart a room_wait that is already open --
+     * "○ 排隊中", a wake button, and instructions to go restart a room_wait that is already open --
      * for up to five seconds. In place rather than re-appended, because a nudge changes nothing about
      * the seat and must not reorder the list: the handlers that do splice are corrected by their next
      * refresh, and this one would never be.
@@ -1367,7 +1367,7 @@ async function requestPresenceWake(session, button) {
      * that silence lasts and must vanish when it ends. "noop" describes THIS CLICK -- the seat turned
      * out to be listening -- and gating that on the seat being silent, which an earlier version did,
      * made it unreachable: the only way to see it is the case where the condition is false. The user
-     * then got a button that vanished, a badge that flipped to 正在收聽, and no words at all, which
+     * then got a button that vanished, a badge that flipped to ● 可交辦, and no words at all, which
      * is precisely the "I rang and it came back" reading this whole item exists to prevent.
      */
     state.wakeNotices = { ...(state.wakeNotices || {}), [session.id]: value.listening
@@ -2181,19 +2181,11 @@ function providerInfo(agent) {
 
 /*
  * Office wording, applied where a notification enters the drawer rather than at every source: the
- * bilingual tail is dropped, and the listed templates are re-said in the office vocabulary. The
- * list is exact strings from known sources, not a global word swap, so a title that happens to
- * contain the same characters is left alone.
- *   - refreshMergeApprovals: "有候選要求合併進 main · merge into main requested"
+ * bilingual tail is dropped. The rewrite table that used to sit here re-said one template from
+ * refreshMergeApprovals; that source now speaks the office vocabulary itself, so the table went.
  */
-const OFFICE_NOTIFICATION_REWRITES = Object.freeze([
-  ["有候選要求合併進 main", "有草稿版要求合併進 main"],
-]);
-
 function officeText(value) {
-  let text = String(value || "").replace(/\s*·\s*[A-Za-z][A-Za-z0-9 ,.'\-]*$/u, "");
-  for (const [from, to] of OFFICE_NOTIFICATION_REWRITES) text = text.replace(from, to);
-  return text;
+  return String(value || "").replace(/\s*·\s*[A-Za-z][A-Za-z0-9 ,.'\-]*$/u, "");
 }
 
 function addOfficeNotification(kind, title, detail, unread = true, action) {
@@ -3908,7 +3900,7 @@ function activeWriterLease() {
 
 /*
  * 與 activeWriterLease() 相同：找不到符合輸入框 taskId 的 lease 時退回最新一筆，
- * 否則面板重開後自動填入的新 taskId 會讓「待回寫」的任務整個從 UI 消失。
+ * 否則面板重開後自動填入的新 taskId 會讓「待 apply-back」的任務整個從 UI 消失。
  */
 function reviewReadyWriterLease() {
   const taskId = byId("writer-task-id")?.value.trim();
@@ -4090,7 +4082,7 @@ async function completeWriterLease() {
       .filter((child) => child.parentLeaseId === active.id && child.state === "active");
     if (state.writerCompleteConfirm !== confirmKey) {
       state.writerCompleteConfirm = confirmKey;
-      status.textContent = `這個動作會先結束 Writer ${active.writer.displayName}（${active.taskId} · epoch ${active.epoch}），` +
+      status.textContent = `這個動作會先結束 Writer ${active.writer.displayName}（${active.taskId} · 第 ${active.epoch} 任），` +
         `立即撤銷它與 ${children.length} 個子 Agent 的寫入權，之後才產生 apply-back 預覽；` +
         "撤銷後不能繼續寫作，只能重新指派 Writer。確定的話請再按一次按鈕。";
       renderWriterControl();
@@ -4104,7 +4096,7 @@ async function completeWriterLease() {
   try {
     status.textContent = active
       ? "階段 1／2：正在結束 Writer 並撤銷寫入權…"
-      : "正在重新產生回寫預覽…";
+      : "正在重新產生 apply-back 預覽…";
     const value = active
       ? await api("/api/rooms/writers/complete", {
         method: "POST",
@@ -4120,15 +4112,15 @@ async function completeWriterLease() {
   } catch (error) {
     status.textContent = active
       ? `階段 1／2（結束 Writer）失敗：${humanError(error)}。Writer 與子 Agent 的寫入權仍然有效，主專案沒有變更。`
-      : `重新產生回寫預覽失敗：${humanError(error)}。主專案沒有變更。`;
+      : `重新產生 apply-back 預覽失敗：${humanError(error)}。主專案沒有變更。`;
     renderWriterControl();
     return;
   }
   await refreshPresence(true);
   if (!preview) {
     status.textContent = active
-      ? "階段 1／2 完成：Writer 已結束、寫入權已撤銷；但沒有取得回寫預覽。請按「重新檢視 apply-back 風險」再試一次。"
-      : "沒有取得回寫預覽，請稍後再試；主專案沒有變更。";
+      ? "階段 1／2 完成：Writer 已結束、寫入權已撤銷；但沒有取得 apply-back 預覽。請按「重新檢視 apply-back 風險」再試一次。"
+      : "沒有取得 apply-back 預覽，請稍後再試；主專案沒有變更。";
     return;
   }
   await openWriterApplyBackApproval(
@@ -4140,11 +4132,11 @@ async function completeWriterLease() {
 }
 
 /*
- * ── Writer 回寫主專案的核准對話框 · writer apply-back approval dialog ────────
+ * ── Writer apply-back 主專案的核准對話框 · writer apply-back approval dialog ────────
  *
  * 這條路徑以前是一個 window.prompt（P0-2）。原生對話框有三個各自獨立的破壞方式：
- *   1. 瀏覽器可以永久靜音它。之後 prompt 直接回傳 null，走到取消分支顯示「已保留在隔離
- *      worktree」——那句話當下為真，卻掩蓋了「核准 UI 已經永久失效」；使用者只覺得按鈕壞了。
+ *   1. 瀏覽器可以永久靜音它。之後 prompt 直接回傳 null，走到取消分支顯示「已保留在
+ *      草稿區」——那句話當下為真，卻掩蓋了「核准 UI 已經永久失效」；使用者只覺得按鈕壞了。
  *   2. 短語印在訊息最底部，而變更清單會把訊息撐開，超過瀏覽器的高度上限就被裁掉：
  *      使用者看不到自己要打什麼。
  *   3. prompt 開啟期間整頁凍結，而預覽 TTL 只有 120 秒——倒數在它底下物理上不可能顯示。
@@ -4189,7 +4181,7 @@ function writerApplyBackBlockers(view) {
   const blockers = [];
   const preview = view && typeof view === "object" ? view.preview : null;
   if (!preview || typeof preview !== "object") {
-    blockers.push("尚未取得回寫預覽，沒有可核准的內容。 · No apply-back preview has been fetched yet.");
+    blockers.push("尚未取得 apply-back 預覽，沒有可核准的內容。");
     return blockers;
   }
   /*
@@ -4198,26 +4190,26 @@ function writerApplyBackBlockers(view) {
    */
   const phrase = view.phrase;
   if (typeof phrase !== "string" || phrase.length === 0) {
-    blockers.push("後端沒有給這次回寫的確認短語，無法確認你要簽的是哪一句。 · The backend supplied no confirmation phrase for this apply-back.");
+    blockers.push("後端沒有給這次 apply-back 的確認短語，無法確認你要簽的是哪一句。");
   }
   const deadline = Date.parse(String(preview.expiresAt));
   const now = Number(view.now);
   if (!Number.isFinite(deadline) || !Number.isFinite(now)) {
-    blockers.push("預覽沒有可解析的到期時間，無法確認它仍然有效。 · The preview carries no parsable expiry.");
+    blockers.push("預覽沒有可解析的到期時間，無法確認它仍然有效。");
   } else if (deadline - now <= 0) {
-    blockers.push("預覽視窗已逾時，必須重新產生預覽再問一次。 · The preview window expired; re-preview and ask again.");
+    blockers.push("預覽視窗已逾時，必須重新產生預覽再問一次。");
   }
   if (view.diffState !== "loaded") {
     blockers.push(view.diffState === "failed"
-      ? "變更內容讀取失敗；看不到要寫回什麼就不可核准。 · The change content failed to load; you must not sign for content you cannot see."
-      : "變更內容尚未載入完成。 · The change content is not loaded yet.");
+      ? "變更內容讀取失敗；看不到要寫回什麼就不可核准。"
+      : "變更內容尚未載入完成。");
   }
   const listed = Array.isArray(preview.changes) ? preview.changes.length : 0;
   if (listed !== Number(preview.files)) {
-    blockers.push(`變更清單只列出 ${listed} 筆，預覽宣稱共 ${Number(preview.files)} 筆；清單不完整就不可核准。 · The change list is incomplete.`);
+    blockers.push(`變更清單只列出 ${listed} 筆，預覽宣稱共 ${Number(preview.files)} 筆；清單不完整就不可核准。`);
   }
   if (view.applying) {
-    blockers.push("這筆回寫正在執行中，不能重複送出。 · This apply-back is already running.");
+    blockers.push("這筆 apply-back 正在執行中，不能重複送出。");
   }
   return blockers;
 }
@@ -4241,14 +4233,14 @@ function writerApplyBackGate(view) {
     inputValue: typed,
     confirmDisabled: !ready || phrase.length === 0 || typed !== phrase,
     hint: decided
-      ? "這筆回寫已經有結果，不能再決定一次。 · This apply-back has already been decided."
+      ? "這筆 apply-back 已經有結果，不能再決定一次。"
       : blocked
-        ? "阻擋區還有項目：確認輸入與「回寫主專案」保持停用。 · Blocking items remain; the confirmation input and the primary button stay disabled."
+        ? "阻擋區還有項目：確認輸入與「apply-back 主專案」保持停用。"
         : phrase.length === 0
-          ? "後端沒有給確認短語，這筆回寫不可核准。 · No confirmation phrase was supplied; this apply-back cannot be approved."
+          ? "後端沒有給確認短語，這筆 apply-back 不可核准。"
           : scrolled
-            ? `變更內容已捲到底：輸入 ${phrase} 即可解鎖「回寫主專案」。 · Scrolled to the end; type the phrase to enable the primary button.`
-            : "請把上面的變更內容捲到底（展開檔案後會重新計算），確認輸入才會解鎖。 · Scroll the change content to the bottom to enable the confirmation input.",
+            ? `變更內容已捲到底：輸入 ${phrase} 即可解鎖「apply-back 主專案」。`
+            : "請把上面的變更內容捲到底（展開檔案後會重新計算），確認輸入才會解鎖。",
   };
 }
 
@@ -4270,8 +4262,8 @@ function formatWriterApplyBackCountdown(ms) {
 
 const WRITER_APPLY_BACK_TRASH_ROOT = "~/trash-pending/orchestratory";
 const WRITER_APPLY_BACK_OPERATION_LABELS = {
-  write: "寫入 · Write",
-  delete: "移到 trash-pending · Move to trash-pending",
+  write: "寫入",
+  delete: "移到 trash-pending",
 };
 
 function writerApplyBackNode(tag, className, id, text) {
@@ -4294,11 +4286,11 @@ function buildWriterApplyBackDialog() {
   const heading = document.createElement("span");
   heading.append(
     writerApplyBackNode("small", "", "", "WRITER APPLY BACK TO THE MAIN PROJECT"),
-    writerApplyBackNode("b", "", "writer-apply-back-title", "把 Writer 的變更回寫主專案 · Apply the Writer's changes back"),
+    writerApplyBackNode("b", "", "writer-apply-back-title", "把 Writer 的變更 apply-back 到主專案"),
   );
   const closeButton = writerApplyBackNode("button", "", "writer-apply-back-close", "×");
   closeButton.type = "button";
-  closeButton.setAttribute("aria-label", "關閉回寫核准");
+  closeButton.setAttribute("aria-label", "關閉 apply-back 核准");
   header.append(heading, closeButton);
 
   const head = writerApplyBackNode("div", "merge-approval-head");
@@ -4311,18 +4303,18 @@ function buildWriterApplyBackDialog() {
     "p",
     "merge-approval-route",
     "writer-apply-back-route",
-    "隔離 Writer worktree → 主專案工作目錄 · isolated writer worktree → main project working tree",
+    "Writer 獨立草稿區 → 主專案工作目錄",
   ));
 
   const risks = writerApplyBackNode("div", "merge-approval-risks", "writer-apply-back-risks");
 
   const blocking = writerApplyBackNode("section", "merge-approval-blocking", "writer-apply-back-blocking");
   blocking.hidden = true;
-  const repreview = writerApplyBackNode("button", "", "writer-apply-back-repreview", "↻ 重新產生預覽 · Re-preview");
+  const repreview = writerApplyBackNode("button", "", "writer-apply-back-repreview", "↻ 重新產生預覽");
   repreview.type = "button";
   blocking.append(
-    writerApplyBackNode("b", "", "", "無法核准 · Blocking"),
-    writerApplyBackNode("p", "", "", "下列項目存在期間，確認輸入與「回寫主專案」保持停用。 · While any of these is present the confirmation input and the primary button stay disabled."),
+    writerApplyBackNode("b", "", "", "無法核准"),
+    writerApplyBackNode("p", "", "", "下列項目存在期間，確認輸入與「apply-back 主專案」保持停用。"),
     writerApplyBackNode("ul", "", "writer-apply-back-blockers"),
     repreview,
   );
@@ -4332,13 +4324,13 @@ function buildWriterApplyBackDialog() {
     "p",
     "merge-approval-diff-label",
     "",
-    "要寫回的變更（全部列出，請捲到底） · Every change to be written back (scroll to the bottom)",
+    "要 apply-back 的變更（全部列出，請捲到底）",
   );
   const diff = writerApplyBackNode("div", "merge-approval-diff", "writer-apply-back-diff");
   diff.tabIndex = 0;
 
   const recovery = writerApplyBackNode("section", "merge-approval-recovery");
-  const copy = writerApplyBackNode("button", "", "writer-apply-back-copy", "⧉ 複製查看指令 · Copy inspection command");
+  const copy = writerApplyBackNode("button", "", "writer-apply-back-copy", "⧉ 複製查看指令");
   copy.type = "button";
   recovery.append(
     writerApplyBackNode("b", "", "", "還原點"),
@@ -4348,17 +4340,17 @@ function buildWriterApplyBackDialog() {
      * 這裡只給唯讀的查看指令。跨程序之後產品沒有第一手觀察，遞出去的字串就不得帶
      * reset --hard／clean -f／stash push 這類會再毀一次的動作（[[PITFALLS]] #94）。
      */
-    writerApplyBackNode("small", "", "", `上面是唯讀查看指令，Orchestratory 不會替你執行；刪除只會移到 ${WRITER_APPLY_BACK_TRASH_ROOT}，不會永久刪除。 · Read-only inspection commands; Orchestratory does not run them for you.`),
+    writerApplyBackNode("small", "", "", `上面是唯讀查看指令，Orchestratory 不會替你執行；刪除只會移到 ${WRITER_APPLY_BACK_TRASH_ROOT}，不會永久刪除。`),
     copy,
   );
 
   const ttl = writerApplyBackNode("div", "merge-approval-ttl");
   const ttlText = document.createElement("span");
   ttlText.append(
-    writerApplyBackNode("small", "", "", "預覽視窗剩餘 · Preview window"),
+    writerApplyBackNode("small", "", "", "預覽視窗剩餘"),
     writerApplyBackNode("b", "", "writer-apply-back-ttl", "—"),
   );
-  const refresh = writerApplyBackNode("button", "", "writer-apply-back-refresh", "↻ 重新產生預覽 · Re-preview");
+  const refresh = writerApplyBackNode("button", "", "writer-apply-back-refresh", "↻ 重新產生預覽");
   refresh.type = "button";
   ttl.append(ttlText, refresh);
 
@@ -4369,7 +4361,7 @@ function buildWriterApplyBackDialog() {
     document.createTextNode("輸入 "),
     /* 空字串起始：這句話由後端供給，前端沒有一份自己的文案可以顯示。 */
     writerApplyBackNode("code", "", "writer-apply-back-phrase", ""),
-    document.createTextNode(" 確認把變更寫回主專案 · type the phrase to confirm"),
+    document.createTextNode(" 確認把變更 apply-back 到主專案"),
   );
   const input = writerApplyBackNode("input", "", "writer-apply-back-confirmation");
   input.type = "text";
@@ -4384,9 +4376,9 @@ function buildWriterApplyBackDialog() {
   );
 
   const actions = writerApplyBackNode("div", "workspace-onboarding-actions merge-approval-actions");
-  const cancel = writerApplyBackNode("button", "", "writer-apply-back-cancel", "取消 · Cancel");
+  const cancel = writerApplyBackNode("button", "", "writer-apply-back-cancel", "取消");
   cancel.type = "button";
-  const confirmButton = writerApplyBackNode("button", "danger", "writer-apply-back-confirm", "回寫主專案 · Apply back to the main project");
+  const confirmButton = writerApplyBackNode("button", "danger", "writer-apply-back-confirm", "apply-back 主專案");
   confirmButton.type = "button";
   confirmButton.disabled = true;
   actions.append(cancel, confirmButton);
@@ -4429,9 +4421,9 @@ function ensureWriterApplyBackDialog() {
     const status = byId("writer-apply-back-status");
     try {
       await navigator.clipboard.writeText(byId("writer-apply-back-restore").textContent || "");
-      status.textContent = "已複製查看指令；Orchestratory 沒有執行它。 · Inspection command copied; Orchestratory did not run it.";
+      status.textContent = "已複製查看指令；Orchestratory 沒有執行它。";
     } catch {
-      status.textContent = "瀏覽器不允許自動複製，請手動選取上面的指令。 · Clipboard access was refused; select the command above manually.";
+      status.textContent = "瀏覽器不允許自動複製，請手動選取上面的指令。";
     }
   });
   return dialog;
@@ -4461,10 +4453,10 @@ function renderWriterApplyBackRisks(preview) {
   if (!host) return;
   host.textContent = "";
   const reasons = preview && preview.risk && Array.isArray(preview.risk.reasons) ? preview.risk.reasons : [];
-  const lines = reasons.map((reason) => `風險原因 · Risk reason：${reason}`);
-  lines.push("這個動作會直接修改主專案，且不會經過 Git commit；只有刪除可以從 trash-pending 復原。 · This writes into the main project directly; only deletions can be recovered from trash-pending.");
+  const lines = reasons.map((reason) => `風險原因：${reason}`);
+  lines.push("這個動作會直接修改主專案，且不會經過 Git commit；只有刪除可以從 trash-pending 復原。");
   if (reasons.length === 0) {
-    lines.unshift("後端沒有回報任何風險原因；這不等於沒有風險，仍請逐檔檢視下方變更。 · The backend declared no risk reasons; that is not the same as there being none.");
+    lines.unshift("後端沒有回報任何風險原因；這不等於沒有風險，仍請逐檔檢視下方變更。");
   }
   for (const line of lines) host.append(writerApplyBackNode("p", "", "", line));
 }
@@ -4474,11 +4466,11 @@ function renderWriterApplyBackStats(preview) {
   if (!host) return;
   host.textContent = "";
   const entries = [
-    ["檔案 · Files", String(preview ? Number(preview.files) : 0)],
-    ["寫入 · Writes", String(preview ? Number(preview.writes) : 0)],
-    ["移到 trash-pending · Deletes", String(preview ? Number(preview.deletes) : 0)],
-    ["內容大小 · Total bytes", formatWriterApplyBackBytes(preview ? preview.totalBytes : Number.NaN)],
-    ["基準 commit · Base SHA", preview ? String(preview.baseSha).slice(0, 12) : "—"],
+    ["檔案", String(preview ? Number(preview.files) : 0)],
+    ["寫入", String(preview ? Number(preview.writes) : 0)],
+    ["移到 trash-pending", String(preview ? Number(preview.deletes) : 0)],
+    ["內容大小", formatWriterApplyBackBytes(preview ? preview.totalBytes : Number.NaN)],
+    ["基準 commit", preview ? String(preview.baseSha).slice(0, 12) : "—"],
   ];
   for (const [label, value] of entries) {
     const cell = document.createElement("span");
@@ -4498,11 +4490,11 @@ function renderWriterApplyBackChanges(view) {
   const preview = view.preview;
   const changes = preview && Array.isArray(preview.changes) ? preview.changes : [];
   if (!preview) {
-    region.append(writerApplyBackNode("p", "merge-file-empty", "", "尚未取得預覽。 · No preview yet."));
+    region.append(writerApplyBackNode("p", "merge-file-empty", "", "尚未取得預覽。"));
     return;
   }
   if (changes.length === 0) {
-    region.append(writerApplyBackNode("p", "merge-file-empty", "", "這份預覽沒有列出任何檔案變更。 · This preview lists no file changes."));
+    region.append(writerApplyBackNode("p", "merge-file-empty", "", "這份預覽沒有列出任何檔案變更。"));
   }
   for (const change of changes) {
     const item = writerApplyBackNode("details", "merge-file");
@@ -4514,11 +4506,11 @@ function renderWriterApplyBackChanges(view) {
     summary.append(operation, path, delta);
     const detail = writerApplyBackNode("div", "merge-file-detail");
     const facts = [
-      `動作 · Operation：${WRITER_APPLY_BACK_OPERATION_LABELS[change.operation] || change.operation}`,
-      `大小 · Size：${formatWriterApplyBackBytes(change.bytes)}`,
+      `動作：${WRITER_APPLY_BACK_OPERATION_LABELS[change.operation] || change.operation}`,
+      `大小：${formatWriterApplyBackBytes(change.bytes)}`,
       change.operation === "delete"
-        ? `這個檔案會被移到 ${WRITER_APPLY_BACK_TRASH_ROOT}，不會永久刪除。 · Moved to trash-pending, not permanently deleted.`
-        : "這個檔案會以草稿區（獨立副本）的內容寫入主專案。",
+        ? `這個檔案會被移到 ${WRITER_APPLY_BACK_TRASH_ROOT}，不會永久刪除。`
+        : "這個檔案會以獨立草稿區的內容寫入主專案。",
     ];
     for (const fact of facts) detail.append(writerApplyBackNode("p", "", "", fact));
     item.append(summary, detail);
@@ -4528,7 +4520,7 @@ function renderWriterApplyBackChanges(view) {
     "p",
     "merge-approval-diff-label",
     "",
-    "草稿區（獨立副本）的逐行變更（後端 bounded 輸出，可能被截斷）",
+    "獨立草稿區的逐行變更（後端 bounded 輸出，可能被截斷）",
   ));
   if (view.diffState === "loaded") {
     region.append(writerApplyBackNode("pre", "apply-back-diff-text", "", view.diffText));
@@ -4538,11 +4530,11 @@ function renderWriterApplyBackChanges(view) {
       "merge-file-truncated",
       "",
       view.diffState === "failed"
-        ? `變更內容讀取失敗，因此不可核准：${view.diffError || "未知原因"} · The change content failed to load, so this cannot be approved.`
-        : "變更內容讀取中… · Loading the change content…",
+        ? `變更內容讀取失敗，因此不可核准：${view.diffError || "未知原因"}`
+        : "變更內容讀取中…",
     ));
   }
-  region.append(writerApplyBackNode("p", "merge-diff-end", "", "── 變更內容結束 · end of change content ──"));
+  region.append(writerApplyBackNode("p", "merge-diff-end", "", "── 變更內容結束 ──"));
 }
 
 function renderWriterApplyBackRecovery(preview) {
@@ -4552,11 +4544,11 @@ function renderWriterApplyBackRecovery(preview) {
   host.textContent = "";
   const workspace = preview ? String(preview.sourceWorkspace) : "";
   const facts = [
-    ["主專案 · Main workspace", workspace],
-    ["基準 commit · Base SHA", preview ? String(preview.baseSha) : ""],
-    ["主專案指紋 · Source fingerprint", preview ? String(preview.sourceFingerprint).slice(0, 16) : ""],
-    ["Writer worktree 指紋 · Worktree fingerprint", preview ? String(preview.worktreeFingerprint).slice(0, 16) : ""],
-    ["刪除去向 · Deletions go to", WRITER_APPLY_BACK_TRASH_ROOT],
+    ["主專案", workspace],
+    ["基準 commit", preview ? String(preview.baseSha) : ""],
+    ["主專案指紋", preview ? String(preview.sourceFingerprint).slice(0, 16) : ""],
+    ["草稿區指紋", preview ? String(preview.worktreeFingerprint).slice(0, 16) : ""],
+    ["刪除去向", WRITER_APPLY_BACK_TRASH_ROOT],
   ];
   for (const [label, value] of facts) {
     const row = document.createElement("span");
@@ -4589,11 +4581,11 @@ function tickWriterApplyBackTtl() {
       view.expiredRendered = true;
       renderWriterApplyBackApproval();
       byId("writer-apply-back-status").textContent =
-        "預覽視窗已逾時；這是刻意的摩擦，不是錯誤。請按「重新產生預覽」再問一次；主專案沒有被修改。 · The preview window expired; re-preview and ask again.";
+        "預覽視窗已逾時；這是刻意的摩擦，不是錯誤。請按「重新產生預覽」再問一次；主專案沒有被修改。";
     }
     return;
   }
-  node.textContent = `${formatWriterApplyBackCountdown(remaining)}（${new Date(deadline).toLocaleTimeString("zh-TW", { hour12: false })} 到期 · expires）`;
+  node.textContent = `${formatWriterApplyBackCountdown(remaining)}（${new Date(deadline).toLocaleTimeString("zh-TW", { hour12: false })} 到期）`;
   node.className = remaining < 30_000 ? "is-urgent" : "";
 }
 
@@ -4613,8 +4605,8 @@ function renderWriterApplyBackApproval() {
   badge.className = `merge-approval-risk is-${risk.key}`;
   byId("writer-apply-back-task").textContent = view.taskId ? `task ${view.taskId}` : "—";
   byId("writer-apply-back-route").textContent = view.preview
-    ? `隔離 Writer worktree → 主專案工作目錄 · isolated writer worktree → main project working tree：${view.preview.sourceWorkspace}`
-    : "隔離 Writer worktree → 主專案工作目錄 · isolated writer worktree → main project working tree";
+    ? `Writer 獨立草稿區 → 主專案工作目錄：${view.preview.sourceWorkspace}`
+    : "Writer 獨立草稿區 → 主專案工作目錄";
   /* 短語直接印後端給的值：改掉後端那個值，這一行就跟著變。 */
   byId("writer-apply-back-phrase").textContent = view.phrase;
   renderWriterApplyBackRisks(view.preview);
@@ -4638,7 +4630,7 @@ async function loadWriterApplyBackDiff() {
   if (!runId) {
     view.diffText = "";
     view.diffState = "failed";
-    view.diffError = "預覽沒有帶 runId，無法讀取變更內容。 · The preview carries no runId.";
+    view.diffError = "預覽沒有帶 runId，無法讀取變更內容。";
     return;
   }
   try {
@@ -4646,7 +4638,7 @@ async function loadWriterApplyBackDiff() {
     const diff = typeof value.diff === "string" ? value.diff : "";
     view.diffText = diff;
     view.diffState = diff ? "loaded" : "failed";
-    if (!diff) view.diffError = "後端沒有回傳任何變更內容。 · The backend returned no change content.";
+    if (!diff) view.diffError = "後端沒有回傳任何變更內容。";
   } catch (error) {
     view.diffText = "";
     view.diffState = "failed";
@@ -4665,7 +4657,7 @@ async function loadWriterApplyBackPreview() {
   view.scrolled = false;
   view.expiredRendered = false;
   renderWriterApplyBackApproval();
-  status.textContent = "正在重新產生預覽並讀取變更內容（唯讀；主專案還沒有被修改）… · Preparing the preview and reading the change content (read-only)…";
+  status.textContent = "正在重新產生預覽並讀取變更內容（唯讀；主專案還沒有被修改）…";
   try {
     const prepared = await api("/api/rooms/writers/apply-back/prepare", {
       method: "POST",
@@ -4677,14 +4669,14 @@ async function loadWriterApplyBackPreview() {
     view.diffState = "failed";
     view.diffError = humanError(error);
     renderWriterApplyBackApproval();
-    status.textContent = `無法產生預覽 · Preview failed：${humanError(error)}。主專案沒有變更。`;
+    status.textContent = `無法產生預覽：${humanError(error)}。主專案沒有變更。`;
     return;
   }
   await loadWriterApplyBackDiff();
   renderWriterApplyBackApproval();
   status.textContent = view.diffState === "loaded"
-    ? "這是唯讀預覽；在你捲完內容、輸入短語並按下「回寫主專案」之前，主專案不會被修改。 · Read-only preview; nothing is written until you scroll, type the phrase and press the primary button."
-    : `變更內容讀取失敗，因此無法核准：${view.diffError} · The change content failed to load, so this cannot be approved.`;
+    ? "這是唯讀預覽；在你捲完內容、輸入短語並按下「apply-back 主專案」之前，主專案不會被修改。"
+    : `變更內容讀取失敗，因此無法核准：${view.diffError}`;
 }
 
 async function openWriterApplyBackApproval(taskId, preview, phrase, stageNote = "") {
@@ -4705,7 +4697,7 @@ async function openWriterApplyBackApproval(taskId, preview, phrase, stageNote = 
   dialog.hidden = false;
   document.body.classList.add("workspace-modal-open");
   byId("writer-apply-back-status").textContent = stageNote
-    ? `${stageNote} 變更仍在隔離 Writer worktree；主專案尚未被修改。`
+    ? `${stageNote} 變更仍在 Writer 的獨立草稿區；主專案尚未被修改。`
     : "";
   if (!view.ticker) view.ticker = setInterval(tickWriterApplyBackTtl, 1000);
   renderWriterApplyBackApproval();
@@ -4734,7 +4726,7 @@ function closeWriterApplyBackApproval() {
   byId("writer-apply-back-confirm").disabled = true;
   if (!view.decided) {
     byId("writer-live-status").textContent =
-      `${view.stageNote ? `${view.stageNote} ` : ""}回寫核准已關閉；變更仍保留在 Writer 的草稿區（獨立副本），主專案沒有變更，可按「重新檢視 apply-back 風險」再看一次。`;
+      `${view.stageNote ? `${view.stageNote} ` : ""}apply-back 核准已關閉；變更仍保留在 Writer 的獨立草稿區，主專案沒有變更，可按「重新檢視 apply-back 風險」再看一次。`;
   }
   view.returnFocus?.focus?.();
   view.returnFocus = null;
@@ -4761,8 +4753,8 @@ async function confirmWriterApplyBack() {
     view.applying = false;
     view.decided = true;
     renderWriterApplyBackApproval();
-    const summary = `Owner 已核准回寫：${value.result.writes} 個寫入；${value.result.deletesMovedToTrash} 個刪除移至可復原區。`;
-    status.textContent = `${summary} · Applied.`;
+    const summary = `Owner 已核准 apply-back：${value.result.writes} 個寫入；${value.result.deletesMovedToTrash} 個刪除移至可復原區。`;
+    status.textContent = summary;
     byId("writer-live-status").textContent = summary;
   } catch (error) {
     /* 失敗後這份預覽已不可信：清掉它，強制重新產生預覽、重新捲、重新輸入短語。 */
@@ -4884,7 +4876,7 @@ byId("writer-handoff-form").addEventListener("submit", async (event) => {
       }),
     });
     if (active) {
-      status.textContent = `${value.reply?.author || active.writer.displayName} 已回覆；請檢查 checkpoint、diff 與風險後再完成或交接。`;
+      status.textContent = `${value.reply?.author || active.writer.displayName} 已回覆；請檢查存檔點、diff 與風險後再完成或交接。`;
       await poll();
     } else {
       byId("writer-handoff-form").hidden = true;
@@ -4942,7 +4934,7 @@ byId("office-chat-form").addEventListener("submit", async (event) => {
 });
 
 /*
- * ── 合併進 main 的核准對話框 · merge-into-main approval dialog ─────────────
+ * ── 核准併入 main 的對話框 · merge-into-main approval dialog ─────────────
  * 沿用 .workspace-onboarding 元件（role="dialog" aria-modal、Esc 關閉、背景點擊關閉、焦點返回、
  * 輸入短語與捲完 diff 才解鎖最終按鈕），只多一個 variant。全程不得使用 window.alert／confirm／prompt：原生對話框
  * 可被瀏覽器永久靜音，而且在它開啟期間頁面凍結，TTL 倒數物理上不可能顯示。

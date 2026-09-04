@@ -1472,7 +1472,7 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomHtml, /GUI Managed/u);
   assert.match(roomHtml, /原生旁路無法攔截/u);
   assert.match(roomHtml, /id="writer-run-cancel"/u);
-  assert.match(roomHtml, /共用目前 task worktree 並由系統序列執行/u);
+  assert.match(roomHtml, /共用目前任務草稿區並由系統序列執行/u);
   assert.doesNotMatch(roomHtml, /(?:src|href)="https?:\/\//u);
   const roomScriptResponse = await fetch(`${server.url}/room.js`);
   assert.equal(roomScriptResponse.status, 200);
