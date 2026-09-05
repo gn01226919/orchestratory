@@ -3770,8 +3770,13 @@ function switchView(view) {
   byId("office").hidden = !office;
   byId("ledger").hidden = office;
   byId("post-form").hidden = office || state.mode === "history";
-  byId("view-office")?.classList.toggle("is-active", office);
-  byId("view-ledger")?.classList.toggle("is-active", !office);
+  /* The topbar switch is a pair of pressed-state buttons, so the class and aria-pressed move together. */
+  for (const [id, active] of [["view-office", office], ["view-ledger", !office]]) {
+    const button = byId(id);
+    if (!button) continue;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", String(active));
+  }
   document.body.classList.toggle("view-office", office);
   if (office) {
     buildOffice();

@@ -2834,6 +2834,14 @@ body.workspace-modal-open { overflow: hidden; }
 .topbar-chip .topbar-chip-count { display: inline; min-width: 0; height: auto; padding: 0; border-radius: 0; color: var(--text); background: transparent; font: 700 12px/1 var(--font-mono); }
 .topbar-chip .topbar-chip-alert { display: inline-grid; min-width: 18px; height: 18px; padding-inline: 5px; place-items: center; border-radius: 999px; color: #2a1013; background: #ef9096; font: 900 10px/1 var(--font-mono); }
 .topbar-chip .topbar-chip-alert[hidden] { display: none; }
+/* F 線：辦公室／帳本切換。Owner 要能自由選擇用像素辦公室還是整份帳本調整進度，所以兩顆鈕回到頂欄，
+   做成與晶片同高（30px）、同字級（12px）的分段切換；is-active 由 switchView 切，色用既有強調色。 */
+.view-switch { display: inline-flex; align-items: stretch; flex: none; min-height: 30px; padding: 2px; border: 1px solid var(--border); border-radius: 999px; background: var(--panel-2); }
+.view-switch-button { display: inline-flex; align-items: center; width: auto; min-height: 24px; padding: 3px 12px; border: 0; border-radius: 999px; color: var(--muted); background: transparent; font-size: 12px; line-height: 1; white-space: nowrap; transition: color 120ms ease-out, background 120ms ease-out; }
+.view-switch-button:hover { color: var(--text); border-color: transparent; }
+.view-switch-button:focus-visible { outline: 1px solid var(--accent-dim); outline-offset: 1px; }
+.view-switch-button.is-active { color: #0b1512; background: var(--accent); font-weight: 700; }
+.view-switch-button.is-active:hover { background: #4bdb9c; }
 .topbar .merge-outcome-nav .merge-approvals-open { display: inline-flex; gap: 6px; min-height: 30px; padding: 4px 10px; border-radius: 999px; font: 700 13px/1 var(--font-mono); border-color: #7a3a40; color: #ffd9db; background: #a5303a; }
 .topbar .merge-outcome-nav .merge-approvals-open b { min-width: 18px; height: 18px; color: #2a1013; background: #ffb8bc; font-size: 11px; }
 .topbar .merge-outcome-nav .merge-approvals-open:disabled { opacity: .45; }

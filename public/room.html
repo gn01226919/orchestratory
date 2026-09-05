@@ -36,6 +36,10 @@
             <div id="connection" class="conn">連線中…</div>
           </div>
         </div>
+        <div class="view-switch" role="group" aria-label="主畫面：辦公室或帳本">
+          <button id="view-office" class="view-switch-button is-active" type="button" aria-pressed="true" aria-controls="office" title="像素辦公室：看席位狀態、用抽屜調整進度">辦公室</button>
+          <button id="view-ledger" class="view-switch-button" type="button" aria-pressed="false" aria-controls="ledger" title="Room Ledger 直播：整份編號對話與發言框">帳本</button>
+        </div>
         <div class="topbar-chips" aria-label="房間概況">
           <button id="topbar-terminal-open" class="topbar-chip" type="button" aria-controls="office-task-center" aria-label="終端：開啟任務清單的「終端」分組">
             <span>終端</span><b id="topbar-terminal-count" class="topbar-chip-count">0</b><b id="agent-request-count" class="topbar-chip-alert" hidden>0</b>

@@ -3766,3 +3766,23 @@ test("Room task drawer books one repaint for the next wake-receipt expiry", asyn
   assert.match(source, /officeTaskRepaintTimer = setTimeout\(\(\) => \{\n {4}officeTaskRepaintTimer = null;\n {4}renderTaskCenter\(\);/u);
   assert.doesNotMatch(source, /setInterval\([^)]*renderTaskCenter/u);
 });
+
+test("the topbar carries an office/ledger switch the owner can use to pick either surface", async () => {
+  const html = await readFile(new URL("../public/room.html", import.meta.url), "utf8");
+  const topbar = /<header class="topbar"[\s\S]*?<\/header>/u.exec(html)?.[0] ?? "";
+  assert.notEqual(topbar, "", "the room page has a topbar");
+  /* Both buttons keep the ids switchView already toggles, so the existing wiring lights them up. */
+  assert.match(topbar, /<button id="view-office" class="view-switch-button is-active" type="button" aria-pressed="true"/u);
+  assert.match(topbar, /<button id="view-ledger" class="view-switch-button" type="button" aria-pressed="false"/u);
+  assert.match(topbar, /<div class="view-switch" role="group"/u);
+  /* The switch sits between the room menu and the count chips, and never inside the digested merge nav. */
+  assert.ok(topbar.indexOf('id="room-menu"') < topbar.indexOf('class="view-switch"'));
+  assert.ok(topbar.indexOf('class="view-switch"') < topbar.indexOf('class="topbar-chips"'));
+  assert.ok(topbar.indexOf('class="topbar-chips"') < topbar.indexOf('class="merge-outcome-nav"'));
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  assert.match(source, /byId\("view-office"\)\?\.addEventListener\("click", \(\) => switchView\("office"\)\);/u);
+  assert.match(source, /byId\("view-ledger"\)\?\.addEventListener\("click", \(\) => switchView\("ledger"\)\);/u);
+  const switchView = /^function switchView\(view\) \{[\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(switchView, /button\.setAttribute\("aria-pressed", String\(active\)\);/u);
+  assert.match(switchView, /document\.body\.classList\.toggle\("view-office", office\);/u);
+});
