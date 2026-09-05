@@ -46,6 +46,8 @@ const state = {
   historyMessages: [],
   cancelledMentions: new Set(),
   providers: [],
+  /* /api/bootstrap 的工作區 allowlist。房間選單靠它說出「這個工作區還沒有房間」。 */
+  workspaceRoots: [],
   pendingWorkflowRequests: [],
   activeRuns: [],
   workflowEvents: new Map(),
@@ -2055,6 +2057,37 @@ async function selectRoom(id) {
   try { await refreshMergeHistory(); } catch { /* 歷史讀不到不阻斷 Room 切換。 */ }
 }
 
+/* @pure-start room-coverage
+ * 工作區與房間是兩件事：工作區是安全授權（Orchestratory 被允許碰哪個資料夾），房間是協作容器
+ * （一份只能追加的帳本＋一份席位名單）。一個工作區可以有多個房間，也可以一個都沒有。
+ * 這個選單列的是房間，所以剛被授權的工作區不會自己出現在這裡；算出「已授權但還沒有房間」的
+ * 工作區，選單才有辦法把這件事講出來，而不是讓人以為新專案不見了。
+ *
+ * 歸屬只用路徑前綴比對。兩份輸入都是伺服器已正規化的絕對路徑（/api/rooms 只回傳通過 allowlist
+ * 的房間，/api/bootstrap 的 workspaceRoots 是同一份 allowlist），所以這裡不做 realpath，也不
+ * 重做授權判斷——這是顯示用的歸屬，不是安全邊界。
+ */
+function pathWithin(root, candidate) {
+  const base = String(root || "").replace(/\/+$/u, "");
+  const target = String(candidate || "").replace(/\/+$/u, "");
+  if (!base || !target) return false;
+  return target === base || target.startsWith(`${base}/`);
+}
+
+function workspacesWithoutRoom(roots, rooms) {
+  const occupied = (Array.isArray(rooms) ? rooms : [])
+    .map((room) => String(room?.workspace || ""))
+    .filter(Boolean);
+  return (Array.isArray(roots) ? roots : [])
+    .filter((root) => root && typeof root.path === "string" && root.path.trim())
+    .filter((root) => !occupied.some((workspace) => pathWithin(root.path, workspace)))
+    .map((root) => ({
+      path: root.path,
+      label: String(root.label || "").trim() || root.path.split("/").filter(Boolean).at(-1) || root.path,
+    }));
+}
+/* @pure-end room-coverage */
+
 function roomOptionLabel(room) {
   const pending = roomPendingCount(room);
   const project = room.projectName || room.workspace?.split("/").filter(Boolean).at(-1) || room.id;
@@ -2084,7 +2117,35 @@ function renderRoomCatalog() {
   const menuLabel = byId("room-menu-label");
   const current = state.rooms.find((room) => room.id === selected);
   if (menuLabel) menuLabel.textContent = current ? (current.projectName || current.id) : (state.rooms.length ? "選擇房間" : "Room 控制室");
+  renderRoomCoverage();
   renderTopbarCounts();
+}
+
+/*
+ * 把「有工作區但沒有房間」直接寫在選單裡。少一個房間跟少一個專案在畫面上長得一模一樣，
+ * 差別只有這段字說得出來；沒有落單的工作區時整段收起來，不佔位置。
+ * 名稱與路徑都走 textContent，路徑只放在 title——allowlist 的路徑是使用者自己的目錄名。
+ */
+function renderRoomCoverage() {
+  const note = byId("room-menu-coverage");
+  if (!note) return;
+  const missing = workspacesWithoutRoom(state.workspaceRoots, state.rooms);
+  note.textContent = "";
+  note.hidden = missing.length === 0;
+  if (missing.length === 0) return;
+  const heading = document.createElement("b");
+  heading.textContent = `${missing.length} 個已授權的工作區還沒有房間`;
+  const list = document.createElement("ul");
+  for (const workspace of missing) {
+    const item = document.createElement("li");
+    item.textContent = workspace.label;
+    item.title = workspace.path;
+    list.append(item);
+  }
+  const how = document.createElement("small");
+  how.textContent = "上面的清單列的是房間，不是工作區。授權工作區只是允許存取那個資料夾；"
+    + "要讓它出現在這裡，還要在該資料夾執行 orchestrator room init，或請該專案的 agent 呼叫 room_init。";
+  note.append(heading, list, how);
 }
 
 /*
@@ -3610,6 +3671,8 @@ async function refreshOfficeControlPlane(initialValue) {
   state.controlRefreshing = true;
   try {
     const value = initialValue || await api("/api/bootstrap");
+    /* 房間清單重繪時要一起判斷哪些工作區還沒有房間，所以 allowlist 先落到 state 再重繪。 */
+    state.workspaceRoots = Array.isArray(value.workspaceRoots) ? value.workspaceRoots : [];
     if (!initialValue) await refreshRoomCatalog();
     state.csrf = value.csrf || state.csrf;
     const previousPending = new Set((state.pendingWorkflowRequests || []).map((request) => request.id));

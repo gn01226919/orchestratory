@@ -2956,6 +2956,11 @@ body.workspace-modal-open { overflow: hidden; }
 .room-menu-item.active { border-color: var(--accent-dim); box-shadow: inset 2px 0 0 var(--accent); }
 .room-menu-item b { display: block; font-size: 12px; }
 .room-menu-item small { display: block; color: var(--muted); font-size: 10px; }
+.room-menu-coverage[hidden] { display: none; }
+.room-menu-coverage { display: grid; gap: 4px; margin: 0; padding: 8px 10px; border: 1px solid var(--border); border-left: 2px solid var(--accent-dim); border-radius: 7px; background: var(--panel-2); }
+.room-menu-coverage b { font-size: 11px; }
+.room-menu-coverage ul { margin: 0; padding-left: 16px; font-size: 11px; }
+.room-menu-coverage small { color: var(--muted); font-size: 10px; line-height: 1.5; }
 .room-menu-stats { display: grid; gap: 4px; }
 .room-menu-stats .rail { border-top: 0; padding-top: 0; }
 .room-menu-panel .field { font-size: 11px; }

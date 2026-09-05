@@ -22,8 +22,9 @@
             <nav class="room-menu-nav" aria-label="Room 導航">
               <a class="room-menu-item" id="live-link" href="/room"><b>▶ Room 即時協作</b><small>直播、發言與 @喚醒</small></a>
               <a class="room-menu-item" id="history-link" href="/room?mode=history"><b>🕘 歷史紀錄</b><small>每次向前翻閱 100 則</small></a>
-              <a class="room-menu-item" href="/"><b>＋ 新增專案／房間</b><small>回主代理工作區設定</small></a>
+              <a class="room-menu-item" href="/"><b>＋ 新增專案／房間</b><small>兩步：先在主代理畫面授權工作區，再到該資料夾執行 orchestrator room init 開房間</small></a>
             </nav>
+            <p class="room-menu-coverage" id="room-menu-coverage" hidden></p>
             <label class="field" for="room-search">搜尋帳本
               <input id="room-search" type="search" placeholder="關鍵字，清空回直播">
             </label>

@@ -4793,3 +4793,102 @@ test("a Writer lease is labelled with the name its seat answers to now, matched 
     "the Writer badge is matched on the presence id, with the name only as the pre-actorId fallback",
   );
 });
+
+test("the room menu names the allowlisted workspaces that have no room yet", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const start = source.indexOf("/* @pure-start room-coverage");
+  const end = source.indexOf("/* @pure-end room-coverage */");
+  assert.ok(start > 0 && end > start, "room.js must expose the DOM-free workspace/room reconciler");
+  const block = source.slice(start, end);
+  assert.doesNotMatch(
+    block,
+    /(?:\b(?:document|window|navigator|localStorage|state)\s*\.|\b(?:fetch|byId|api|setInterval|setTimeout|require|import)\s*\()/u,
+  );
+  const reader = runInNewContext(
+    `${block}\n({ workspacesWithoutRoom });`,
+    Object.create(null) as object,
+    { timeout: 2_000 },
+  ) as {
+    workspacesWithoutRoom: (
+      roots: unknown,
+      rooms: unknown,
+    ) => { path: string; label: string }[];
+  };
+
+  // The owner's actual situation: five allowlisted workspaces, three rooms. The dropdown lists
+  // rooms, so the two workspaces without one are exactly what is missing from the menu.
+  const roots = [
+    { id: "a", label: "orchestratory協作器", path: "/Users/example/orchestratory協作器" },
+    { id: "b", label: "sports-platform", path: "/Users/example/sports-platform" },
+    { id: "c", label: "這什麼意思？專案", path: "/Users/example/這什麼意思？專案" },
+    { id: "d", label: "tpebarber", path: "/Users/example/tpebarber" },
+    { id: "e", label: "黑客松demo", path: "/Users/example/黑客松demo" },
+  ];
+  const rooms = [
+    { id: "orchestratory", workspace: "/Users/example/orchestratory協作器" },
+    { id: "room-default-8ccced9d", workspace: "/Users/example/這什麼意思？專案" },
+    { id: "tpebarber", workspace: "/Users/example/tpebarber" },
+  ];
+  // Spread into this realm: an array the vm built carries the other context's prototype, which
+  // strict deepEqual rejects.
+  assert.deepEqual(
+    [...reader.workspacesWithoutRoom(roots, rooms)].map((workspace) => workspace.label),
+    ["sports-platform", "黑客松demo"],
+  );
+
+  // A room opened in a subdirectory still belongs to the root that authorised it, so the root is
+  // covered; a sibling whose path merely shares a prefix is not.
+  assert.deepEqual(
+    [...reader.workspacesWithoutRoom(
+      [{ id: "a", label: "web", path: "/Users/example/web" }],
+      [{ id: "r", workspace: "/Users/example/web/packages/app" }],
+    )],
+    [],
+  );
+  assert.deepEqual(
+    [...reader.workspacesWithoutRoom(
+      [{ id: "a", label: "web", path: "/Users/example/web" }],
+      [{ id: "r", workspace: "/Users/example/web-legacy" }],
+    )].map((workspace) => workspace.label),
+    ["web"],
+  );
+  // A trailing slash on either side is the same directory.
+  assert.deepEqual(
+    [...reader.workspacesWithoutRoom(
+      [{ id: "a", label: "web", path: "/Users/example/web/" }],
+      [{ id: "r", workspace: "/Users/example/web" }],
+    )],
+    [],
+  );
+  // Nothing allowlisted, nothing to report -- and a room whose workspace is missing never covers.
+  assert.deepEqual([...reader.workspacesWithoutRoom(undefined, undefined)], []);
+  assert.deepEqual(
+    [...reader.workspacesWithoutRoom([{ id: "a", label: "web", path: "/Users/example/web" }], [{ id: "r" }])]
+      .map((workspace) => workspace.label),
+    ["web"],
+  );
+  // Falling back to the directory name keeps the notice readable when a root carries no label.
+  assert.deepEqual(
+    [...reader.workspacesWithoutRoom([{ id: "a", path: "/Users/example/web" }], [])].map((workspace) => workspace.label),
+    ["web"],
+  );
+
+  // Wiring: the allowlist has to reach the browser and the menu has to repaint from it, or the
+  // reconciler above is computing an answer nobody sees.
+  assert.match(source, /state\.workspaceRoots = Array\.isArray\(value\.workspaceRoots\)/u);
+  const catalog = /^function renderRoomCatalog\(\) \{[\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.notEqual(catalog, "", "room.js keeps renderRoomCatalog");
+  assert.match(catalog, /renderRoomCoverage\(\)/u, "the room list repaint also repaints the notice");
+  const coverage = /^function renderRoomCoverage\(\) \{[\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(
+    coverage,
+    /workspacesWithoutRoom\(state\.workspaceRoots, state\.rooms\)/u,
+    "the notice compares the allowlist against the rooms the menu is listing",
+  );
+  assert.match(coverage, /room_init/u, "and says what actually creates a room");
+
+  const html = await readFile(new URL("../public/room.html", import.meta.url), "utf8");
+  assert.match(html, /id="room-menu-coverage"/u, "the menu keeps the slot the notice renders into");
+  // Adding a workspace does not create a room, so the menu item must not promise one step.
+  assert.match(html, /orchestrator room init/u);
+});
