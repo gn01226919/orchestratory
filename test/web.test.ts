@@ -1856,7 +1856,9 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomHtml, /id="merge-approvals-open"/u);
   assert.match(roomHtml, /id="merge-approval-count" aria-label="0 件待核准">0</u);
   assert.match(roomHtml, /class="agent-requests-open merge-approvals-open"/u);
-  assert.match(roomHtml, /id="merge-active-task" class="merge-active-task" hidden/u);
+  // The pending-approval button stays in the topbar at 0 (neutral, disabled) instead of appearing on demand.
+  assert.doesNotMatch(roomHtml, /id="merge-active-task"/u);
+  assert.match(roomHtml, /<span>⑂ 待核准<\/span><b id="merge-approval-count"/u);
   assert.match(roomHtml, /id="merge-history-open"/u);
   assert.match(roomHtml, /▤ 併入紀錄/u);
   assert.match(roomHtml, /id="merge-records-attention" class="merge-records-attention" hidden/u);
@@ -2821,7 +2823,9 @@ test("Merge task sidebar disappears when every request is complete or terminal",
   assert.equal(mixed.count, 1);
   assert.equal(mixed.visible, true);
   assert.deepEqual(Array.from(mixed.pending), [active]);
-  assert.match(source, /activeTask\.hidden = !summary\.visible/u);
+  // The topbar button is always present: 0 pending disables it and drops the red state, never hides it.
+  assert.match(source, /button\.disabled = !summary\.visible;\n\s*button\.classList\.toggle\("is-pending", summary\.visible\);/u);
+  assert.doesNotMatch(source, /merge-active-task/u);
 });
 
 test("Merge records shows nonnumeric attention only for outcomes requiring review", async () => {

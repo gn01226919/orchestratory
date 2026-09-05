@@ -5231,15 +5231,16 @@ function renderMergeApprovalBadge() {
   const badge = byId("merge-approval-count");
   if (!button || !badge) return;
   const summary = mergeTaskSummary(state.mergeApprovals);
-  const activeTask = byId("merge-active-task");
+  /* The button never leaves the topbar: at 0 it is a neutral grey "nothing waiting", above 0 it turns
+   * red with the count. The owner asked to see this at a glance rather than have it appear and go. */
   badge.textContent = String(summary.count);
   badge.hidden = false;
   badge.setAttribute("aria-label", `${summary.count} 件待核准`);
   button.disabled = !summary.visible;
-  if (activeTask) activeTask.hidden = !summary.visible;
+  button.classList.toggle("is-pending", summary.visible);
   const label = button.querySelector("span");
-  if (label) label.textContent = "⑂";
-  button.title = `${summary.count} 件草稿版待核准併入 main`;
+  if (label) label.textContent = "⑂ 待核准";
+  button.title = summary.visible ? `${summary.count} 件草稿版待核准併入 main` : "目前沒有草稿版待核准併入 main";
   button.setAttribute("aria-label", button.title);
 }
 
