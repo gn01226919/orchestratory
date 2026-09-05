@@ -5236,10 +5236,10 @@ function renderMergeApprovalBadge() {
   badge.textContent = String(summary.count);
   badge.hidden = false;
   badge.setAttribute("aria-label", `${summary.count} 件待核准`);
-  button.disabled = !summary.visible;
+  /* Never disabled: at 0 the click opens the approval layer's empty state, so the owner can still
+   * reach the place where approvals happen and see for themselves that nothing is waiting. */
+  button.disabled = false;
   button.classList.toggle("is-pending", summary.visible);
-  const label = button.querySelector("span");
-  if (label) label.textContent = "⑂ 待核准";
   button.title = summary.visible ? `${summary.count} 件草稿版待核准併入 main` : "目前沒有草稿版待核准併入 main";
   button.setAttribute("aria-label", button.title);
 }
@@ -6509,7 +6509,11 @@ function openMergeApprovalDialog(approvalId) {
   if (!dialog) return;
   const pending = (state.mergeApprovals || []).filter(mergeApprovalPending);
   const target = approvalId || pending[0]?.id;
-  if (!target) return;
+  /* Empty state: with nothing pending the layer still opens, showing only "nothing waiting" and the
+   * way back. The pending path below is unchanged; the class just hides review, confirm and input. */
+  dialog.classList.toggle("is-empty", !target);
+  byId("merge-approval-empty").hidden = Boolean(target);
+  if (!target) { openMergeApprovalEmptyState(dialog); return; }
   state.mergeApprovalReturnFocus = document.activeElement;
   state.mergeApprovalDecided = false;
   state.mergeApprovalScrolled = false;
@@ -6529,6 +6533,24 @@ function openMergeApprovalDialog(approvalId) {
   /* 取消是預設焦點：最高風險動作不得預先對準破壞性按鈕。 */
   byId("merge-approval-cancel").focus();
 }
+
+/*
+ * The approval layer with nothing to approve. No ticker, no poll, no fetch: there is no approval to
+ * bind to, so the only things on screen are the fact and two exits. closeMergeApprovalDialog handles
+ * this state as it does any other (the intervals it clears are simply null).
+ */
+function openMergeApprovalEmptyState(dialog) {
+  state.mergeApprovalReturnFocus = document.activeElement;
+  dialog.hidden = false;
+  document.body.classList.add("workspace-modal-open");
+  byId("merge-approval-status").textContent = "";
+  byId("merge-approval-empty-close").focus();
+}
+byId("merge-approval-empty-close")?.addEventListener("click", closeMergeApprovalDialog);
+byId("merge-approval-empty-history")?.addEventListener("click", () => {
+  closeMergeApprovalDialog();
+  void openMergeHistory();
+});
 
 function closeMergeApprovalDialog() {
   const dialog = byId("merge-approval");

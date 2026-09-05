@@ -52,11 +52,11 @@
           </button>
         </div>
         <section class="merge-outcome-nav" aria-label="核准併入與併入紀錄">
-          <button id="merge-approvals-open" class="agent-requests-open merge-approvals-open" type="button" aria-haspopup="dialog" aria-controls="merge-approval" aria-label="0 件草稿版待核准併入 main" disabled>
-            <span>⑂ 待核准</span><b id="merge-approval-count" aria-label="0 件待核准">0</b>
+          <button id="merge-approvals-open" class="agent-requests-open merge-approvals-open" type="button" aria-haspopup="dialog" aria-controls="merge-approval" aria-label="0 件草稿版待核准併入 main">
+            <span>⑂ <span class="merge-nav-full">待核准</span><span class="merge-nav-short">待核</span></span><b id="merge-approval-count" aria-label="0 件待核准">0</b>
           </button>
           <button id="merge-history-open" class="agent-requests-open merge-history-open" type="button" aria-haspopup="dialog" aria-controls="merge-history" aria-label="開啟併入紀錄；紀錄數量尚未讀取">
-            <span>▤ 併入紀錄</span>
+            <span>▤ <span class="merge-nav-full">併入紀錄</span><span class="merge-nav-short">紀錄</span></span>
             <em id="merge-records-attention" class="merge-records-attention" hidden>需檢查</em>
           </button>
           <p class="merge-outcome-nav-title sr-only">稽核紀錄（不是待辦）；完成、拒絕或逾期後會從待處理區消失，歷史只在紀錄面板內保留。</p>
@@ -268,6 +268,16 @@
           <code id="merge-approval-task">—</code>
           <em id="merge-approval-risk" class="merge-approval-risk">風險</em>
         </header>
+        <!-- 空狀態：沒有待核准時也能從頂欄進來，讓 Owner 確認「核准就在這裡」；審閱區、確認列與輸入框整段不顯示。
+             用 div 不用 section：shipped-docs 的守門用非貪婪 </section> 切出核准層，一個提早的 </section> 會讓它切錯。 -->
+        <div id="merge-approval-empty" class="merge-approval-empty" hidden role="group" aria-label="目前沒有待核准">
+          <b>目前沒有草稿版待核准。</b>
+          <p>草稿版 complete 後會出現在這裡，並在頂欄「⑂ 待核准」轉紅顯示件數。</p>
+          <div class="merge-approval-empty-actions">
+            <button id="merge-approval-empty-history" type="button" aria-haspopup="dialog" aria-controls="merge-history">▤ 看併入紀錄</button>
+            <button id="merge-approval-empty-close" type="button">← 回辦公室</button>
+          </div>
+        </div>
         <div class="merge-approval-body">
           <aside class="merge-approval-facts" aria-label="核准事實">
             <div class="merge-approval-head">

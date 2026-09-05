@@ -2845,7 +2845,8 @@ body.workspace-modal-open { overflow: hidden; }
 .topbar .merge-outcome-nav .merge-history-open { display: inline-flex; align-items: center; gap: 8px; min-height: 34px; padding: 5px 14px; border-radius: 999px; font-weight: 700; font-size: 13px; line-height: 1; white-space: nowrap; }
 .topbar .merge-outcome-nav .merge-approvals-open { border-color: var(--border-strong); color: var(--muted); background: var(--panel-2); }
 .topbar .merge-outcome-nav .merge-approvals-open b { min-width: 20px; height: 20px; padding-inline: 6px; color: var(--text); background: var(--bg); font: 800 12px/1 var(--font-mono); }
-.topbar .merge-outcome-nav .merge-approvals-open:disabled { opacity: 1; cursor: default; }
+.topbar .merge-outcome-nav .merge-approvals-open:hover { border-color: var(--faint); color: var(--text); }
+.topbar .merge-outcome-nav .merge-nav-short { display: none; }
 .topbar .merge-outcome-nav .merge-approvals-open.is-pending { border-color: #c4454f; color: #ffe1e3; background: #a5303a; box-shadow: 0 0 0 3px rgb(165 48 58 / 22%); }
 .topbar .merge-outcome-nav .merge-approvals-open.is-pending b { color: #2a1013; background: #ffb8bc; }
 .topbar .merge-outcome-nav .merge-approvals-open.is-pending:hover { background: #b8394a; border-color: #e06670; }
@@ -2881,6 +2882,16 @@ body.view-office #ledger, body.view-office #post-form { display: none; }
 .merge-approval-card > .merge-approval-bar > .merge-approval-bar-title b { font-size: 15px; white-space: nowrap; }
 .merge-approval-bar > code { flex: 1 1 auto; min-width: 0; color: #cdd3d9; font: 12px/1.4 var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .merge-approval-body { display: grid; grid-template-columns: 320px minmax(0, 1fr); min-height: 0; }
+/* F 線：核准層空狀態。審閱區、確認列（含輸入框）、任務代碼與風險標籤整段不顯示，只留事實與兩個出口。 */
+.merge-approval-empty[hidden] { display: none; }
+.merge-approval-empty { display: grid; align-content: center; justify-items: center; gap: 10px; min-height: 0; padding: 32px 20px; text-align: center; }
+.merge-approval-empty > b { font-size: 16px; }
+.merge-approval-empty > p { max-width: 42ch; margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.merge-approval-empty-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: 8px; }
+.merge-approval-empty-actions button { width: auto; min-height: 34px; padding: 6px 16px; border-radius: 999px; background: var(--panel-2); font-size: 13px; }
+.merge-approval-empty-actions button:hover { border-color: var(--accent-dim); }
+.merge-approval.is-empty .merge-approval-body, .merge-approval.is-empty .merge-approval-confirm,
+.merge-approval.is-empty #merge-approval-task, .merge-approval.is-empty #merge-approval-risk { display: none; }
 .merge-approval-facts { display: grid; align-content: start; gap: 10px; min-height: 0; padding: 14px 14px 18px; overflow-y: auto; border-right: 1px solid var(--border); background: var(--panel); }
 .merge-approval-facts-label { color: var(--muted); font-size: 11px; }
 .merge-approval-disclaimer { padding: 9px 10px; border: 1px solid #5b4a22; border-radius: 8px; color: #d8c9a2; background: rgb(245 166 35 / 8%); font-family: var(--font-body); font-size: 11px; line-height: 1.6; }
@@ -2920,12 +2931,10 @@ body.view-office #ledger, body.view-office #post-form { display: none; }
   .topbar { flex-wrap: wrap; row-gap: 4px; height: auto; min-height: 50px; padding: 6px 12px; }
   .topbar-chips { order: 5; width: 100%; }
   .room-menu > .room-menu-summary b { max-width: 34vw; overflow: hidden; text-overflow: ellipsis; }
-  /* 兩顆主鈕在窄版仍常駐，只把文字縮成圖示＋數字，字級維持 13px。 */
+  /* 兩顆主鈕在窄版仍常駐，文字縮成「待核 N」「紀錄」，字級維持 13px。 */
   .topbar .merge-outcome-nav .merge-approvals-open, .topbar .merge-outcome-nav .merge-history-open { padding-inline: 11px; }
-  .topbar .merge-outcome-nav .merge-approvals-open span { font-size: 0; }
-  .topbar .merge-outcome-nav .merge-approvals-open span::before { content: "⑂"; font-size: 13px; }
-  .topbar .merge-outcome-nav .merge-history-open span { font-size: 0; }
-  .topbar .merge-outcome-nav .merge-history-open span::before { content: "▤"; font-size: 13px; }
+  .topbar .merge-outcome-nav .merge-nav-full { display: none; }
+  .topbar .merge-outcome-nav .merge-nav-short { display: inline; }
   .workspace-onboarding.merge-approval { top: 0; }
   .topbar-drawer { top: 122px; }
 }

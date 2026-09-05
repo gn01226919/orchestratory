@@ -1858,7 +1858,8 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomHtml, /class="agent-requests-open merge-approvals-open"/u);
   // The pending-approval button stays in the topbar at 0 (neutral, disabled) instead of appearing on demand.
   assert.doesNotMatch(roomHtml, /id="merge-active-task"/u);
-  assert.match(roomHtml, /<span>⑂ 待核准<\/span><b id="merge-approval-count"/u);
+  assert.match(roomHtml, /<span>⑂ <span class="merge-nav-full">待核准<\/span><span class="merge-nav-short">待核<\/span><\/span><b id="merge-approval-count"/u);
+  assert.doesNotMatch(roomHtml, /id="merge-approvals-open"[^>]*\sdisabled/u);
   assert.match(roomHtml, /id="merge-history-open"/u);
   assert.match(roomHtml, /▤ 併入紀錄/u);
   assert.match(roomHtml, /id="merge-records-attention" class="merge-records-attention" hidden/u);
@@ -2824,8 +2825,41 @@ test("Merge task sidebar disappears when every request is complete or terminal",
   assert.equal(mixed.visible, true);
   assert.deepEqual(Array.from(mixed.pending), [active]);
   // The topbar button is always present: 0 pending disables it and drops the red state, never hides it.
-  assert.match(source, /button\.disabled = !summary\.visible;\n\s*button\.classList\.toggle\("is-pending", summary\.visible\);/u);
+  assert.match(source, /button\.disabled = false;\n\s*button\.classList\.toggle\("is-pending", summary\.visible\);/u);
   assert.doesNotMatch(source, /merge-active-task/u);
+});
+
+test("with nothing pending the approval button still opens the layer, as an empty state", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const html = await readFile(new URL("../public/room.html", import.meta.url), "utf8");
+  const styles = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
+  const open = /^function openMergeApprovalDialog\(approvalId\) \{[\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(open, /dialog\.classList\.toggle\("is-empty", !target\);/u);
+  assert.match(open, /if \(!target\) \{ openMergeApprovalEmptyState\(dialog\); return; \}/u);
+  const empty = /^function openMergeApprovalEmptyState\(dialog\) \{[\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  /* No fetch, ticker or poll: there is nothing to bind to. Focus lands on the way back. */
+  assert.doesNotMatch(empty, /loadMergeApproval|setInterval|api\(/u);
+  assert.match(empty, /byId\("merge-approval-empty-close"\)\.focus\(\);/u);
+  assert.match(source, /byId\("merge-approval-empty-close"\)\?\.addEventListener\("click", closeMergeApprovalDialog\);/u);
+  /* A div, not a section: the shipped-docs guard cuts the approval layer at the first </section>. */
+  assert.match(html, /<div id="merge-approval-empty" class="merge-approval-empty" hidden/u);
+  assert.match(html, /目前沒有草稿版待核准。/u);
+  assert.match(html, /<button id="merge-approval-empty-history"[^>]*>▤ 看併入紀錄<\/button>/u);
+  assert.match(html, /<button id="merge-approval-empty-close"[^>]*>← 回辦公室<\/button>/u);
+  /* The confirmation row (input included) and the review body are hidden by the state class. */
+  assert.match(styles, /\.merge-approval\.is-empty \.merge-approval-body, \.merge-approval\.is-empty \.merge-approval-confirm,/u);
+});
+
+test("the narrow topbar keeps words on the approval and records buttons, not icons alone", async () => {
+  const html = await readFile(new URL("../public/room.html", import.meta.url), "utf8");
+  const styles = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
+  assert.match(html, /<span class="merge-nav-short">待核<\/span>/u);
+  assert.match(html, /<span class="merge-nav-short">紀錄<\/span>/u);
+  const narrow = /@media \(max-width: 760px\) \{\n {2}\.topbar \{ flex-wrap: wrap;[\s\S]*?\n\}/u.exec(styles)?.[0] ?? "";
+  assert.notEqual(narrow, "", "the narrow topbar block exists");
+  assert.match(narrow, /\.merge-nav-full \{ display: none; \}/u);
+  assert.match(narrow, /\.merge-nav-short \{ display: inline; \}/u);
+  assert.doesNotMatch(narrow, /merge-(approvals|history)-open span \{ font-size: 0/u);
 });
 
 test("Merge records shows nonnumeric attention only for outcomes requiring review", async () => {
