@@ -4278,7 +4278,7 @@ test("an author name in the ledger is a button that tags that seat in the compos
   assert.match(css, /^\.msg-author:focus-visible \{/mu);
 });
 
-test("Enter twice sends, including when the first Enter is the one that commits an IME composition", async () => {
+test("Enter twice sends; the Enter that commits an IME composition ends the composition and nothing more", async () => {
   const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
   const start = source.indexOf("const DOUBLE_ENTER_WINDOW_MS");
   const end = source.indexOf("async function submitRoomText(");
@@ -4332,38 +4332,28 @@ test("Enter twice sends, including when the first Enter is the one that commits 
     t.enter();
     assert.equal(t.form.submits, 1);
   }
-  // 注音, candidate taken with Enter (Chrome: keydown 229 + isComposing, then compositionend, then a
-  // keyup Enter with keyCode 13): that Enter is the first of the pair, the next one sends.
-  {
+  // 注音, candidate taken with Enter. That Enter belongs to the input method: it ends the
+  // composition and resets the pair, so sending still takes two plain Enters after it -- one
+  // more would send on a single press, which the box never does. Three shapes of the same commit:
+  // Chrome (keydown 229 + isComposing, compositionend, keyup Enter 13), Safari (compositionend
+  // first, keydown 229 with isComposing false), Chrome on Windows (every composing key is "Process").
+  const commitShapes = [
+    { key: "Enter", isComposing: true },
+    { key: "Enter", isComposing: false },
+    { key: "Process", isComposing: true },
+  ];
+  for (const shape of commitShapes) {
     const t = build();
     t.composeKeys("su3", "ㄋㄧˇ");
-    t.fire("keydown", { key: "Enter", keyCode: 229, isComposing: true });
+    t.fire("keydown", { keyCode: 229, ...shape });
     t.setText("你");
     t.fire("keyup", { key: "Enter", keyCode: 13, isComposing: false });
     assert.equal(t.form.submits, 0);
     assert.equal(t.input.value, "你", "the commit Enter must not add a newline of its own");
     t.enter();
-    assert.equal(t.form.submits, 1, "commit Enter + Enter sends");
-  }
-  // Safari's shape of the same commit: compositionend first, keydown with 229 but isComposing false.
-  {
-    const t = build();
-    t.composeKeys("su3", "ㄋㄧˇ");
-    t.fire("keydown", { key: "Enter", keyCode: 229, isComposing: false });
-    t.setText("你");
-    t.fire("keyup", { key: "Enter", keyCode: 13, isComposing: false });
+    assert.equal(t.form.submits, 0, `commit Enter + Enter must NOT send (${JSON.stringify(shape)})`);
     t.enter();
-    assert.equal(t.form.submits, 1);
-  }
-  // Chrome on Windows reports every composing key as "Process": the keyup still tells them apart.
-  {
-    const t = build();
-    t.composeKeys("su3", "ㄋㄧˇ");
-    t.fire("keydown", { key: "Process", keyCode: 229, isComposing: true });
-    t.setText("你");
-    t.fire("keyup", { key: "Enter", keyCode: 13, isComposing: false });
-    t.enter();
-    assert.equal(t.form.submits, 1);
+    assert.equal(t.form.submits, 1, `commit Enter + Enter + Enter sends (${JSON.stringify(shape)})`);
   }
   // Candidate taken with Space instead: two plain Enters after it send. This took THREE before,
   // because the composing keydowns left a flag that ate the first Enter's keyup.
@@ -4378,14 +4368,16 @@ test("Enter twice sends, including when the first Enter is the one that commits 
     t.enter();
     assert.equal(t.form.submits, 1);
   }
-  // Commit with Enter, then keep typing: the pair is broken, nothing sends until two more.
+  // A plain Enter armed, then a composition opened and committed with Enter: the pair is reset,
+  // so the commit Enter cannot complete a pair started before the composition.
   {
     const t = build();
+    t.typePlain("a");
+    t.enter();
     t.composeKeys("su3", "ㄋㄧˇ");
     t.fire("keydown", { key: "Enter", keyCode: 229, isComposing: true });
-    t.setText("你");
+    t.setText("a\n你");
     t.fire("keyup", { key: "Enter", keyCode: 13, isComposing: false });
-    t.typePlain("!");
     t.enter();
     assert.equal(t.form.submits, 0);
     t.enter();
