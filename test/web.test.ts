@@ -4277,3 +4277,142 @@ test("an author name in the ledger is a button that tags that seat in the compos
   assert.match(css, /^\.msg-author \{ appearance: none; background: none; border: 0;/mu);
   assert.match(css, /^\.msg-author:focus-visible \{/mu);
 });
+
+test("Enter twice sends, including when the first Enter is the one that commits an IME composition", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const start = source.indexOf("const DOUBLE_ENTER_WINDOW_MS");
+  const end = source.indexOf("async function submitRoomText(");
+  assert.ok(start > 0 && end > start);
+  const block = source.slice(start, end);
+
+  type Listener = (event: Record<string, unknown>) => void;
+  const build = () => {
+    let now = 0;
+    const listeners: Record<string, Listener[]> = {};
+    const input = {
+      value: "", selectionStart: 0, selectionEnd: 0,
+      addEventListener(type: string, fn: Listener) { (listeners[type] ??= []).push(fn); },
+    };
+    const form = { submits: 0, requestSubmit() { form.submits += 1; } };
+    runInNewContext(
+      `${block}\ninstallMacComposerKeyboard(input, form, { disabled: false });`,
+      { input, form, WeakMap, WeakSet, performance: { now: () => now } },
+      { timeout: 2_000 },
+    );
+    const fire = (type: string, init: Record<string, unknown>) => {
+      const event = { isComposing: false, keyCode: 0, metaKey: false, shiftKey: false, altKey: false, ctrlKey: false, repeat: false, prevented: false, preventDefault() { event.prevented = true; }, ...init };
+      for (const fn of listeners[type] ?? []) fn(event);
+      return event;
+    };
+    const setText = (value: string) => { input.value = value; input.selectionStart = input.selectionEnd = value.length; };
+    // A plain Enter the page did not prevent: the browser inserts a newline before keyup.
+    const enter = (init: Record<string, unknown> = {}) => {
+      now += 50;
+      const down = fire("keydown", { key: "Enter", keyCode: 13, ...init });
+      if (!down.prevented && !init.metaKey) setText(`${input.value}\n`);
+      now += 40;
+      fire("keyup", { key: "Enter", keyCode: 13, ...init, isComposing: false });
+    };
+    const typePlain = (text: string) => {
+      for (const ch of text) { fire("keydown", { key: ch, keyCode: 65 }); setText(input.value + ch); fire("keyup", { key: ch, keyCode: 65 }); }
+    };
+    // Chrome on macOS while a composition is open: every keydown carries keyCode 229 and isComposing.
+    const composeKeys = (keys: string, shown: string) => {
+      for (const key of keys) { fire("keydown", { key, keyCode: 229, isComposing: true }); setText(shown); fire("keyup", { key, keyCode: 229, isComposing: true }); }
+    };
+    return { input, form, fire, setText, enter, typePlain, composeKeys, tick: (ms: number) => { now += ms; } };
+  };
+
+  // Plain text: Enter, Enter.
+  {
+    const t = build();
+    t.typePlain("hi");
+    t.enter();
+    assert.equal(t.form.submits, 0);
+    t.enter();
+    assert.equal(t.form.submits, 1);
+  }
+  // 注音, candidate taken with Enter (Chrome: keydown 229 + isComposing, then compositionend, then a
+  // keyup Enter with keyCode 13): that Enter is the first of the pair, the next one sends.
+  {
+    const t = build();
+    t.composeKeys("su3", "ㄋㄧˇ");
+    t.fire("keydown", { key: "Enter", keyCode: 229, isComposing: true });
+    t.setText("你");
+    t.fire("keyup", { key: "Enter", keyCode: 13, isComposing: false });
+    assert.equal(t.form.submits, 0);
+    assert.equal(t.input.value, "你", "the commit Enter must not add a newline of its own");
+    t.enter();
+    assert.equal(t.form.submits, 1, "commit Enter + Enter sends");
+  }
+  // Safari's shape of the same commit: compositionend first, keydown with 229 but isComposing false.
+  {
+    const t = build();
+    t.composeKeys("su3", "ㄋㄧˇ");
+    t.fire("keydown", { key: "Enter", keyCode: 229, isComposing: false });
+    t.setText("你");
+    t.fire("keyup", { key: "Enter", keyCode: 13, isComposing: false });
+    t.enter();
+    assert.equal(t.form.submits, 1);
+  }
+  // Chrome on Windows reports every composing key as "Process": the keyup still tells them apart.
+  {
+    const t = build();
+    t.composeKeys("su3", "ㄋㄧˇ");
+    t.fire("keydown", { key: "Process", keyCode: 229, isComposing: true });
+    t.setText("你");
+    t.fire("keyup", { key: "Enter", keyCode: 13, isComposing: false });
+    t.enter();
+    assert.equal(t.form.submits, 1);
+  }
+  // Candidate taken with Space instead: two plain Enters after it send. This took THREE before,
+  // because the composing keydowns left a flag that ate the first Enter's keyup.
+  {
+    const t = build();
+    t.composeKeys("su3", "ㄋㄧˇ");
+    t.fire("keydown", { key: " ", keyCode: 229, isComposing: true });
+    t.setText("你");
+    t.fire("keyup", { key: " ", keyCode: 32, isComposing: false });
+    t.enter();
+    assert.equal(t.form.submits, 0);
+    t.enter();
+    assert.equal(t.form.submits, 1);
+  }
+  // Commit with Enter, then keep typing: the pair is broken, nothing sends until two more.
+  {
+    const t = build();
+    t.composeKeys("su3", "ㄋㄧˇ");
+    t.fire("keydown", { key: "Enter", keyCode: 229, isComposing: true });
+    t.setText("你");
+    t.fire("keyup", { key: "Enter", keyCode: 13, isComposing: false });
+    t.typePlain("!");
+    t.enter();
+    assert.equal(t.form.submits, 0);
+    t.enter();
+    assert.equal(t.form.submits, 1);
+  }
+  // Edited between the two presses, or too slow: no send.
+  {
+    const t = build();
+    t.typePlain("a");
+    t.enter();
+    t.typePlain("b");
+    t.enter();
+    assert.equal(t.form.submits, 0);
+    t.tick(2_000);
+    t.enter();
+    assert.equal(t.form.submits, 0);
+  }
+  // ⌘Enter sends at once; ⇧Enter and ⌥Enter only break the line.
+  {
+    const t = build();
+    t.typePlain("a");
+    t.enter({ metaKey: true });
+    assert.equal(t.form.submits, 1);
+    t.fire("keyup", { key: "Meta" });
+    t.enter({ shiftKey: true });
+    t.enter({ altKey: true });
+    assert.equal(t.form.submits, 1);
+    assert.equal(t.input.value, "a\n\n");
+  }
+});

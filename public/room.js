@@ -2112,14 +2112,46 @@ function offlineExternalMention(text) {
 const DOUBLE_ENTER_WINDOW_MS = 1600;
 const composerEnterState = new WeakMap();
 const suppressComposerEnterKeyup = new WeakSet();
+const composerImeEnter = new WeakSet();
 
+/*
+ * Enter twice sends; one Enter is a newline; ⌘Enter sends at once; ⇧/⌥ Enter always break the line.
+ *
+ * The pair is counted on KEYUP, and only when nothing about the text or the caret changed between
+ * the two presses, so a newline typed and then edited never turns into a send.
+ *
+ * Input methods are the reason this is not four lines. While a composition is open, every keydown
+ * arrives with keyCode 229 (Chrome sets isComposing too; Safari fires compositionend first and
+ * leaves isComposing false, so both are checked), and the Enter that commits the composition is
+ * one of them. Two things follow:
+ *
+ *  - The commit Enter COUNTS as the first press of the pair. Someone typing 注音 presses Enter to
+ *    take the candidate and Enter again to send; that is two presses of Enter to them, and the
+ *    box must agree. The state is armed on that Enter's keyup, when the committed text is in the
+ *    box, so the second press compares against what was actually sent for.
+ *  - A composing keydown for any other key (ㄅ, a candidate digit, Space) must not leave a mark
+ *    that eats the next Enter's keyup. It used to: the suppress flag set for a composing keydown
+ *    lived until the next Enter keyup, whichever key it was set for, so after any IME-typed text
+ *    the first plain Enter was never counted and sending took three. The flag is now cleared by
+ *    the keyup of the key that set it.
+ */
 function installMacComposerKeyboard(input, form, submitButton) {
+  const arm = () => composerEnterState.set(input, {
+    value: input.value,
+    start: input.selectionStart,
+    end: input.selectionEnd,
+    at: performance.now(),
+  });
   input.addEventListener("keydown", (event) => {
     if (event.isComposing || event.keyCode === 229) {
       composerEnterState.delete(input);
       suppressComposerEnterKeyup.add(input);
+      /* Whether this composing keydown was the Enter is decided by ITS keyup, not by `key` here:
+         Chrome on Windows reports every composing key as "Process". */
+      composerImeEnter.add(input);
       return;
     }
+    composerImeEnter.delete(input);
     if (event.key !== "Enter") {
       composerEnterState.delete(input);
       return;
@@ -2149,8 +2181,21 @@ function installMacComposerKeyboard(input, form, submitButton) {
     composerEnterState.delete(input);
   });
   input.addEventListener("keyup", (event) => {
-    if (event.key !== "Enter") return;
-    if (suppressComposerEnterKeyup.delete(input)) return;
+    if (event.key !== "Enter") {
+      /* A modifier's keyup is not the keyup of the key that set the flag: ⌘Enter releases ⌘ first. */
+      if (!["Meta", "Shift", "Alt", "Control"].includes(event.key)) {
+        suppressComposerEnterKeyup.delete(input);
+        composerImeEnter.delete(input);
+      }
+      return;
+    }
+    if (suppressComposerEnterKeyup.delete(input)) {
+      /* The keyup of the Enter that committed a composition (the last composing keydown was this
+         key): the text is final now, so this press is the first of the pair. If the composition is
+         somehow still open, it is nothing yet. */
+      if (composerImeEnter.delete(input) && !event.isComposing) arm();
+      return;
+    }
     if (
       event.isComposing || event.keyCode === 229 || event.shiftKey || event.altKey ||
       event.ctrlKey || event.metaKey
@@ -2158,12 +2203,7 @@ function installMacComposerKeyboard(input, form, submitButton) {
       composerEnterState.delete(input);
       return;
     }
-    composerEnterState.set(input, {
-      value: input.value,
-      start: input.selectionStart,
-      end: input.selectionEnd,
-      at: performance.now(),
-    });
+    arm();
   });
   input.addEventListener("blur", () => composerEnterState.delete(input));
 }
