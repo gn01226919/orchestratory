@@ -67,7 +67,6 @@ const state = {
      kind and timestamp. */
   wakeNotices: {},
   presenceJoinModes: {},
-  presenceTurnSync: {},
   presenceViewSignature: "",
   presences: [],
   /* Join requests the owner chose not to approve. There is no route that tells a waiting terminal
@@ -1026,35 +1025,14 @@ function renderPresencePanel() {
         });
         modeSelect.addEventListener("click", (event) => event.stopPropagation());
 
-        /* A statement with a switch, on by default, not a checkbox offering an option: mirroring the
-           terminal's visible turns into the ledger is what joining a room means here, and the row
-           should read that way. The switch stays because the owner can still turn it off; it is a
-           checkbox underneath (role="switch") so the value still travels with the join request. */
-        syncLabel = document.createElement("label");
-        syncLabel.className = "presence-sync-label";
-        const syncText = document.createElement("span");
-        syncText.textContent = "此終端的對話會鏡射進帳本（需要宿主 CLI 支援 hook）";
-        const syncInput = document.createElement("input");
-        syncInput.type = "checkbox";
-        syncInput.setAttribute("role", "switch");
-        syncInput.className = "presence-sync-input";
-        syncInput.dataset.presenceId = session.id;
-        syncInput.checked = state.presenceTurnSync[session.id] !== false;
-        syncInput.setAttribute("aria-checked", String(syncInput.checked));
-        syncInput.setAttribute("aria-label", `${session.provider} 的對話鏡射進帳本`);
-        state.presenceTurnSync[session.id] = syncInput.checked;
-        syncInput.addEventListener("change", () => {
-          state.presenceTurnSync[session.id] = syncInput.checked;
-          syncInput.setAttribute("aria-checked", String(syncInput.checked));
-          for (const peer of document.querySelectorAll(`.presence-sync-input[data-presence-id="${CSS.escape(session.id)}"]`)) {
-            if (peer !== syncInput) {
-              peer.checked = syncInput.checked;
-              peer.setAttribute("aria-checked", String(syncInput.checked));
-            }
-          }
-        });
-        syncLabel.addEventListener("click", (event) => event.stopPropagation());
-        syncLabel.append(syncText, syncInput);
+        /* A statement, not a control. Connecting over MCP means the terminal's visible turns are
+           written to the ledger -- the owner's rule, with no switch to turn it off, so nothing here
+           is read when the join is sent (changePresenceMembership sends syncTurns: true outright).
+           The presence record carries no field saying whether the host CLI supports the hook, so
+           the line does not claim more than it knows. */
+        syncLabel = document.createElement("p");
+        syncLabel.className = "presence-sync-note";
+        syncLabel.textContent = "此終端的對話會鏡射進帳本";
       }
       const actions = seatActionButtons(session, listening);
       /*
@@ -1321,7 +1299,9 @@ async function changePresenceMembership(session, button) {
         ...(joining
           ? {
               collaborationMode: state.presenceJoinModes[session.id] || "room-first",
-              syncTurns: state.presenceTurnSync[session.id] !== false,
+              /* Always: joining over MCP writes the terminal's turns to the ledger, by the owner's
+                 rule. Not read from any control, because there is none. */
+              syncTurns: true,
             }
           : {}),
       }),
@@ -1330,7 +1310,6 @@ async function changePresenceMembership(session, button) {
       state.presences = [...(state.presences || []).filter((entry) => entry.id !== value.session.id), value.session];
       delete state.presenceLabels[session.id];
       delete state.presenceJoinModes[session.id];
-      delete state.presenceTurnSync[session.id];
       state.selectedPresenceId = "";
     } else if (!joining) {
       state.presences = (state.presences || []).filter((entry) => entry.id !== session.id);
