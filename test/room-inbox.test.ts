@@ -637,22 +637,53 @@ test("reply prepare is the linearization point and a later owner cancel cannot o
   assert.equal(ledger.getRoom("demo")?.messages, 3);
 });
 
-test("acknowledged lease expiry retries with a rotated token, then fails after bounded attempts", async (t) => {
+test("an acknowledged delivery is not taken back on a timer, however long the work runs", async (t) => {
   const { inbox, ledger, advance } = await fixture(t);
   const mention = ledger.append("demo", "you", "@codex1 任務");
   const queued = inbox.enqueue({ message: mention, targetPresenceId: firstSeat, targetDisplayName: "codex1" });
-  const tokens = new Set<string>();
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const claimed = await inbox.wait({ presenceId: firstSeat, roomId: "demo", timeoutMs: 100, ledger });
-    assert.ok(claimed);
-    tokens.add(claimed.leaseToken);
-    inbox.ack({ presenceId: firstSeat, deliveryId: claimed.id, leaseToken: claimed.leaseToken, phase: "read" });
-    advance(5_001);
-    const state = inbox.list("demo").find((item) => item.id === queued.id)?.state;
-    assert.equal(state, attempt === 2 ? "failed" : "queued");
-  }
-  assert.equal(tokens.size, 3);
-  assert.equal(inbox.retry(queued.id).state, "queued");
+  const claimed = await inbox.wait({ presenceId: firstSeat, roomId: "demo", timeoutMs: 100, ledger });
+  assert.ok(claimed);
+  inbox.ack({ presenceId: firstSeat, deliveryId: claimed.id, leaseToken: claimed.leaseToken, phase: "read" });
+  inbox.ack({ presenceId: firstSeat, deliveryId: claimed.id, leaseToken: claimed.leaseToken, phase: "working" });
+
+  /* Two hundred times the lease. The measured case was four minutes against sixty seconds. */
+  advance(1_000_000);
+  const held = inbox.get(queued.id);
+  assert.equal(held?.state, "working", "acknowledged work must still be held by the seat doing it");
+  assert.equal(held?.attempt, 1, "and no requeue means no second attempt was spent");
+
+  /* The point of holding it: the reply still lands, with the token the seat was given. */
+  const finished = await inbox.reply({
+    presenceId: firstSeat,
+    deliveryId: claimed.id,
+    leaseToken: claimed.leaseToken,
+    text: "做完了",
+    ledger,
+    author: "codex1",
+  });
+  assert.equal(finished.delivery.state, "replied");
+});
+
+test("a delivery nobody acknowledged is still handed back, and still without spending an attempt", async (t) => {
+  const { inbox, ledger, advance } = await fixture(t);
+  const mention = ledger.append("demo", "you", "@codex1 任務");
+  const queued = inbox.enqueue({ message: mention, targetPresenceId: firstSeat, targetDisplayName: "codex1" });
+
+  /*
+   * The other half of the same day: a seat took the work and its turn ended before the tool ever
+   * ran. Nothing it did proves it is coming back, so this timer is the only thing that returns the
+   * task -- and it must stay, or the work waits on a seat that will never answer.
+   */
+  const claimed = await inbox.wait({ presenceId: firstSeat, roomId: "demo", timeoutMs: 100, ledger });
+  assert.ok(claimed);
+  advance(5_001);
+  const returned = inbox.get(queued.id);
+  assert.equal(returned?.state, "queued", "unacknowledged work must go back to the queue");
+  assert.equal(returned?.attempt, 0, "a machine requeue must not spend one of the seat's three tries");
+
+  /* And it is genuinely back on offer: the next wait hands out the same delivery. */
+  const again = await inbox.wait({ presenceId: firstSeat, roomId: "demo", timeoutMs: 100, ledger });
+  assert.equal(again?.id, queued.id);
 });
 
 test("disconnect before MCP acknowledgement does not consume the retry budget", async (t) => {

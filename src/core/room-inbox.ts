@@ -1533,6 +1533,28 @@ export class RoomInboxStore {
     }
   }
 
+  /*
+   * Whether this row's lease is a DEADLINE, as opposed to only an ownership token.
+   *
+   * One predicate rather than two conditions, because the two places that ask -- the sweep that
+   * hands work back and the check that admits a reply -- disagreed once already: narrowing the
+   * sweep alone left work held by its seat and its reply refused as DELIVERY_LEASE_EXPIRED, which
+   * is the worst of both answers. Whatever this returns, both paths now say the same thing.
+   *
+   * `delivered` is a deadline: nothing the seat did proves it will come back, so the timer is the
+   * only thing that returns the task. A prepared reply is a deadline too -- that window is about a
+   * commit whose outcome is unknown, not about how long the work takes.
+   *
+   * `read` and `working` are not. They were sent by a live tool call, and after that the elapsed
+   * time says nothing about whether the seat is still there: a seat waiting on ANOTHER seat's reply
+   * is doing exactly what it should, for as long as that chain takes. Death is covered where it was
+   * always covered -- `#reconcileUnavailableDeliveries` fails every delivery whose target presence
+   * is gone, in all four states, on the next `roomView`.
+   */
+  static #leaseIsDeadline(row: DeliveryRow): boolean {
+    return row.state === "delivered" || row.reply_key !== null;
+  }
+
   #authorizedLease(input: { presenceId: string; deliveryId: string; leaseToken: string }): DeliveryRow {
     const presenceId = validId(input.presenceId, "INVALID_PRESENCE_ID");
     const row = this.#row(validId(input.deliveryId, "INVALID_DELIVERY_ID"));
@@ -1541,7 +1563,8 @@ export class RoomInboxStore {
     this.#assertRow(row);
     if (row.target_presence_id !== presenceId) throw new Error("DELIVERY_ACTOR_MISMATCH");
     if (row.lease_token === null || !equalHash(row.lease_token, tokenHash(leaseToken))) throw new Error("DELIVERY_LEASE_MISMATCH");
-    if (row.lease_expires_at_ms !== null && row.lease_expires_at_ms <= this.#now()) throw new Error("DELIVERY_LEASE_EXPIRED");
+    if (RoomInboxStore.#leaseIsDeadline(row) && row.lease_expires_at_ms !== null
+      && row.lease_expires_at_ms <= this.#now()) throw new Error("DELIVERY_LEASE_EXPIRED");
     return row;
   }
 
@@ -1562,7 +1585,35 @@ export class RoomInboxStore {
 
   #sweepRows(now: number): void {
     this.#db.prepare("DELETE FROM room_wait_leases WHERE expires_at_ms <= ?").run(now - WAIT_LEASE_GC_MS);
-    const expired = this.#db.prepare("SELECT * FROM room_deliveries WHERE state IN ('delivered','read','working') AND lease_expires_at_ms <= ?").all(now) as unknown as DeliveryRow[];
+    /*
+     * Only work nobody has acknowledged is retired on a timer, and only the reply-commit window
+     * beside it.
+     *
+     * `delivered` and `working` used to share one deadline, and one number cannot be right for
+     * both: they carry different evidence that the seat will come back. `delivered` is what the
+     * SERVER knows -- the work was handed out -- and a seat whose turn ended without ever reaching
+     * the tool leaves it sitting there while its process stays alive and its presence stays healthy,
+     * so nothing but this timer ever hands the work back. `working` is what the AGENT said, and it
+     * had to be running to say it.
+     *
+     * Both failures were measured on the same day. A codex seat took #1076, its turn ended before
+     * the work arrived, and the timer correctly requeued it -- that is the event `silentRequeues`
+     * exists to announce. Hours later a claude seat acked `working`, spent four minutes waiting for
+     * a REPLY from another seat (an ordinary hand-off chain, whose length it does not control), and
+     * the same timer took the work away underneath it; its `room_reply` was then refused with
+     * DELIVERY_LEASE_MISMATCH after the work was already done.
+     *
+     * Death is not what this covers, and was never covered here: `#reconcileUnavailableDeliveries`
+     * fails every delivery in `queued`, `delivered`, `read` and `working` whose target presence is
+     * gone, on the next `roomView`. That is the liveness mechanism. This timer was a second, much
+     * shorter deadline layered on top of it, and after an acknowledgement it has nothing left to
+     * protect -- only work to lose.
+     *
+     * `read` is grouped with `working` deliberately: it is also an acknowledgement, sent by the same
+     * live tool call, and a seat that says "I have it" has given the same proof.
+     */
+    const held = this.#db.prepare("SELECT * FROM room_deliveries WHERE state IN ('delivered','read','working') AND lease_expires_at_ms <= ?").all(now) as unknown as DeliveryRow[];
+    const expired = held.filter((row) => RoomInboxStore.#leaseIsDeadline(row));
     for (const row of expired) {
       this.#assertRow(row);
       if (row.reply_key !== null) {
