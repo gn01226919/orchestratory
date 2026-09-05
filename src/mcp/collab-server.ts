@@ -62,6 +62,24 @@ const DEFAULT_JOIN_APPROVAL_WAIT_MS = 30_000;
  * already filled in, so `timeoutMs === undefined` never happened outside a test. A seat went deaf
  * after four hours and still looked present, which is the defect this whole item exists to fix.
  */
+/*
+ * There is deliberately no default bound here, and that is a decision this file already made once.
+ *
+ * A forty-five second default was written and then withdrawn on reading ADR-027's 2026-09-02
+ * amendment, which removed a four-hour one after five review rounds. Its finding was the opposite
+ * of the intuition: a bound is not a protection, it is "the single largest cause of work sent with
+ * nobody answering". When the wait returns on a timer the seat stops listening while still showing
+ * as online, and MCP over stdio gives the server no way to wake a client that is not asking -- so
+ * the seat is unreachable until it happens to wait again.
+ *
+ * The failure that prompted the retry is real, but it is not a duration problem. Round four of that
+ * same ADR wrote the residual risk down exactly: a client that times out silently WITHOUT sending
+ * `notifications/cancelled` is invisible here, so the wait keeps renewing and work is handed to a
+ * turn that has already ended. Shortening the wait does not fix that; it only changes which of two
+ * failures happens. The fix is to stop inferring that the caller is present and require it to show
+ * that it is -- see the two-phase handover on `room_ack(read)`.
+ */
+
 const MAX_STANDBY_WAIT_MS = 4 * 60 * 60 * 1_000;
 const DEFAULT_PEER_REPLY_WAIT_MS = 30_000;
 const MAX_MCP_INFLIGHT_REQUESTS = 16;
@@ -1440,9 +1458,38 @@ export class CollabToolBroker {
         ledger: this.#requireLedger(),
         ...(options.signal ? { signal: options.signal } : {}),
       });
+    /*
+     * The first field is an instruction, not data, and it is first on purpose.
+     *
+     * The previous shape was `{ timeout, standbyApproved, actor, delivery }` -- a status object. A
+     * model that receives a status object reasonably reports the status and stops, which is exactly
+     * what happened: a seat was handed real work and answered by announcing that it was listening.
+     * Work arriving has to read as work to do, in the imperative, before any of the fields it is
+     * carried in.
+     */
     return JSON.stringify(delivery
-      ? { timeout: false, standbyApproved: true, actor, delivery }
-      : { timeout: true, phase: "standby", standbyApproved: Boolean(collaboration), actor, room: roomId });
+      ? {
+        doThisNow: [
+          "這是交給你的工作，不是狀態回報。你的回合還沒結束，不要在這裡停下來。",
+          "依序：room_ack(read) → room_ack(working) → 實際完成工作 → room_reply（或 room_fail）→ room_wait 重新待命。",
+          "工作內容在 delivery.text。room_ack(read) 必須在 delivery.leaseExpiresAtMs 之前送出，否則這筆會退回佇列。",
+        ],
+        timeout: false,
+        standbyApproved: true,
+        actor,
+        delivery,
+      }
+      : {
+        doThisNow: [
+          "這段等待期間沒有工作進來。你仍然在待命，但這次呼叫已經結束。",
+          "立刻再呼叫一次 room_wait 繼續待命。停在這裡等於離開待命，之後送來的工作沒有人接得到。",
+        ],
+        timeout: true,
+        phase: "standby",
+        standbyApproved: Boolean(collaboration),
+        actor,
+        room: roomId,
+      });
   }
 
   #roomAck(input: JsonObject): string {

@@ -1275,6 +1275,35 @@ export class RoomInboxStore {
    * Nothing is deleted. The row keeps its text, its thread, its timestamps and its hash chain; only
    * the state moves, so "what did we ask it to do last Tuesday" still has an answer.
    */
+  /**
+   * Deliveries a seat took and then never acknowledged, read from the event log rather than counted.
+   *
+   * The event is already written -- `delivered → queued` with detail `lease-expired` -- and nothing
+   * ever looked at it. That is the whole defect: the work goes back in the queue correctly, the
+   * attempt is deliberately not consumed (a machine requeue must not spend a seat's three tries),
+   * and no observer is told, so "sent and claimed" and "sent and dropped" are indistinguishable from
+   * outside. A seat can bounce the same task forever while the room shows nothing.
+   *
+   * `from_state = 'delivered'` is the whole condition: a row that reached `read` or `working` was
+   * being worked on and its lease lapsing is a different story with a different remedy.
+   */
+  silentRequeues(roomId: string, sinceMs = 0): Array<{ eventId: number; atMs: number; delivery: RoomDelivery }> {
+    const room = validRoom(roomId);
+    const rows = this.#db.prepare(`
+      SELECT e.id AS event_id, e.at_ms AS at_ms, d.*
+      FROM room_delivery_events e
+      JOIN room_deliveries d ON d.id = e.delivery_id
+      WHERE d.room_id = ? AND e.detail = 'lease-expired' AND e.from_state = 'delivered' AND e.at_ms > ?
+      ORDER BY e.id
+      LIMIT 200
+    `).all(room, sinceMs) as unknown as Array<DeliveryRow & { event_id: number; at_ms: number }>;
+    return rows.map((row) => ({
+      eventId: Number(row.event_id),
+      atMs: Number(row.at_ms),
+      delivery: publicDelivery(row),
+    }));
+  }
+
   expireStaleQueued(roomId: string, olderThanMs: number): RoomDelivery[] {
     const room = validRoom(roomId);
     if (!Number.isSafeInteger(olderThanMs) || olderThanMs < 60_000) {

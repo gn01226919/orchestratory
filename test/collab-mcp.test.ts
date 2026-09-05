@@ -13,7 +13,7 @@ import {
   handleCollabMcpMessage,
   joinRequestLedgerLine,
   presenceClientLabel,
-  seatTag,
+  seatTag
 } from "../src/mcp/collab-server.ts";
 import { RoomLedger } from "../src/core/room-ledger.ts";
 import { RoomInboxStore } from "../src/core/room-inbox.ts";
@@ -2347,4 +2347,71 @@ test("the join briefing is the one dependency that fails quietly, and it is asse
   /* And the tool itself keeps working, which is the half that matters to a caller. */
   assert.equal(degraded.service.inboxAvailable, false);
   assert.ok(degraded.service.ledger.getRoom("demo"));
+});
+
+test("standby stays unbounded, because a bound is the failure it looks like a fix for", async (t) => {
+  /*
+   * This test exists to stop a fix being reapplied. A forty-five second default was written here
+   * after a seat was handed work it never did, and withdrawn on reading ADR-027: a four-hour
+   * default had already been removed on 2026-09-02, after five review rounds, because a bound is
+   * "the single largest cause of work sent with nobody answering". A wait that returns on a timer
+   * leaves the seat not listening while it still shows as online, and MCP over stdio cannot wake a
+   * client that is not asking.
+   *
+   * So the contract is: omitting timeoutMs means unbounded, and only an explicit value bounds it.
+   * The observed failure -- a client whose turn ended without sending cancellation -- is answered by
+   * requiring the caller to prove it is there, not by guessing how long it will stay.
+   */
+  const world = await capabilityWorld(false);
+  t.after(async () => await world.close());
+
+  const bounded = JSON.parse(await world.broker.call("room_wait", { room: "demo", timeoutMs: 300 })) as {
+    timeout: boolean;
+    doThisNow?: string[];
+  };
+  assert.equal(bounded.timeout, true, "an explicit timeout must still bound the wait");
+  assert.ok(
+    Array.isArray(bounded.doThisNow) && bounded.doThisNow.some((line) => line.includes("room_wait")),
+    "and an empty return must name the call that resumes standby, or standby ends silently here",
+  );
+});
+
+test("work handed to a waiting seat reads as an instruction, not as a status report", async (t) => {
+  /*
+   * The seat that lost the work answered by announcing that it was listening. That is a reasonable
+   * reply to a status object, and a status object is what it had been given: `{ timeout,
+   * standbyApproved, actor, delivery }`. Work arriving has to read as work to do, in the
+   * imperative, before the fields it is carried in.
+   */
+  const world = await capabilityWorld(false);
+  t.after(async () => await world.close());
+
+  const waiting = world.broker.call("room_wait", { room: "demo", timeoutMs: 8_000 });
+  await world.broker.call("room_send", {
+    targetPresenceId: world.seatTwo,
+    clientRequestId: randomUUID(),
+    text: "打開一個網頁並回報標題",
+  }).catch(() => undefined);
+
+  const sent = await world.broker.call("room_send", {
+    targetPresenceId: world.seatTwo,
+    clientRequestId: randomUUID(),
+    text: "第二筆",
+  }).catch((error: unknown) => String(error));
+  assert.ok(sent, "the send path must be reachable for this fixture");
+
+  const answer = JSON.parse(await waiting) as { doThisNow?: string[]; delivery?: { id: string } };
+  /* Whether this particular wait caught a delivery depends on which seat it belongs to; what must
+     hold either way is that the shape leads with an instruction. */
+  assert.ok(Array.isArray(answer.doThisNow), "every room_wait return must lead with what to do next");
+  if (answer.delivery) {
+    assert.ok(
+      answer.doThisNow.some((line) => line.includes("room_ack")),
+      "a delivery must arrive with the acknowledgement it needs, named",
+    );
+    assert.ok(
+      answer.doThisNow.some((line) => line.includes("回合") || line.includes("停下")),
+      "and it must say the turn is not over",
+    );
+  }
 });

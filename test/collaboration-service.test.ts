@@ -1797,3 +1797,69 @@ test("the real JSON-RPC error builder carries no part of what the failure said",
   /* And the cause is still reachable in-process, which is the point of keeping it. */
   assert.equal(wrapped.cause, original);
 });
+
+test("a task taken and dropped is said out loud, once per drop", async (t) => {
+  /*
+   * The fourth silent failure of the night, and the one that cost real work. A seat claimed a task
+   * five milliseconds after it was sent, its own turn had already ended, and sixty seconds later the
+   * lease lapsed and the task went back to the queue. Every layer reported success: the send said it
+   * went straight to the seat, the wait returned, the store recorded the handback. Nobody was told,
+   * so the room could not tell "taken" from "taken and abandoned".
+   *
+   * Time is moved with the injectable inbox clock rather than by waiting, and rather than by calling
+   * some test-only helper -- an earlier draft of this test called `expireLeasesForTest?.()`, which
+   * does not exist, so the optional call did nothing and the test would have passed while measuring
+   * nothing at all.
+   */
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-requeue-"));
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+  let clock = Date.now();
+  const service = new CollaborationService(data, {
+    presence: { leaseMs: 120_000 },
+    inbox: { now: () => clock },
+  });
+  t.after(() => service.close());
+
+  const workspace = data;
+  const room = service.ledger.createRoom("demo", workspace);
+  const sender = service.registerExternal({ provider: "claude", workspace, hostPid: 5_101 });
+  const target = service.registerExternal({ provider: "codex", workspace, hostPid: 5_102 });
+  for (const [seat, label] of [[sender, "sender"], [target, "target"]] as const) {
+    service.requestExternalJoin(seat.id, room.id, workspace);
+    service.approveExternalJoin({
+      presenceId: seat.id, roomId: room.id, workspace,
+      label, collaborationMode: "room-first", syncTurns: true,
+    });
+    service.requestExternalStandby(seat.id, room.id, workspace);
+    service.approveExternalStandby(seat.id, room.id, workspace);
+  }
+
+  const sent = service.postBetweenExternals({
+    roomId: room.id, workspace,
+    sourcePresenceId: sender.id, targetPresenceId: target.id,
+    clientRequestId: randomUUID(), text: "打開網頁回報標題",
+  });
+
+  /* The target takes it and never acknowledges -- the exact shape of the observed failure. */
+  const taken = await service.waitExternal({ presenceId: target.id, roomId: room.id, timeoutMs: 2_000 });
+  assert.ok(taken, "the fixture must actually hand the work out, or it proves nothing");
+  assert.equal(taken.id, sent.delivery.id);
+
+  /* Sixty seconds of nothing, which is what the lease is for. */
+  clock += 120_000;
+  const before = service.ledger.getRoom(room.id)?.messages ?? 0;
+  service.roomView(room.id, workspace);
+  const announced = service.ledger.listAfter(room.id, before)
+    .filter((message) => message.text.includes("被取走後沒有回應"));
+  assert.equal(announced.length, 1, "the drop must be announced exactly once");
+  assert.ok(announced[0]!.text.includes(`#${sent.delivery.ledgerSeq}`), "and must name which task");
+
+  const beforeSecond = service.ledger.getRoom(room.id)?.messages ?? 0;
+  service.roomView(room.id, workspace);
+  assert.equal(
+    service.ledger.listAfter(room.id, beforeSecond)
+      .filter((message) => message.text.includes("被取走後沒有回應")).length,
+    0,
+    "a second look must not say it again",
+  );
+});

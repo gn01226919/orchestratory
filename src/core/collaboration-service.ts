@@ -402,6 +402,7 @@ export class CollaborationService {
     this.#assertRoomWorkspace(roomId, workspace);
     this.#reconcileUnavailableDeliveries(roomId, workspace, "SEAT_OFFLINE");
     this.#expireStaleDeliveries(roomId);
+    this.#announceSilentRequeues(roomId);
     const sessions = this.presence.list(workspace, roomId);
     return {
       sessions: sessions
@@ -1732,6 +1733,45 @@ export class CollaborationService {
    * something whose whole point is that it stopped being urgent -- but it does mean a room nobody
    * opens keeps its backlog until someone does.
    */
+  /*
+   * Work that was taken and then dropped, said out loud.
+   *
+   * The store has always recorded it -- `delivered → queued` with detail `lease-expired` -- and
+   * nothing read the record, so from the room's side "a seat took this" and "a seat took this and
+   * abandoned it" looked identical. The observed case: a terminal claimed a task five milliseconds
+   * after it was sent, its own turn had already ended, and sixty seconds later the task went back to
+   * the queue. The sender was told the delivery went straight to it. Both statements were true, and
+   * together they were misleading.
+   *
+   * Announced rather than fixed, deliberately. The requeue itself is correct -- the task is still
+   * there for whoever waits next, and the attempt is not consumed because a machine handback must
+   * not spend a seat's three tries. What was missing was anybody knowing. Idempotent on the event
+   * id, so a task that bounces twice says so twice and a room reopened ten times says it once.
+   */
+  #announceSilentRequeues(roomId: string): void {
+    let requeues: ReturnType<RoomInboxStore["silentRequeues"]>;
+    try {
+      requeues = this.inbox.silentRequeues(roomId);
+    } catch {
+      /* Reporting a dropped task must never be the reason a room fails to open. */
+      return;
+    }
+    for (const { eventId, delivery } of requeues) {
+      try {
+        this.ledger.appendSystemIdempotent(
+          roomId,
+          `↩︎ #${delivery.ledgerSeq} 給 ${delivery.targetDisplayName} 的交辦被取走後沒有回應，已退回佇列。`
+          + "它仍在等下一個開著 room_wait 的席位接手；重試次數沒有被消耗。"
+          + "常見原因是那個終端的回合在工作送達前就結束了。",
+          `delivery-requeued:${eventId}`,
+        );
+      } catch {
+        /* The requeue is already recorded in the event log; a missing courtesy line must not undo
+           it, and must not stop the rest of the batch from being announced. */
+      }
+    }
+  }
+
   #expireStaleDeliveries(roomId: string): void {
     let expired: RoomDelivery[];
     try {
