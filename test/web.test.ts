@@ -1871,6 +1871,7 @@ test("Web dashboard enforces session, CSRF, origin and Host checks", async (t) =
   assert.match(roomHtml, /id="merge-outcome-nav-status"[^>]*aria-live="polite"/u);
   assert.match(roomHtml, /id="merge-history-merged-list"/u);
   assert.match(roomHtml, /id="merge-history-review-list"/u);
+  assert.match(roomHtml, /id="merge-history-closed-list"/u);
   assert.match(roomHtml, /id="merge-history-unpromoted-list"/u);
   assert.match(roomHtml, /DURABLE OUTCOME ARCHIVE/u);
   assert.match(roomHtml, /關閉紀錄</u);
@@ -2591,15 +2592,17 @@ test("Merge outcome archive counts only verified success as merged", async () =>
     /(?:\b(?:document|window|navigator|localStorage|state)\s*\.|\b(?:fetch|byId|api|setInterval|setTimeout|require|import)\s*\()/u,
   );
   const classifier = runInNewContext(
-    `${block}\n({ mergeHistorySucceeded, mergeHistoryBuckets });`,
+    `${block}\n({ mergeHistorySucceeded, mergeHistoryBuckets, mergeHistoryGroupCounts });`,
     Object.create(null) as object,
     { timeout: 2_000 },
   ) as {
     mergeHistorySucceeded: (entry: unknown) => boolean;
     mergeHistoryBuckets: (promotions: unknown, approvals: unknown) => {
       mergedPromotions: unknown[]; reviewPromotions: unknown[];
-      notStartedApprovals: unknown[]; reviewApprovals: unknown[]; otherCount: number;
+      notStartedApprovals: unknown[]; closedApprovals: unknown[]; invalidatedApprovals: unknown[];
+      reviewApprovals: unknown[]; otherCount: number;
     };
+    mergeHistoryGroupCounts: (buckets: unknown) => Record<string, number>;
   };
   const verified = {
     id: "verified", state: "applied", mainHeadAfter: "a".repeat(40),
@@ -2635,8 +2638,18 @@ test("Merge outcome archive counts only verified success as merged", async () =>
   assert.deepEqual(Array.from(buckets.mergedPromotions), [verified]);
   assert.deepEqual(Array.from(buckets.reviewPromotions), [missingObservation, missingHead, rolledBack, unattested]);
   assert.deepEqual(Array.from(buckets.notStartedApprovals), approvals.slice(0, 3));
+  // Lapsed on its own evidence: a window that ran out or a person who said no is sorted as 已失效
+  // without asking anyone; a voided binding is the one closure that never got in at all.
+  assert.deepEqual(Array.from(buckets.closedApprovals), approvals.slice(0, 2));
+  assert.deepEqual(Array.from(buckets.invalidatedApprovals), approvals.slice(2, 3));
   assert.deepEqual(Array.from(buckets.reviewApprovals), approvals.slice(3));
   assert.equal(buckets.otherCount, 9);
+  // The four numbers every surface shows come from one place.
+  assert.deepEqual(
+    { ...classifier.mergeHistoryGroupCounts(buckets) },
+    { merged: 1, review: 6, closed: 2, unpromoted: 1 },
+  );
+  assert.deepEqual({ ...classifier.mergeHistoryGroupCounts(undefined) }, { merged: 0, review: 0, closed: 0, unpromoted: 0 });
   const everyRow = [
     ...buckets.mergedPromotions,
     ...buckets.reviewPromotions,
@@ -3895,7 +3908,7 @@ test("closing the records panel leaves the open approval gate exactly as the own
   );
   // What closing must do.
   assert.equal(at("merge-history").hidden, true);
-  assert.equal(at("merge-approval-history-summary").textContent, "已併入 1 · 需檢查 1 · 未進入 1");
+  assert.equal(at("merge-approval-history-summary").textContent, "已併入 1 · 等你確認 1 · 已失效 1 · 未進入 0");
   assert.deepEqual(focusLog, ["merge-approval-history-open"], "focus returns to the control that opened the panel");
   assert.equal(state.mergeHistoryReturnFocus, null);
   // What closing must NOT do: the open approval layer is left exactly as the owner had it.

@@ -358,27 +358,27 @@
           <button id="merge-history-close" type="button" aria-label="關閉併入紀錄">×</button>
         </header>
         <p class="merge-history-note">這是不會被「關閉」清除的 durable audit 檔案，不是待辦清單。只有 <code>applied</code>、觀察到授權 merge commit，且讀到 main HEAD after 才會進入「已併入」。</p>
+        <div class="merge-history-batch">
+          <label><input id="merge-history-select-all" type="checkbox"> 全選可重新發起的</label>
+          <button id="merge-history-retry-selected" type="button" disabled>↻ 重新發起選取的核准</button>
+          <span id="merge-history-batch-note" class="merge-history-batch-note">只有草稿版仍在等併入的紀錄才有勾選框；同一個草稿版一次只能有一筆待答的請求，重複的會被跳過。舊紀錄仍永久保留。</span>
+        </div>
         <div class="merge-history-sections" aria-live="polite">
           <section id="merge-history-merged-section" class="merge-history-section is-merged" tabindex="-1" aria-labelledby="merge-history-merged-title">
             <header><span><b id="merge-history-merged-title">已併入</b><small>已驗證的 main 事實</small></span><strong id="merge-history-merged-total">0</strong></header>
             <div id="merge-history-merged-list" class="merge-history-list"></div>
           </section>
           <section id="merge-history-review-section" class="merge-history-section is-review" tabindex="-1" aria-labelledby="merge-history-review-title">
-            <header><span><b id="merge-history-review-title">需要檢查</b><small>重新讀取或核對還原點；絕不重複 apply</small></span><strong id="merge-history-review-total">0</strong></header>
+            <header><span><b id="merge-history-review-title">等你確認</b><small>系統自己無法下結論的紀錄；絕不重複 apply</small></span><strong id="merge-history-review-total">0</strong></header>
             <div id="merge-history-review-list" class="merge-history-list"></div>
           </section>
-          <section id="merge-history-unpromoted-section" class="merge-history-section is-unpromoted" tabindex="-1" aria-labelledby="merge-history-unpromoted-title">
-            <header><span><b id="merge-history-unpromoted-title">未進入併入 · 可重新發起</b><small>草稿版仍在等併入；重新發起會依 live main 重算預覽</small></span><strong id="merge-history-unpromoted-total">0</strong></header>
-            <div class="merge-history-batch">
-              <label><input id="merge-history-select-all" type="checkbox"> 全選</label>
-              <button id="merge-history-retry-selected" type="button" disabled>↻ 重新發起選取的核准</button>
-              <span id="merge-history-batch-note" class="merge-history-batch-note">同一個草稿版一次只能有一筆待答的請求，重複的會被跳過。</span>
-            </div>
-            <div id="merge-history-unpromoted-list" class="merge-history-list"></div>
+          <section id="merge-history-closed-section" class="merge-history-section is-closed" tabindex="-1" aria-labelledby="merge-history-closed-title">
+            <header><span><b id="merge-history-closed-title">已失效</b><small>逾時或被拒絕，系統自動歸類；每一筆都寫明原因</small></span><strong id="merge-history-closed-total">0</strong></header>
+            <div id="merge-history-closed-list" class="merge-history-list"></div>
           </section>
-          <section id="merge-history-blocked-section" class="merge-history-section is-blocked" tabindex="-1" aria-labelledby="merge-history-blocked-title">
-            <header><span><b id="merge-history-blocked-title">未進入併入 · 不能重新發起</b><small>每一筆都寫明理由；這裡沒有按鈕是刻意的</small></span><strong id="merge-history-blocked-total">0</strong></header>
-            <div id="merge-history-blocked-list" class="merge-history-list"></div>
+          <section id="merge-history-unpromoted-section" class="merge-history-section is-unpromoted" tabindex="-1" aria-labelledby="merge-history-unpromoted-title">
+            <header><span><b id="merge-history-unpromoted-title">未進入</b><small>核准在執行前被作廢（main 或快照已改變），從未進入併入</small></span><strong id="merge-history-unpromoted-total">0</strong></header>
+            <div id="merge-history-unpromoted-list" class="merge-history-list"></div>
           </section>
         </div>
         <p id="merge-history-status" class="workspace-onboarding-status" aria-live="polite"></p>

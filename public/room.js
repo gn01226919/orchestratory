@@ -6199,6 +6199,8 @@ function mergeHistoryBuckets(promotions, unpromotedApprovals) {
   const mergedPromotions = [];
   const reviewPromotions = [];
   const notStartedApprovals = [];
+  const closedApprovals = [];
+  const invalidatedApprovals = [];
   const retryableApprovals = [];
   const blockedApprovals = [];
   const reviewApprovals = [];
@@ -6208,6 +6210,12 @@ function mergeHistoryBuckets(promotions, unpromotedApprovals) {
   for (const approval of Array.isArray(unpromotedApprovals) ? unpromotedApprovals : []) {
     if (["rejected", "expired", "invalidated"].includes(approval?.state)) {
       notStartedApprovals.push(approval);
+      /* The record's own state decides the group, not whether a button can follow.  `expired` and
+         `rejected` each carry an ending the system saw for itself -- a window that ran out, or a
+         person who said no -- so they are sorted as lapsed without asking anyone.  `invalidated` is
+         the one closure with neither: the product voided the question because main or the snapshot
+         moved first, and the work simply never got in. */
+      (approval.state === "invalidated" ? invalidatedApprovals : closedApprovals).push(approval);
       (approval?.retry?.eligible === true ? retryableApprovals : blockedApprovals).push(approval);
     } else {
       /* approved/consumed/malformed without a promotion row is not a closed non-event. */
@@ -6218,10 +6226,25 @@ function mergeHistoryBuckets(promotions, unpromotedApprovals) {
     mergedPromotions,
     reviewPromotions,
     notStartedApprovals,
+    closedApprovals,
+    invalidatedApprovals,
     retryableApprovals,
     blockedApprovals,
     reviewApprovals,
     otherCount: reviewPromotions.length + reviewApprovals.length + notStartedApprovals.length,
+  };
+}
+
+/*
+ * The four numbers every surface shows -- section badges, the side navigation, the one-line summary
+ * beside the approval dialog -- come from here and nowhere else, so they cannot disagree.
+ */
+function mergeHistoryGroupCounts(buckets) {
+  return {
+    merged: buckets?.mergedPromotions?.length || 0,
+    review: (buckets?.reviewPromotions?.length || 0) + (buckets?.reviewApprovals?.length || 0),
+    closed: buckets?.closedApprovals?.length || 0,
+    unpromoted: buckets?.invalidatedApprovals?.length || 0,
   };
 }
 /* @pure-end merge-history-buckets */
@@ -6273,7 +6296,7 @@ function renderMergeHistoryBadge() {
   recordsButton.setAttribute(
     "aria-label",
     requiresReview
-      ? "開啟併入紀錄；有需要人工檢查的結果，不是已完成任務"
+      ? "開啟併入紀錄；有等你確認的結果，不是已完成任務"
       : "開啟併入紀錄；durable audit records，不是待辦",
   );
   recordsButton.disabled = false;
@@ -6470,9 +6493,18 @@ function renderApprovalHistoryEntry(host, approval, reviewRequired = false) {
   item.className = "merge-history-entry";
   const header = document.createElement("header");
   const title = document.createElement("strong");
+  /* The title says what happened to the record in plain words; the state tag keeps the raw word.
+     A lapsed approval is not a failure of anyone's -- the window closed, or someone said no -- and
+     the reason line underneath is the sentence that makes the group self-explanatory. */
   title.textContent = reviewRequired
     ? "核准與 promotion 關聯不完整"
-    : "未進入併入";
+    : approval?.state === "expired"
+      ? "已失效：逾時"
+      : approval?.state === "rejected"
+        ? "已失效：被拒絕"
+        : approval?.state === "invalidated"
+          ? "未進入併入：核准已作廢"
+          : "未進入併入";
   const stateTag = document.createElement("span");
   stateTag.className = reviewRequired ? "merge-history-state" : "merge-history-state is-closed";
   stateTag.textContent = String(approval?.state || "unavailable");
@@ -6484,7 +6516,7 @@ function renderApprovalHistoryEntry(host, approval, reviewRequired = false) {
   historyFact(facts, "Candidate HEAD", approval?.candidateHead || approval?.binding?.candidateHead);
   historyFact(facts, "main HEAD bound", approval?.mainHead || approval?.binding?.mainHead);
   historyFact(facts, "Recovery ref", approval?.binding?.recoveryRef);
-  historyFact(facts, "原因", mergeApprovalClosedReason(approval));
+  historyFact(facts, "原因", mergeApprovalClosedReason(approval) || (reviewRequired ? "" : "紀錄沒有寫下原因。"));
   historyCopyable(facts, "草稿區路徑", approval?.binding?.candidatePath);
   item.append(header, facts);
   if (reviewRequired) {
@@ -6598,34 +6630,37 @@ async function retrySelectedMergeApprovals() {
 function renderMergeHistory() {
   const mergedHost = byId("merge-history-merged-list");
   const reviewHost = byId("merge-history-review-list");
+  const closedHost = byId("merge-history-closed-list");
   const unpromotedHost = byId("merge-history-unpromoted-list");
-  const blockedHost = byId("merge-history-blocked-list");
-  if (!mergedHost || !reviewHost || !unpromotedHost || !blockedHost) return;
+  if (!mergedHost || !reviewHost || !closedHost || !unpromotedHost) return;
   mergedHost.textContent = "";
   reviewHost.textContent = "";
+  closedHost.textContent = "";
   unpromotedHost.textContent = "";
-  blockedHost.textContent = "";
   const buckets = mergeHistoryBuckets(state.mergeHistory, state.mergeUnpromotedApprovals);
-  byId("merge-history-merged-total").textContent = String(buckets.mergedPromotions.length);
-  const reviewCount = buckets.reviewPromotions.length + buckets.reviewApprovals.length;
-  byId("merge-history-review-total").textContent = String(reviewCount);
-  byId("merge-history-unpromoted-total").textContent = String(buckets.retryableApprovals.length);
-  byId("merge-history-blocked-total").textContent = String(buckets.blockedApprovals.length);
+  const counts = mergeHistoryGroupCounts(buckets);
+  for (const key of ["merged", "review", "closed", "unpromoted"]) {
+    const total = byId(`merge-history-${key}-total`);
+    if (total) total.textContent = String(counts[key]);
+  }
   for (const entry of buckets.mergedPromotions) renderPromotionHistoryEntry(mergedHost, entry);
   for (const entry of buckets.reviewPromotions) renderPromotionHistoryEntry(reviewHost, entry);
   for (const approval of buckets.reviewApprovals) renderApprovalHistoryEntry(reviewHost, approval, true);
-  for (const approval of buckets.retryableApprovals) renderApprovalHistoryEntry(unpromotedHost, approval);
-  for (const approval of buckets.blockedApprovals) renderApprovalHistoryEntry(blockedHost, approval);
+  for (const approval of buckets.closedApprovals) renderApprovalHistoryEntry(closedHost, approval);
+  for (const approval of buckets.invalidatedApprovals) renderApprovalHistoryEntry(unpromotedHost, approval);
   updateMergeRetrySelection();
-  if (!buckets.mergedPromotions.length) {
+  if (!counts.merged) {
     mergeHistoryEmpty(mergedHost, "尚無已驗證的併入。");
   }
-  if (!reviewCount) {
-    mergeHistoryEmpty(reviewHost, "目前沒有需人工檢查的 promotion 或核准。");
+  if (!counts.review) {
+    mergeHistoryEmpty(reviewHost, "目前沒有等你確認的 promotion 或核准。");
   }
   renderUnattestedAcknowledgement(reviewHost, mergeHistoryUnattested(state.mergeHistory));
-  if (!buckets.notStartedApprovals.length) {
-    mergeHistoryEmpty(unpromotedHost, "目前沒有已結案但未開始併入的核准。");
+  if (!counts.closed) {
+    mergeHistoryEmpty(closedHost, "目前沒有逾時或被拒絕的核准。");
+  }
+  if (!counts.unpromoted) {
+    mergeHistoryEmpty(unpromotedHost, "目前沒有被作廢而未進入併入的核准。");
   }
 }
 
@@ -7272,8 +7307,8 @@ function renderMergeApprovalHistorySummary() {
   const historySummary = byId("merge-approval-history-summary");
   if (!historySummary) return;
   if (state.mergeHistoryLoaded && state.mergeHistoryRoom === state.room) {
-    const buckets = mergeHistoryBuckets(state.mergeHistory, state.mergeUnpromotedApprovals);
-    historySummary.textContent = `已併入 ${buckets.mergedPromotions.length} · 需檢查 ${buckets.reviewPromotions.length + buckets.reviewApprovals.length} · 未進入 ${buckets.notStartedApprovals.length}`;
+    const counts = mergeHistoryGroupCounts(mergeHistoryBuckets(state.mergeHistory, state.mergeUnpromotedApprovals));
+    historySummary.textContent = `已併入 ${counts.merged} · 等你確認 ${counts.review} · 已失效 ${counts.closed} · 未進入 ${counts.unpromoted}`;
   } else historySummary.textContent = "尚未讀取";
 }
 
@@ -7488,11 +7523,11 @@ async function approveMergeIntoMain() {
         result.classList.add("is-failed");
         title.textContent = "併入未套用";
         detail.textContent = `promotion 已記錄為 rolled-back（${promotion.observation?.code || "未讀到原因"}）；草稿版與還原點 ref 保留。`;
-        status.textContent = "沒有顯示成功，也不會自動重試；請從「需要檢查」核對完整紀錄。";
+        status.textContent = "沒有顯示成功，也不會自動重試；請從「等你確認」核對完整紀錄。";
       } else {
         result.classList.add("is-uncertain");
-        title.textContent = "尚未能確認併入成功 · 需要檢查";
-        detail.textContent = `promotion=${promotion.state || "unavailable"}；observation=${promotion.observation?.code || "unavailable"}。這不是成功，已放入「需要檢查」；請與 recovery 紀錄一起人工確認。`;
+        title.textContent = "尚未能確認併入成功 · 等你確認";
+        detail.textContent = `promotion=${promotion.state || "unavailable"}；observation=${promotion.observation?.code || "unavailable"}。這不是成功，已放入「等你確認」；請與 recovery 紀錄一起人工確認。`;
         status.textContent = "系統不會把不確定狀態說成成功，也不會重複 apply。";
       }
       log.textContent = `promotion ${promotion.id || "unavailable"} · approval ${approval.id} · recovery ${promotion.recoveryRef || approval.binding?.recoveryRef || "unavailable"}`;

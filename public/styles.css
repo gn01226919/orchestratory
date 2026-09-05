@@ -2790,18 +2790,16 @@ body.workspace-modal-open { overflow: hidden; }
 .merge-history-section.is-review > header b { color: #e7c27c; }
 .merge-history-section.is-review > header strong { color: #251c0c; background: #d9b464; }
 /* 四區各自一個顏色，因為它們要求的動作完全不同：
-   綠＝已是 main 的事實，不必做事；黃＝要人工核對；藍＝你可以按，而且按了會有結果；
-   灰＝已結案，這裡沒有按鈕是刻意的。灰不是錯誤色——沒有人做錯事，事情只是已經做完了。 */
+   綠＝已是 main 的事實，不必做事；黃＝等你確認；灰＝已失效（逾時或被拒絕），系統自己看得到終局；
+   藍＝未進入（核准被作廢）。灰不是錯誤色——沒有人做錯事，事情只是已經結束了。 */
 .merge-history-section.is-unpromoted > header b { color: #8fc4ea; }
 .merge-history-section.is-unpromoted > header strong { color: #0c1a25; background: #6fb2e0; }
-.merge-history-section.is-blocked > header b { color: #9aa1a9; }
-.merge-history-section.is-blocked > header strong { color: #1b1e22; background: #7d858e; }
-.merge-history-section.is-blocked .merge-history-entry { opacity: 0.82; }
-/* 工具列常駐，即使這區是空的：一個空的區塊配上它的操作方式，才說得清楚這區是做什麼的。
-   隱藏它會讓「可重新發起」在沒有紀錄時看起來跟「不能重新發起」沒有差別。按鈕本身仍然
-   在沒有選取時停用，所以常駐不等於可以誤按。 */
+.merge-history-section.is-closed > header b { color: #9aa1a9; }
+.merge-history-section.is-closed > header strong { color: #1b1e22; background: #7d858e; }
+.merge-history-section.is-closed .merge-history-entry { opacity: 0.82; }
+/* 工具列常駐在分組之上，即使沒有可勾選的紀錄：一個空的工具列配上它的說明，才說得清楚
+   「重新發起」是什麼。按鈕本身在沒有選取時停用，所以常駐不等於可以誤按。 */
 .merge-history-batch { opacity: 1; }
-.merge-history-section.is-unpromoted > header b { color: #b9bec5; }
 .merge-history-list { display: grid; gap: 8px; }
 .merge-history-entry { display: grid; gap: 7px; padding: 11px 12px; border: 1px solid var(--border); border-radius: 8px; background: #15171b; }
 .merge-history-entry > header { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; }
