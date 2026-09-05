@@ -535,7 +535,13 @@ function renderDeliveryReceipt(body, seq) {
       ? "它可交辦，正在送過去"
       : `已排隊：${targetState.text}`
     : DELIVERY_LABELS[delivery.state] || delivery.state;
-  text.textContent = `${deliveryLabel} · ${delivery.targetDisplayName} · 嘗試 ${delivery.attempt}/${delivery.maxAttempts}`;
+  /* A replied receipt points at the reply. The attempt count is about getting the ask through, and
+     once the answer is in the ledger that is no longer the question; where the answer is, is. */
+  if (delivery.state === "replied" && Number.isInteger(delivery.replyLedgerSeq)) {
+    renderTextWithRefs(text, `${deliveryLabel} → #${delivery.replyLedgerSeq} · ${delivery.targetDisplayName}`);
+  } else {
+    text.textContent = `${deliveryLabel} · ${delivery.targetDisplayName} · 嘗試 ${delivery.attempt}/${delivery.maxAttempts}`;
+  }
   receipt.append(text);
   if (["queued", "delivered", "read", "working"].includes(delivery.state)) {
     const cancel = document.createElement("button");

@@ -4416,3 +4416,14 @@ test("Enter twice sends, including when the first Enter is the one that commits 
     assert.equal(t.input.value, "a\n\n");
   }
 });
+
+test("a replied delivery receipt points at the reply instead of counting attempts", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const receipt = /^function renderDeliveryReceipt\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.notEqual(receipt, "");
+  assert.match(receipt, /delivery\.state === "replied" && Number\.isInteger\(delivery\.replyLedgerSeq\)/u);
+  // Through the ref renderer, so "#12" is the same clickable quote link a message body gets.
+  assert.match(receipt, /renderTextWithRefs\(text, `\$\{deliveryLabel\} → #\$\{delivery\.replyLedgerSeq\} · \$\{delivery\.targetDisplayName\}`\)/u);
+  // Every other state keeps the attempt count: there the ask is still in flight or has stopped.
+  assert.match(receipt, /嘗試 \$\{delivery\.attempt\}\/\$\{delivery\.maxAttempts\}/u);
+});
