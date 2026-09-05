@@ -4189,8 +4189,8 @@ test("machine records in the ledger fold to a one-line summary; conversation nev
     kind: "task-notification",
     summary: "⚙ 系統紀錄 · task-notification · kvwybvp0i · completed",
   });
-  const envelope = "<cross-session-message from=\"danielcitybarber-57\" at=\"2026-09-04T13:02:11Z\">\n收工。\n</cross-session-message>";
-  assert.deepEqual(plain(reader.ledgerLogKind(envelope)), { kind: "cross-session-message", summary: "⚙ 跨 session 訊息 · 來自 danielcitybarber-57" });
+  const envelope = "<cross-session-message from=\"peer-57\" at=\"2026-09-04T13:02:11Z\">\n收工。\n</cross-session-message>";
+  assert.deepEqual(plain(reader.ledgerLogKind(envelope)), { kind: "cross-session-message", summary: "⚙ 跨 session 訊息 · 來自 peer-57" });
   const json = JSON.stringify({ event: "candidate.checkpoint", taskId: "t-8f2a" }, null, 2);
   assert.equal(reader.ledgerLogKind(json)?.kind, "json");
   assert.equal(reader.ledgerLogKind(json)?.summary, '⚙ 機器紀錄 · JSON · {"event":"candidate.checkpoint","taskId":"t-8f2a"}');
