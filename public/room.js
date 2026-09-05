@@ -2433,6 +2433,21 @@ function renderOfficeNotifications() {
     list.append(groupHead("知道就好"));
     for (const item of informational) {
       const row = buildRow(item);
+      if (item.action?.kind === "join-approve" || item.action?.kind === "standby-approve") {
+        /* A request card that has stopped being a request goes grey and says which way it went:
+           已處理 when the owner answered it, 已過期 when the seat or its request went away before
+           anyone did. The buttons are gone either way -- the request cannot be acted on any more,
+           and a live-looking card for a lapsed request is what the owner mistook for a task. */
+        const session = (state.presences || []).find((entry) => entry.id === item.action.presenceId);
+        const handled = item.action.kind === "join-approve"
+          ? Boolean(session && (session.joined || state.dismissedSeatRequests.has(session.id)))
+          : Boolean(session?.joined && session.standbyApproved);
+        row.classList.add("is-expired");
+        const tag = document.createElement("em");
+        tag.className = "office-notification-tag";
+        tag.textContent = handled ? "已處理" : "已過期";
+        row.querySelector("b")?.append(tag);
+      }
       if (item.detail) {
         const detail = document.createElement("p");
         detail.textContent = item.detail;

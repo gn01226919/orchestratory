@@ -3881,3 +3881,16 @@ test("no room copy points the owner at the sidebar that was removed", async () =
   /* The one place a join request is explained in the task drawer names the panel it means. */
   assert.match(source, /要取名或改協作模式，用下方「終端加入設定」/u);
 });
+
+test("a request card that lapsed or was answered goes grey and says which, with no buttons left", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const render = /^function renderOfficeNotifications\(\) \{[\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  const informational = render.slice(render.indexOf("for (const item of informational) {"));
+  assert.match(informational, /row\.classList\.add\("is-expired"\);/u);
+  assert.match(informational, /tag\.textContent = handled \? "已處理" : "已過期";/u);
+  /* Only live requests get buttons: the informational loop never builds seatRequestActions. */
+  assert.doesNotMatch(informational, /seatRequestActions\(|office-notification-action/u);
+  const css = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
+  assert.match(css, /\.office-notification\.is-expired \{ opacity: \.55; \}/u);
+  assert.match(css, /\.office-notification\.is-expired::before \{ display: none; \}/u);
+});

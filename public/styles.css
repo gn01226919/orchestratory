@@ -2152,6 +2152,23 @@ button.cancel-pending:hover { border-color: var(--warn); }
 .office-notification-action.primary { border-color: #3d7659; color: #14261c; background: #58ce90; font-weight: 700; }
 .office-notification[data-kind="proposal"] .office-notification-action.primary { border-color: #b35660; color: #fff; background: #d9515c; }
 .office-notification-done { grid-column: 1 / -1; color: #6f8f7d; font-size: 10px; line-height: 1.45; }
+/* A request card that has lapsed or been answered: greyed as a whole, colour bar gone, a small
+   grey tag after the title saying which. It stays readable, it just no longer looks like a task. */
+.office-notification.is-expired { opacity: .55; }
+.office-notification.is-expired::before { display: none; }
+.office-notification-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 5px;
+  border: 1px solid #4a444d;
+  border-radius: 4px;
+  color: #9b929e;
+  background: #26212b;
+  font: 700 10px/1.4 var(--font-mono);
+  font-style: normal;
+  vertical-align: middle;
+  white-space: nowrap;
+}
 #office-notification-clear { flex: none; margin: 0 10px 10px; padding: 8px; font-size: 11px; }
 
 /* ── Chat drawer: chips, docked card ── */
