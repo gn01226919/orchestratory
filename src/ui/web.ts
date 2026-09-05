@@ -981,6 +981,31 @@ export async function startWebServer(
           json(response, 200, { session });
           return;
         }
+        if (url.pathname === "/api/rooms/presence/reject") {
+          /* Owner-only like every presence route. Turns a pending join request down: the request
+             disappears, the terminal stays live and may ask again, and the ledger records the refusal. */
+          if (typeof body !== "object" || body === null || Array.isArray(body)) {
+            throw new Error("INVALID_PRESENCE_REJECT_REQUEST");
+          }
+          const value = body as Record<string, unknown>;
+          if (
+            Object.keys(value).some((key) => key !== "room" && key !== "presenceId") ||
+            typeof value.room !== "string" || typeof value.presenceId !== "string"
+          ) throw new Error("INVALID_PRESENCE_REJECT_REQUEST");
+          const info = ledger.getRoom(value.room);
+          if (!info) throw new Error("ROOM_NOT_FOUND");
+          const workspace = await app.workspaces.assertAllowed(info.workspace);
+          const rejected = collaboration.rejectExternalJoin(value.presenceId, value.room, workspace);
+          json(response, 200, {
+            session: {
+              ...rejected,
+              executionClass: "native-full-trust",
+              capabilityAuthority: "host",
+              hostCapabilities: "unchanged",
+            },
+          });
+          return;
+        }
         if (url.pathname === "/api/rooms/presence/rename") {
           /* Owner-only like every presence route (cookie + CSRF checked above). The seat keeps its id
              and approvals; only the label after the provider changes, and the ledger records it. */

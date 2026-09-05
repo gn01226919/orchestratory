@@ -2302,9 +2302,12 @@ export async function runCollabMcpServer(app: AppContext, actor = "mcp-host"): P
             const deadline = Date.now() + timeoutMs;
             while (Date.now() < deadline) {
               if (signal?.aborted) throw new Error("ROOM_WAIT_CANCELLED");
-              const current = presence.get(id);
-              if (!current) throw new Error("PRESENCE_NOT_FOUND");
-              if (current.joined && current.roomId === roomId && current.workspace === workspace) return true;
+              /* Approval, refusal and a pruned seat are all read from the same place, so a refusal
+                 comes back as its own answer instead of masquerading as an approval timeout. */
+              const joinState = collaboration.externalJoinWaitState(id, roomId, workspace);
+              if (joinState === "gone") throw new Error("PRESENCE_NOT_FOUND");
+              if (joinState === "joined") return true;
+              if (joinState === "rejected") throw new Error("ROOM_JOIN_REJECTED");
               const remaining = deadline - Date.now();
               if (remaining <= 0) break;
               try {

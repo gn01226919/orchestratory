@@ -141,6 +141,51 @@ test("GUI, TUI and MCP service instances share one exact-seat ledger sequence", 
  * returned as `wakeable: false`, but only to the caller, in a JSON field, at a moment nobody is
  * reading. The ledger is where the question actually gets asked later.
  */
+test("a refused join request disappears, is recorded, and reads as rejected to the waiting terminal", async (t) => {
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-join-reject-"));
+  const workspace = await repository();
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+  t.after(async () => await rm(workspace, { recursive: true, force: true }));
+  const service = collaborationService(data);
+  t.after(() => service.close());
+  service.ledger.createRoom("demo", workspace);
+  const seat = service.presence.register({ provider: "codex", workspace, hostPid: 3101, client: "Codex CLI" });
+  const other = service.presence.register({ provider: "grok", workspace, hostPid: 3102 });
+
+  // Nothing to refuse yet: the seat has not asked.
+  assert.throws(() => service.rejectExternalJoin(seat.id, "demo", workspace), /PRESENCE_JOIN_NOT_REQUESTED/u);
+  assert.throws(() => service.rejectExternalJoin("missing", "demo", workspace), /PRESENCE_NOT_FOUND/u);
+  assert.equal(service.externalJoinWaitState("missing", "demo", workspace), "gone");
+
+  service.requestExternalJoin(seat.id, "demo", workspace);
+  assert.equal(service.externalJoinWaitState(seat.id, "demo", workspace), "pending");
+  const before = service.ledger.getRoom("demo")?.messages ?? 0;
+  const refused = service.rejectExternalJoin(seat.id, "demo", workspace);
+  assert.equal(refused.requested, false);
+  assert.equal(refused.joined, false);
+  assert.equal(service.presence.get(seat.id)?.id, seat.id, "the live terminal is not removed");
+  assert.equal(service.externalJoinWaitState(seat.id, "demo", workspace), "rejected");
+  const lines = service.ledger.listAfter("demo", before);
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0]?.author, "system");
+  assert.equal(lines[0]?.text, `拒絕 codex 終端的加入申請（席位 ${seat.id.slice(0, 8)}）`);
+  // Refusing twice does not write twice.
+  assert.throws(() => service.rejectExternalJoin(seat.id, "demo", workspace), /PRESENCE_JOIN_NOT_REQUESTED/u);
+  assert.equal(service.ledger.getRoom("demo")?.messages, before + 1);
+
+  // The terminal may ask again, and an approved request reads as joined; a joined seat cannot be refused.
+  service.requestExternalJoin(seat.id, "demo", workspace);
+  assert.equal(service.externalJoinWaitState(seat.id, "demo", workspace), "pending");
+  service.approveExternalJoin({ presenceId: seat.id, roomId: "demo", workspace, ...ROOM_FIRST_JOIN });
+  assert.equal(service.externalJoinWaitState(seat.id, "demo", workspace), "joined");
+  assert.throws(() => service.rejectExternalJoin(seat.id, "demo", workspace), /PRESENCE_ALREADY_JOINED/u);
+
+  // A seat that goes away while waiting reads as gone, not rejected.
+  service.requestExternalJoin(other.id, "demo", workspace);
+  service.presence.unregister(other.id);
+  assert.equal(service.externalJoinWaitState(other.id, "demo", workspace), "gone");
+});
+
 test("work queued for a seat that is not listening is recorded in the ledger", async (t) => {
   const data = await mkdtemp(join(tmpdir(), "orchestratory-silent-seat-"));
   const gui = collaborationService(data);

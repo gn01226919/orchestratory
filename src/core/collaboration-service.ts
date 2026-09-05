@@ -444,6 +444,37 @@ export class CollaborationService {
     return this.presence.cancelJoinRequest(presenceId, roomId);
   }
 
+  /*
+   * Owner turns a pending join request down. The request disappears at once, the live terminal is
+   * left alone (it can ask again), and the ledger says who was refused so the next reader does not
+   * see a request line with nothing after it. The terminal's own room_join_request, which is still
+   * polling for approval, reads the same state through externalJoinWaitState and returns
+   * ROOM_JOIN_REJECTED instead of sitting there until its timeout.
+   */
+  rejectExternalJoin(presenceId: string, roomId: string, workspace: string): PresenceInfo {
+    this.#assertRoomWorkspace(roomId, workspace);
+    const current = this.presence.list(workspace, roomId).find((session) => session.id === presenceId);
+    if (!current) throw new Error("PRESENCE_NOT_FOUND");
+    if (current.joined) throw new Error("PRESENCE_ALREADY_JOINED");
+    if (!current.requested) throw new Error("PRESENCE_JOIN_NOT_REQUESTED");
+    const cancelled = this.presence.cancelJoinRequest(presenceId, roomId);
+    this.ledger.appendSystem(roomId, `拒絕 ${current.provider} 終端的加入申請（席位 ${presenceId.slice(0, 8)}）`);
+    return cancelled;
+  }
+
+  /*
+   * What a terminal waiting on its join request should do next. "rejected" is the request having
+   * gone away without the seat joining: from a waiting terminal's point of view the only thing that
+   * does that is the owner's refusal (its own cancel happens only after its wait has already ended).
+   */
+  externalJoinWaitState(presenceId: string, roomId: string, workspace: string): "joined" | "pending" | "rejected" | "gone" {
+    const current = this.presence.list(workspace, roomId).find((session) => session.id === presenceId);
+    if (!current) return "gone";
+    if (current.joined && current.roomId === roomId) return "joined";
+    if (current.requested) return "pending";
+    return "rejected";
+  }
+
   requestExternalStandby(presenceId: string, roomId: string, workspace: string): PresenceInfo {
     this.#assertRoomWorkspace(roomId, workspace);
     const current = this.presence.get(presenceId);

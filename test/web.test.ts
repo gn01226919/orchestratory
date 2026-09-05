@@ -3027,6 +3027,107 @@ test("Web dashboard lets the owner rename a joined seat in place", async (t) => 
   assert.equal(((await afterCancel.json()) as { displayName: string }).displayName, "codex（前端 2）");
 });
 
+/*
+ * H. The owner turns a pending join request down from the GUI. Owner-only (401 without the session
+ * cookie, 403 without CSRF); the request disappears from the room's presence list, the terminal
+ * itself stays registered and may ask again, and the ledger records the refusal in one system line.
+ */
+test("Web dashboard lets the owner reject a pending join request", async (t) => {
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-web-reject-data-"));
+  const workspace = await realpath(await repository());
+  await writeFile(
+    join(data, "workspace-roots.json"),
+    `${JSON.stringify([{ id: "reject-root", label: "Reject root", path: workspace }])}\n`,
+    { encoding: "utf8", mode: 0o600 },
+  );
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+  t.after(async () => await rm(workspace, { recursive: true, force: true }));
+
+  const app = await createAppContext(data);
+  t.after(() => app.close());
+  const ledger = new RoomLedger(app.store.dataDirectory);
+  ledger.createRoom("reject-room", workspace);
+  ledger.close();
+  const presenceStore = new RoomPresenceStore(app.store.dataDirectory);
+  t.after(() => presenceStore.close());
+  const pending = presenceStore.register({ provider: "codex", workspace, hostPid: 98781, client: "Codex CLI" });
+  const joined = presenceStore.register({ provider: "claude", workspace, hostPid: 98782 });
+  const silent = presenceStore.register({ provider: "grok", workspace, hostPid: 98783 });
+  presenceStore.requestJoin(pending.id, "reject-room", workspace);
+  presenceStore.requestJoin(joined.id, "reject-room", workspace);
+  presenceStore.join(joined.id, "reject-room", workspace, { collaborationMode: "seat-only", syncTurns: false });
+
+  const server = await startWebServer(app, 0);
+  t.after(async () => await server.close());
+  const index = await fetch(server.url);
+  const cookie = (index.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+  const bootstrap = await fetch(`${server.url}/api/bootstrap`, { headers: { Cookie: cookie } });
+  const { csrf } = (await bootstrap.json()) as { csrf: string };
+  const headers = { Cookie: cookie, Origin: server.url, "X-CSRF-Token": csrf, "Content-Type": "application/json" };
+  const reject = (body: Record<string, unknown>, overrides: Record<string, string> = headers) =>
+    fetch(`${server.url}/api/rooms/presence/reject`, { method: "POST", headers: overrides, body: JSON.stringify(body) });
+  const sessions = async () => ((await (await fetch(`${server.url}/api/rooms/presence?room=reject-room`, {
+    headers: { Cookie: cookie },
+  })).json()) as { sessions: Array<{ id: string; joined: boolean; requested: boolean }> }).sessions;
+
+  const withoutCookie = await reject(
+    { room: "reject-room", presenceId: pending.id },
+    { Origin: server.url, "X-CSRF-Token": csrf, "Content-Type": "application/json" },
+  );
+  assert.equal(withoutCookie.status, 401);
+  const withoutCsrf = await reject(
+    { room: "reject-room", presenceId: pending.id },
+    { Cookie: cookie, Origin: server.url, "Content-Type": "application/json" },
+  );
+  assert.equal(withoutCsrf.status, 403);
+  assert.equal((await sessions()).some((session) => session.id === pending.id && session.requested), true);
+
+  const wrongShape = await reject({ room: "reject-room", presenceId: pending.id, reason: "no" });
+  assert.equal(wrongShape.status, 400);
+  assert.deepEqual(await wrongShape.json(), { error: "INVALID_PRESENCE_REJECT_REQUEST" });
+  const unknownRoom = await reject({ room: "missing-room", presenceId: pending.id });
+  assert.equal(unknownRoom.status, 400);
+  assert.deepEqual(await unknownRoom.json(), { error: "ROOM_NOT_FOUND" });
+  const unknownSeat = await reject({ room: "reject-room", presenceId: "missing" });
+  assert.equal(unknownSeat.status, 400);
+  assert.deepEqual(await unknownSeat.json(), { error: "PRESENCE_NOT_FOUND" });
+  const alreadyJoined = await reject({ room: "reject-room", presenceId: joined.id });
+  assert.equal(alreadyJoined.status, 400);
+  assert.deepEqual(await alreadyJoined.json(), { error: "PRESENCE_ALREADY_JOINED" });
+  const neverAsked = await reject({ room: "reject-room", presenceId: silent.id });
+  assert.equal(neverAsked.status, 400);
+  assert.deepEqual(await neverAsked.json(), { error: "PRESENCE_JOIN_NOT_REQUESTED" });
+
+  const ledgerBefore = ((await (await fetch(`${server.url}/api/rooms/messages?room=reject-room&after=0`, {
+    headers: { Cookie: cookie },
+  })).json()) as { messages: { seq: number }[] }).messages.at(-1)?.seq ?? 0;
+  const rejected = await reject({ room: "reject-room", presenceId: pending.id });
+  assert.equal(rejected.status, 200);
+  const rejectedBody = (await rejected.json()) as {
+    session: { id: string; joined: boolean; requested: boolean; executionClass: string; capabilityAuthority: string; hostCapabilities: string };
+  };
+  assert.equal(rejectedBody.session.id, pending.id);
+  assert.equal(rejectedBody.session.joined, false);
+  assert.equal(rejectedBody.session.requested, false);
+  assert.equal(rejectedBody.session.executionClass, "native-full-trust");
+  assert.equal(rejectedBody.session.capabilityAuthority, "host");
+  assert.equal(rejectedBody.session.hostCapabilities, "unchanged");
+  assert.equal((await sessions()).some((session) => session.id === pending.id), false, "a refused request leaves the room's list");
+  assert.equal(presenceStore.get(pending.id)?.id, pending.id, "the terminal itself stays registered");
+  const lines = ((await (await fetch(`${server.url}/api/rooms/messages?room=reject-room&after=${ledgerBefore}`, {
+    headers: { Cookie: cookie },
+  })).json()) as { messages: { author: string; text: string }[] }).messages;
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0]?.author, "system");
+  assert.equal(lines[0]?.text, `拒絕 codex 終端的加入申請（席位 ${pending.id.slice(0, 8)}）`);
+  const again = await reject({ room: "reject-room", presenceId: pending.id });
+  assert.equal(again.status, 400);
+  assert.deepEqual(await again.json(), { error: "PRESENCE_JOIN_NOT_REQUESTED" });
+  // The terminal may ask again afterwards.
+  presenceStore.requestJoin(pending.id, "reject-room", workspace);
+  assert.equal((await sessions()).some((session) => session.id === pending.id && session.requested), true);
+});
+
 test("Web dashboard cancels only the exact active Writer run", async (t) => {
   const data = await mkdtemp(join(tmpdir(), "orchestratory-web-cancel-data-"));
   const workspace = await repository();
