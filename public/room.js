@@ -345,6 +345,69 @@ function providerForAgent(agent) {
 }
 function authorColor(author) { return AUTHOR_COLORS[author] || AUTHOR_COLORS[providerForAgent(author)] || "#8a8f98"; }
 
+/* @pure-start ledger-log-kind
+ * Which ledger lines are machine records rather than things a person said, and the one-line
+ * summary each folds down to.
+ *
+ * Visible-turn sync mirrors whole host turns into the ledger, so a room fills with
+ * `<task-notification>` blocks, `<cross-session-message>` envelopes, JSON payloads and stack
+ * traces. Every one of them is worth keeping -- the ledger is the record -- but none of them is
+ * worth reading at full height between two sentences of conversation. Collapsed by default, the
+ * ledger reads as a conversation again; the record is one click away.
+ *
+ * Deliberately conservative: a false positive hides something a person wrote, which is worse than
+ * a machine record left open. So the tag forms are matched at the start of the text only, JSON
+ * must actually parse to an object or array, and "looks like code" needs both many lines and most
+ * of them shaped like code.
+ */
+const LEDGER_LOG_CODE_LINES = 12;
+const LEDGER_LOG_SUMMARY_CHARS = 60;
+
+function ledgerLogSummaryText(text) {
+  const line = String(text).split(/\r?\n/u).map((part) => part.trim()).find(Boolean) || "";
+  return line.length > LEDGER_LOG_SUMMARY_CHARS ? `${line.slice(0, LEDGER_LOG_SUMMARY_CHARS)}…` : line;
+}
+
+function ledgerLogTagValue(text, tag) {
+  return text.match(new RegExp(`<${tag}>\\s*([^<]{1,80}?)\\s*</${tag}>`, "u"))?.[1] || "";
+}
+
+function ledgerLogKind(text) {
+  if (typeof text !== "string") return null;
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  if (/^<task-notification[\s>]/u.test(trimmed)) {
+    const parts = ["⚙ 系統紀錄", "task-notification", ledgerLogTagValue(trimmed, "task-id"), ledgerLogTagValue(trimmed, "status")];
+    return { kind: "task-notification", summary: parts.filter(Boolean).join(" · ") };
+  }
+  if (/^<cross-session-message[\s>]/u.test(trimmed)) {
+    const from = trimmed.match(/^<cross-session-message[^>]*\sfrom="([^"]{1,80})"/u)?.[1] || "";
+    return { kind: "cross-session-message", summary: from ? `⚙ 跨 session 訊息 · 來自 ${from}` : "⚙ 跨 session 訊息" };
+  }
+  if (/^[[{]/u.test(trimmed)) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed && typeof parsed === "object") {
+        /* Compacted first: pretty-printed JSON opens with a lone brace, which summarises nothing. */
+        return { kind: "json", summary: `⚙ 機器紀錄 · JSON · ${ledgerLogSummaryText(JSON.stringify(parsed))}` };
+      }
+    } catch { /* not JSON; fall through to the shape test */ }
+  }
+  const lines = trimmed.split(/\r?\n/u);
+  if (lines.length > LEDGER_LOG_CODE_LINES) {
+    const filled = lines.filter((line) => line.trim());
+    /* Bullets, numbered points and headings are how people (and agents) write long answers, so
+       none of them counts as code here; only indentation, bracket/semicolon line ends, tag or
+       brace line starts, and stack-frame "at " lines do. */
+    const codeLike = filled.filter((line) => /^(?:\s{2,}|\t)|[;{}()[\]>]\s*$|^\s*(?:at\s|[<{}[\]/])/u.test(line));
+    if (filled.length > LEDGER_LOG_CODE_LINES && codeLike.length * 5 >= filled.length * 3) {
+      return { kind: "code", summary: `⚙ 機器紀錄 · ${lines.length} 行 · ${ledgerLogSummaryText(trimmed)}` };
+    }
+  }
+  return null;
+}
+/* @pure-end ledger-log-kind */
+
 function renderMessage(message) {
   const item = document.createElement("article");
   item.className = "msg";
@@ -359,7 +422,22 @@ function renderMessage(message) {
   const content = document.createElement("p");
   if (message.kind === "system") content.style.color = "#5f636b";
   renderTextWithRefs(content, message.text);
-  body.append(label, content);
+  const log = ledgerLogKind(message.text);
+  if (log) {
+    /* A machine record folds to one line by default; the full text stays in the DOM, so a search
+       hit inside it still lands here, and the reader opens it when the summary is not enough. */
+    item.classList.add("is-log");
+    const fold = document.createElement("details");
+    fold.className = "msg-log";
+    fold.dataset.logKind = log.kind;
+    const summary = document.createElement("summary");
+    summary.textContent = log.summary;
+    summary.title = "展開／收合這則機器紀錄";
+    fold.append(summary, content);
+    body.append(label, fold);
+  } else {
+    body.append(label, content);
+  }
   renderDeliveryReceipt(body, message.seq);
   item.append(avatar, body);
   return item;

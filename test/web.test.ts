@@ -4166,3 +4166,60 @@ test("the bell carries system state only: no reply or chat ever becomes a notifi
   assert.doesNotMatch(ingest, /message\.kind === "chat"/u);
   assert.match(ingest, /message\.kind === "system"/u);
 });
+
+test("machine records in the ledger fold to a one-line summary; conversation never does", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const start = source.indexOf("/* @pure-start ledger-log-kind");
+  const end = source.indexOf("/* @pure-end ledger-log-kind */");
+  assert.ok(start > 0 && end > start, "room.js must expose the DOM-free ledger log classifier");
+  const block = source.slice(start, end);
+  assert.doesNotMatch(
+    block,
+    /(?:\b(?:document|window|navigator|localStorage|state)\s*\.|\b(?:fetch|byId|api|setInterval|setTimeout|require|import)\s*\()/u,
+  );
+  const reader = runInNewContext(`${block}\n({ ledgerLogKind });`, Object.create(null) as object, { timeout: 2_000 }) as {
+    ledgerLogKind: (text: unknown) => { kind: string; summary: string } | null;
+  };
+  // Objects born in the vm realm carry that realm's prototype; compare their content, not their identity.
+  const plain = (value: unknown): unknown => JSON.parse(JSON.stringify(value ?? null));
+
+  // The three shapes visible-turn sync mirrors in, each with the summary a reader scans by.
+  const notification = "<task-notification>\n<task-id>kvwybvp0i</task-id>\n<status>completed</status>\n<summary>done</summary>\n</task-notification>";
+  assert.deepEqual(plain(reader.ledgerLogKind(notification)), {
+    kind: "task-notification",
+    summary: "⚙ 系統紀錄 · task-notification · kvwybvp0i · completed",
+  });
+  const envelope = "<cross-session-message from=\"danielcitybarber-57\" at=\"2026-09-04T13:02:11Z\">\n收工。\n</cross-session-message>";
+  assert.deepEqual(plain(reader.ledgerLogKind(envelope)), { kind: "cross-session-message", summary: "⚙ 跨 session 訊息 · 來自 danielcitybarber-57" });
+  const json = JSON.stringify({ event: "candidate.checkpoint", taskId: "t-8f2a" }, null, 2);
+  assert.equal(reader.ledgerLogKind(json)?.kind, "json");
+  assert.equal(reader.ledgerLogKind(json)?.summary, '⚙ 機器紀錄 · JSON · {"event":"candidate.checkpoint","taskId":"t-8f2a"}');
+  const stack = ["Error: DELIVERY_LEASE_EXPIRED", ...Array.from({ length: 14 }, (_, i) => `    at RoomInboxStore.#x (src/core/room-inbox.ts:${1395 + i}:21)`)].join("\n");
+  assert.equal(reader.ledgerLogKind(stack)?.kind, "code");
+  assert.equal(reader.ledgerLogKind(stack)?.summary, "⚙ 機器紀錄 · 15 行 · Error: DELIVERY_LEASE_EXPIRED");
+  // A long first line is clipped, not dumped into the summary.
+  const longJson = JSON.stringify({ text: "x".repeat(200) });
+  const clipped = reader.ledgerLogKind(longJson)?.summary ?? "";
+  assert.ok(clipped.endsWith("…") && clipped.length < 100, clipped);
+
+  // Things a person wrote stay open, however long or however much they mention the tags.
+  assert.equal(reader.ledgerLogKind("看了 P0-3：缺 test/web.test.ts 的 keyboard 案例，其餘都在。"), null);
+  assert.equal(reader.ledgerLogKind("我看到 <task-notification> 進來了，這種要收合。"), null);
+  assert.equal(reader.ledgerLogKind(Array.from({ length: 20 }, (_, i) => `第 ${i + 1} 點：這一段是人寫的說明，不是程式碼。`).join("\n")), null);
+  assert.equal(reader.ledgerLogKind("{ 這不是 JSON }"), null);
+  // A long markdown answer -- heading, bullets, numbered points -- is a person's (or an agent's) writing.
+  const markdown = ["## 檢查結果", ...Array.from({ length: 10 }, (_, i) => `- 第 ${i + 1} 項：已核對`), ...Array.from({ length: 4 }, (_, i) => `${i + 1}. 待辦：補測試`)].join("\n");
+  assert.equal(reader.ledgerLogKind(markdown), null);
+  assert.equal(reader.ledgerLogKind("42"), null);
+  assert.equal(reader.ledgerLogKind(""), null);
+  assert.equal(reader.ledgerLogKind(undefined), null);
+
+  // Wiring: renderMessage folds through the classifier into a closed <details>, with the text kept.
+  const render = /^function renderMessage\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(render, /ledgerLogKind\(message\.text\)/u);
+  assert.match(render, /createElement\("details"\)/u);
+  assert.match(render, /fold\.className = "msg-log"/u);
+  assert.doesNotMatch(render, /fold\.open = true/u);
+  const css = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
+  assert.match(css, /^\.msg\.is-log \{ opacity: 0\.72; \}$/mu);
+});
