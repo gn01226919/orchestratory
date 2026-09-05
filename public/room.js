@@ -203,6 +203,10 @@ const ROOM_ERROR_MESSAGES = {
   MANAGED_AGENT_REPLY_FAILED: "受控 Agent 回覆失敗，請確認對應的 CLI 已登入後再試。",
   MANAGED_AGENT_PROVIDER_UNAVAILABLE: "這個模型來源目前無法使用。",
   MANAGED_AGENT_DISPLAY_NAME_IN_USE: "這個名稱已被使用，請換一個。",
+  PRESENCE_NAME_TAKEN: "這個名字已經有人用了（終端或受控 Agent），請換一個。",
+  PRESENCE_NAME_INVALID: "名字要 1–24 字，只能用中英數、空格、. _ -，不能只有空白。",
+  PRESENCE_NOT_JOINED: "這個席位還沒加入房間，加入後才能更名。",
+  PRESENCE_RENAME_BUSY: "這個席位還有交辦在處理中（排隊或進行中），先等它回覆或取消交辦，再更名。",
   MANAGED_AGENT_REMOVED: "這個受控 Agent 已被移除。",
   EMPTY_AGENT_MESSAGE: "只有 @名稱沒有內容；請在名稱後面加上要交辦的訊息。",
   RATE_LIMITED: "操作太頻繁，請稍等幾秒再試。",
@@ -2608,7 +2612,166 @@ function officeClock(value) {
  * One row of the task drawer: dot, name, one status word, ▸. Everything else waits behind the
  * caret. `details` is a list of [term, value] pairs; `actions` is a list of buttons.
  */
-function officeTaskRow({ key, color, name, status, statusCls = "", details = [], actions = [], title = "" }) {
+/*
+ * H. Renaming a joined terminal seat in place, from either surface that shows its name: the seat's
+ * row in the task drawer and its name plate on the floor. The provider stays in front of the label
+ * (codex（…）) because "which model" is half of what the owner is trying to tell apart; only the
+ * part in brackets is typed. One editor at a time; while it is open the drawer does not rebuild
+ * itself, so a poll cannot pull the input out from under the cursor.
+ */
+let officeSeatRenameActive = false;
+
+function seatRenameLabel(session) {
+  const name = String(session?.displayName || "");
+  const wrapped = name.match(/^(?:codex|claude|grok)（(.+)）$/u);
+  return wrapped ? wrapped[1] : "";
+}
+
+/* The server answered: adopt the session in place, carry the desk's position and selection over to
+   the new name (desks are keyed by name), and repaint the two surfaces that show it. */
+function applySeatRename(previous, value) {
+  const session = value?.session || { ...previous, displayName: value?.displayName || previous.displayName };
+  const oldName = previous.displayName;
+  const newName = session.displayName;
+  state.presences = (state.presences || []).map((entry) => (entry.id === session.id ? session : entry));
+  if (newName) state.knownExternalNames.add(newName);
+  if (oldName && newName && oldName !== newName) {
+    if (state.officePositions[oldName]) {
+      state.officePositions[newName] = state.officePositions[oldName];
+      delete state.officePositions[oldName];
+      saveOfficePositions();
+    }
+    if (state.selectedAgent === oldName) state.selectedAgent = newName;
+  }
+  syncOfficeDesks();
+  renderTaskCenter(true);
+  renderSeatChips();
+  if (state.selectedAgent) renderAgentCard(state.selectedAgent, state.recent || []);
+}
+
+/*
+ * The inline editor. `hidden` is the element it stands in for (hidden while editing, shown again
+ * after). Enter submits, Escape cancels, leaving the field submits a changed value and drops an
+ * unchanged one. A refused name (taken, too long, seat busy) is written under the field in red and
+ * the editor stays open; it is not re-focused after a blur, so a reader can always click away.
+ */
+function mountSeatRenameEditor({ session, hidden, compact = false, onDone }) {
+  const editor = document.createElement("div");
+  editor.className = compact ? "seat-rename is-compact" : "seat-rename";
+  const prefix = document.createElement("i");
+  prefix.className = "seat-rename-fixed";
+  prefix.textContent = `${session.provider}（`;
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "seat-rename-input";
+  input.maxLength = 24;
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.value = seatRenameLabel(session);
+  input.placeholder = "取個好認的名字";
+  input.setAttribute("aria-label", `${session.displayName} 的新名字（Enter 送出，Esc 取消）`);
+  const suffix = document.createElement("i");
+  suffix.className = "seat-rename-fixed";
+  suffix.textContent = "）";
+  const error = document.createElement("small");
+  error.className = "seat-rename-error";
+  error.hidden = true;
+  editor.append(prefix, input, suffix, error);
+  let settled = false;
+  let lastRefused = null;
+  const finish = (renamed) => {
+    if (settled) return;
+    settled = true;
+    officeSeatRenameActive = false;
+    editor.remove();
+    if (hidden) hidden.hidden = false;
+    onDone?.(renamed);
+  };
+  const submit = async (fromBlur) => {
+    if (settled || input.disabled) return;
+    const label = input.value.trim();
+    if (!label || label === seatRenameLabel(session) || (fromBlur && label === lastRefused)) {
+      if (!label && !fromBlur) {
+        error.hidden = false;
+        error.textContent = "名字不能是空白。";
+        return;
+      }
+      finish(false);
+      return;
+    }
+    input.disabled = true;
+    try {
+      const value = await api("/api/rooms/presence/rename", {
+        method: "POST",
+        body: JSON.stringify({ room: state.room, presenceId: session.id, label }),
+      });
+      applySeatRename(session, value);
+      finish(true);
+    } catch (failure) {
+      lastRefused = label;
+      input.disabled = false;
+      error.hidden = false;
+      error.textContent = humanError(failure);
+      if (!fromBlur) {
+        input.focus();
+        input.select();
+      }
+    }
+  };
+  /* The plate sits inside a draggable, clickable cubicle whose Enter key opens the composer; none of
+     that may fire while the owner is typing a name. */
+  for (const type of ["click", "pointerdown", "pointerup", "keydown", "keyup"]) {
+    editor.addEventListener(type, (event) => event.stopPropagation());
+  }
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void submit(false);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener("blur", () => {
+    setTimeout(() => {
+      if (!settled && !input.disabled && document.activeElement !== input) void submit(true);
+    }, 0);
+  });
+  editor.focusInput = () => {
+    input.focus();
+    input.select();
+  };
+  return editor;
+}
+
+/* The drawer row: the head button is stood down while its name is being edited. */
+function beginSeatRowRename(session, head) {
+  if (officeSeatRenameActive || !head || !session?.joined) return;
+  officeSeatRenameActive = true;
+  head.hidden = true;
+  const editor = mountSeatRenameEditor({
+    session,
+    hidden: head,
+    onDone: (renamed) => {
+      if (!renamed) head.focus({ preventScroll: true });
+    },
+  });
+  head.before(editor);
+  editor.focusInput();
+}
+
+/* The name plate on the floor: the name span is stood down, the status word under it stays. */
+function beginPlateRename(agent, plateName) {
+  const session = presenceForAgent(agent);
+  if (officeSeatRenameActive || !session || !plateName) return;
+  officeSeatRenameActive = true;
+  plateName.hidden = true;
+  const editor = mountSeatRenameEditor({ session, hidden: plateName, compact: true });
+  plateName.before(editor);
+  editor.focusInput();
+}
+
+function officeTaskRow({ key, color, name, status, statusCls = "", details = [], actions = [], title = "", rename = null }) {
   const row = document.createElement("article");
   row.className = "office-task-row";
   row.dataset.key = key;
@@ -2622,6 +2785,22 @@ function officeTaskRow({ key, color, name, status, statusCls = "", details = [],
   dot.style.background = color;
   const label = document.createElement("b");
   label.textContent = name;
+  if (rename) {
+    /* A joined terminal: its name is editable where it is read. The pencil is a hint, not a control,
+       so the whole name is the target; the click must not also toggle the row. */
+    label.classList.add("is-renamable");
+    label.title = "點名字就地更名（Enter 送出、Esc 取消）";
+    const hint = document.createElement("u");
+    hint.className = "rename-hint";
+    hint.setAttribute("aria-hidden", "true");
+    hint.textContent = "✎";
+    label.append(hint);
+    label.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      beginSeatRowRename(rename, head);
+    });
+  }
   const word = document.createElement("span");
   word.className = `office-task-state ${statusCls}`;
   word.textContent = status;
@@ -2764,6 +2943,12 @@ function officeSeatRows() {
         ...(listening.fix ? [["怎麼辦", listening.fix]] : []),
       );
       actions.push(officeButton("交辦", () => focusAgentComposer(session.displayName)));
+      /* Same editor as clicking the name, reachable by keyboard: the name sits inside the row's
+         toggle button, which a Tab stop cannot single out. */
+      actions.push(officeButton("更名", (event) => {
+        const head = event.currentTarget.closest(".office-task-row")?.querySelector(".office-task-row-head");
+        beginSeatRowRename(session, head);
+      }));
     } else {
       details.push(["申請", "等你核准加入房間；核准前不記錄它的內容。要取名或改協作模式，用下方「終端加入設定」。"]);
     }
@@ -2777,6 +2962,7 @@ function officeSeatRows() {
       statusCls: session.joined ? listening.cls : "is-pending",
       title: listening.title,
       details, actions,
+      ...(session.joined ? { rename: session } : {}),
     };
   });
 }
@@ -2891,6 +3077,9 @@ function renderTaskCenter(force = false) {
     approvals: approvals.map((entry) => [entry.approval.id, entry.candidateId]),
   });
   if (!force && signature === officeTaskSignature) return;
+  /* A name is being typed in this list: leave it alone. The signature is deliberately not updated,
+     so the change that arrived is painted by the next call once the editor has closed. */
+  if (!force && officeSeatRenameActive) return;
   officeTaskSignature = signature;
   /* Keep the reader's place: scroll offset, opened rows (officeTaskExpanded, read by officeTaskRow)
      and the focused control, found again by row key and label after the rebuild. */
@@ -3265,6 +3454,22 @@ function createOfficeDesk(agent) {
     plate.className = "name-plate";
     const plateName = document.createElement("span");
     plateName.textContent = agent;
+    if (presenceForAgent(agent)) {
+      /* A joined terminal's plate is where the owner reads its name, so it is also where the name is
+         changed. Pointer events stop here so the cubicle's drag and its composer click do not fire. */
+      plate.classList.add("is-renamable");
+      plateName.title = "點名字就地更名（Enter 送出、Esc 取消）";
+      const hint = document.createElement("u");
+      hint.className = "rename-hint";
+      hint.setAttribute("aria-hidden", "true");
+      hint.textContent = "✎";
+      plateName.append(hint);
+      plateName.addEventListener("pointerdown", (event) => event.stopPropagation());
+      plateName.addEventListener("click", (event) => {
+        event.stopPropagation();
+        beginPlateRename(agent, plateName);
+      });
+    }
     const stat = document.createElement("div");
     stat.className = "desk-stat";
     stat.id = `stat-${agent}`;

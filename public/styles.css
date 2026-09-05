@@ -2097,6 +2097,22 @@ button.cancel-pending:hover { border-color: var(--warn); }
 .office-task-row-actions button.leave.is-demoted { opacity: .55; }
 .office-task-row-actions button.cancel { border-color: #77565e; color: #e0a3ad; background: #321e24; }
 .office-task-row-actions button.presence-wake { border-color: #3f4658; color: #b9c3d9; background: #1b1f2a; }
+/* ── H: rename a joined terminal seat where its name is read (drawer row, name plate) ── */
+.office-task-row-head b.is-renamable, .cubicle .name-plate.is-renamable > span { cursor: text; }
+/* Both stand-ins carry their own display rule, which would otherwise win over [hidden]. */
+.office-task-row-head[hidden], .cubicle .name-plate > span[hidden] { display: none; }
+.rename-hint { display: inline-block; margin-left: 4px; color: #e7c37a; font: 400 11px/1 var(--font-mono); text-decoration: none; opacity: 0; transition: opacity .12s ease; }
+.office-task-row-head:hover .rename-hint, .office-task-row-head:focus-visible .rename-hint,
+.cubicle .name-plate:hover .rename-hint, .cubicle:focus-visible .name-plate .rename-hint { opacity: 1; }
+.seat-rename { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 2px; padding: 7px 10px; color: #e6dce7; font: 800 11px/1.2 var(--font-mono); }
+.seat-rename-fixed { color: #9a909d; font-style: normal; }
+.seat-rename input { min-width: 0; width: 100%; padding: 3px 6px; border: 1px solid #7a6738; border-radius: 4px; color: #f5e6d0; background: #14121a; font: inherit; }
+.seat-rename input:focus { outline: 2px solid rgb(231 195 122 / 45%); outline-offset: 1px; }
+.seat-rename input:disabled { opacity: .6; }
+.seat-rename-error { grid-column: 1 / -1; margin-top: 3px; color: #ff8a8a; font: 500 10.5px/1.4 var(--font-sans, system-ui, sans-serif); white-space: normal; text-align: left; }
+.seat-rename-error[hidden] { display: none; }
+.cubicle .name-plate .seat-rename { min-width: 150px; padding: 0; font-size: 10px; }
+.cubicle .name-plate .seat-rename input { padding: 2px 4px; }
 /* The one door from the task drawer to the topbar panel that holds what the drawer's rows do not:
    naming and mode for a seat still waiting to join, and creating a managed agent. */
 .office-task-settings { flex: none; width: auto; margin: 0 10px; padding: 9px 2px; border: 0; border-top: 1px dashed #403748; border-radius: 0; color: #bbb0be; background: transparent; font-size: 11px; text-align: left; }
