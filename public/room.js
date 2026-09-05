@@ -135,6 +135,7 @@ const state = {
   mergeHistoryLoaded: false,
   mergeHistoryRoom: "",
   mergeHistoryReturnFocus: null,
+  mergeHistorySelected: null,
 };
 const byId = (id) => document.getElementById(id);
 let sessionRecovery;
@@ -6771,6 +6772,7 @@ async function submitUnattestedAcknowledgement(confirm, box) {
 function selectMergeHistorySection(key) {
   const section = byId(`merge-history-${key}-section`);
   if (!section) return;
+  state.mergeHistorySelected = key;
   for (const item of document.querySelectorAll(".merge-history-nav-item")) {
     if (item.dataset.section === key) item.setAttribute("aria-current", "true");
     else item.removeAttribute("aria-current");
@@ -6778,7 +6780,15 @@ function selectMergeHistorySection(key) {
   for (const other of document.querySelectorAll(".merge-history-section")) {
     other.classList.toggle("is-current", other === section);
   }
-  section.scrollIntoView({ block: "start", behavior: "smooth" });
+  /* Scroll the list, not the whole card: scrollIntoView also dragged the dialog header and the
+     navigation itself out of view, which is the one thing a table of contents must not do. */
+  const list = section.closest(".merge-history-sections");
+  if (list) {
+    const top = section.getBoundingClientRect().top - list.getBoundingClientRect().top + list.scrollTop;
+    /* Instant on purpose: a table of contents jumps, and a smooth scroll on a hidden-then-shown
+       dialog was observed not to move at all in a headless browser. */
+    list.scrollTop = Math.max(0, top - 4);
+  }
   section.focus({ preventScroll: true });
 }
 
@@ -7630,6 +7640,7 @@ async function approveMergeIntoMain() {
 async function openMergeHistory() {
   const dialog = byId("merge-history");
   state.mergeHistoryReturnFocus = document.activeElement;
+  state.mergeHistorySelected = null;
   dialog.hidden = false;
   document.body.classList.add("workspace-modal-open");
   byId("merge-history-status").textContent = "正在從 durable store 讀取…";
@@ -7637,7 +7648,11 @@ async function openMergeHistory() {
   catch (error) {
     byId("merge-history-status").textContent = `併入紀錄讀取失敗：${humanError(error)}；讀不到不等於沒有紀錄。`;
   }
-  byId("merge-history-merged-section")?.focus();
+  /* The read above re-observes main and can take a couple of seconds; an owner who chose a group
+     from the navigation in the meantime keeps it. The unconditional focus here used to scroll the
+     list back to the top out from under that choice (measured: 757 → 0 about 600ms after the click). */
+  if (state.mergeHistorySelected) selectMergeHistorySection(state.mergeHistorySelected);
+  else byId("merge-history-merged-section")?.focus({ preventScroll: true });
 }
 
 function closeMergeHistory() {

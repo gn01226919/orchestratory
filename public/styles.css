@@ -2929,6 +2929,9 @@ body.workspace-modal-open { overflow: hidden; }
   display: block;
   margin-bottom: 0.35rem;
 }
+/* 勾選框不吃全域 input 的 width:100%：它們排在文字旁邊，不是自成一列的欄位。 */
+.merge-history-batch > label { display: inline-flex; align-items: center; gap: 6px; }
+.merge-history-batch input, .merge-history-pick input { display: inline-block; width: auto; margin: 0 6px 0 0; padding: 0; vertical-align: middle; }
 .merge-history-action.is-blocked {
   opacity: 0.85;
 }
