@@ -3844,3 +3844,27 @@ test("the bell drawer lists every waiting seat under 要你動手, wired to the 
   assert.match(source, /的加入申請已逾時`/u);
   assert.doesNotMatch(source, /左側「新增 Agents」/u);
 });
+
+test("a new seat request puts a red banner on the stage, and the bell keeps counting after the banner goes", async () => {
+  const html = await readFile(new URL("../public/room.html", import.meta.url), "utf8");
+  const stage = /<section class="office-stage"[\s\S]*?<\/section>/u.exec(html)?.[0] ?? "";
+  assert.match(stage, /<div id="office-seat-banner" class="office-seat-banner" hidden role="alert"/u);
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  assert.match(source, /^const SEAT_BANNER_AUTO_HIDE_MS = 20_000;$/mu);
+  const banner = /^function renderSeatRequestBanner\(\) \{[\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.notEqual(banner, "", "room.js keeps renderSeatRequestBanner");
+  assert.match(banner, /setTimeout\(dismissSeatRequestBanner, SEAT_BANNER_AUTO_HIDE_MS\)/u);
+  /* The banner's buttons are the drawer's buttons: the same builder, the same handlers. */
+  assert.match(banner, /seatRequestActions\(first, dismissSeatRequestBanner\)/u);
+  assert.match(banner, /later\.textContent = "稍後";/u);
+  assert.match(banner, /筆，到 🔔 處理`/u);
+  /* No browser permission prompt: the page never asks for Notification. */
+  assert.doesNotMatch(source, /Notification\.requestPermission|new Notification\(/u);
+  const render = /^function renderOfficeNotifications\(\) \{[\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(render, /document\.title = pendingCount \? `\(\$\{pendingCount\}\) \$\{state\.documentTitle\}` : state\.documentTitle;/u);
+  assert.match(render, /classList\.toggle\("has-seat-request", pendingCount > 0\)/u);
+  const css = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
+  assert.match(css, /\.office-seat-banner \{[^}]*border: 2px solid #e66d73;/u);
+  assert.match(css, /\.office-rail-button\.has-seat-request \{ animation: office-bell-pulse/u);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\s*\.office-seat-banner \{ animation: none; \}\s*\.office-rail-button\.has-seat-request \{ animation: none;/u);
+});

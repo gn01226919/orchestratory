@@ -4,6 +4,10 @@ const ROOM_UI_PROTOCOL = 2;
    this long, and it goes on the next repaint after that -- which the click schedules, but which an
    unrelated presence change can also bring forward or a later click can push back (see wakeNoticeTimers). */
 const WAKE_NOOP_NOTICE_MS = 15_000;
+/* How long the stage banner for a new seat request stays up before it puts itself away. Short of
+   the product's two-minute approval ceiling by design: the banner is the nudge, the bell drawer is
+   where the request lives, and the drawer keeps its count after the banner is gone. */
+const SEAT_BANNER_AUTO_HIDE_MS = 20_000;
 /*
  * Provider 選單的單一來源（瀏覽器側）。
  *
@@ -70,6 +74,12 @@ const state = {
      "no" -- its request simply lapses at the product's two-minute ceiling -- so "not approving" is a
      local decision: the row is put away here and the lapse is reported when the seat disappears. */
   dismissedSeatRequests: new Set(),
+  /* Requests the stage banner has already shown and put away ("稍後" or the 20-second clock), keyed
+     kind:presenceId. They stay in the bell drawer; only the banner stops repeating them. */
+  seatBannerDismissed: new Set(),
+  seatBannerTimer: null,
+  /* The page title as the HTML set it, remembered before a "(N) " pending prefix is put in front. */
+  documentTitle: "",
   knownExternalNames: new Set(),
   managedAgents: [],
   deliveries: [],
@@ -2475,6 +2485,90 @@ function renderOfficeNotifications() {
   badge.hidden = unread === 0;
   const title = byId("office-notification-title");
   if (title) title.textContent = unread ? `通知 · ${unread}` : "通知";
+  /* Three more places say "a terminal is waiting" while any request is pending: the bell on the
+     rail pulses red, the tab title carries "(N) ", and the stage shows the banner. All derived from
+     the same list, so they agree with each other and with the drawer. */
+  const pendingCount = pendingSeatRequests().length;
+  byId("office-notification-toggle")?.classList.toggle("has-seat-request", pendingCount > 0);
+  if (!state.documentTitle) state.documentTitle = document.title;
+  document.title = pendingCount ? `(${pendingCount}) ${state.documentTitle}` : state.documentTitle;
+  renderSeatRequestBanner();
+}
+
+function seatBannerKey(request) {
+  return `${request.kind}:${request.session.id}`;
+}
+
+/*
+ * The banner on the stage: one waiting request, its two buttons, and "稍後". It is shown for a
+ * request the banner has not put away yet, whether the request arrived just now or was already
+ * waiting when the page opened -- the terminal behind it cannot tell the difference, and its
+ * two-minute clock is running either way. A second and later request is a count that opens the
+ * bell drawer rather than a second banner. The 20-second clock restarts whenever the headline
+ * request changes; running out, like "稍後", puts away everything the banner was covering, so the
+ * next request to arrive gets a fresh banner rather than a stale one still counting.
+ */
+function renderSeatRequestBanner() {
+  const banner = byId("office-seat-banner");
+  if (!banner) return;
+  const pending = pendingSeatRequests();
+  /* Put-away keys outlive their request only until the next paint, so the set cannot grow with
+     every terminal that ever asked. */
+  const pendingKeys = new Set(pending.map(seatBannerKey));
+  for (const key of state.seatBannerDismissed) if (!pendingKeys.has(key)) state.seatBannerDismissed.delete(key);
+  const requests = pending.filter((request) => !state.seatBannerDismissed.has(seatBannerKey(request)));
+  const [first, ...rest] = requests;
+  if (!first) {
+    banner.hidden = true;
+    banner.textContent = "";
+    delete banner.dataset.key;
+    clearTimeout(state.seatBannerTimer);
+    state.seatBannerTimer = null;
+    return;
+  }
+  const key = seatBannerKey(first);
+  if (banner.dataset.key !== key) {
+    banner.dataset.key = key;
+    clearTimeout(state.seatBannerTimer);
+    state.seatBannerTimer = setTimeout(dismissSeatRequestBanner, SEAT_BANNER_AUTO_HIDE_MS);
+  }
+  banner.textContent = "";
+  const headline = document.createElement("b");
+  const { session } = first;
+  const dir = workspaceLabel(session.workspace);
+  headline.textContent = first.kind === "join"
+    ? `${session.provider} MCP 終端申請加入 · 席位 ${seatTag(session.id)}${dir ? ` · ${dir}` : ""}`
+    : `${session.displayName || session.provider} 申請 room-wait 待命 · 席位 ${seatTag(session.id)}${dir ? ` · ${dir}` : ""}`;
+  const hint = document.createElement("small");
+  hint.textContent = first.kind === "join"
+    ? "等你按核准；申請在產品上限 2 分鐘後會自動消失。"
+    : "核准後它才收得到工作；它得自己呼叫 room_wait。";
+  headline.append(hint);
+  const actions = seatRequestActions(first, dismissSeatRequestBanner);
+  const later = document.createElement("button");
+  later.type = "button";
+  later.className = "office-notification-action office-seat-banner-later";
+  later.textContent = "稍後";
+  later.title = "先收起提示；申請還在 🔔 通知的「要你動手」裡，2 分鐘內都能核准。";
+  later.addEventListener("click", dismissSeatRequestBanner);
+  actions.append(later);
+  banner.append(headline, actions);
+  if (rest.length) {
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "office-seat-banner-more";
+    more.textContent = `＋${rest.length} 筆，到 🔔 處理`;
+    more.addEventListener("click", () => openOfficeDrawer("office-notifications"));
+    banner.append(more);
+  }
+  banner.hidden = false;
+}
+
+function dismissSeatRequestBanner() {
+  clearTimeout(state.seatBannerTimer);
+  state.seatBannerTimer = null;
+  for (const request of pendingSeatRequests()) state.seatBannerDismissed.add(seatBannerKey(request));
+  renderSeatRequestBanner();
 }
 
 function markOfficeNotificationsRead() {

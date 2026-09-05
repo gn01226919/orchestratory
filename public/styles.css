@@ -2330,6 +2330,57 @@ button.cancel-pending:hover { border-color: var(--warn); }
 @keyframes office-outcome-in { from { opacity: 0; transform: translate(-50%, -8px) scale(.96); } }
 @keyframes office-celebrate { 50% { transform: translateY(-10px) rotate(4deg); } }
 
+/* ── Seat-request banner: a terminal is waiting for the owner's click ──
+   Red, like the pending-approval chip on the status wall, and sitting just under that wall: the
+   request lapses on a two-minute clock, so it must be the first thing the eye lands on. The approve
+   button keeps the green every other approve button here has, so it reads as the same action. */
+.office-seat-banner {
+  position: absolute;
+  z-index: 46;
+  left: 50%;
+  top: clamp(64px, 13%, 118px);
+  display: grid;
+  gap: 8px;
+  width: min(92%, 560px);
+  padding: 11px 14px 12px;
+  transform: translateX(-50%);
+  border: 2px solid #e66d73;
+  border-radius: 10px;
+  color: #ffe5e6;
+  background: rgb(79 31 38 / 96%);
+  box-shadow: 0 15px 38px rgb(0 0 0 / 46%), 0 0 26px rgb(230 109 115 / 38%);
+  animation: office-outcome-in .32s ease-out;
+}
+.office-seat-banner[hidden] { display: none; }
+.office-seat-banner > b { font: 900 11px/1.45 var(--font-mono); letter-spacing: .02em; overflow-wrap: anywhere; }
+.office-seat-banner > b small { display: block; margin-top: 2px; color: #f0b5b8; font: 700 10px/1.4 var(--font-mono); letter-spacing: 0; }
+.office-seat-banner .seat-request-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; }
+.office-seat-banner .office-notification-action { flex: 1 1 96px; min-height: 34px; padding: 8px 12px; font-size: 12px; }
+.office-seat-banner .office-notification-action.primary { flex-grow: 2; font-weight: 900; box-shadow: 0 0 0 2px rgb(88 206 144 / 25%), 0 6px 18px rgb(88 206 144 / 25%); }
+.office-seat-banner .office-seat-banner-later { border-color: #8a4b52; color: #f4c9cc; background: rgb(255 255 255 / 6%); }
+.office-seat-banner .office-seat-banner-more {
+  justify-self: start;
+  padding: 3px 0;
+  border: 0;
+  color: #ffc7ca;
+  background: none;
+  font: 700 10px/1.4 var(--font-mono);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+/* The rail's bell gets a red pulse while any request is waiting -- the drawer is where the request
+   lives once the banner is put away, and the number alone is easy to miss on a pixel stage. */
+.office-rail-button.has-seat-request { animation: office-bell-pulse 1.6s ease-out infinite; }
+@keyframes office-bell-pulse {
+  0% { box-shadow: 0 0 0 0 rgb(230 109 115 / 75%); }
+  70% { box-shadow: 0 0 0 9px rgb(230 109 115 / 0%); }
+  100% { box-shadow: 0 0 0 0 rgb(230 109 115 / 0%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .office-seat-banner { animation: none; }
+  .office-rail-button.has-seat-request { animation: none; box-shadow: 0 0 0 2px #e66d73; }
+}
+
 .office.day-mode .office-back-wall { filter: brightness(1.14) saturate(.92); }
 .office.day-mode .office-window { background: linear-gradient(180deg, #8fc7d7 0 54%, #ebc98d 55% 100%); box-shadow: 5px 7px 0 rgb(52 28 29 / 22%), 0 0 34px rgb(255 223 157 / 38%), inset 0 0 20px rgb(255 247 211 / 24%); }
 .office.day-mode .city-lights { opacity: .22; }
