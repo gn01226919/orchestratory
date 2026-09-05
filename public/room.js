@@ -6677,6 +6677,8 @@ function renderMergeHistory() {
   for (const key of ["merged", "review", "closed", "unpromoted"]) {
     const total = byId(`merge-history-${key}-total`);
     if (total) total.textContent = String(counts[key]);
+    const navCount = byId(`merge-history-nav-${key}`);
+    if (navCount) navCount.textContent = String(counts[key]);
   }
   for (const entry of buckets.mergedPromotions) renderPromotionHistoryEntry(mergedHost, entry);
   for (const entry of buckets.reviewPromotions) renderPromotionHistoryEntry(reviewHost, entry);
@@ -6751,6 +6753,25 @@ async function submitUnattestedAcknowledgement(confirm, box) {
     failed.textContent = `未送出：${error && error.message ? error.message : "unknown"}`;
     box.append(failed);
   }
+}
+
+/*
+ * The side navigation is a table of contents, not a filter: every group stays on the page, and a
+ * click only moves the reader to one of them and marks which one they chose.  Counts are written
+ * by renderMergeHistory from the same buckets as the section badges, so this never computes them.
+ */
+function selectMergeHistorySection(key) {
+  const section = byId(`merge-history-${key}-section`);
+  if (!section) return;
+  for (const item of document.querySelectorAll(".merge-history-nav-item")) {
+    if (item.dataset.section === key) item.setAttribute("aria-current", "true");
+    else item.removeAttribute("aria-current");
+  }
+  for (const other of document.querySelectorAll(".merge-history-section")) {
+    other.classList.toggle("is-current", other === section);
+  }
+  section.scrollIntoView({ block: "start", behavior: "smooth" });
+  section.focus({ preventScroll: true });
 }
 
 async function refreshMergeHistory() {
@@ -7721,6 +7742,10 @@ byId("merge-history-select-all").addEventListener("change", (event) => {
 });
 byId("merge-history-retry-selected").addEventListener("click", retrySelectedMergeApprovals);
 byId("merge-history-close").addEventListener("click", closeMergeHistory);
+document.querySelector(".merge-history-nav")?.addEventListener("click", (event) => {
+  const item = event.target.closest(".merge-history-nav-item");
+  if (item?.dataset.section) selectMergeHistorySection(item.dataset.section);
+});
 byId("merge-history-done").addEventListener("click", closeMergeHistory);
 byId("merge-history-refresh").addEventListener("click", async () => {
   byId("merge-history-status").textContent = "正在重新讀取…";
