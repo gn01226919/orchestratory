@@ -4081,6 +4081,11 @@ test("the bell drawer lists every waiting seat under 要你動手, wired to the 
   assert.match(actions, /changePresenceMembership\(session, approve\)/u);
   assert.match(actions, /changePresenceStandby\(session, "approve", approve\)/u);
   assert.match(actions, /changePresenceStandby\(session, "revoke", reject\)/u);
+  /* Refusing a join is a server call, never a local put-away. */
+  assert.match(actions, /reject\.textContent = "拒絕";[\s\S]*?rejectSeatJoin\(session, reject\)/u);
+  assert.doesNotMatch(source, /dismissedSeatRequests|textContent = "不核准"/u);
+  const rejectFn = /^async function rejectSeatJoin\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(rejectFn, /api\("\/api\/rooms\/presence\/reject", \{\s*method: "POST",\s*body: JSON\.stringify\(\{ room: state\.room, presenceId: session\.id \}\)/u);
   /* The announcement is unread and says where the button is; a lapse is reported, not swallowed. */
   assert.match(source, /"在這裡按核准，或到任務清單底部「⚙ 終端加入設定」[^"]*",\s*true,\s*\{ kind: "join-approve", presenceId: session\.id \}/u);
   assert.match(source, /的加入申請已逾時`/u);
@@ -4097,7 +4102,7 @@ test("a new seat request puts a red banner on the stage, and the bell keeps coun
   assert.notEqual(banner, "", "room.js keeps renderSeatRequestBanner");
   assert.match(banner, /setTimeout\(dismissSeatRequestBanner, SEAT_BANNER_AUTO_HIDE_MS\)/u);
   /* The banner's buttons are the drawer's buttons: the same builder, the same handlers. */
-  assert.match(banner, /seatRequestActions\(first, dismissSeatRequestBanner\)/u);
+  assert.match(banner, /seatRequestActions\(first\)/u);
   assert.match(banner, /later\.textContent = "稍後";/u);
   assert.match(banner, /筆，到 🔔 處理`/u);
   /* No browser permission prompt: the page never asks for Notification. */
@@ -4129,7 +4134,7 @@ test("a request card that lapsed or was answered goes grey and says which, with 
   const render = /^function renderOfficeNotifications\(\) \{[\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
   const informational = render.slice(render.indexOf("for (const item of informational) {"));
   assert.match(informational, /row\.classList\.add\("is-expired"\);/u);
-  assert.match(informational, /tag\.textContent = handled \? "已處理" : "已過期";/u);
+  assert.match(informational, /tag\.textContent = rejected \? "已拒絕" : handled \? "已處理" : "已過期";/u);
   /* Only live requests get buttons: the informational loop never builds seatRequestActions. */
   assert.doesNotMatch(informational, /seatRequestActions\(|office-notification-action/u);
   const css = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");

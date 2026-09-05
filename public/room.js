@@ -69,10 +69,10 @@ const state = {
   presenceJoinModes: {},
   presenceViewSignature: "",
   presences: [],
-  /* Join requests the owner chose not to approve. There is no route that tells a waiting terminal
-     "no" -- its request simply lapses at the product's two-minute ceiling -- so "not approving" is a
-     local decision: the row is put away here and the lapse is reported when the seat disappears. */
-  dismissedSeatRequests: new Set(),
+  /* Join requests the owner refused through /api/rooms/presence/reject. The seat leaves the pending
+     list on the server's say-so; this set only remembers that it was the owner's refusal, so the
+     card says 已拒絕 rather than 已過期 and the lapse report stays quiet for it. */
+  rejectedSeatRequests: new Set(),
   /* Requests the stage banner has already shown and put away ("稍後" or the 20-second clock), keyed
      kind:presenceId. They stay in the bell drawer; only the banner stops repeating them. */
   seatBannerDismissed: new Set(),
@@ -1340,6 +1340,39 @@ async function changePresenceMembership(session, button) {
 }
 
 /*
+ * Refuse a pending join request. The server drops the request and writes the refusal to the
+ * ledger; the terminal stays live and may ask again. Remembered locally only so the card can say
+ * 已拒絕 and the lapse report knows this disappearance was the owner's doing.
+ */
+async function rejectSeatJoin(session, button) {
+  if (!state.room) return;
+  button.disabled = true;
+  const original = button.textContent;
+  button.textContent = "拒絕中…";
+  try {
+    await api("/api/rooms/presence/reject", {
+      method: "POST",
+      body: JSON.stringify({ room: state.room, presenceId: session.id }),
+    });
+    state.rejectedSeatRequests.add(session.id);
+    state.presences = (state.presences || []).filter((entry) => entry.id !== session.id);
+    if (state.selectedPresenceId === session.id) state.selectedPresenceId = "";
+    renderPresencePanel();
+    renderOfficeNotifications();
+    syncOfficeDesks();
+    if (!byId("office").hidden) updateOffice(state.recent || []);
+    await refreshPresence(true);
+    await poll();
+  } catch (error) {
+    showRoomError(error, { prefix: "拒絕加入申請失敗", session });
+    button.disabled = false;
+    button.textContent = original;
+    renderPresencePanel();
+    renderOfficeNotifications();
+  }
+}
+
+/*
  * Record that the owner wanted this seat's attention.
  *
  * It does not wake anything. MCP over stdio is request/response -- the server cannot push to a
@@ -1561,16 +1594,14 @@ async function refreshPresence(force = false) {
       if (state.presences.some((session) => session.id === id)) continue;
       if (before.requested && !before.joined) {
         /* The server keeps no record of a lapsed request, so the only place the owner can learn
-           that a terminal gave up waiting is here, from the diff. Approving from this page keeps the
-           seat in the list as joined, so a vanished pending seat is a lapse (or a closed terminal),
-           never something the owner did. */
-        const dismissed = state.dismissedSeatRequests.delete(id);
+           that a terminal gave up waiting is here, from the diff. Approving keeps the seat in the
+           list as joined and a refusal is remembered in rejectedSeatRequests, so a vanished pending
+           seat that is in neither is a lapse (or a closed terminal), not something the owner did. */
+        if (state.rejectedSeatRequests.has(id)) continue;
         addOfficeNotification(
           "presence",
           `${seatRequestTitle(before)} 的加入申請已逾時`,
-          dismissed
-            ? "你沒有核准，申請已在產品上限 2 分鐘內過期；它要再進來得自己重送。"
-            : "產品把等待核准鎖在 2 分鐘，逾時就消失（也可能是該終端已關閉），請該終端重送申請。",
+          "產品把等待核准鎖在 2 分鐘，逾時就消失（也可能是該終端已關閉），請該終端重送申請。",
           true,
         );
       } else if (before.joined && state.controlInitialized) {
@@ -2289,7 +2320,7 @@ function officeNotificationLive(item) {
   }
   if (item.action?.kind === "join-approve") {
     const session = (state.presences || []).find((entry) => entry.id === item.action.presenceId);
-    return Boolean(session?.requested && !session.joined && !state.dismissedSeatRequests.has(session.id));
+    return Boolean(session?.requested && !session.joined);
   }
   if (item.action?.kind === "merge-approval") {
     return mergeApprovalPending((state.mergeApprovals || []).find((entry) => entry.id === item.action.approvalId));
@@ -2307,14 +2338,13 @@ function seatRequestTitle(session) {
 /*
  * Every request the owner has not answered, read from the seat list rather than from the
  * notification log: a request is pending because the server says so, not because a notification
- * about it happens to survive in a list capped at thirty entries. A join request the owner put away
- * is left out here and reported once it lapses.
+ * about it happens to survive in a list capped at thirty entries.
  */
 function pendingSeatRequests() {
   const requests = [];
   for (const session of state.presences || []) {
     if (session.requested && !session.joined) {
-      if (!state.dismissedSeatRequests.has(session.id)) requests.push({ kind: "join", session });
+      requests.push({ kind: "join", session });
     } else if (session.joined && session.standbyRequested && !session.standbyApproved) {
       requests.push({ kind: "standby", session });
     }
@@ -2325,11 +2355,10 @@ function pendingSeatRequests() {
 /*
  * The two buttons for one request, built once for every surface that shows it, so each surface
  * calls the handler the terminal panel already calls: approving a join is changePresenceMembership,
- * approving or revoking standby is changePresenceStandby. Nothing about approval is re-implemented
- * here. The one asymmetry is stated rather than papered over: no route tells a waiting terminal
- * "no", so not approving a join only puts the request away and lets it lapse on the product's clock.
+ * approving or revoking standby is changePresenceStandby, refusing a join is rejectSeatJoin. Nothing
+ * about approval is re-implemented here.
  */
-function seatRequestActions(request, onDismiss) {
+function seatRequestActions(request) {
   const { kind, session } = request;
   const actions = document.createElement("div");
   actions.className = "office-notification-actions seat-request-actions";
@@ -2343,13 +2372,9 @@ function seatRequestActions(request, onDismiss) {
   if (kind === "join") {
     approve.title = `核准 ${seatRequestTitle(session)} 加入房間，預設全程帳本協作＋終端對話同步；要取名或改模式，先到任務清單底部「⚙ 終端加入設定」。`;
     approve.addEventListener("click", () => void changePresenceMembership(session, approve));
-    reject.textContent = "不核准";
-    reject.title = "沒有通道能告訴那個終端「不」：這只會把申請從這裡收起，它的申請會在產品上限 2 分鐘內自行過期。";
-    reject.addEventListener("click", () => {
-      state.dismissedSeatRequests.add(session.id);
-      renderOfficeNotifications();
-      if (typeof onDismiss === "function") onDismiss();
-    });
+    reject.textContent = "拒絕";
+    reject.title = "拒絕這次加入申請：申請消失、帳本記一行，那個終端還在線，可以再申請。";
+    reject.addEventListener("click", () => void rejectSeatJoin(session, reject));
   } else {
     approve.title = `核准 ${session.displayName || session.provider} 的 room-wait 待命：允許它收工作，不代表它隨時在收聽。`;
     approve.addEventListener("click", () => void changePresenceStandby(session, "approve", approve));
@@ -2435,17 +2460,19 @@ function renderOfficeNotifications() {
       const row = buildRow(item);
       if (item.action?.kind === "join-approve" || item.action?.kind === "standby-approve") {
         /* A request card that has stopped being a request goes grey and says which way it went:
-           已處理 when the owner answered it, 已過期 when the seat or its request went away before
-           anyone did. The buttons are gone either way -- the request cannot be acted on any more,
-           and a live-looking card for a lapsed request is what the owner mistook for a task. */
+           已拒絕 when the owner refused a join, 已處理 when the owner answered it the other way, 已過期
+           when the seat or its request went away before anyone did. The buttons are gone either way
+           -- the request cannot be acted on any more, and a live-looking card for a lapsed request is
+           what the owner mistook for a task. */
         const session = (state.presences || []).find((entry) => entry.id === item.action.presenceId);
+        const rejected = item.action.kind === "join-approve" && state.rejectedSeatRequests.has(item.action.presenceId);
         const handled = item.action.kind === "join-approve"
-          ? Boolean(session && (session.joined || state.dismissedSeatRequests.has(session.id)))
+          ? Boolean(session?.joined)
           : Boolean(session?.joined && session.standbyApproved);
         row.classList.add("is-expired");
         const tag = document.createElement("em");
         tag.className = "office-notification-tag";
-        tag.textContent = handled ? "已處理" : "已過期";
+        tag.textContent = rejected ? "已拒絕" : handled ? "已處理" : "已過期";
         row.querySelector("b")?.append(tag);
       }
       if (item.detail) {
@@ -2478,11 +2505,13 @@ function renderOfficeNotifications() {
         const session = (state.presences || []).find((entry) => entry.id === item.action.presenceId);
         const done = document.createElement("small");
         done.className = "office-notification-done";
-        done.textContent = !session
-          ? "這個申請已經不在了：逾時或該終端已關閉。"
-          : session.joined
-            ? "① 已核准加入房間"
-            : "你沒有核准；它的申請會在產品上限 2 分鐘內自行過期。";
+        done.textContent = state.rejectedSeatRequests.has(item.action.presenceId)
+          ? "你拒絕了這次申請，帳本有紀錄；那個終端還在線，可以再申請。"
+          : !session
+            ? "這個申請已經不在了：逾時或該終端已關閉。"
+            : session.joined
+              ? "① 已核准加入房間"
+              : "這個申請已經取消，不需要處理了。";
         row.append(done);
       }
       if (item.action?.kind === "merge-approval") {
@@ -2559,7 +2588,7 @@ function renderSeatRequestBanner() {
     ? "等你按核准；申請在產品上限 2 分鐘後會自動消失。"
     : "核准後它才收得到工作；它得自己呼叫 room_wait。";
   headline.append(hint);
-  const actions = seatRequestActions(first, dismissSeatRequestBanner);
+  const actions = seatRequestActions(first);
   const later = document.createElement("button");
   later.type = "button";
   later.className = "office-notification-action office-seat-banner-later";
