@@ -859,12 +859,16 @@ function updateRoomInfo(room) {
   renderTopbarCounts();
 }
 
+/*
+ * Only system state reaches the bell. A reply is conversation, and conversation is what the ledger
+ * shows; a "new reply" card for every resident-model turn filled the drawer until the one card that
+ * needed a click (a terminal waiting to join) was buried under them. So chat is never a
+ * notification here -- no kind, no switch -- and the bell keeps to requests, outcomes and errors.
+ */
 function ingestRoomNotifications(messages) {
   for (const message of messages) {
     if (message.kind === "system" && /失敗|停止|取消/u.test(message.text)) {
       addOfficeNotification("error", "Room 工作需要注意", message.text);
-    } else if (message.kind === "chat" && ROOM_RESIDENT_PROVIDER_IDS.includes(providerForAgent(message.author))) {
-      addOfficeNotification("message", `${message.author} 有新回覆`, message.text);
     }
   }
 }

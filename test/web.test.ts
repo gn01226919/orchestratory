@@ -3907,3 +3907,15 @@ test("the terminal panel states that turns mirror into the ledger, and offers no
   assert.match(join, /syncTurns: true,/u);
   assert.doesNotMatch(join, /syncTurns: (?!true,)/u);
 });
+
+test("the bell carries system state only: no reply or chat ever becomes a notification", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const calls = [...source.matchAll(/addOfficeNotification\(\s*"([a-z-]+)"/gu)].map((match) => match[1] ?? "");
+  assert.ok(calls.length > 0, "room.js still raises office notifications");
+  for (const kind of calls) assert.ok(!["message", "reply", "chat", "mention"].includes(kind), `chat-class notification kind: ${kind}`);
+  assert.doesNotMatch(source, /有新回覆/u);
+  const ingest = /^function ingestRoomNotifications\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.notEqual(ingest, "");
+  assert.doesNotMatch(ingest, /message\.kind === "chat"/u);
+  assert.match(ingest, /message\.kind === "system"/u);
+});

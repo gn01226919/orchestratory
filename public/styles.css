@@ -2141,7 +2141,6 @@ button.cancel-pending:hover { border-color: var(--warn); }
 .office-notification.is-actionable { border-color: #7a6738; }
 .office-notification[data-kind="success"]::before { background: #58ce90; }
 .office-notification[data-kind="error"]::before { background: #ef736d; }
-.office-notification[data-kind="message"]::before { background: #6da5ef; }
 .office-notification[data-kind="proposal"]::before { background: #e56d76; }
 .office-notification[data-kind="presence"]::before { background: #e7b45f; }
 .office-notification b { color: #ded3df; font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
