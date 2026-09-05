@@ -6,6 +6,10 @@
 
 *同一個房間裡的 codex、claude 與 grok 席位。右側草稿區標著它自己的限制：**獨立副本，看得到、可退回、有紀錄；不是沙盒**。*
 
+![核准併入 main 的閘門：變更清單要捲到底才解鎖，確認短語逐字輸入後仍未合併，還要再按一次核准](docs/images/merge-gate.png)
+
+*寫入你的專案是一道獨立閘門。捲完變更清單才解鎖輸入，逐字打出 `MERGE INTO MAIN` 之後**仍未合併**——還要再按一次。免責聲明就放在做決定的那一格裡。（左側本機路徑已遮蔽。）*
+
 **[▶ 90 秒展示影片](https://www.youtube.com/watch?v=wS8F4vVaAvA)** ｜ **[互動式席位手冊](https://gn01226919.github.io/orchestratory/orchestrator-seat-handbook.html)**
 
 ## 問題與目標
