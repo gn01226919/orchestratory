@@ -6181,7 +6181,15 @@ function mergeRetryReason(approval) {
  * the question gets fifteen minutes, a granted authorization five.
  */
 function mergeApprovalClosedReason(approval) {
-  const stated = approval?.refusal?.reason || approval?.refusal?.code;
+  const code = approval?.refusal?.code;
+  const changed = Array.isArray(approval?.refusal?.changed) ? approval.refusal.changed.join("、") : "";
+  /* The two machine endings the registry writes for a voided binding and a refusal without a note
+     used to reach the screen as their codes; each is a knowable story, told here in plain words. */
+  if (code === "MAIN_MERGE_APPROVAL_BINDING_CHANGED") {
+    return `核准送出後 main 或快照已改變${changed ? `（${changed}）` : ""}，這筆核准在執行前作廢，沒有進入併入。沒有人拒絕它。`;
+  }
+  if (code === "OWNER_REJECTED" && !approval?.refusal?.reason) return "有人拒絕了這筆核准，沒有留下理由。";
+  const stated = approval?.refusal?.reason || code;
   if (stated) return String(stated);
   if (approval?.state !== "expired") return "";
   const opened = Date.parse(approval?.createdAt ?? "");
