@@ -6323,48 +6323,83 @@ function renderPromotionHistoryEntry(host, entry) {
   const header = document.createElement("header");
   const title = document.createElement("strong");
   const succeeded = mergeHistorySucceeded(entry);
+  /* Two kinds of "unreadable" that must not share a sentence.  `row-integrity` means the bytes
+     failed their own check -- the record IS incomplete and has to be verified.  `promotion-
+     attestation` means the row is intact; only this process, started after the merge, has no
+     first-hand memory of it and refuses to vouch.  Calling the second one "incomplete" accused a
+     complete record, so the title now names what actually happened: the service restarted. */
+  const unattested = entry?.state === "unreadable" && entry?.unreadableReason === "promotion-attestation";
   title.textContent = succeeded
     ? "併入成功"
-    : entry?.state === "applied"
-      ? "併入驗證不完整"
-      : entry?.state === "applying"
-        ? "Promotion 結果尚未收斂"
-        : entry?.state === "needs-manual-review"
-          ? "必須人工核對"
-          : entry?.state === "rolled-back"
-            ? "Promotion 已回復，仍需核對"
-            : "紀錄不完整，必須核對";
+    : unattested
+      ? "服務重啟過，等你確認"
+      : entry?.state === "applied"
+        ? "併入驗證不完整"
+        : entry?.state === "applying"
+          ? "Promotion 結果尚未收斂"
+          : entry?.state === "needs-manual-review"
+            ? "必須人工核對"
+            : entry?.state === "rolled-back"
+              ? "Promotion 已回復，仍需核對"
+              : "紀錄不完整，必須核對";
   const stateTag = document.createElement("span");
   stateTag.className = `merge-history-state is-${String(entry?.state || "unknown")}`;
-  stateTag.textContent = String(entry?.state || "unknown");
+  stateTag.textContent = unattested && typeof entry?.storedState === "string" && entry.storedState
+    ? `紀錄寫的是 ${entry.storedState}`
+    : String(entry?.state || "unknown");
   header.append(title, stateTag);
   const facts = document.createElement("dl");
-  historyFact(facts, "時間", entry?.updatedAt);
-  historyFact(facts, "Task", entry?.taskId);
-  historyFact(facts, "Promotion", entry?.id);
-  historyFact(facts, "Approval", entry?.approvalId);
-  historyFact(facts, "main HEAD before", entry?.mainHeadBefore);
-  historyFact(facts, "main HEAD after", entry?.mainHeadAfter);
-  historyFact(facts, "Candidate HEAD", entry?.candidateHead);
-  historyFact(facts, "Recovery ref", entry?.recoveryRef);
-  historyFact(facts, "Observation", entry?.observation?.code);
-  /* The two commits are already on screen; what was missing was the one line that turns them into
-     an answer. Only offered when both ends were observed -- half a range inspects nothing. */
-  if (typeof entry?.mainPath === "string" && typeof entry?.mainHeadBefore === "string"
-    && typeof entry?.mainHeadAfter === "string") {
-    historyCopyable(
-      facts,
-      "檢視這次併入",
-      `git -C ${entry.mainPath} log --oneline ${entry.mainHeadBefore}..${entry.mainHeadAfter}`,
-      "已複製指令",
-    );
+  if (unattested) {
+    /* Only what the daemon actually sent for this row.  It deliberately withholds the HEADs, the
+       approval id and the recovery ref for a record it will not vouch for, so printing those
+       labels with "未讀到" beside them described a read failure that never happened. */
+    historyFact(facts, "Task", entry?.taskId);
+    historyFact(facts, "Promotion", entry?.id);
+    historyFact(facts, "紀錄寫的狀態", entry?.storedState);
+  } else {
+    historyFact(facts, "時間", entry?.updatedAt);
+    historyFact(facts, "Task", entry?.taskId);
+    historyFact(facts, "Promotion", entry?.id);
+    historyFact(facts, "Approval", entry?.approvalId);
+    historyFact(facts, "main HEAD before", entry?.mainHeadBefore);
+    historyFact(facts, "main HEAD after", entry?.mainHeadAfter);
+    historyFact(facts, "Candidate HEAD", entry?.candidateHead);
+    historyFact(facts, "Recovery ref", entry?.recoveryRef);
+    historyFact(facts, "Observation", entry?.observation?.code);
+    /* The two commits are already on screen; what was missing was the one line that turns them into
+       an answer. Only offered when both ends were observed -- half a range inspects nothing. */
+    if (typeof entry?.mainPath === "string" && typeof entry?.mainHeadBefore === "string"
+      && typeof entry?.mainHeadAfter === "string") {
+      historyCopyable(
+        facts,
+        "檢視這次併入",
+        `git -C ${entry.mainPath} log --oneline ${entry.mainHeadBefore}..${entry.mainHeadAfter}`,
+        "已複製指令",
+      );
+    }
+    const hooks = entry?.observation?.hooksExecuted;
+    historyFact(facts, "Hooks", Array.isArray(hooks)
+      ? (hooks.length ? hooks.map((hook) => `${hook.name}(exit ${hook.exitCode ?? "?"})`).join("、") : "none observed")
+      : "未讀到");
   }
-  const hooks = entry?.observation?.hooksExecuted;
-  historyFact(facts, "Hooks", Array.isArray(hooks)
-    ? (hooks.length ? hooks.map((hook) => `${hook.name}(exit ${hook.exitCode ?? "?"})`).join("、") : "none observed")
-    : "未讀到");
   item.append(header, facts);
-  if (!succeeded) {
+  if (unattested) {
+    const action = document.createElement("section");
+    action.className = "merge-history-action";
+    const explain = document.createElement("p");
+    explain.textContent = "紀錄本身完整；只是這個服務在併入之後才啟動，沒有第一手記憶，所以不替它背書。"
+      + "你自行檢查專案後，在這裡確認即可。";
+    action.append(explain);
+    if (entry?.holdsProjectExclusiveMarker === true) {
+      const confirm = document.createElement("button");
+      confirm.type = "button";
+      confirm.className = "merge-history-acknowledge";
+      confirm.textContent = "確認已檢查（對這個專案所有等待證實的紀錄一起生效）";
+      confirm.addEventListener("click", () => submitUnattestedAcknowledgement(confirm, action));
+      action.append(confirm);
+    }
+    item.append(action);
+  } else if (!succeeded) {
     const action = document.createElement("p");
     action.className = "merge-history-action";
     action.textContent = "不要再次 apply。先重新讀取 observation；若仍停在此區，依還原點 ref 人工核對 main。";
@@ -6686,28 +6721,36 @@ function renderUnattestedAcknowledgement(host, unattested) {
   confirm.type = "button";
   confirm.className = "merge-history-acknowledge";
   confirm.textContent = "確認已檢查：我已自行檢查這個專案，沒有更早的併入還在執行";
-  confirm.addEventListener("click", async () => {
-    confirm.disabled = true;
-    try {
-      await api("/api/rooms/merge-promotions/acknowledge", {
-        method: "POST",
-        body: JSON.stringify({
-          room: state.room,
-          confirmation: "I HAVE CHECKED THIS PROJECT MYSELF AND NO EARLIER PROMOTION IS STILL RUNNING",
-        }),
-      });
-      await refreshMergeHistory();
-    } catch (error) {
-      // Failure is named where the owner is looking, and the button comes back: a disabled control
-      // with no message is indistinguishable from having worked.
-      confirm.disabled = false;
-      const failed = document.createElement("p");
-      failed.textContent = `未送出：${error && error.message ? error.message : "unknown"}`;
-      box.append(failed);
-    }
-  });
+  confirm.addEventListener("click", () => submitUnattestedAcknowledgement(confirm, box));
   box.append(explain, warn, confirm);
   host.append(box);
+}
+
+/*
+ * The one path that sends the owner's declaration, shared by the banner above and the button on
+ * each card so the two can never drift into different phrases or different endpoints.  The
+ * endpoint is project-wide by design -- it acknowledges every record this daemon cannot vouch for,
+ * not one -- which is why the card's button says so.
+ */
+async function submitUnattestedAcknowledgement(confirm, box) {
+  confirm.disabled = true;
+  try {
+    await api("/api/rooms/merge-promotions/acknowledge", {
+      method: "POST",
+      body: JSON.stringify({
+        room: state.room,
+        confirmation: "I HAVE CHECKED THIS PROJECT MYSELF AND NO EARLIER PROMOTION IS STILL RUNNING",
+      }),
+    });
+    await refreshMergeHistory();
+  } catch (error) {
+    // Failure is named where the owner is looking, and the button comes back: a disabled control
+    // with no message is indistinguishable from having worked.
+    confirm.disabled = false;
+    const failed = document.createElement("p");
+    failed.textContent = `未送出：${error && error.message ? error.message : "unknown"}`;
+    box.append(failed);
+  }
 }
 
 async function refreshMergeHistory() {
