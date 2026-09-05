@@ -1725,3 +1725,30 @@ test("a permission failure is a real one, produced by the filesystem rather than
     },
   );
 });
+
+test("the real JSON-RPC error builder carries no part of what the failure said", async () => {
+  /*
+   * The end-to-end half of the promise. The test above proves the summariser drops the original;
+   * this one proves the thing that actually writes to stdout does too, by serialising exactly what
+   * the server would send and searching the bytes.
+   *
+   * Asserting on `JSON.stringify` of the whole response rather than on one field is deliberate: a
+   * later change that attaches the error under some new key -- `data`, `cause`, a debug field --
+   * would pass a check that only reads `error.message`, and fail this one.
+   */
+  const { errorResponse } = await import("../src/mcp/collab-server.ts");
+  const secret = "/Users/example/private/data.sqlite";
+  const original = Object.assign(new Error(`EACCES: permission denied, open '${secret}'`), {
+    code: "EACCES",
+  });
+  const wrapped = new Error(describeStoreFailure("room-inbox", original), { cause: original });
+
+  const onTheWire = JSON.stringify(errorResponse(7, wrapped));
+  assert.equal(onTheWire.includes(secret), false, "the path must not appear anywhere in the response");
+  assert.equal(onTheWire.includes("EACCES: permission denied"), false, "nor the original message");
+  assert.equal(onTheWire.includes("data.sqlite"), false, "nor any fragment of it");
+  assert.match(onTheWire, /STORE_UNAVAILABLE:room-inbox:PERMISSION/u, "the actionable part must survive");
+
+  /* And the cause is still reachable in-process, which is the point of keeping it. */
+  assert.equal(wrapped.cause, original);
+});

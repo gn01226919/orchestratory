@@ -2030,7 +2030,16 @@ function response(id: unknown, result: unknown): JsonObject {
   return { jsonrpc: "2.0", id, result };
 }
 
-function errorResponse(id: unknown, error: unknown): JsonObject {
+/*
+ * Exported for one test, and the reason is the test could not otherwise exist.
+ *
+ * The guarantee being checked is "nothing the failure said reaches the wire", and until now the
+ * test for it summarised a hand-built string and asserted about that -- so a future version of this
+ * function that attached `data: error`, or summarised `cause` alongside `message`, would have
+ * shipped green. Testing the real builder means the assertion is about the bytes that actually go
+ * out, including anything a later change adds to this object.
+ */
+export function errorResponse(id: unknown, error: unknown): JsonObject {
   return {
     jsonrpc: "2.0",
     id,
