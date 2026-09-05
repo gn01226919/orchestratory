@@ -1824,6 +1824,18 @@ async function refreshPresence(force = false) {
     for (const session of state.presences) {
       const before = previous.get(session.id);
       if (!before && session.requested && !session.joined) {
+        /*
+         * A fresh ask retires the refusal that came before it.
+         *
+         * The refusal is remembered against the presence id, and the same terminal keeps that id
+         * when it asks again -- which is exactly what the refusal card invites it to do ("那個終端
+         * 還在線，可以再申請"). Without this the second ask arrives already wearing the answer to the
+         * first: the card reads "你拒絕了這次申請" about a request nobody has answered, and the lapse
+         * notice for it is suppressed by the same remembered id, so a request that then times out
+         * says nothing at all. The memory exists to explain a card that vanished, not to follow a
+         * seat around.
+         */
+        state.rejectedSeatRequests.delete(session.id);
         addOfficeNotification(
           "presence",
           `${seatRequestTitle(session)} 申請加入 Room`,
