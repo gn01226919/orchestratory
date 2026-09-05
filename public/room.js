@@ -1283,6 +1283,77 @@ function seatWakeNotice(session, listening) {
  * behind the task list) and the office task drawer. The text, ordering and demotion rules are the
  * ones the panel row settled on; the drawer must not get a second hand-written copy of them.
  */
+/* @pure-start seat-removal-lock
+ * Whether a seat can be removed right now, and if not, why -- one answer for every entrance that
+ * offers removal (side panel, bell drawer, task drawer) and for the handlers behind them. Removing
+ * the active Writer would strand its draft area and every child it delegated to; removing a seat
+ * that is mid-task drops work the owner asked for. `subject` is { displayName, presenceId? };
+ * `snapshot` is { leases, deliveries } as the page holds them. Managed agents have no presence id,
+ * so only the Writer rule can lock them. The lock lifts on its own when the lease ends or the reply
+ * lands.
+ */
+const SEAT_REMOVAL_REASONS = Object.freeze({
+  writer: "正在當 Writer，先交接或結束 Writer 才能移除",
+  working: "有交辦執行中，先請求取消或等它回覆",
+});
+
+function seatRemovalLock(subject, snapshot) {
+  const name = typeof subject?.displayName === "string" ? subject.displayName : "";
+  const presenceId = typeof subject?.presenceId === "string" ? subject.presenceId : "";
+  const leases = Array.isArray(snapshot?.leases) ? snapshot.leases : [];
+  const deliveries = Array.isArray(snapshot?.deliveries) ? snapshot.deliveries : [];
+  if (name && leases.some((lease) => lease?.state === "active" && lease?.writer?.displayName === name)) {
+    return { locked: true, reason: SEAT_REMOVAL_REASONS.writer };
+  }
+  if (presenceId && deliveries.some((delivery) => delivery?.targetPresenceId === presenceId && delivery?.state === "working")) {
+    return { locked: true, reason: SEAT_REMOVAL_REASONS.working };
+  }
+  return { locked: false, reason: "" };
+}
+/* @pure-end seat-removal-lock */
+
+function presenceRemovalLock(session) {
+  return seatRemovalLock(
+    { displayName: session?.displayName, presenceId: session?.id },
+    { leases: state.writers?.leases, deliveries: state.deliveries },
+  );
+}
+
+function managedAgentRemovalLock(agent) {
+  return seatRemovalLock({ displayName: agent?.displayName }, { leases: state.writers?.leases, deliveries: state.deliveries });
+}
+
+/* Grey a remove button and say why beside it. Returns the note to place after the button, or null.
+   The button keeps its handler: the handler checks the lock again, so a stale DOM cannot send. */
+function applyRemovalLock(button, lock) {
+  button.disabled = Boolean(lock.locked);
+  if (!lock.locked) {
+    button.removeAttribute("title");
+    return null;
+  }
+  button.title = lock.reason;
+  const note = document.createElement("small");
+  note.className = "seat-removal-lock";
+  note.textContent = lock.reason;
+  return note;
+}
+
+/*
+ * The one builder for a managed agent's control: 取消回覆 while it is answering (data-action
+ * cancel-child), 移除子 Agent otherwise (data-action remove-child), greyed with its reason when the
+ * lock says so. Every list that offers the control -- side panel, task drawer -- gets it from here.
+ */
+function managedAgentActions(agent) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = agent.busy ? "cancel" : "leave";
+  button.dataset.action = agent.busy ? "cancel-child" : "remove-child";
+  button.textContent = agent.busy ? "取消回覆" : "移除子 Agent";
+  button.addEventListener("click", () => void changeManagedAgent(agent, button));
+  const note = agent.busy ? null : applyRemovalLock(button, managedAgentRemovalLock(agent));
+  return note ? [button, note] : [button];
+}
+
 function seatActionButtons(session, listening) {
   const actions = document.createElement("div");
   actions.className = "presence-actions";
@@ -1343,10 +1414,14 @@ function seatActionButtons(session, listening) {
   membership.type = "button";
   membership.textContent = session.joined ? "移出房間" : "核准加入房間";
   membership.className = session.joined ? "leave" : "join";
+  membership.dataset.action = session.joined ? "remove" : "join";
   membership.addEventListener("click", () => {
     void changePresenceMembership(session, membership);
   });
   actions.append(membership);
+  /* Greyed here, in the builder, so every entrance that shows this button shows the same lock. */
+  const note = session.joined ? applyRemovalLock(membership, presenceRemovalLock(session)) : null;
+  if (note) actions.append(note);
   return actions;
 }
 
@@ -1395,12 +1470,7 @@ function renderManagedAgents() {
         : `GUI Managed · 對話唯讀 · ${agent.model} · Writer 需另行授權`;
       identity.append(dot, name, detail);
       identity.addEventListener("click", () => focusAgentComposer(agent.displayName));
-      const action = document.createElement("button");
-      action.type = "button";
-      action.className = agent.busy ? "cancel" : "leave";
-      action.textContent = agent.busy ? "取消回覆" : "移除子 Agent";
-      action.addEventListener("click", () => void changeManagedAgent(agent, action));
-      row.append(identity, action);
+      row.append(identity, ...managedAgentActions(agent));
       list.append(row);
     }
   }
@@ -1409,6 +1479,15 @@ function renderManagedAgents() {
 }
 
 async function changeManagedAgent(agent, button) {
+  /* Second check, at the click: a row drawn before the lease or the delivery arrived must not send. */
+  if (!agent.busy) {
+    const lock = managedAgentRemovalLock(agent);
+    if (lock.locked) {
+      applyRemovalLock(button, lock);
+      showRoomError(lock.reason, { prefix: "移除子 Agent 失敗" });
+      return;
+    }
+  }
   button.disabled = true;
   try {
     const value = await api(`/api/rooms/managed-agents/${agent.busy ? "cancel" : "archive"}`, {
@@ -1429,8 +1508,17 @@ async function changeManagedAgent(agent, button) {
 
 async function changePresenceMembership(session, button) {
   if (!state.room) return;
-  button.disabled = true;
   const joining = !session.joined;
+  /* Second check, at the click: a row drawn before the lease or the delivery arrived must not send. */
+  if (!joining) {
+    const lock = presenceRemovalLock(session);
+    if (lock.locked) {
+      applyRemovalLock(button, lock);
+      showRoomError(lock.reason, { prefix: "移出房間失敗" });
+      return;
+    }
+  }
+  button.disabled = true;
   button.textContent = joining ? "建立中…" : "移除中…";
   try {
     const value = await api(`/api/rooms/presence/${joining ? "join" : "leave"}`, {
@@ -3074,7 +3162,7 @@ function officeRunningRows() {
       key: `managed:${agent.id}`, color: authorColor(agent.provider), name: agent.displayName,
       status: "即時回覆中", statusCls: "is-busy",
       details: [["來源", `${agent.provider} · ${agent.model || "—"}`], ["權限", "GUI Managed · 對話唯讀"]],
-      actions: [officeButton("取消回覆", (event) => void changeManagedAgent(agent, event.currentTarget), "cancel")],
+      actions: managedAgentActions(agent),
     });
   }
   for (const [provider, work] of Object.entries(workflow)) {
@@ -3125,37 +3213,12 @@ function officeRunningRows() {
   return rows;
 }
 
-/*
- * Why a seat cannot be removed right now, or "" when it can. Removing the active Writer would
- * strand its draft area and every child it delegated to; removing a seat that is mid-task drops
- * work the owner asked for. The drawer says so beside the greyed button instead of letting the
- * click fail on the server, and the lock lifts on its own when the lease ends or the reply lands.
- */
-function seatRemovalLock({ isWriter, working }) {
-  if (isWriter) return "正在當 Writer，先交接或結束 Writer 才能移除";
-  if (working) return "有交辦執行中，先請求取消或等它回覆";
-  return "";
-}
-
-/* Grey the one button that removes this seat and say why, in the row's own action bar. */
-function lockRemovalButton(actions, label, reason) {
-  const button = actions.find((node) => node.tagName === "BUTTON" && node.textContent === label);
-  if (!button) return;
-  button.disabled = true;
-  button.title = reason;
-  const note = document.createElement("small");
-  note.className = "office-task-lock";
-  note.textContent = reason;
-  actions.splice(actions.indexOf(button) + 1, 0, note);
-}
-
 function officeSeatRows() {
   const activeLeases = (state.writers?.leases || []).filter((entry) => entry.state === "active");
   return (state.presences || []).map((session, index) => {
     const listening = seatListeningState(session);
     const tag = seatTag(session.id);
     const isWriter = activeLeases.some((lease) => lease.writer?.displayName === session.displayName);
-    const working = (state.deliveries || []).some((delivery) => delivery.targetPresenceId === session.id && delivery.state === "working");
     const details = [["席位", seatIdentityText(session)]];
     const actions = [];
     if (session.joined) {
@@ -3176,11 +3239,8 @@ function officeSeatRows() {
     }
     const wakeNotice = seatWakeNotice(session, listening);
     if (wakeNotice) details.push(["紀錄", wakeNotice]);
+    /* The same buttons the side panel gets, removal lock included: one builder, every entrance. */
     actions.push(...seatActionButtons(session, listening).children);
-    /* The same "移出房間" button seatActionButtons builds for the side panel; here it is greyed with
-       its reason so the row can say why the seat is staying. */
-    const lock = session.joined ? seatRemovalLock({ isWriter, working }) : "";
-    if (lock) lockRemovalButton(actions, "移出房間", lock);
     return {
       key: `seat:${session.id}`, color: authorColor(session.provider),
       name: session.displayName || (tag ? `${session.provider} · ${tag}` : `${session.provider} 申請 ${index + 1}`),
@@ -3194,24 +3254,12 @@ function officeSeatRows() {
 }
 
 function officeChildRows() {
-  const activeLeases = (state.writers?.leases || []).filter((entry) => entry.state === "active");
-  const rows = state.managedAgents.map((agent) => {
-    const actions = [
-      officeButton("交辦", () => focusAgentComposer(agent.displayName)),
-      officeButton(agent.busy ? "取消回覆" : "移除子 Agent", (event) => void changeManagedAgent(agent, event.currentTarget), agent.busy ? "cancel" : "leave"),
-    ];
-    /* A busy child already shows 取消回覆 in place of the remove button; an idle child that holds the
-       Writer lease keeps its remove button, greyed, with the reason. */
-    const isWriter = activeLeases.some((lease) => lease.writer?.displayName === agent.displayName);
-    const lock = agent.busy ? "" : seatRemovalLock({ isWriter, working: false });
-    if (lock) lockRemovalButton(actions, "移除子 Agent", lock);
-    return {
-      key: `child:${agent.id}`, color: authorColor(agent.provider), name: agent.displayName,
-      status: agent.busy ? "回覆中" : "唯讀 · 閒置", statusCls: agent.busy ? "is-busy" : "",
-      details: [["來源", `${agent.provider} · ${agent.model || "—"}`], ["權限", "GUI Managed · 對話唯讀 · Writer 需另行授權"]],
-      actions,
-    };
-  });
+  const rows = state.managedAgents.map((agent) => ({
+    key: `child:${agent.id}`, color: authorColor(agent.provider), name: agent.displayName,
+    status: agent.busy ? "回覆中" : "唯讀 · 閒置", statusCls: agent.busy ? "is-busy" : "",
+    details: [["來源", `${agent.provider} · ${agent.model || "—"}`], ["權限", "GUI Managed · 對話唯讀 · Writer 需另行授權"]],
+    actions: [officeButton("交辦", () => focusAgentComposer(agent.displayName)), ...managedAgentActions(agent)],
+  }));
   for (const child of (state.writers?.delegations || []).filter((entry) => entry.state === "active")) {
     rows.push({
       key: `delegation:${child.id}`, color: authorColor(child.provider || child.displayName), name: child.displayName,

@@ -4467,21 +4467,52 @@ test("a resident model gets a card above the 終端 group that says it holds no 
   assert.match(render, /resident: officeResidentFocus,/u);
 });
 
-test("the remove button on a seat row is greyed with its reason while the seat is Writer or mid-task", async () => {
+test("one removal lock, greyed at every entrance and re-checked at the click", async () => {
   const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
-  const lock = /^function seatRemovalLock\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
-  assert.match(lock, /if \(isWriter\) return "正在當 Writer，先交接或結束 Writer 才能移除";/u);
-  assert.match(lock, /if \(working\) return "有交辦執行中，先請求取消或等它回覆";/u);
-  assert.match(lock, /return "";/u);
-  const grey = /^function lockRemovalButton\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
-  assert.match(grey, /button\.disabled = true;/u);
-  assert.match(grey, /note\.className = "office-task-lock";/u);
-  const seats = /^function officeSeatRows\(\) \{[\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
-  assert.match(seats, /delivery\.targetPresenceId === session\.id && delivery\.state === "working"/u);
-  assert.match(seats, /if \(lock\) lockRemovalButton\(actions, "移出房間", lock\);/u);
-  const children = /^function officeChildRows\(\) \{[\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
-  assert.match(children, /if \(lock\) lockRemovalButton\(actions, "移除子 Agent", lock\);/u);
-  // The side panel's own builder is untouched: the greying happens in the drawer's rows only.
+  const start = source.indexOf("/* @pure-start seat-removal-lock");
+  const end = source.indexOf("/* @pure-end seat-removal-lock */");
+  assert.ok(start > 0 && end > start, "room.js must expose the DOM-free removal lock");
+  const block = source.slice(start, end);
+  assert.doesNotMatch(
+    block,
+    /(?:\b(?:document|window|navigator|localStorage|state)\s*\.|\b(?:fetch|byId|api|setInterval|setTimeout|require|import)\s*\()/u,
+  );
+  const lock = runInNewContext(
+    `${block}\n({ seatRemovalLock });`,
+    Object.create(null) as object,
+    { timeout: 2_000 },
+  ) as { seatRemovalLock: (subject: unknown, snapshot: unknown) => { locked: boolean; reason: string } };
+  // Spread into this realm: a vm object carries the other context's prototype, which strict deepEqual rejects.
+  const lockOf = (subject: unknown, snapshot: unknown) => ({ ...lock.seatRemovalLock(subject, snapshot) });
+  const leases = [{ state: "active", writer: { displayName: "claude2" } }, { state: "ended", writer: { displayName: "codex1" } }];
+  const deliveries = [{ targetPresenceId: "p-1", state: "working" }, { targetPresenceId: "p-2", state: "read" }];
+  assert.deepEqual(lockOf({ displayName: "claude2", presenceId: "p-9" }, { leases, deliveries }), { locked: true, reason: "正在當 Writer，先交接或結束 Writer 才能移除" });
+  assert.deepEqual(lockOf({ displayName: "grok1", presenceId: "p-1" }, { leases, deliveries }), { locked: true, reason: "有交辦執行中，先請求取消或等它回覆" });
+  // An ended lease, a delivery that is merely read, or a seat nobody is addressing: removable.
+  assert.deepEqual(lockOf({ displayName: "codex1", presenceId: "p-2" }, { leases, deliveries }), { locked: false, reason: "" });
+  assert.deepEqual(lockOf({ displayName: "reviewer" }, { leases: [], deliveries }), { locked: false, reason: "" });
+  assert.deepEqual(lockOf(undefined, undefined), { locked: false, reason: "" });
+  // Every entrance gets the button from one builder, which greys it in place: no text matching anywhere.
   const panel = /^function seatActionButtons\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
-  assert.doesNotMatch(panel, /seatRemovalLock|lockRemovalButton/u);
+  assert.match(panel, /membership\.dataset\.action = session\.joined \? "remove" : "join";/u);
+  assert.match(panel, /const note = session\.joined \? applyRemovalLock\(membership, presenceRemovalLock\(session\)\) : null;/u);
+  const managed = /^function managedAgentActions\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(managed, /button\.dataset\.action = agent\.busy \? "cancel-child" : "remove-child";/u);
+  assert.match(managed, /const note = agent\.busy \? null : applyRemovalLock\(button, managedAgentRemovalLock\(agent\)\);/u);
+  const grey = /^function applyRemovalLock\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(grey, /button\.disabled = Boolean\(lock\.locked\);/u);
+  assert.match(grey, /note\.className = "seat-removal-lock";/u);
+  assert.doesNotMatch(source, /lockRemovalButton|textContent === "移出房間"|textContent === "移除子 Agent"/u);
+  // The side panel, the task drawer and the running list all draw the managed control through the builder.
+  assert.match(source, /row\.append\(identity, \.\.\.managedAgentActions\(agent\)\);/u);
+  const children = /^function officeChildRows\(\) \{[\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(children, /\.\.\.managedAgentActions\(agent\)\]/u);
+  const seats = /^function officeSeatRows\(\) \{[\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(seats, /actions\.push\(\.\.\.seatActionButtons\(session, listening\)\.children\);/u);
+  assert.doesNotMatch(source, /officeButton\("移除子 Agent"|action\.textContent = agent\.busy/u);
+  // The click checks the lock again and does not send.
+  const leave = /^async function changePresenceMembership\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(leave, /if \(!joining\) \{\s*const lock = presenceRemovalLock\(session\);\s*if \(lock\.locked\) \{\s*applyRemovalLock\(button, lock\);\s*showRoomError\(lock\.reason, \{ prefix: "移出房間失敗" \}\);\s*return;/u);
+  const archive = /^async function changeManagedAgent\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(archive, /if \(!agent\.busy\) \{\s*const lock = managedAgentRemovalLock\(agent\);\s*if \(lock\.locked\) \{\s*applyRemovalLock\(button, lock\);\s*showRoomError\(lock\.reason, \{ prefix: "移除子 Agent 失敗" \}\);\s*return;/u);
 });
