@@ -137,10 +137,11 @@ grok   mcp add             orchestrator -- orchestrator mcp --actor grok
 
 **已知限制（誠實揭露，不是遺漏）**
 
-- **`npm run check` 目前有一項紅燈，那是設計如此。** `merge-dialog-acceptance` 會把合併對話框的
-  程式碼雜湊，比對 `docs/VERIFICATION.md` 裡**一次真人瀏覽器驗收**的紀錄。畫面改了、還沒有人看過
-  新畫面時，它就是紅的——它擋的不是錯誤，是「沒有人看過」。**這一項不能靠改 digest 讓它變綠**，
-  那正是它存在要防止的事。目前的狀態是：介面剛改版，Owner 的驗收尚未寫入。其餘七個階段全綠。
+- **`merge-dialog-acceptance` 這一項不能靠改程式碼變綠。** 它把合併對話框的程式碼雜湊，比對
+  `docs/VERIFICATION.md` 裡**一次真人瀏覽器驗收**的紀錄。畫面改了、還沒有人看過新畫面時，它就是
+  紅的——它擋的不是錯誤，是「沒有人看過」。**修法只有一個：真的去看一次，然後把觀察與新的
+  digest 寫進 `VERIFICATION.md`**；直接改 digest 正是它存在要防止的事。本輪介面改版後它紅了
+  一整輪，直到 Owner 實際操作預覽環境並記錄觀察為止。
 
 - **Candidate 不是 OS 沙箱。** 同一個作業系統帳號下的 full-trust agent，技術上仍然可以繞過**應用層**邊界。本產品提供的是可追溯、可復原、有紀錄，**不是強制隔離**。需要強制隔離請用容器或另一個帳號。
 - **加入房間不會改變 agent 的權限。** 它的 sandbox、工具、shell、網路由它自己的 host 決定，Orchestratory 不升權也不降權。
