@@ -1,0 +1,2360 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orchestratory 席位手冊</title>
+<style>
+  /* ── 配色：總機接線台。黃銅面板、深橄欖石板、象牙標籤。 ───────────────── */
+  :root {
+    --ground:  #f2f3ef;
+    --surface: #ffffff;
+    --sunk:    #e7e9e3;
+    --ink:     #1b1f1d;
+    --muted:   #5d635f;
+    --hair:    #d3d7cf;
+
+    --brass:   #9a6b16;   /* Owner 的動作 */
+    --brass-b: #f4ead6;
+    --live:    #2b7a63;   /* 線路開著 */
+    --live-b:  #dcefe7;
+    --stall:   #b4482e;   /* 沒人在聽 */
+    --stall-b: #f7e2da;
+    --sky:     #2f6f9e;   /* 可重新發起 */
+    --sky-b:   #dfeaf3;
+
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --sans: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Noto Sans TC", "PingFang TC", sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+
+    --measure: 34rem;
+    --r: 3px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:  #141817; --surface: #1c2220; --sunk: #0f1413;
+      --ink: #e6eae7; --muted: #97a09b; --hair: #2e3634;
+      --brass: #d9a752; --brass-b: #2a2214;
+      --live: #58c1a2; --live-b: #122b25;
+      --stall: #e88a6c; --stall-b: #2e1a14;
+      --sky: #7fb6e0; --sky-b: #12222e;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:  #141817; --surface: #1c2220; --sunk: #0f1413;
+    --ink: #e6eae7; --muted: #97a09b; --hair: #2e3634;
+    --brass: #d9a752; --brass-b: #2a2214;
+    --live: #58c1a2; --live-b: #122b25;
+    --stall: #e88a6c; --stall-b: #2e1a14;
+    --sky: #7fb6e0; --sky-b: #12222e;
+  }
+
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--ground); color: var(--ink); font: 400 16px/1.72 var(--sans); -webkit-font-smoothing: antialiased; }
+  ::selection { background: var(--brass-b); color: var(--ink); }
+  a { color: var(--brass); text-underline-offset: .18em; }
+  :focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; border-radius: 2px; }
+
+  .wrap { max-width: 62rem; margin: 0 auto; padding: 0 1.4rem 6rem; }
+
+  header.top { padding: 4.5rem 0 2.6rem; border-bottom: 1px solid var(--hair); }
+  .eyebrow { font: 600 11px/1 var(--mono); letter-spacing: .16em; text-transform: uppercase; color: var(--muted); margin: 0 0 1.1rem; }
+  h1 { font: 400 clamp(2.1rem, 5.4vw, 3.1rem)/1.12 var(--serif); letter-spacing: -.01em; text-wrap: balance; margin: 0 0 1rem; }
+  .standfirst { font-size: 1.06rem; color: var(--muted); margin: 0; max-width: var(--measure); }
+
+  section { padding: 3.4rem 0 0; }
+  h2 { font: 400 1.62rem/1.25 var(--serif); margin: 0 0 .35rem; text-wrap: balance; display: flex; align-items: baseline; gap: .7rem; }
+  h2 .n { font: 600 11px/1 var(--mono); color: var(--brass); letter-spacing: .1em; flex: none; transform: translateY(-.15em); }
+  h3 { font: 600 .96rem/1.4 var(--sans); margin: 2rem 0 .4rem; letter-spacing: .01em; }
+  p { margin: 0 0 1rem; max-width: var(--measure); }
+  .lede { color: var(--muted); margin-bottom: 1.8rem; }
+  strong { font-weight: 640; }
+  code { font: 500 .86em/1.4 var(--mono); background: var(--sunk); padding: .12em .34em; border-radius: 2px; }
+  kbd { font: 600 .78em/1 var(--mono); border: 1px solid var(--hair); border-bottom-width: 2px; border-radius: 3px; padding: .18em .42em; background: var(--surface); }
+
+  .panel { background: var(--surface); border: 1px solid var(--hair); border-radius: var(--r); margin: 1.6rem 0 2rem; overflow: hidden; }
+  .panel > .bar { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; padding: .6rem .9rem; background: var(--sunk); border-bottom: 1px solid var(--hair); font: 600 10.5px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+  .panel > .body { padding: 1.1rem .9rem 1.2rem; }
+
+  button { font: 600 .8rem/1 var(--sans); color: var(--ink); background: var(--surface); border: 1px solid var(--hair); border-radius: var(--r); padding: .52rem .8rem; cursor: pointer; transition: background .12s, border-color .12s; }
+  button:hover:not(:disabled) { border-color: var(--brass); }
+  button:disabled { opacity: .42; cursor: not-allowed; }
+  button.act { background: var(--brass); border-color: var(--brass); color: var(--ground); }
+  button.act:hover:not(:disabled) { filter: brightness(1.08); }
+  .row { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+
+  .lamp { display: inline-flex; align-items: center; gap: .42rem; font: 600 11px/1 var(--mono); letter-spacing: .06em; padding: .34rem .56rem; border-radius: 2px; border: 1px solid transparent; }
+  .lamp::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+  .lamp.on   { color: var(--live);  background: var(--live-b);  border-color: color-mix(in srgb, var(--live) 30%, transparent); }
+  .lamp.off  { color: var(--stall); background: var(--stall-b); border-color: color-mix(in srgb, var(--stall) 30%, transparent); }
+  .lamp.wait { color: var(--brass); background: var(--brass-b); border-color: color-mix(in srgb, var(--brass) 30%, transparent); }
+  .lamp.idle { color: var(--muted); background: var(--sunk); border-color: var(--hair); }
+
+  /* 席位狀態機 */
+  .track { display: flex; gap: 0; overflow-x: auto; padding-bottom: .3rem; }
+  .track button { flex: 1 0 auto; min-width: 7.2rem; text-align: left; border-radius: 0; border-width: 1px 0 1px 1px; padding: .62rem .7rem; background: var(--surface); }
+  .track button:last-child { border-right-width: 1px; }
+  .track button[aria-selected="true"] { background: var(--brass-b); border-color: var(--brass); position: relative; z-index: 1; }
+  .track .s-i { display: block; font: 600 10px/1 var(--mono); color: var(--muted); letter-spacing: .1em; margin-bottom: .34rem; }
+  .track button[aria-selected="true"] .s-i { color: var(--brass); }
+  .track .s-n { display: block; font-size: .82rem; }
+  .facets { display: grid; gap: 1px; background: var(--hair); border: 1px solid var(--hair); border-radius: var(--r); margin-top: 1.1rem; }
+  @media (min-width: 46rem) { .facets { grid-template-columns: repeat(3, 1fr); } }
+  .facet { background: var(--surface); padding: .85rem .9rem; }
+  .facet dt { font: 600 10px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin-bottom: .5rem; }
+  .facet dd { margin: 0; font-size: .88rem; line-height: 1.6; }
+
+  /* 沒人在聽 */
+  .sim { display: grid; gap: 1rem; }
+  @media (min-width: 46rem) { .sim { grid-template-columns: 1fr 1fr; } }
+  .stage { border: 1px solid var(--hair); border-radius: var(--r); overflow: hidden; }
+  .stage h4 { margin: 0; padding: .5rem .75rem; background: var(--sunk); font: 600 10px/1.4 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--hair); }
+  .stage .in { padding: .8rem .75rem; }
+  .feed { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .4rem; min-height: 9.5rem; }
+  .feed li { font: .8rem/1.5 var(--mono); padding: .42rem .55rem; border-radius: 2px; background: var(--sunk); border-left: 2px solid var(--hair); animation: land .22s ease-out; }
+  .feed li.q { border-left-color: var(--stall); }
+  .feed li.d { border-left-color: var(--live); }
+  .feed li.o { border-left-color: var(--brass); }
+  .feed .t { color: var(--muted); }
+  @keyframes land { from { opacity: 0; transform: translateY(-4px); } }
+  @media (prefers-reduced-motion: reduce) { .feed li { animation: none; } }
+  .toggle { display: inline-flex; align-items: center; gap: .55rem; cursor: pointer; font-size: .86rem; }
+  .toggle input { width: 1rem; height: 1rem; accent-color: var(--brass); }
+
+  /* 核准閘門 */
+  .diff { height: 9rem; overflow-y: auto; background: var(--sunk); border: 1px solid var(--hair); border-radius: var(--r); padding: .6rem .7rem; font: .78rem/1.65 var(--mono); white-space: pre; }
+  .diff .add { color: var(--live); }
+  .diff .del { color: var(--stall); }
+  .gate-in { font: 600 .84rem/1 var(--mono); letter-spacing: .06em; padding: .55rem .6rem; width: 100%; background: var(--surface); color: var(--ink); border: 1px solid var(--hair); border-radius: var(--r); }
+  .gate-in:disabled { background: var(--sunk); }
+  .checks { list-style: none; margin: .9rem 0 0; padding: 0; display: flex; flex-direction: column; gap: .38rem; }
+  .checks li { font-size: .84rem; display: flex; gap: .5rem; align-items: baseline; color: var(--muted); }
+  .checks li::before { content: "○"; font: 600 .8rem var(--mono); color: var(--hair); flex: none; }
+  .checks li.ok { color: var(--ink); }
+  .checks li.ok::before { content: "●"; color: var(--live); }
+
+  /* 工具表 */
+  .filters { display: flex; gap: .4rem; flex-wrap: wrap; margin-bottom: 1rem; }
+  .filters button[aria-pressed="true"] { background: var(--brass-b); border-color: var(--brass); color: var(--brass); }
+  .tools { display: grid; gap: 1px; background: var(--hair); border: 1px solid var(--hair); border-radius: var(--r); overflow: hidden; }
+  .tool { background: var(--surface); padding: .62rem .8rem; display: grid; gap: .1rem .9rem; align-items: baseline; }
+  @media (min-width: 40rem) { .tool { grid-template-columns: 13rem 1fr; } }
+  .tool code { background: none; padding: 0; color: var(--ink); font-weight: 600; font-size: .84rem; }
+  .tool .why { font-size: .84rem; color: var(--muted); }
+  .tool .kind { font: 600 9.5px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase; }
+
+  .note { border-left: 2px solid var(--brass); padding: .1rem 0 .1rem 1rem; margin: 1.6rem 0; max-width: var(--measure); }
+  .note p { margin: 0; font-size: .93rem; }
+  .note .k { font: 600 10px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--brass); display: block; margin-bottom: .45rem; }
+  .note.warn { border-left-color: var(--stall); }
+  .note.warn .k { color: var(--stall); }
+
+  footer { margin-top: 4rem; padding-top: 1.4rem; border-top: 1px solid var(--hair); color: var(--muted); font-size: .85rem; }
+  footer p { max-width: var(--measure); }
+
+  /* 卡片式引導 */
+  .deck { display: flex; flex-direction: column; gap: 1rem; }
+  .dots { display: flex; align-items: center; gap: .3rem; flex-wrap: wrap; }
+  .dots button { width: 1.7rem; height: 1.7rem; padding: 0; border-radius: 50%; font: 600 10px/1 var(--mono); color: var(--muted); display: grid; place-items: center; }
+  .dots button[aria-current="step"] { border-color: var(--brass); color: var(--brass); background: var(--brass-b); }
+  .dots button.done { background: var(--live); border-color: var(--live); color: var(--ground); }
+  .dots .rail { flex: 1; height: 1px; background: var(--hair); min-width: 1rem; }
+  .card { border: 1px solid var(--hair); border-radius: var(--r); background: var(--surface); padding: 1.5rem 1.4rem 1.3rem; display: flex; flex-direction: column; gap: .1rem; animation: cardin .18s ease-out; }
+  @keyframes cardin { from { opacity: 0; transform: translateY(6px); } }
+  @media (prefers-reduced-motion: reduce) { .card { animation: none; } }
+  .card .num { font: 400 2.7rem/1 var(--serif); color: var(--brass); letter-spacing: -.02em; margin-bottom: .3rem; }
+  .card h3 { font: 400 1.32rem/1.3 var(--serif); margin: 0 0 .55rem; text-wrap: balance; }
+  .card .why { font-size: .93rem; color: var(--muted); margin: 0 0 1.1rem; max-width: 42rem; }
+  .card .why + .why { margin-top: -.5rem; }
+  .card .expects { list-style: none; margin: .3rem 0 0; padding: 0; display: flex; flex-direction: column; gap: .55rem; }
+  .card .foot { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-top: 1.3rem; padding-top: 1rem; border-top: 1px solid var(--hair); }
+  .card .foot .spacer { flex: 1; }
+  .markdone { display: inline-flex; align-items: center; gap: .5rem; cursor: pointer; font-size: .87rem; }
+  .markdone input { width: 1.05rem; height: 1.05rem; accent-color: var(--live); }
+  .cmd { position: relative; margin: 0 0 .7rem; }
+  .cmd pre { margin: 0; padding: .75rem 4.8rem .75rem .8rem; background: var(--sunk); border: 1px solid var(--hair); border-radius: var(--r); font: .81rem/1.8 var(--mono); overflow-x: auto; white-space: pre; }
+  .cmd .copy { position: absolute; top: .5rem; right: .5rem; font: 600 10px/1 var(--mono); letter-spacing: .08em; padding: .38rem .5rem; }
+  .cmd .copy.ok { background: var(--live); border-color: var(--live); color: var(--ground); }
+  .expect { display: flex; gap: .6rem; align-items: baseline; font-size: .87rem; margin: 0; }
+  .expect b { font: 600 9.5px/1.8 var(--mono); letter-spacing: .1em; text-transform: uppercase; flex: none; width: 4rem; color: var(--muted); }
+  .expect.good b { color: var(--live); }
+  .expect.bad  b { color: var(--stall); }
+  .expect span { flex: 1; }
+  .vendors { display: flex; gap: .4rem; margin-bottom: .8rem; flex-wrap: wrap; }
+  .vendors button[aria-pressed="true"] { background: var(--brass-b); border-color: var(--brass); color: var(--brass); }
+  .say { border: 1px dashed var(--brass); border-radius: var(--r); padding: .7rem .8rem; margin: 0 0 .7rem; background: var(--brass-b); color: var(--ink); font-size: .91rem; }
+  .say b { display: block; font: 600 9.5px/1.7 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--brass); margin-bottom: .3rem; }
+  .progress { display: flex; align-items: center; gap: .6rem; font-size: .85rem; color: var(--muted); }
+  .progress .bar { flex: 1; height: 4px; background: var(--sunk); border-radius: 2px; overflow: hidden; min-width: 6rem; }
+  .progress .bar i { display: block; height: 100%; background: var(--live); width: 0; transition: width .2s; }
+  @media (prefers-reduced-motion: reduce) { .progress .bar i { transition: none; } }
+
+  /* 終端機長相示意 */
+  .termshot { background: #0f1413; color: #d9e0dc; border-radius: 6px; border: 1px solid #2e3634; padding: .7rem .9rem; font: .8rem/1.7 var(--mono); margin: 0 0 1rem; max-width: 42rem; box-shadow: 0 8px 24px rgb(0 0 0 / 18%); }
+  .termshot .tb { display: flex; gap: .38rem; margin-bottom: .5rem; }
+  .termshot .tb i { width: .68rem; height: .68rem; border-radius: 50%; background: #3b4441; display: inline-block; }
+  .termshot .tb i:nth-child(1) { background: #e66d73; } .termshot .tb i:nth-child(2) { background: #e7c27c; } .termshot .tb i:nth-child(3) { background: #7bd7a3; }
+  .termshot .cur { display: inline-block; width: .55em; height: 1.1em; background: #d9e0dc; vertical-align: -.2em; animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .termshot .cur { animation: none; } }
+
+  /* 控制室導覽 */
+  .ui { border: 1px solid var(--hair); border-radius: var(--r); overflow: hidden; margin: 0 0 1.2rem; background: var(--surface); }
+  .ui .u-top { display: flex; gap: .45rem; align-items: center; flex-wrap: wrap; padding: .5rem .6rem; background: var(--sunk); border-bottom: 1px solid var(--hair); font-size: .78rem; }
+  .ui .u-top > span { border: 1px solid var(--hair); border-radius: 3px; padding: .22rem .5rem; background: var(--surface); white-space: nowrap; }
+  .ui .u-top > span.big { font-weight: 640; padding: .3rem .65rem; }
+  .ui .u-top > span.red { border-color: var(--stall); color: var(--stall); }
+  .ui .u-top > span.sw { padding: 0; display: inline-flex; overflow: hidden; }
+  .ui .u-top > span.sw i { font-style: normal; padding: .22rem .5rem; }
+  .ui .u-top > span.sw i.on { background: var(--brass-b); color: var(--brass); font-weight: 640; }
+  .ui .u-main { display: grid; grid-template-columns: 1fr auto; min-height: 9rem; }
+  .ui .u-stage { padding: .8rem; position: relative; font-size: .8rem; color: var(--muted); }
+  .ui .u-banner { border: 1px solid var(--stall); background: var(--stall-b); color: var(--ink); border-radius: 3px; padding: .4rem .6rem; font-size: .78rem; display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-bottom: .7rem; }
+  .ui .u-banner b { color: var(--stall); }
+  .ui .u-banner span.btn { border: 1px solid var(--hair); background: var(--surface); border-radius: 3px; padding: .1rem .45rem; }
+  .ui .u-rail { display: flex; flex-direction: column; gap: .3rem; padding: .6rem .45rem; border-left: 1px solid var(--hair); background: var(--sunk); }
+  .ui .u-rail span { width: 2rem; height: 2rem; display: grid; place-items: center; border: 1px solid var(--hair); border-radius: 4px; background: var(--surface); font-size: .95rem; position: relative; }
+  .ui .u-rail span.on { border-color: var(--brass); background: var(--brass-b); }
+  .ui .u-rail span.alert::after { content: "1"; position: absolute; top: -.35rem; right: -.35rem; background: var(--stall); color: #fff; font: 600 9px/1 var(--mono); padding: .15rem .3rem; border-radius: 6px; }
+  .ui .u-rail .gap { flex: 1; border: 0; background: none; min-height: .6rem; }
+  .ui .u-drawer { border-left: 1px solid var(--hair); padding: .7rem .8rem; font-size: .78rem; width: 12rem; }
+  .ui .u-drawer b { display: block; margin-bottom: .3rem; }
+  @media (max-width: 40rem) { .ui .u-drawer { display: none; } }
+
+  .legend { display: grid; gap: 1px; background: var(--hair); border: 1px solid var(--hair); border-radius: var(--r); overflow: hidden; margin: 0 0 1.4rem; }
+  @media (min-width: 46rem) { .legend { grid-template-columns: 1fr 1fr; } }
+  .legend div { background: var(--surface); padding: .7rem .85rem; font-size: .86rem; }
+  .legend div b { display: block; margin-bottom: .15rem; }
+  .legend div small { color: var(--muted); }
+
+  .zones { display: grid; gap: .6rem; margin: 0 0 1.4rem; }
+  @media (min-width: 46rem) { .zones { grid-template-columns: repeat(2, 1fr); } }
+  .zone { border: 1px solid var(--hair); border-left-width: 4px; border-radius: var(--r); padding: .7rem .85rem; font-size: .86rem; background: var(--surface); }
+  .zone b { display: block; margin-bottom: .2rem; }
+  .zone small { color: var(--muted); }
+  .zone.g { border-left-color: var(--live); }
+  .zone.a { border-left-color: var(--brass); }
+  .zone.b { border-left-color: var(--sky); }
+  .zone.x { border-left-color: var(--muted); }
+
+  /* 圖 */
+  .diagram { overflow-x: auto; margin: 0 0 1.2rem; padding-bottom: .2rem; }
+  .diagram svg { display: block; min-width: 30rem; width: 100%; height: auto; }
+  .dg-box  { fill: var(--surface); stroke: var(--hair); stroke-width: 1; }
+  .dg-sunk { fill: var(--sunk);    stroke: var(--hair); stroke-width: 1; }
+  .dg-t    { fill: var(--ink);  font: 600 12px var(--sans); }
+  .dg-s    { fill: var(--muted); font: 400 10.5px var(--sans); }
+  .dg-k    { fill: var(--muted); font: 600 8.5px var(--mono); letter-spacing: .1em; }
+  .dg-line { stroke: var(--hair); stroke-width: 1.25; fill: none; }
+  .dg-lab  { fill: var(--muted); font: 500 9.5px var(--mono); }
+  .lit .dg-box  { fill: var(--brass-b); stroke: var(--brass); }
+  .lit .dg-k    { fill: var(--brass); }
+  .lit .dg-line { stroke: var(--brass); stroke-width: 2; }
+  .lit .dg-lab  { fill: var(--brass); stroke: none; }
+  .dg-g, .dg-a { transition: opacity .18s; }
+  .dim { opacity: .3; }
+  @media (prefers-reduced-motion: reduce) { .dg-g, .dg-a { transition: none; } }
+  .ok   .dg-box { fill: var(--live-b);  stroke: var(--live); }
+  .ok   .dg-k   { fill: var(--live); }
+  .no   .dg-box { fill: var(--stall-b); stroke: var(--stall); }
+  .no   .dg-k   { fill: var(--stall); }
+  .ok .dg-line { stroke: var(--live); }
+  .ok .dg-lab  { fill: var(--live);  stroke: none; }
+  .no .dg-line { stroke: var(--stall); }
+  .no .dg-lab  { fill: var(--stall); stroke: none; }
+
+.path{margin:1rem 0 .4rem;padding:.9rem 1rem;border:1px solid rgba(127,127,127,.35);border-radius:10px}
+.path h4{margin:0 0 .5rem;font-size:1rem}
+.path ol{margin:0;padding-left:1.4rem}
+.path ol li{margin:.35rem 0;line-height:1.55}
+.path ol li > div{margin-top:.5rem}
+
+/* ═════ hero：誰有什麼權限 ═════ */
+.hero{margin:1.2rem 0 2.4rem;border:1px solid var(--hair);border-radius:var(--r);background:var(--surface);overflow:hidden}
+.hero .bar{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;padding:.6rem .9rem;background:var(--sunk);border-bottom:1px solid var(--hair);font:600 10.5px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.hero .grid{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(16rem,1fr);gap:0}
+@media (max-width:52rem){.hero .grid{grid-template-columns:1fr}}
+.hero .map{padding:.9rem .9rem .4rem;border-right:1px solid var(--hair)}
+@media (max-width:52rem){.hero .map{border-right:0;border-bottom:1px solid var(--hair)}}
+.hero .map svg{display:block;width:100%;height:auto;min-width:0}
+.hero .legend{display:flex;flex-wrap:wrap;gap:.4rem 1.1rem;padding:.5rem .9rem .9rem;font:500 11px var(--sans);color:var(--muted)}
+.hero .legend i{display:inline-block;width:1.4rem;height:0;border-top:2px solid var(--hair);vertical-align:middle;margin-right:.4rem}
+.hero .legend i.b{border-color:var(--brass)} .hero .legend i.l{border-color:var(--live)} .hero .legend i.x{border-color:var(--stall);border-top-style:dashed}
+.hn{cursor:pointer}
+.hn:focus{outline:none} .hn:focus .dg-box,.hn:focus .dg-sunk{stroke-width:2}
+.hn.near .dg-box,.hn.near .dg-sunk{stroke:var(--ink)}
+.he .dg-line{stroke-width:1.5} .he.hb .dg-line{stroke:var(--brass)} .he.hl .dg-line{stroke:var(--live)} .he.hx .dg-line{stroke:var(--stall);stroke-dasharray:5 4}
+.he.hb .dg-lab{fill:var(--brass)} .he.hl .dg-lab{fill:var(--live)} .he.hx .dg-lab{fill:var(--stall)}
+.he.lit .dg-line{stroke-width:2.6}
+.hn,.he{transition:opacity .18s}
+.hero .who{padding:1rem 1.1rem 1.2rem;font-size:.92rem}
+.hero .who .k{font:600 10px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted);display:block;margin-bottom:.3rem}
+.hero .who h3{margin:0 0 .2rem;font:600 1.15rem var(--serif)}
+.hero .who .role{margin:0 0 .8rem;color:var(--muted)}
+.hero .lvl{display:flex;align-items:center;gap:.35rem;margin:0 0 .9rem;font:500 11px var(--sans);color:var(--muted)}
+.hero .lvl b{display:inline-block;width:.6rem;height:.6rem;border-radius:50%;border:1px solid var(--brass);background:transparent}
+.hero .lvl b.on{background:var(--brass)}
+.hero .who ul{margin:0 0 .7rem;padding-left:1.1rem} .hero .who li{margin:.22rem 0;line-height:1.5}
+.hero .who .can .k{color:var(--live)} .hero .who .no .k{color:var(--stall)}
+.hero .hint{margin:.6rem 0 0;font-size:.8rem;color:var(--muted)}
+
+.hero .blocks{padding:.2rem .9rem 1rem}
+.hero .blocks .k{font:600 10px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--stall);display:block;margin-bottom:.45rem}
+.hero .chips{display:flex;flex-wrap:wrap;gap:.35rem}
+.hero .chips button{font:500 11.5px var(--sans);color:var(--ink);background:var(--surface);border:1px solid var(--hair);border-radius:999px;padding:.3rem .7rem;cursor:pointer}
+.hero .chips button[aria-pressed="true"]{border-color:var(--stall);background:var(--stall-b);color:var(--stall)}
+.hn.no .dg-box,.hn.no .dg-sunk{fill:var(--stall-b);stroke:var(--stall)} .hn.no .dg-k{fill:var(--stall)}
+.hero .who .blk{border-left:2px solid var(--stall);padding-left:.8rem;margin:.6rem 0 .9rem}
+.hero .who .blk p{margin:.25rem 0}
+
+/* ═════ 02 模擬控制室（貼近 public/styles.css 的配色與命名） ═════ */
+.crs{--s-bg:#101114;--s-panel:#17181c;--s-panel2:#1c1d22;--s-border:#26282e;--s-border2:#34363d;--s-text:#dde0e4;--s-muted:#8a8f98;--s-faint:#5f636b;--s-accent:#3ecf8e;--s-accent-dim:#2a8f64;--s-danger:#e5484d;--s-warn:#f5a623;--s-mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,monospace;--s-body:"SF Pro Text",-apple-system,BlinkMacSystemFont,"PingFang TC","Noto Sans TC",system-ui,sans-serif;
+  position:relative;margin:1.2rem 0 1.6rem;border:1px solid var(--s-border2);border-radius:12px;overflow:hidden;background:var(--s-bg);color:var(--s-text);font:13px/1.5 var(--s-body);box-shadow:0 20px 60px rgba(0,0,0,.35)}
+.crs *{box-sizing:border-box}
+.crs button{font:inherit;color:inherit;background:transparent;border:1px solid var(--s-border);border-radius:8px;padding:5px 10px;cursor:pointer;line-height:1.2}
+.crs button:hover{border-color:var(--s-accent-dim);color:#fff}
+.crs button:focus-visible{outline:1px solid var(--s-accent);outline-offset:1px}
+.crs.is-full{position:fixed;inset:0;z-index:9999;margin:0;border-radius:0;display:flex;flex-direction:column}
+.crs.is-full .s-body{flex:1;min-height:0}
+.s-note{display:flex;justify-content:space-between;align-items:center;gap:.6rem;flex-wrap:wrap;padding:6px 12px;background:#0b0c0f;border-bottom:1px dashed var(--s-border2);font:600 10.5px/1.2 var(--s-mono);letter-spacing:.06em;color:#b7a54a;text-transform:uppercase}
+.s-note-actions button{font:600 10.5px var(--s-mono);letter-spacing:.04em;text-transform:none;color:#d9c86a;border-color:#4a4322;padding:4px 8px;margin-left:6px}
+/* 頂欄 */
+.s-topbar{display:flex;align-items:center;gap:8px;height:50px;padding:0 12px;border-bottom:1px solid var(--s-border);background:var(--s-panel);overflow-x:auto;white-space:nowrap}
+.s-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--s-faint);flex:none}
+.s-dot.on{background:var(--s-accent);box-shadow:0 0 0 3px rgba(62,207,142,.16)}
+.s-dot.paused{background:var(--s-warn)}
+.s-room{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;background:var(--s-panel2);font-weight:600}
+.s-room small{color:var(--s-muted)}
+.s-switch{display:inline-flex;gap:2px;padding:3px;border:1px solid var(--s-border);border-radius:999px;background:var(--s-panel2)}
+.s-switch button{border:0;border-radius:999px;padding:3px 12px;color:var(--s-muted);font-size:12px}
+.s-switch button.is-active{color:#0b1512;background:var(--s-accent);font-weight:700}
+.s-chips{display:inline-flex;gap:6px}
+.s-chips button{display:inline-flex;align-items:center;gap:6px;min-height:30px;padding:4px 10px;border-radius:999px;color:var(--s-muted);background:var(--s-panel2);font-size:12px}
+.s-chips button b{color:var(--s-text);font:700 12px var(--s-mono)}
+.s-nav{display:inline-flex;gap:6px;margin-left:auto}
+.s-nav button{min-height:34px;font-size:13px;font-weight:700;padding:6px 12px;border-radius:10px}
+.s-pending{color:var(--s-muted);border-color:var(--s-border2);background:var(--s-panel2)}
+.s-pending b{display:inline-grid;min-width:20px;height:20px;place-items:center;padding:0 6px;border-radius:999px;color:var(--s-text);background:var(--s-border2);font:800 11px var(--s-mono)}
+.s-pending.is-hot{border-color:#5c3a3d;color:#eab9bb;background:#241a1c}
+.s-pending.is-hot b{color:#2a1013;background:#ef9096}
+.s-history{border-color:#385d4b;color:#bfe4d0;background:#152019}
+.s-history em{font:800 9px var(--s-mono);letter-spacing:.06em;color:#2a1013;background:var(--s-warn);border-radius:999px;padding:2px 6px;font-style:normal;margin-left:4px}
+.s-rec{display:inline-flex;align-items:center;gap:6px;min-height:30px;padding:4px 10px;border-radius:999px;background:var(--s-panel2)}
+.s-rec b{font:700 12px var(--s-mono);color:var(--s-text)}
+.s-stop{width:34px;min-height:30px;padding:0;border-radius:8px;color:#fff;background:var(--s-danger);border-color:#a4353a;font-size:13px}
+/* 主體 */
+.s-body{display:grid;grid-template-columns:minmax(0,1fr) 300px;min-height:560px;background:var(--s-bg)}
+@media (max-width:52rem){.s-body{grid-template-columns:1fr}.s-side{border-left:0;border-top:1px solid var(--s-border)}}
+.s-main{position:relative;padding:8px;min-width:0}
+.s-office{position:relative;height:100%;border:2px solid #3a2a1c;border-radius:14px;overflow:hidden;background:#b47e4d;display:flex;flex-direction:column}
+.s-floor{position:relative;flex:1;min-height:340px;background:
+  repeating-linear-gradient(90deg,rgba(0,0,0,.06) 0 2px,transparent 2px 48px),
+  repeating-linear-gradient(0deg,rgba(0,0,0,.05) 0 2px,transparent 2px 24px),
+  linear-gradient(#c58c57,#b3784a)}
+.crs.is-day .s-floor{background:repeating-linear-gradient(90deg,rgba(0,0,0,.05) 0 2px,transparent 2px 48px),repeating-linear-gradient(0deg,rgba(0,0,0,.04) 0 2px,transparent 2px 24px),linear-gradient(#e2b384,#d29e6e)}
+.s-wall{position:relative;height:88px;background:linear-gradient(#5a3a22,#6a4629);border-bottom:6px solid #3d2716}
+.crs.is-day .s-wall{background:linear-gradient(#8a5f3c,#9a6b45)}
+.s-shelf{position:absolute;left:18px;top:10px;width:110px;height:70px;background:#3b2617;border:3px solid #2a1a0f;border-radius:4px;display:flex;align-items:flex-end;gap:4px;padding:6px}
+.s-shelf i{flex:1;height:60%;background:#c94f3d;border-radius:2px}.s-shelf i:nth-child(2){background:#3f8f6a;height:75%}.s-shelf i:nth-child(3){background:#d8a53a;height:55%}.s-shelf i:nth-child(4){background:#4f6fb5;height:70%}.s-shelf i:nth-child(5){background:#b06fb5;height:62%}
+.s-recbox{position:absolute;left:150px;top:22px;display:inline-flex;align-items:center;gap:8px;padding:6px 12px;background:#1b1f1c;border:2px solid #0f120f;border-radius:6px;color:#8ce1b4;font:700 11px var(--s-mono)}
+.s-window{position:absolute;right:130px;top:12px;width:140px;height:60px;background:linear-gradient(135deg,#2a3f66,#4a6a9a);border:4px solid #3a2716;box-shadow:inset 0 0 0 2px #1d2c47}
+.crs.is-day .s-window{background:linear-gradient(135deg,#8fc6ff,#d8efff)}
+.s-sign{position:absolute;right:16px;top:34px;padding:4px 10px;background:#2a1a0f;color:#ffd48a;border:2px solid #1a0f08;font:800 11px var(--s-mono);letter-spacing:.12em}
+.s-seats{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:52px 10px;padding:44px 16px 16px}
+.s-seat{position:relative;display:flex;flex-direction:column;align-items:center;gap:4px;transition:opacity .2s}
+.s-seat.is-unjoined{opacity:.45}
+.s-seat.is-stopped .s-char{filter:grayscale(1) brightness(.7)}
+.s-desk{position:relative;width:118px;height:58px;background:#8a5a34;border:3px solid #5a3a20;border-radius:6px;box-shadow:0 6px 0 #5a3a20}
+.s-desk::before{content:"";position:absolute;left:8px;top:-22px;width:14px;height:22px;background:#e9d58a;border:2px solid #7a6530;border-radius:8px 8px 2px 2px}
+.s-desk::after{content:"☕";position:absolute;right:10px;top:-14px;font-size:12px}
+.s-char{position:absolute;left:50%;top:-34px;transform:translateX(-50%);width:34px;height:36px;border-radius:9px 9px 6px 6px;border:3px solid rgba(0,0,0,.35);display:flex;justify-content:center;gap:6px;padding-top:10px}
+.s-char i{width:6px;height:8px;background:#fff;border-radius:2px;position:relative}
+.s-char i::after{content:"";position:absolute;left:1px;top:2px;width:3px;height:3px;background:#101114;border-radius:1px}
+.s-char.codex{background:#5b8def}.s-char.claude{background:#3ecf8e}.s-char.grok{background:#e7b45f}.s-char.you{background:#8a8f98}
+.s-seat.is-idle .s-char{animation:s-bob 2.4s ease-in-out infinite}
+@keyframes s-bob{0%,100%{transform:translateX(-50%) translateY(0)}50%{transform:translateX(-50%) translateY(-3px)}}
+.crs.no-idle .s-seat .s-char{animation:none}
+.s-bubble{position:absolute;top:-58px;left:50%;transform:translateX(-50%);padding:3px 8px;background:#fff8e6;color:#3a2a1c;border:2px solid #2a1a0f;border-radius:6px;font:700 10px var(--s-mono);white-space:nowrap}
+.crs.no-idle .s-bubble{display:none}
+.s-plate{display:flex;flex-direction:column;align-items:center;gap:2px;min-width:92px;padding:4px 8px;background:#1b1f1c;border:2px solid #0f120f;border-radius:6px;text-align:center}
+.s-plate b{font:800 10px var(--s-mono);letter-spacing:.06em;color:#f0e6f1;text-transform:uppercase;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.s-plate b button{border:0;padding:0;font:inherit;color:inherit;cursor:text;text-transform:uppercase}
+.s-plate b button:hover{color:#8ce1b4;border:0}
+.s-plate small{font:700 10px var(--s-mono);padding:1px 8px;border-radius:4px;background:#2a2f2c;color:#d8cfdc}
+.s-plate small.ok{color:#14261c;background:#58ce90}.s-plate small.q{color:#f0e6f1;background:#4a3f4e}.s-plate small.ro{color:#9aa39d;background:#22272a}.s-plate small.stop{color:#fff;background:var(--s-danger)}
+.s-rename{font:700 11px var(--s-mono);width:130px;padding:2px 6px;border:1px solid var(--s-accent);border-radius:4px;background:#0b0c0f;color:#fff}
+.s-rename-err{position:absolute;left:50%;transform:translateX(-50%);bottom:-26px;white-space:nowrap;padding:3px 8px;background:#3a1518;color:#f4b6b9;border:1px solid #7a2e33;border-radius:6px;font-size:10.5px;z-index:5}
+.s-lounge{display:flex;align-items:flex-end;justify-content:space-between;gap:8px;padding:0 16px 12px}
+.crs.is-quiet .s-lounge .s-plant,.crs.is-quiet .s-lounge .s-pet{visibility:hidden}
+.s-plant,.s-pet{font-size:28px}
+.s-draft{margin-left:auto;padding:8px 10px;border:2px dashed #8a5a34;border-radius:8px;background:rgba(0,0,0,.12);max-width:220px;text-align:center}
+.s-draft b{display:block;font:800 10px var(--s-mono);letter-spacing:.08em;color:#f0e6f1;background:#1b1f1c;padding:3px 8px;border-radius:4px;margin-bottom:6px}
+.s-draft small{font-size:10px;color:#3a2a1c}
+.s-you{display:flex;flex-direction:column;align-items:center;gap:4px;padding:34px 0 8px;background:#a86f43;border-top:6px solid #3d2716}
+.s-you-desk{width:118px}
+.s-caption{padding:4px 0 8px;text-align:center;background:#a86f43;font:700 10px var(--s-mono);color:#3a2a1c}
+.s-caption span{background:#1b1f1c;color:#c9c1cb;padding:3px 10px;border-radius:999px}
+/* 紅色提示條 */
+.s-banner{position:absolute;z-index:6;left:50%;top:14px;transform:translateX(-50%);display:grid;gap:8px;width:min(92%,560px);padding:10px 12px;border:1px solid #b35660;border-radius:10px;background:#2a1518;box-shadow:0 12px 30px rgba(0,0,0,.5);color:#f4d7d9}
+.s-banner[hidden]{display:none}
+.s-banner b{font-size:12px;color:#ffb3b8}
+.s-banner .s-banner-actions{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:6px}
+.s-banner button{padding:7px 8px;font-size:11px;border-color:#51434f;background:#221d28;color:#d8cfdc}
+.s-banner button.primary{border-color:#3d7659;color:#14261c;background:#58ce90;font-weight:700}
+.s-banner button.reject{border-color:#b35660;color:#fff;background:#d9515c}
+.s-banner small{font-size:10px;color:#c99fa3}
+/* 帳本頁 */
+.s-ledger{display:flex;flex-direction:column;height:100%;min-height:540px;border:1px solid var(--s-border);border-radius:12px;background:var(--s-panel)}
+.s-ledger[hidden]{display:none}
+.s-ledger-head{padding:10px 14px;border-bottom:1px solid var(--s-border)}
+.s-ledger-head b{display:block;font-size:13px}.s-ledger-head small{color:var(--s-muted);font-size:11px}
+.s-stream{flex:1;overflow-y:auto;padding:10px 14px;display:flex;flex-direction:column;gap:8px;min-height:0;max-height:380px}
+.s-msg{padding:8px 10px;border:1px solid var(--s-border);border-radius:8px;background:var(--s-panel2)}
+.s-msg.system{background:transparent;border-style:dashed;color:var(--s-muted);font-size:12px}
+.s-msg-head{display:flex;justify-content:space-between;gap:8px;font:700 11px var(--s-mono);color:var(--s-muted);margin-bottom:3px}
+.s-msg-head button{border:0;padding:0;font:inherit;color:#8ce1b4;cursor:pointer}
+.s-msg-head button:hover{text-decoration:underline;border:0}
+.s-msg-head .seq{color:var(--s-faint)}
+.s-msg p{margin:0;white-space:pre-wrap;word-break:break-word;font-size:12.5px}
+.s-msg.log{opacity:.72}.s-msg.log:hover,.s-msg.log:focus-within,.s-msg.log[open]{opacity:1}
+.s-msg.log summary{cursor:pointer;list-style:none;display:flex;gap:6px;align-items:center;font:600 11px var(--s-mono);color:var(--s-muted)}
+.s-msg.log summary::-webkit-details-marker{display:none}
+.s-msg.log summary::before{content:"▸";color:var(--s-faint)}
+.s-msg.log[open] summary::before{content:"▾"}
+.s-msg.log pre{margin:6px 0 0;padding:8px 10px;background:var(--s-bg);border:1px solid var(--s-border);border-radius:6px;font:11px var(--s-mono);color:var(--s-muted);white-space:pre-wrap;max-height:160px;overflow:auto}
+.s-composer{border-top:1px solid var(--s-border);padding:10px 12px;background:var(--s-panel)}
+.s-composer textarea{width:100%;resize:none;min-height:60px;padding:8px 10px;border:1px solid var(--s-border);border-radius:8px;background:var(--s-bg);color:var(--s-text);font:12.5px/1.5 var(--s-body)}
+.s-composer textarea:focus{outline:none;border-color:var(--s-accent-dim)}
+.s-composer-foot{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:6px}
+.s-composer-foot span{color:var(--s-faint);font-size:10.5px}
+.s-composer-foot button{background:var(--s-accent);color:#0b1512;border-color:var(--s-accent-dim);font-weight:700}
+/* 右欄 */
+.s-side{position:relative;display:flex;border-left:1px solid var(--s-border);background:var(--s-panel);min-height:0}
+.s-rail{flex:none;display:flex;flex-direction:column;align-items:center;gap:8px;width:52px;padding:10px 0;border-right:1px solid var(--s-border)}
+.s-rail button{position:relative;width:36px;height:36px;padding:0;border-radius:10px;font-size:16px;color:#aaa0ad;background:transparent;border-color:transparent}
+.s-rail button:hover{color:#efe4f0;background:#27222d;border-color:transparent}
+.s-rail button[aria-pressed="true"]{color:#8ce1b4;border-color:#3d7659;background:#17241c;box-shadow:0 0 0 1px rgba(94,189,140,.18)}
+.s-rail button b{position:absolute;top:-4px;right:-4px;min-width:16px;height:16px;padding:0 4px;border-radius:999px;color:#fff;background:#e56d76;font:800 10px/16px var(--s-mono)}
+.s-rail button b[hidden]{display:none}
+.s-rail-gap{flex:1}
+.s-drawers{flex:1;min-width:0;display:flex;flex-direction:column}
+.s-drawer{display:flex;flex-direction:column;height:100%;min-height:0}
+.s-drawer[hidden]{display:none}
+.s-drawer > header{display:flex;align-items:center;gap:8px;padding:10px 10px 8px;border-bottom:1px solid var(--s-border)}
+.s-drawer > header b{flex:none;color:#f0e6f1;font-size:13px}
+.s-drawer > header small{flex:1;min-width:0;margin-left:auto;color:#6e6873;font:700 10px var(--s-mono);text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.s-drawer > header button{flex:none;width:24px;height:24px;padding:0;border-radius:50%;border-color:transparent;color:#aaa0ad;font-size:14px}
+.s-drawer > header button:hover{background:#2f2834;border-color:transparent}
+.s-group{display:block;padding:10px 12px 5px;color:#8f8291;font:700 10px var(--s-mono);letter-spacing:.04em}
+.s-chipsrow{display:flex;gap:6px;flex-wrap:wrap;padding:8px 10px;border-bottom:1px solid var(--s-border)}
+.s-chip{display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border:1px solid #3a323e;border-radius:999px;color:#a79ba9;background:#1b1820;font:700 10px/1.3 var(--s-mono);white-space:nowrap}
+.s-chip[aria-pressed="true"]{color:#14261c;background:#8ce1b4;border-color:#3d7659}
+.s-chip i{width:6px;height:6px;border-radius:50%;background:var(--s-faint)}
+.s-chip i.ok{background:var(--s-accent)}.s-chip i.ro{background:#6e6873}
+.s-chat{flex:1;min-height:180px;max-height:300px;overflow-y:auto;padding:10px;display:flex;flex-direction:column;gap:8px}
+.s-agentcard{margin:0 10px 8px;padding:9px 10px;border:1px solid #57465a;border-radius:9px;background:linear-gradient(180deg,#241c28,#1a171f);display:grid;gap:5px;font-size:11.5px}
+.s-agentcard[hidden]{display:none}
+.s-agentcard .head{display:flex;justify-content:space-between;align-items:center;gap:6px}
+.s-agentcard .head b{display:inline-flex;align-items:center;gap:6px;font:800 12px var(--s-mono)}
+.s-agentcard .head button{padding:3px 8px;font-size:11px}
+.s-agentcard .line{display:flex;gap:6px;flex-wrap:wrap;color:#c9bfcb}
+.s-agentcard .line b{padding:1px 8px;border-radius:999px;background:#2a2f2c;color:#d8cfdc;font:700 10px var(--s-mono)}
+.s-agentcard .line b.ok{color:#14261c;background:#58ce90}
+.s-agentcard .meta{color:#8f8291;font:600 10px var(--s-mono)}
+.s-agentcard .how{color:#b8adb9;line-height:1.5}
+.s-tasks{flex:1;overflow-y:auto;padding:0 10px 10px;max-height:380px}
+.s-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:center;gap:8px;padding:9px 10px;margin:4px 0;border:1px solid #2f2833;border-radius:9px;background:#1a171f;font-size:12px}
+.s-row .name{font:700 11.5px var(--s-mono);color:#ded3df;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.s-row .name button{border:0;padding:0;font:inherit;color:inherit;cursor:text}
+.s-row .name button:hover{color:#8ce1b4;border:0}
+.s-row .st{font:700 10px var(--s-mono);padding:1px 8px;border-radius:999px;background:#2a2f2c;color:#d8cfdc}
+.s-row .st.ok{color:#14261c;background:#58ce90}.s-row .st.q{background:#4a3f4e;color:#f0e6f1}.s-row .st.ro{background:#22272a;color:#9aa39d}.s-row .st.stop{background:var(--s-danger);color:#fff}
+.s-row .more{color:var(--s-faint);border:0;padding:0 4px}
+.s-empty{padding:8px 12px;color:var(--s-faint);font-size:11.5px}
+.s-tasks-foot{display:grid;gap:6px;padding:8px 10px 10px;border-top:1px dashed var(--s-border)}
+.s-tasks-foot button{text-align:left;font-size:11px;color:#bfe4d0;border-style:dashed}
+.s-notify{flex:1;overflow-y:auto;padding:0 10px 10px;display:flex;flex-direction:column;gap:6px;max-height:380px}
+.s-nt{position:relative;display:grid;gap:4px 8px;padding:9px 10px 9px 13px;border:1px solid #2f2833;border-radius:8px;background:#1a171f;font-size:11px}
+.s-nt::before{content:"";position:absolute;left:-1px;top:10px;bottom:10px;width:3px;border-radius:0 3px 3px 0;background:#6e6672}
+.s-nt.presence::before{background:#e7b45f}.s-nt.success::before{background:#58ce90}.s-nt.error::before{background:#ef736d}
+.s-nt.actionable{border-color:#7a6738}
+.s-nt b{color:#ded3df;line-height:1.4}
+.s-nt small{color:#8f8291}
+.s-nt .acts{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:6px;margin-top:4px}
+.s-nt .acts button{padding:7px 8px;border-color:#51434f;color:#d8cfdc;background:#221d28;font-size:11px}
+.s-nt .acts button.primary{border-color:#3d7659;color:#14261c;background:#58ce90;font-weight:700}
+.s-nt .acts button.reject{border-color:#b35660;color:#fff;background:#d9515c}
+.s-nt.done{opacity:.55}.s-nt.done::before{display:none}
+.s-nt .tag{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:999px;background:#2f2834;color:#aaa0ad;font:700 9px var(--s-mono)}
+.s-writer{padding:10px 12px;display:grid;gap:10px;font-size:11.5px}
+.s-writer p{margin:0;display:grid;gap:2px}.s-writer p b{color:#bfe4d0;font:700 10px var(--s-mono);letter-spacing:.06em}.s-writer p span{color:#c9bfcb}
+.s-writer button{font-size:11px;border-style:dashed;color:#bfe4d0}
+.s-menu{position:absolute;right:8px;bottom:48px;z-index:20;min-width:210px;padding:6px;border:1px solid var(--s-border2);border-radius:10px;background:#1c1d22;box-shadow:0 18px 50px rgba(0,0,0,.55);display:grid;gap:2px}
+.s-menu[hidden]{display:none}
+.s-menu button{display:flex;justify-content:space-between;align-items:center;gap:10px;width:100%;border-color:transparent;text-align:left;font-size:12px;padding:7px 10px}
+.s-menu button:hover{background:#27222d;border-color:transparent}
+.s-menu button i{width:14px;height:14px;border:1px solid var(--s-border2);border-radius:4px}
+.s-menu button[aria-checked="true"] i{background:var(--s-accent);border-color:var(--s-accent)}
+/* modal */
+.s-modal{position:absolute;inset:0;z-index:40;display:flex;align-items:center;justify-content:center;padding:14px;background:rgba(6,7,9,.78)}
+.s-modal[hidden]{display:none}
+.crs.is-full .s-modal{position:fixed}
+.s-dialog{width:min(100%,900px);max-height:100%;overflow:auto;border:1px solid var(--s-border2);border-radius:12px;background:var(--s-panel);box-shadow:0 30px 80px rgba(0,0,0,.6);display:flex;flex-direction:column}
+.s-dialog > header{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--s-border)}
+.s-dialog > header small{display:block;font:800 9px var(--s-mono);letter-spacing:.12em;color:#6f757d}
+.s-dialog > header b{font-size:14px}
+.s-dialog > header code{font:11px var(--s-mono);color:var(--s-muted)}
+.s-dialog > header em{font:800 10px var(--s-mono);font-style:normal;padding:2px 8px;border-radius:999px;background:#17241c;color:#8ce1b4;border:1px solid #3d7659}
+.s-dialog > header button[data-close]{margin-left:auto;width:26px;height:26px;padding:0;border-radius:50%;border-color:transparent}
+.s-dialog > p{padding:10px 14px;margin:0;font-size:12.5px;color:#c9bfcb}
+.s-small{width:min(100%,460px)}
+.s-actions{display:flex;gap:8px;justify-content:flex-end;padding:8px 14px 14px}
+.s-actions .danger{background:var(--s-danger);border-color:#a4353a;color:#fff;font-weight:700}
+.s-merge-body{display:grid;grid-template-columns:260px minmax(0,1fr);gap:0;min-height:0}
+@media (max-width:52rem){.s-merge-body{grid-template-columns:1fr}}
+.s-facts{padding:12px 14px;border-right:1px solid var(--s-border);display:grid;gap:10px;align-content:start;font-size:11.5px}
+.s-facts-label{margin:0;font:800 9px var(--s-mono);letter-spacing:.12em;color:#6f757d}
+.s-route{margin:0;color:#c9bfcb}
+.s-disc{padding:8px 10px;border:1px dashed #5c3a3d;border-radius:8px;color:#e6c3c5;font-size:11px}
+.s-recovery{display:grid;gap:4px;padding:8px 10px;border:1px solid var(--s-border);border-radius:8px;background:var(--s-panel2)}
+.s-recovery b{font-size:11px;color:#bfe4d0}.s-recovery small{color:var(--s-muted);font-size:10px}
+.s-recovery code{font:11px var(--s-mono);color:var(--s-text);word-break:break-all}
+.s-ttl{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.s-ttl small{display:block;color:var(--s-muted);font-size:10px}.s-ttl b{font:800 16px var(--s-mono);color:var(--s-warn)}
+.s-demo{font-size:10.5px;border-style:dashed;color:#d9c86a;border-color:#4a4322}
+.s-review{display:flex;flex-direction:column;min-height:0}
+.s-review-head{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid var(--s-border);font-size:12px}
+.s-review-head span{font:700 11px var(--s-mono);color:var(--s-muted)}
+.s-blocking{margin:10px 14px 0;padding:10px 12px;border:1px solid #7a2e33;border-radius:8px;background:#2a1518;font-size:11.5px}
+.s-blocking[hidden]{display:none}
+.s-blocking b{color:#ffb3b8}.s-blocking p{margin:2px 0 6px;color:#e6c3c5}
+.s-blocking ul{margin:0;padding-left:18px;color:#f4d7d9}
+.s-diff{height:220px;overflow-y:auto;margin:10px 14px 12px;padding:10px 12px;border:1px solid var(--s-border);border-radius:8px;background:var(--s-bg);font-size:12px}
+.s-diff p{margin:0 0 6px;color:#c9bfcb}
+.s-diff pre{margin:0 0 8px;padding:8px 10px;border:1px solid var(--s-border);border-radius:6px;background:var(--s-panel2);font:11px var(--s-mono);color:#bfe4d0;white-space:pre-wrap}
+.s-diff-end{color:#8ce1b4;font:700 11px var(--s-mono);text-align:center;margin-top:10px}
+.s-confirm{padding:10px 14px 14px;border-top:1px solid var(--s-border);display:grid;gap:6px;background:var(--s-panel2)}
+.s-confirm-row{display:flex;justify-content:space-between;align-items:center;gap:10px;font:700 11px var(--s-mono);color:var(--s-muted)}
+.s-confirm-row p{margin:0;font:11px var(--s-body);color:var(--s-warn)}
+.s-phrase{margin:0;font-size:11.5px;color:#c9bfcb}
+.s-phrase code{font:800 12px var(--s-mono);color:#fff;background:#0b0c0f;padding:2px 8px;border-radius:4px;border:1px solid var(--s-border2)}
+.s-confirm-area{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px}
+.s-confirm-area input{padding:8px 10px;border:1px solid var(--s-border2);border-radius:8px;background:var(--s-bg);color:#fff;font:700 13px var(--s-mono)}
+.s-confirm-area input:disabled{opacity:.5}
+.s-confirm-area input.ok{border-color:var(--s-accent)}
+#s-approve{background:var(--s-accent);color:#0b1512;border-color:var(--s-accent-dim);font-weight:800}
+#s-approve:disabled{opacity:.4;cursor:not-allowed}
+.s-feedback{margin:0;min-height:1.2em;font-size:11.5px;color:#c9bfcb}
+.s-feedback.ok{color:#8ce1b4}.s-feedback.bad{color:#ffb3b8}
+.s-hist-note{padding:10px 14px 0!important;font-size:11.5px!important}
+.s-hist-note code{font:11px var(--s-mono);color:#fff}
+.s-buckets{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;padding:12px 14px 14px}
+.s-bucket{border:1px solid var(--s-border);border-radius:10px;background:var(--s-panel2);overflow:hidden}
+.s-bucket header{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--s-border);border-left:4px solid var(--c)}
+.s-bucket header b{display:block;font-size:12px;color:var(--c)}.s-bucket header small{display:block;color:var(--s-muted);font-size:10px}
+.s-bucket header strong{font:800 16px var(--s-mono);color:var(--c)}
+.s-bucket ul{margin:0;padding:8px 10px;list-style:none;display:grid;gap:6px;font:11px var(--s-mono);color:#c9bfcb}
+.s-bucket li{display:grid;gap:2px}.s-bucket li small{color:var(--s-faint);font-size:10px}
+.s-bucket .none{color:var(--s-faint);font-size:11px}
+.s-bucket.green{--c:#58ce90}.s-bucket.amber{--c:#f5a623}.s-bucket.blue{--c:#6fa8ff}.s-bucket.grey{--c:#8a8f98}
+.s-toast{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);z-index:60;max-width:90%;padding:8px 14px;border:1px solid var(--s-border2);border-radius:999px;background:#0b0c0f;color:#f0e6f1;font-size:12px;box-shadow:0 10px 30px rgba(0,0,0,.5)}
+.s-toast[hidden]{display:none}
+.crs.is-full .s-toast{position:fixed}
+</style>
+
+</head>
+<body>
+
+<div class="wrap">
+
+<header class="top">
+  <p class="eyebrow">Orchestratory · 互動手冊 · 2026-09-05 版</p>
+  <h1>席位手冊</h1>
+  <p class="standfirst">
+    先帶你<strong>從一台什麼都沒裝的 Mac 接上</strong>——連「終端機是什麼」都從頭講，八步，每步一行指令。
+    接著是<strong>控制室導覽</strong>，帶你認識畫面上每一個區塊與按鈕，
+    然後講<strong>互動方式</strong>：一個 agent 怎麼進到房間、什麼時候它聽得見你、
+    什麼時候它其實沒在聽，以及為什麼「寫進你的專案」是一道你必須親手打字的閘門。
+    下面的元件都可以動——它們示範的是真實規則，不是動畫。
+  </p>
+</header>
+
+
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<div class="hero" id="hero">
+  <div class="bar">誰能做什麼 · 點任一個方塊</div>
+  <div class="grid">
+    <div class="map">
+      <svg viewBox="0 0 760 420" role="group" aria-label="權限關係圖：你的終端機、GUI 控制台、Orchestratory 服務、Agent 席位、你的專案資料夾、Room 帳本">
+        <defs>
+          <marker id="hah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="context-stroke"></path></marker>
+        </defs>
+        <g class="he hb" data-n="term orch"><path class="dg-line" marker-end="url(#hah)" d="M190,202 H305"></path><text class="dg-lab" x="247" y="193" text-anchor="middle">安裝 · 啟動</text><text class="dg-lab" x="247" y="218" text-anchor="middle">親手打 ALLOW</text></g>
+        <g class="he hb" data-n="term gui"><path class="dg-line" marker-end="url(#hah)" d="M115,170 V62 H305"></path><text class="dg-lab" x="130" y="54">打開瀏覽器</text></g>
+        <g class="he hb" data-n="gui orch"><path class="dg-line" marker-start="url(#hah)" marker-end="url(#hah)" d="M390,94 V170"></path><text class="dg-lab" x="398" y="136">核准 / 拒絕 / 逐字確認</text></g>
+        <g class="he hl" data-n="agent orch"><path class="dg-line" marker-start="url(#hah)" marker-end="url(#hah)" d="M580,202 H475"></path><text class="dg-lab" x="527" y="193" text-anchor="middle">stdio MCP</text></g>
+        <g class="he hl" data-n="orch ledger"><path class="dg-line" marker-end="url(#hah)" d="M440,246 V290 H515 V320"></path><text class="dg-lab" x="450" y="282">只能往後追加</text></g>
+        <g class="he hb" data-n="orch proj"><path class="dg-line" marker-end="url(#hah)" d="M340,246 V290 H275 V320"></path><text class="dg-lab" x="332" y="282" text-anchor="end">你逐字確認後才寫入</text></g>
+        <g class="he hl" data-n="agent ledger"><path class="dg-line" marker-start="url(#hah)" marker-end="url(#hah)" d="M615,234 V300 H560 V320"></path><text class="dg-lab" x="608" y="297" text-anchor="end">讀帳本 · 發言入帳</text></g>
+        <g class="he hx" data-n="agent proj"><path class="dg-line" d="M655,234 V400 H275 V378"></path><text class="dg-lab" x="465" y="393" text-anchor="middle">✗ agent 不能直接寫進你的專案</text></g>
+
+        <g class="he hx" data-n="outside gui"><path class="dg-line" d="M580,62 H475"></path><text class="dg-lab" x="527" y="54" text-anchor="middle">✗ 連不進來</text></g>
+        <g class="he hx" data-n="orch outside"><path class="dg-line" d="M440,170 V150 H655 V94"></path><text class="dg-lab" x="662" y="128">✗ 沒有端點</text></g>
+        <g class="hn" data-id="outside" tabindex="0" role="button" aria-label="外部網路與雲端"><rect class="dg-sunk" x="580" y="30" width="150" height="64" rx="3" stroke-dasharray="4 3"></rect><text class="dg-k" x="594" y="52">OUTSIDE</text><text class="dg-t" x="594" y="73">外部網路 · 雲端</text><text class="dg-s" x="594" y="87">這個產品沒有這一層</text></g>
+        <g class="hn" data-id="term" tabindex="0" role="button" aria-label="你的終端機"><rect class="dg-box" x="40" y="170" width="150" height="64" rx="3"></rect><text class="dg-k" x="54" y="192">YOU · OWNER</text><text class="dg-t" x="54" y="213">你的終端機</text><text class="dg-s" x="54" y="227">最高權限</text></g>
+        <g class="hn" data-id="gui" tabindex="0" role="button" aria-label="GUI 控制台"><rect class="dg-sunk" x="305" y="30" width="170" height="64" rx="3"></rect><text class="dg-k" x="319" y="52">LOOPBACK ONLY</text><text class="dg-t" x="319" y="73">GUI 控制台</text><text class="dg-s" x="319" y="87">127.0.0.1:4317 · 核准都在這</text></g>
+        <g class="hn" data-id="orch" tabindex="0" role="button" aria-label="Orchestratory 本機服務"><rect class="dg-box" x="305" y="170" width="170" height="76" rx="3"></rect><text class="dg-k" x="319" y="192">LOCAL SERVICE</text><text class="dg-t" x="319" y="213">Orchestratory</text><text class="dg-s" x="319" y="228">登記與執行，不決定</text><text class="dg-s" x="319" y="240">不升權、不降權</text></g>
+        <g class="hn" data-id="agent" tabindex="0" role="button" aria-label="Agent 席位"><rect class="dg-box" x="580" y="170" width="150" height="64" rx="3"></rect><text class="dg-k" x="594" y="192">CODEX / CLAUDE / GROK</text><text class="dg-t" x="594" y="213">Agent 席位</text><text class="dg-s" x="594" y="227">做事、提案，不核准</text></g>
+        <g class="hn" data-id="proj" tabindex="0" role="button" aria-label="你的專案資料夾"><rect class="dg-box" x="190" y="320" width="170" height="58" rx="3"></rect><text class="dg-k" x="204" y="342">ALLOWLIST · 預設為空</text><text class="dg-t" x="204" y="363">你的專案資料夾</text></g>
+        <g class="hn" data-id="ledger" tabindex="0" role="button" aria-label="Room 帳本"><rect class="dg-box" x="430" y="320" width="170" height="58" rx="3"></rect><text class="dg-k" x="444" y="342">APPEND-ONLY · 雜湊鏈</text><text class="dg-t" x="444" y="363">Room 帳本</text></g>
+      </svg>
+      <div class="legend">
+        <span><i class="b"></i>只有你能按的線</span>
+        <span><i class="l"></i>協作與紀錄的線</span>
+        <span><i class="x"></i>被擋住的路</span>
+      </div>
+      <div class="blocks" id="heroBlocks"><span class="k">被擋住的路 · 全部</span><div class="chips"></div></div>
+    </div>
+    <div class="who" id="heroWho" aria-live="polite"></div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<section>
+  <h2><span class="n">01</span>第一次安裝：從零到接上</h2>
+  <p class="lede">
+    八張卡片，一次做一步。每張都寫了<strong>你應該看到什麼</strong>，以及<strong>沒看到時該怎麼辦</strong>。
+    這份引導假設你<strong>從來沒用過終端機</strong>；已經會的人直接從第 3 步開始。
+    上方圓點可以直接跳，鍵盤左右鍵也能翻。
+  </p>
+
+  <div class="panel">
+    <div class="bar">
+      <span>安裝與串接</span>
+      <span class="progress" style="margin-left:auto;min-width:11rem">
+        <span class="bar"><i id="progBar"></i></span>
+        <span id="progText">0 / 8</span>
+      </span>
+    </div>
+    <div class="body">
+      <div class="deck">
+      <div class="diagram">
+        <svg viewBox="0 0 760 340" role="img" aria-labelledby="mapTitle mapDesc">
+          <title id="mapTitle">安裝與串接的系統關係圖</title>
+          <desc id="mapDesc">Orchestrator 在中間，左邊是你的終端機，右邊是 Agent CLI，上面是 GUI 控制台，下面是你的專案資料夾與 Room 帳本。目前這一步會用到的部分會亮起來，其餘變淡。</desc>
+          <defs>
+            <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,1 L9,5 L0,9 z" fill="context-stroke"></path>
+            </marker>
+          </defs>
+          <g class="dg-a" id="a-inst"><path class="dg-line" marker-end="url(#ah)" d="M180,156 H296"></path><text class="dg-lab" x="238" y="147" text-anchor="middle">npm ci · link</text></g>
+          <g class="dg-a" id="a-gui"><path class="dg-line" marker-end="url(#ah)" d="M380,120 V94"></path><text class="dg-lab" x="390" y="112">orchestrator</text></g>
+          <g class="dg-a" id="a-appr"><path class="dg-line" marker-end="url(#ah)" d="M110,126 V56 H296"></path><text class="dg-lab" x="150" y="48">你在這裡核准</text></g>
+          <g class="dg-a" id="a-cli"><path class="dg-line" marker-start="url(#ah)" marker-end="url(#ah)" d="M576,156 H464"></path><text class="dg-lab" x="520" y="147" text-anchor="middle">stdio MCP</text></g>
+          <g class="dg-a" id="a-proj"><path class="dg-line" marker-end="url(#ah)" d="M348,192 V222 H262 V246"></path><text class="dg-lab" x="256" y="216" text-anchor="end">workspaces allow</text></g>
+          <g class="dg-a" id="a-room"><path class="dg-line" marker-end="url(#ah)" d="M412,192 V222 H500 V246"></path><text class="dg-lab" x="506" y="216">room init</text></g>
+          <g class="dg-a" id="a-join"><path class="dg-line" marker-end="url(#ah)" d="M650,126 V56 H464"></path><text class="dg-lab" x="640" y="48" text-anchor="end">room_join_request</text></g>
+          <g class="dg-g" id="g-term"><rect class="dg-box" x="40" y="126" width="140" height="60" rx="3"></rect><text class="dg-k" x="54" y="148">YOU</text><text class="dg-t" x="54" y="169">你的終端機</text></g>
+          <g class="dg-g" id="g-gui"><rect class="dg-sunk" x="300" y="34" width="164" height="60" rx="3"></rect><text class="dg-k" x="314" y="56">LOOPBACK ONLY</text><text class="dg-t" x="314" y="76">GUI 控制台</text><text class="dg-s" x="314" y="89">127.0.0.1:4317</text></g>
+          <g class="dg-g" id="g-orch"><rect class="dg-box" x="300" y="120" width="164" height="72" rx="3"></rect><text class="dg-k" x="314" y="142">LOCAL SERVICE</text><text class="dg-t" x="314" y="162">Orchestrator</text><text class="dg-s" x="314" y="178">不升權、不降權</text></g>
+          <g class="dg-g" id="g-cli"><rect class="dg-box" x="576" y="126" width="150" height="60" rx="3"></rect><text class="dg-k" x="590" y="148">CODEX / CLAUDE / GROK</text><text class="dg-t" x="590" y="169">Agent CLI</text></g>
+          <g class="dg-g" id="g-proj"><rect class="dg-box" x="182" y="246" width="160" height="56" rx="3"></rect><text class="dg-k" x="196" y="267">ALLOWLIST</text><text class="dg-t" x="196" y="288">你的專案資料夾</text></g>
+          <g class="dg-g" id="g-room"><rect class="dg-box" x="420" y="246" width="160" height="56" rx="3"></rect><text class="dg-k" x="434" y="267">APPEND-ONLY</text><text class="dg-t" x="434" y="288">Room 帳本</text></g>
+        </svg>
+      </div>
+        <div class="dots" id="dots" role="tablist" aria-label="安裝步驟"></div>
+        <div id="cardStage" aria-live="polite"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="note">
+    <span class="k">三件新手最常卡住的事</span>
+    <p>
+      <strong>一、<code>orchestrator</code> 說找不到指令。</strong>先用完整路徑
+      <code>"$HOME/.local/bin/orchestrator"</code>；那不是安裝失敗，是這個目錄不在你的
+      <code>PATH</code> 裡。要不要改 shell 設定由你決定，安裝程序不會自己改。<br><br>
+      <strong>二、什麼都還沒授權，所以什麼都會失敗。</strong>Workspace 白名單<strong>預設是空的</strong>，
+      沒有第 5 步，後面每一步都會被拒絕——這是刻意的，不是壞掉。<br><br>
+      <strong>三、不要叫 agent 用 shell 指令進房。</strong>進房必須由它自己呼叫
+      <code>room_join_request</code>，系統才知道是<strong>哪一個活著的程序</strong>在申請。
+      shell 指令給不了這個資訊。
+    </p>
+  </div>
+
+  <div class="note warn">
+    <span class="k">這個產品只在你自己的電腦上跑</span>
+    <p>
+      GUI 只綁 <code>127.0.0.1</code>，也就是只有這台電腦自己連得到。沒有帳號、沒有雲端、沒有對外請求。
+      這份手冊<strong>不會教你把它開放給別台機器</strong>，那不是它的設計；要跨機器協作請等
+      <code>docs/V2_ROADMAP.md</code> 裡的 Remote Room Seat。
+    </p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<section>
+  <h2><span class="n">02</span>控制室導覽</h2>
+  <p class="lede">
+    打開 <code>http://127.0.0.1:4317</code> 看到的畫面叫「Room 控制室」。畫面分三塊：
+    <strong>頂欄</strong>放專案選單、辦公室／帳本切換與兩顆常駐按鈕（待核准、併入紀錄）；
+    <strong>中間的舞台</strong>是像素辦公室，每個 agent 是一個席位；
+    <strong>右欄</strong>是一排圖示，點一顆開一個抽屜。下面是可以操作的模擬畫面：版面、按鈕、文案都照真實介面做，狀態只存在這一頁。
+  </p>
+
+  <div class="crs" id="sim02" aria-label="模擬控制室">
+    <div class="s-note"><span>模擬畫面 · 不連線 · 你按的每一下只改這頁的狀態</span><span class="s-note-actions"><button type="button" id="s-replay">模擬：新申請到達</button><button type="button" id="s-reset">重置模擬</button></span></div>
+    <header class="s-topbar">
+      <button type="button" class="s-room" id="s-room"><i class="s-dot on"></i>orchestratory協作器 <small>▾</small></button>
+      <div class="s-switch" role="tablist"><button type="button" class="is-active" data-view="office" role="tab">辦公室</button><button type="button" data-view="ledger" role="tab">帳本</button></div>
+      <div class="s-chips"><button type="button" data-group="terminal">終端 <b id="s-c-term">0</b></button><button type="button" data-group="managed">子 Agent <b id="s-c-man">0</b></button><button type="button" data-group="running">任務 <b id="s-c-run">0</b></button></div>
+      <div class="s-nav"><button type="button" class="s-pending" id="s-pending">⑂ 待核准 <b id="s-pending-n">1</b></button><button type="button" class="s-history" id="s-history">▤ 併入紀錄 <em id="s-history-attn" hidden>需檢查</em></button></div>
+      <button type="button" class="s-rec" id="s-rec" title="切換收錄"><i class="s-dot on"></i><b id="s-rec-label">#100</b></button>
+      <button type="button" class="s-stop" id="s-stop" title="緊急停止：停止所有執行中的工作流">■</button>
+    </header>
+    <div class="s-body">
+      <div class="s-main">
+        <div class="s-office" id="s-office">
+          <div class="s-banner" id="s-banner" hidden></div>
+          <div class="s-floor">
+            <div class="s-wall">
+              <div class="s-shelf"><i></i><i></i><i></i><i></i><i></i></div>
+              <div class="s-recbox"><i class="s-dot on"></i><span id="s-recbox">收錄中 · #100</span></div>
+              <div class="s-window"></div>
+              <div class="s-sign">ORCHESTRATORY</div>
+            </div>
+            <div class="s-seats" id="s-seats"></div>
+            <div class="s-lounge" id="s-lounge"><div class="s-plant">🪴</div><div class="s-pet" title="MISO">🐈</div><div class="s-draft"><b>草稿區</b><small>草稿區＝獨立副本，看得到、可退回、有紀錄；不是作業系統層級的邊界</small></div></div>
+          </div>
+          <div class="s-you"><div class="s-desk s-you-desk"><div class="s-char you"><i></i><i></i></div></div><div class="s-plate"><b>YOU</b><small>閒置</small></div></div>
+          <div class="s-caption" id="s-caption">已擴編至 0 席 · 可拖曳辦公桌調整位置</div>
+        </div>
+        <div class="s-ledger" id="s-ledger" hidden>
+          <div class="s-ledger-head"><b>Room Ledger 直播</b><small>整份編號對話。點 #編號可展開被引用段落。</small></div>
+          <div class="s-stream" id="s-stream"></div>
+          <form class="s-composer" data-composer><textarea rows="3" placeholder="對房間說話…（連按兩次 Enter 送出；Shift／Option Enter 換行；⌘Enter 立即送出）"></textarea><div class="s-composer-foot"><span>發言會進帳本，所有席位都讀得到</span><button type="submit">發言</button></div></form>
+        </div>
+      </div>
+      <aside class="s-side">
+        <nav class="s-rail">
+          <button type="button" data-drawer="chat" title="對話 · 帳本直播">💬</button>
+          <button type="button" data-drawer="tasks" title="任務清單" aria-pressed="true">📋</button>
+          <button type="button" data-drawer="notify" title="通知">🔔<b id="s-notify-n" hidden>0</b></button>
+          <button type="button" data-drawer="writer" title="Writer">✎</button>
+          <span class="s-rail-gap"></span>
+          <button type="button" id="s-gear" title="設定" aria-expanded="false">⚙</button>
+        </nav>
+        <div class="s-drawers">
+          <section class="s-drawer" data-drawer="chat" hidden>
+            <header><b>對話 · 帳本直播</b><small>orchestratory協作器</small><button type="button" data-close>×</button></header>
+            <div class="s-chipsrow" id="s-seatchips"></div>
+            <div class="s-chat" id="s-chat"></div>
+            <section class="s-agentcard" id="s-agentcard" hidden></section>
+            <form class="s-composer" data-composer><textarea rows="3" placeholder="對房間說話…（連按兩次 Enter 送出）"></textarea><div class="s-composer-foot"><span id="s-composer-hint">未選擇席位：發言進帳本，不喚醒任何人</span><button type="submit">發言</button></div></form>
+          </section>
+          <section class="s-drawer" data-drawer="tasks">
+            <header><b>任務清單</b><small id="s-tasks-sub"></small><button type="button" data-close>×</button></header>
+            <div class="s-tasks" id="s-tasks"></div>
+            <footer class="s-tasks-foot"><button type="button" id="s-joinsettings">⚙ 終端加入設定 · ＋ 受控即時 Agent ▸</button><button type="button">＋ 建立傳統 workflow 提案</button></footer>
+          </section>
+          <section class="s-drawer" data-drawer="notify" hidden>
+            <header><b id="s-notify-title">通知</b><small>回覆內容不在這裡，那是帳本的事</small><button type="button" data-close>×</button></header>
+            <div class="s-notify" id="s-notify"></div>
+          </section>
+          <section class="s-drawer" data-drawer="writer" hidden>
+            <header><b>Writer</b><small>寫入交接</small><button type="button" data-close>×</button></header>
+            <div class="s-writer"><p><b>Writer Lease</b><span>目前沒有任務持有 Writer Lease。</span></p><p><b>寫入路徑</b><span>agent 只能在 candidate 工作區改東西；寫進 main 一律經「⑂ 待核准」的閘門，由你逐字打確認語。</span></p><p><b>這頁能做什麼</b><span>把 Writer 交給常駐、受控或外接的 Codex／Claude 身分；每次交接 epoch 遞增，舊 Writer 立刻失效。這裡是模擬，按了只會記一行帳本。</span></p><button type="button" id="s-writer-demo">模擬：交接 Writer 給 codex（DEX test）</button></div>
+          </section>
+        </div>
+        <div class="s-menu" id="s-menu" hidden role="menu">
+          <button type="button" role="menuitemcheckbox" data-action="theme" aria-checked="false"><span>☀ 日間場景</span><i></i></button>
+          <button type="button" role="menuitemcheckbox" data-action="quiet" aria-checked="false"><span>🔕 安靜（隱藏休息區）</span><i></i></button>
+          <button type="button" role="menuitemcheckbox" data-action="idle" aria-checked="true"><span>🧘 休閒活動</span><i></i></button>
+          <button type="button" role="menuitem" data-action="layout"><span>⇄ 整理工位</span></button>
+          <button type="button" role="menuitem" data-action="full"><span>⛶ 全螢幕</span></button>
+          <button type="button" role="menuitem" data-action="rec"><span id="s-menu-rec">⏸ 暫停收錄</span></button>
+          <button type="button" role="menuitem" data-action="disclaimer"><span>ⓘ 免責與說明</span></button>
+        </div>
+      </aside>
+    </div>
+
+    <div class="s-modal" id="s-merge" hidden>
+      <div class="s-dialog s-merge">
+        <header><span><small>MERGE DRAFT INTO MAIN</small><b>⑂ 核准併入 main</b></span><code id="s-merge-task">task c1f94338 · examples/plane-shooter</code><em>風險 · 低</em><button type="button" data-close>×</button></header>
+        <div class="s-merge-body">
+          <aside class="s-facts">
+            <p class="s-facts-label">來源 → 目標</p>
+            <p class="s-route">草稿版 orchestratory/candidate-c1f94338 → 正式版 main</p>
+            <p class="s-route s-disc">草稿區保證的是看得到、可退回、有紀錄，<b>不是作業系統層級的隔離保證</b>。需要強制邊界請用容器或另一個帳號。</p>
+            <div class="s-recovery"><b>還原點</b><small>refs/orchestratory/recovery/c1f94338 → e0304b3c</small><code>git update-ref refs/heads/main e0304b3c</code><button type="button" id="s-copy">⧉ 複製還原指令</button><small>Orchestratory 不會替你執行這段指令；它只是把還原路徑寫成可直接貼上的形式。</small></div>
+            <div class="s-ttl"><span><small>核准視窗剩餘</small><b id="s-ttl">10:00</b></span><button type="button" id="s-repreview">↻ 重新產生預覽</button></div>
+            <button type="button" class="s-demo" id="s-demo-blocker">模擬：草稿版 HEAD 在預覽之後改變</button>
+          </aside>
+          <div class="s-review">
+            <div class="s-review-head"><b>審閱 · 捲到底才解鎖</b><span>3 檔 · +212 −0</span></div>
+            <section class="s-blocking" id="s-blocking" hidden><b>無法核准</b><p>下列項目存在期間，「核准併入 main」保持停用；一般阻擋項目不會鎖住輸入，但逾時／終局核准不能復活。</p><ul id="s-blockers"></ul></section>
+            <div class="s-diff" id="s-diff" tabindex="0">
+              <p><b>這次併入會執行什麼</b>：fast-forward 合併 1 個 commit（02b3335）到 main；不會執行任何 merge driver。</p>
+              <p><b>覆蓋清單</b>：無。live main 上沒有同名檔案被改寫。</p>
+              <p><b>變更檔案</b></p>
+              <pre>+ examples/plane-shooter/index.html   (+198)
++ examples/plane-shooter/README.md    (+12)
+~ examples/README.md                  (+2)</pre>
+              <pre>@@ examples/plane-shooter/index.html @@
++&lt;!doctype html&gt;
++&lt;canvas id="game" width="480" height="640"&gt;&lt;/canvas&gt;
++&lt;script&gt;
++  // A playable game — built in one room, in record.
++  const ctx = document.getElementById("game").getContext("2d");
++  …（198 行，此處省略；真實畫面會完整列出）
++&lt;/script&gt;</pre>
+              <p><b>測試</b>：npm run check · 887/887 通過（模擬值）。</p>
+              <p><b>候選 HEAD</b> 02b3335 · <b>main HEAD</b> e0304b3c · <b>預覽摘要</b> adab0c08</p>
+              <p class="s-diff-end">── 已到底。上面每一項都是這份核准綁定的快照；任一項改變，核准立刻失效。 ──</p>
+            </div>
+          </div>
+        </div>
+        <footer class="s-confirm">
+          <div class="s-confirm-row"><span id="s-blocker-count">阻擋項目 · 0</span><p id="s-scroll-hint">請把審閱區捲到底，確認輸入框才會開放。</p></div>
+          <p class="s-phrase">確認語逐字如下，按下即等於你說出這句話：<code>MERGE INTO MAIN</code></p>
+          <div class="s-confirm-area"><input type="text" id="s-phrase" placeholder="在這裡逐字輸入確認語" disabled autocomplete="off" spellcheck="false"><button type="button" id="s-approve" disabled>核准併入 main</button><button type="button" id="s-reject">拒絕並保留草稿版</button></div>
+          <p class="s-feedback" id="s-feedback"></p>
+        </footer>
+      </div>
+    </div>
+
+    <div class="s-modal" id="s-hist" hidden>
+      <div class="s-dialog s-histd">
+        <header><span><small>MERGE RECORDS</small><b>▤ 併入紀錄</b></span><button type="button" data-close>×</button></header>
+        <p class="s-hist-note">這是不會被「關閉」清除的 durable audit 檔案，不是待辦清單。只有 <code>applied</code>、觀察到授權 merge commit，且讀到 main HEAD after 才會進入「已併入」。</p>
+        <div class="s-buckets" id="s-buckets"></div>
+      </div>
+    </div>
+
+    <div class="s-modal" id="s-confirmstop" hidden>
+      <div class="s-dialog s-small">
+        <header><span><b>■ 緊急停止</b></span><button type="button" data-close>×</button></header>
+        <p>停止所有執行中的工作流與交辦。已寫進帳本的東西不會消失；還沒回覆的交辦會標成已取消。</p>
+        <div class="s-actions"><button type="button" class="danger" id="s-stop-yes">停止全部</button><button type="button" data-close>取消</button></div>
+      </div>
+    </div>
+
+    <div class="s-modal" id="s-disclaimer" hidden>
+      <div class="s-dialog s-small">
+        <header><span><b>免責與說明</b></span><button type="button" data-close>×</button></header>
+        <p><b>外接終端＝Native Full-Trust，能力仍由 host 掌管。</b>加入房間不會改變 agent 的權限：它的工具、shell、網路由它自己的 host 決定，Orchestratory 不升權也不降權。</p>
+        <p>草稿區保證的是看得到、可退回、有紀錄，不是作業系統層級的隔離保證。需要強制邊界請用容器或另一個帳號。</p>
+        <p>GUI 只綁 127.0.0.1。這一頁是手冊裡的模擬，沒有連到任何服務。</p>
+        <div class="s-actions"><button type="button" data-close>我知道了</button></div>
+      </div>
+    </div>
+
+    <div class="s-toast" id="s-toast" hidden></div>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+  var root = document.getElementById("sim02");
+  if (!root) return;
+  var $ = function (id) { return document.getElementById(id); };
+  var q = function (sel, el) { return (el || root).querySelector(sel); };
+  var qa = function (sel, el) { return Array.prototype.slice.call((el || root).querySelectorAll(sel)); };
+  var PHRASE = "MERGE INTO MAIN";
+  var BANNER_MS = 8000;   /* 真實產品 20 秒；模擬縮成 8 秒，畫面上有標 */
+  var PROV = { codex: { label: "Codex", model: "gpt-5.6-sol" }, claude: { label: "Claude", model: "claude-fable-5" }, grok: { label: "Grok", model: "grok-4.5" } };
+  var S, toastT = null, bannerT = null, ttlT = null;
+
+  function initialState() {
+    return {
+      view: "office", drawer: "tasks", theme: "night", quiet: false, idle: true, full: false, rec: true, seq: 100,
+      pending: 1, selectedSeat: null, stopped: false, scrolled: false, blockers: [], mergeDone: false, ttl: 600,
+      seats: [
+        { id: 1, provider: "codex",  name: "codex（DEX test）", joined: true, standby: true, busy: false, managed: false, mood: "可交辦" },
+        { id: 2, provider: "claude", name: "claude（CCBOSS）",  joined: true, standby: true, busy: true,  managed: false, mood: "可交辦" },
+        { id: 3, provider: "claude", name: "claude（CC YT）",   joined: true, standby: false, busy: false, managed: false, mood: "排隊中" },
+        { id: 4, provider: "grok",   name: "grok",             joined: false, standby: false, busy: false, managed: false, mood: "還沒加入" },
+        { id: 5, provider: "claude", name: "claude（上線審查）", joined: true, standby: false, busy: false, managed: true, mood: "唯讀" },
+        { id: 6, provider: "codex",  name: "codex（審查）",     joined: true, standby: false, busy: false, managed: true, mood: "唯讀" }
+      ],
+      ledger: [
+        { seq: 96, author: "you", text: "@claude（CCBOSS） 這一輪把 UI 六條線併進來之前，先跑一次完整閘門。", kind: "chat" },
+        { seq: 97, author: "claude（CCBOSS）", text: "收到。閘門跑中：typecheck、全套測試、覆蓋率、fuzz、SBOM、密鑰掃描，八階段。綠了回報。", kind: "chat" },
+        { seq: 98, author: "you", text: "<task-notification>\n<task-id>kvwybvp0i</task-id>\n<status>completed</status>\n<summary>MCP task (orchestrator/room_wait) completed.</summary>\n<result>{\"timeout\":true,\"phase\":\"standby\"}</result>\n</task-notification>", kind: "log" },
+        { seq: 99, author: "codex（DEX test）", text: "PASS。#97 的三個阻擋點都已修正，81/81 通過。", kind: "chat" },
+        { seq: 100, author: "system", text: "codex（DEX test） 的 room-wait 待命申請已核准", kind: "system" }
+      ],
+      notes: [
+        { id: 1, kind: "presence", actionable: true, stage: "join", provider: "codex", name: "codex", title: "終端加入申請 · codex 想加入房間", sub: "全程帳本協作 · 終端對話同步 · 2 分鐘內有效", done: false },
+        { id: 2, kind: "success", actionable: false, title: "codex（DEX test） 的 room-wait 待命申請已核准", sub: "#100", done: true }
+      ],
+      history: { merged: [{ t: "task 8f2a19 · docs/QUICKSTART.md", s: "main 4b2a11cc → 7e21e09 · 2026-09-05" }], review: [], reopen: [{ t: "task c1f94338 · examples/plane-shooter", s: "草稿版仍在等併入（就是頂欄那 1 件）" }], blocked: [{ t: "task 3d9c02 · src/config.ts", s: "草稿區有未提交變更，已拒絕；請先在草稿版端提交或整理。" }] }
+    };
+  }
+
+  /* ───── 小工具 ───── */
+  function el(tag, cls, text) { var n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; }
+  function toast(msg) { var t = $("s-toast"); t.textContent = msg; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(function () { t.hidden = true; }, 2600); }
+  function post(author, text, kind) { S.seq += 1; S.ledger.push({ seq: S.seq, author: author, text: text, kind: kind || "chat" }); renderLedger(); renderRec(); return S.seq; }
+  function moodCls(seat) { if (S.stopped) return "stop"; if (!seat.joined) return "q"; if (seat.managed) return "ro"; if (seat.standby) return "ok"; return "q"; }
+  function moodText(seat) { if (S.stopped) return "已停止"; if (!seat.joined) return "還沒加入"; if (seat.managed) return "唯讀"; if (seat.busy) return "處理中"; return seat.standby ? "可交辦" : "排隊中"; }
+
+  /* ───── 頂欄 ───── */
+  function renderTop() {
+    var term = S.seats.filter(function (s) { return s.joined && !s.managed; }).length;
+    var man = S.seats.filter(function (s) { return s.managed; }).length;
+    var run = S.seats.filter(function (s) { return s.busy && !S.stopped; }).length;
+    $("s-c-term").textContent = term; $("s-c-man").textContent = man; $("s-c-run").textContent = run;
+    $("s-pending-n").textContent = S.pending; $("s-pending").classList.toggle("is-hot", S.pending > 0);
+    $("s-history-attn").hidden = S.history.review.length === 0;
+    qa(".s-switch button").forEach(function (b) { b.classList.toggle("is-active", b.getAttribute("data-view") === S.view); b.setAttribute("aria-selected", b.getAttribute("data-view") === S.view); });
+    $("s-office").hidden = S.view !== "office"; $("s-ledger").hidden = S.view !== "ledger";
+    $("s-caption").replaceChildren(el("span", "", "已擴編至 " + S.seats.filter(function (s) { return s.joined; }).length + " 席 · 可拖曳辦公桌調整位置"));
+    var sub = S.seats.filter(function (s) { return s.joined; }).length + " 已加入 · " + S.seats.filter(function (s) { return s.joined && s.standby && !s.managed; }).length + " 可交辦 · " + man + " 子 Agent";
+    $("s-tasks-sub").textContent = sub;
+  }
+  function renderRec() {
+    var lab = S.rec ? "#" + S.seq : "已暫停";
+    $("s-rec-label").textContent = lab; $("s-recbox").textContent = (S.rec ? "收錄中 · #" : "已暫停收錄 · #") + S.seq;
+    q("#s-rec .s-dot").className = "s-dot " + (S.rec ? "on" : "paused");
+    $("s-menu-rec").textContent = S.rec ? "⏸ 暫停收錄" : "● 恢復收錄";
+  }
+
+  /* ───── 舞台 ───── */
+  function renderSeats() {
+    var host = $("s-seats"); host.replaceChildren();
+    S.seats.forEach(function (seat) {
+      var d = el("div", "s-seat " + (seat.joined ? "" : "is-unjoined ") + (S.stopped ? "is-stopped " : "") + (S.idle && seat.joined && !seat.busy ? "is-idle" : ""));
+      var desk = el("div", "s-desk");
+      var ch = el("div", "s-char " + seat.provider); ch.append(el("i"), el("i"));
+      desk.appendChild(ch);
+      if (S.idle && seat.joined && !seat.busy && !S.stopped && seat.id % 2 === 0) desk.appendChild(el("div", "s-bubble", seat.id === 2 ? "☕ 補充一下能量" : "zZ… 五分鐘就好"));
+      var plate = el("div", "s-plate");
+      var nb = el("b"); var nameBtn = el("button", "", seat.name); nameBtn.type = "button"; nameBtn.title = "點名字就地更名（Enter 送出、Esc 取消）";
+      nameBtn.addEventListener("click", function () { startRename(seat, plate, nb, nameBtn); });
+      nb.appendChild(nameBtn);
+      plate.append(nb, el("small", moodCls(seat), moodText(seat)));
+      d.append(desk, plate);
+      host.appendChild(d);
+    });
+  }
+  function startRename(seat, plate, holder, btn) {
+    if (!seat.joined) return renameError(plate, "這個席位還沒加入房間，加入後才能更名。");
+    if (seat.busy && !S.stopped) return renameError(plate, "這個席位還有交辦在處理中（排隊或進行中），先等它回覆或取消交辦，再更名。");
+    var input = el("input", "s-rename"); input.value = seat.name; input.setAttribute("aria-label", "更名 " + seat.name);
+    holder.replaceChildren(input); input.focus(); input.select();
+    var finish = function (commit) {
+      var v = input.value.trim();
+      if (commit && v && v !== seat.name) { var old = seat.name; seat.name = v; post("system", "席位 " + seat.id + " 更名：" + old + " → " + v, "system"); toast("已更名為 " + v); }
+      renderAll();
+    };
+    input.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); finish(true); } else if (e.key === "Escape") { e.preventDefault(); finish(false); } });
+    input.addEventListener("blur", function () { setTimeout(function () { if (input.isConnected) finish(false); }, 0); });
+  }
+  function renameError(plate, msg) { var old = q(".s-rename-err", plate); if (old) old.remove(); var e = el("div", "s-rename-err", msg); plate.style.position = "relative"; plate.appendChild(e); setTimeout(function () { e.remove(); }, 3200); }
+
+  /* ───── 提示條 ───── */
+  function showBanner(note) {
+    var b = $("s-banner"); b.replaceChildren();
+    var title = el("b", "", (note.stage === "join" ? "終端加入申請" : "待命申請") + "　" + note.name + (note.stage === "join" ? " 想加入房間" : " 申請 room-wait 待命"));
+    var acts = el("div", "s-banner-actions");
+    var ok = el("button", "primary", note.stage === "join" ? "核准" : "核准 " + note.name + " 的 room-wait 待命"); ok.type = "button";
+    var no = el("button", "reject", "拒絕"); no.type = "button";
+    var later = el("button", "", "稍後"); later.type = "button"; later.title = "先收起提示；申請還在 🔔 通知的「要你動手」裡，2 分鐘內都能核准。";
+    ok.addEventListener("click", function () { approveNote(note); });
+    no.addEventListener("click", function () { rejectNote(note); });
+    later.addEventListener("click", hideBanner);
+    acts.append(ok, no, later);
+    var hint = el("small", "", "真實產品 20 秒後自動收起（這裡模擬為 8 秒）；申請仍留在 🔔 裡，整個申請只活 2 分鐘。");
+    b.append(title, acts, hint); b.hidden = false;
+    clearTimeout(bannerT); bannerT = setTimeout(hideBanner, BANNER_MS);
+  }
+  function hideBanner() { $("s-banner").hidden = true; clearTimeout(bannerT); }
+
+  /* ───── 通知 ───── */
+  function renderNotes() {
+    var host = $("s-notify"); host.replaceChildren();
+    var todo = S.notes.filter(function (n) { return n.actionable && !n.done; });
+    var unread = todo.length;
+    $("s-notify-n").textContent = unread; $("s-notify-n").hidden = unread === 0;
+    $("s-notify-title").textContent = unread ? "通知 · " + unread : "通知";
+    if (!S.notes.length) { host.appendChild(el("div", "s-empty", "目前沒有通知。")); return; }
+    if (todo.length) host.appendChild(el("span", "s-group", "要你動手"));
+    todo.forEach(function (n) { host.appendChild(noteCard(n)); });
+    var rest = S.notes.filter(function (n) { return !(n.actionable && !n.done); });
+    if (rest.length) host.appendChild(el("span", "s-group", "其他"));
+    rest.slice().reverse().forEach(function (n) { host.appendChild(noteCard(n)); });
+  }
+  function noteCard(n) {
+    var c = el("div", "s-nt " + n.kind + (n.actionable && !n.done ? " actionable" : "") + (n.done ? " done" : ""));
+    var t = el("b", "", n.title); if (n.done && n.result) t.appendChild(el("span", "tag", n.result));
+    c.append(t, el("small", "", n.sub || ""));
+    if (n.actionable && !n.done) {
+      var acts = el("div", "acts");
+      var ok = el("button", "primary", n.stage === "join" ? "核准加入" : "核准待命"); ok.type = "button"; ok.addEventListener("click", function () { approveNote(n); });
+      var no = el("button", "reject", "拒絕"); no.type = "button"; no.addEventListener("click", function () { rejectNote(n); });
+      acts.append(ok, no); c.appendChild(acts);
+    }
+    return c;
+  }
+  function approveNote(n) {
+    if (n.done) return;
+    n.done = true; hideBanner();
+    if (n.stage === "join") {
+      n.result = "已核准";
+      var seat = { id: S.seats.length + 1, provider: n.provider, name: n.name, joined: true, standby: false, busy: false, managed: false };
+      S.seats.push(seat);
+      post("system", seat.name + " 已加入辦公室（全程帳本協作；終端對話同步已開啟）", "system");
+      var standby = { id: Date.now(), kind: "presence", actionable: true, stage: "standby", provider: n.provider, name: seat.name, seatId: seat.id, title: seat.name + " 申請 room-wait 待命", sub: "核准後它才收得到交辦；只對這一個活著的終端有效", done: false };
+      S.notes.push(standby);
+      post("system", seat.name + " 申請 room-wait 待命（等待 GUI 核准）", "system");
+      toast("已加入。它接著申請待命，再核准一次。");
+      renderAll(); showBanner(standby); openDrawer("notify");
+    } else {
+      n.result = "已核准";
+      var s = S.seats.filter(function (x) { return x.id === n.seatId || x.name === n.name; })[0];
+      if (s) s.standby = true;
+      post("system", n.name + " 的 room-wait 待命申請已核准", "system");
+      toast("待命已核准，席位變成「可交辦」。");
+      renderAll();
+    }
+  }
+  function rejectNote(n) {
+    if (n.done) return;
+    n.done = true; n.result = "已拒絕"; hideBanner();
+    post("system", "已拒絕 " + n.name + " 的" + (n.stage === "join" ? "加入" : "待命") + "申請；那個終端還在線，可以再申請", "system");
+    toast("已拒絕。申請消失、帳本記一行。"); renderAll();
+  }
+  function newRequest() {
+    var provs = ["codex", "claude", "grok"]; var p = provs[Math.floor(Math.random() * 3)];
+    var n = { id: Date.now(), kind: "presence", actionable: true, stage: "join", provider: p, name: p + "（新終端）", title: "終端加入申請 · " + p + " 想加入房間", sub: "全程帳本協作 · 終端對話同步 · 2 分鐘內有效", done: false };
+    S.notes.push(n); post("system", p + " MCP 終端提出加入申請（等待 GUI 核准）", "system");
+    renderAll(); showBanner(n);
+  }
+
+  /* ───── 任務清單 ───── */
+  function renderTasks(group) {
+    var host = $("s-tasks"); host.replaceChildren();
+    var running = S.seats.filter(function (s) { return s.busy && !S.stopped; });
+    var terms = S.seats.filter(function (s) { return !s.managed; });
+    var mans = S.seats.filter(function (s) { return s.managed; });
+    var sec = function (title, list, empty, key) {
+      var h = el("span", "s-group", title + " · " + list.length); h.id = "s-g-" + key; host.appendChild(h);
+      if (!list.length) return host.appendChild(el("div", "s-empty", empty));
+      list.forEach(function (seat) {
+        var r = el("div", "s-row");
+        var dot = el("i", "s-dot " + (seat.joined && seat.standby ? "on" : "")); dot.style.background = seat.provider === "codex" ? "#5b8def" : seat.provider === "claude" ? "#3ecf8e" : "#e7b45f";
+        var name = el("span", "name"); var nb = el("button", "", seat.name); nb.type = "button"; nb.title = "點名字就地更名（Enter 送出、Esc 取消）";
+        nb.addEventListener("click", function () { startRename(seat, r, name, nb); });
+        name.appendChild(nb);
+        var st = el("span", "st " + moodCls(seat), key === "running" ? "處理中 · #" + (S.seq - 3) : moodText(seat) + (seat.managed ? " · 閒置" : ""));
+        var more = el("button", "more", "▸"); more.type = "button"; more.title = "展開這一列";
+        more.addEventListener("click", function () { S.selectedSeat = seat.id; openDrawer("chat"); });
+        r.append(dot, name, st, more); host.appendChild(r);
+      });
+    };
+    sec("執行中", running, "沒有人在忙。", "running");
+    sec("終端", terms, "還沒有終端加入。", "terminal");
+    sec("子 Agent", mans, "沒有子 Agent。", "managed");
+    if (group) { var g = $("s-g-" + group); if (g) g.scrollIntoView({ block: "nearest" }); }
+  }
+
+  /* ───── 對話抽屜 ───── */
+  function renderChat() {
+    var chips = $("s-seatchips"); chips.replaceChildren();
+    S.seats.filter(function (s) { return s.joined; }).forEach(function (seat) {
+      var c = el("button", "s-chip"); c.type = "button"; c.setAttribute("aria-pressed", S.selectedSeat === seat.id ? "true" : "false");
+      c.append(el("i", seat.managed ? "ro" : seat.standby ? "ok" : ""), document.createTextNode(seat.name));
+      c.addEventListener("click", function () { S.selectedSeat = S.selectedSeat === seat.id ? null : seat.id; renderChat(); });
+      chips.appendChild(c);
+    });
+    var stream = $("s-chat"); stream.replaceChildren();
+    S.ledger.slice(-8).forEach(function (m) { stream.appendChild(msgCard(m, "chat")); });
+    stream.scrollTop = stream.scrollHeight;
+    var card = $("s-agentcard"); var seat = S.seats.filter(function (s) { return s.id === S.selectedSeat; })[0];
+    if (!seat) { card.hidden = true; $("s-composer-hint").textContent = "未選擇席位：發言進帳本，不喚醒任何人"; return; }
+    card.hidden = false; card.replaceChildren();
+    var head = el("div", "head"); var nm = el("b"); nm.append(el("i", "s-dot " + (seat.standby ? "on" : "")), document.createTextNode(seat.name));
+    var actions = el("span"); var at = el("button", "", "@ 帶入"); at.type = "button"; at.title = "把 @名字 帶入發言框"; at.addEventListener("click", function () { insertMention(seat.name, q(".s-drawer[data-drawer=chat] textarea")); });
+    var x = el("button", "", "×"); x.type = "button"; x.addEventListener("click", function () { S.selectedSeat = null; renderChat(); });
+    actions.append(at, x); head.append(nm, actions);
+    var line = el("p", "line"); line.append(el("b", moodCls(seat), moodText(seat)), document.createTextNode(seat.managed ? "GUI Managed · 對話唯讀" : "Native Full-Trust · host-controlled"));
+    var meta = el("p", "meta", PROV[seat.provider].label + " " + (seat.managed ? "子 Agent" : "終端") + " · " + PROV[seat.provider].model + " · " + (S.ledger.filter(function (m) { return m.author === seat.name; }).length ? "訊息 " + S.ledger.filter(function (m) { return m.author === seat.name; }).length + " 則" : "尚無發言"));
+    var how = el("p", "how", seat.managed ? "子 Agent 只能唯讀回答，不接觸工作區；交辦用 room_mention。" : seat.standby ? "它可交辦，正在待命：交辦會直接送到它手上。" : "交辦會進它的收件匣排隊，等它下次 room_wait。（每席最多 32 則還沒結束的交辦，滿了就送不出去。）怎麼辦：到那個終端機視窗，讓它再呼叫一次 room_wait。距離你上次要求超過 12 小時而且還在排隊的話就會過期。");
+    card.append(head, line, meta, how);
+    $("s-composer-hint").textContent = "已選擇 " + seat.name + " · " + (seat.standby ? "交辦會直接送到它手上" : "交辦會進它的收件匣排隊，等它下次 room_wait");
+  }
+  function msgCard(m, where) {
+    if (m.kind === "log") {
+      var d = el("details", "s-msg log"); var sm = el("summary");
+      var idm = /<task-id>([^<]+)<\/task-id>/.exec(m.text), stm = /<status>([^<]+)<\/status>/.exec(m.text);
+      sm.textContent = "⚙ 系統紀錄 · task-notification · " + (idm ? idm[1] : "") + " · " + (stm ? stm[1] : "") + "　#" + m.seq;
+      var pre = el("pre", "", m.text); d.append(sm, pre); return d;
+    }
+    var c = el("div", "s-msg " + (m.kind === "system" ? "system" : ""));
+    var head = el("div", "s-msg-head");
+    var a = document.createElement(m.author === "you" || m.author === "system" ? "span" : "button"); a.textContent = m.author;
+    if (a.tagName === "BUTTON") { a.type = "button"; a.title = "點作者名把 @名字 帶入發言框"; a.addEventListener("click", function () { insertMention(m.author, visibleComposer()); }); }
+    head.append(a, el("span", "seq", "#" + m.seq)); c.append(head, el("p", "", m.text)); return c;
+  }
+  function renderLedger() {
+    var st = $("s-stream"); st.replaceChildren();
+    S.ledger.forEach(function (m) { st.appendChild(msgCard(m, "ledger")); });
+    st.scrollTop = st.scrollHeight; renderChat();
+  }
+  function visibleComposer() { return S.view === "ledger" ? q("#s-ledger textarea") : q(".s-drawer[data-drawer=chat] textarea"); }
+  function insertMention(name, ta) {
+    if (!ta) return; var tag = "@" + name + " ";
+    if (ta.value.indexOf("@" + name) >= 0) { ta.focus(); return; }
+    var s = ta.selectionStart || 0, e = ta.selectionEnd || 0, before = ta.value.slice(0, s), after = ta.value.slice(e);
+    if (before && !/\s$/.test(before)) before += " ";
+    ta.value = before + tag + after; ta.focus(); ta.selectionStart = ta.selectionEnd = (before + tag).length;
+    if (S.view !== "ledger") openDrawer("chat");
+  }
+  function bindComposer(form) {
+    var ta = q("textarea", form), last = 0;
+    var send = function () {
+      var text = ta.value.replace(/\n+$/, "").trim(); if (!text) return;
+      var target = /^@([^\s]+)/.exec(text);
+      post("you", text, "chat"); ta.value = ""; last = 0;
+      if (target) {
+        var seat = S.seats.filter(function (s) { return s.name === target[1]; })[0];
+        if (seat && seat.joined && seat.standby && !seat.managed) { seat.busy = true; post("system", "交辦 #" + S.seq + " 已送到 " + seat.name + "（delivered）", "system"); setTimeout(function () { seat.busy = false; post(seat.name, "收到 #" + (S.seq - 1) + "，已處理：這是模擬回覆。", "chat"); renderAll(); }, 2500); }
+        else if (seat && seat.joined) post("system", "交辦已排入 " + seat.name + " 的收件匣，等它下次 room_wait", "system");
+      }
+      renderAll();
+    };
+    form.addEventListener("submit", function (e) { e.preventDefault(); send(); });
+    ta.addEventListener("keydown", function (e) {
+      if (e.key !== "Enter" || e.isComposing || e.keyCode === 229) return;
+      if (e.metaKey) { e.preventDefault(); send(); return; }
+      if (e.shiftKey || e.altKey) return;
+      var now = Date.now();
+      if (now - last < 700) { e.preventDefault(); send(); } else { last = now; }
+    });
+  }
+
+  /* ───── 抽屜與設定 ───── */
+  function openDrawer(name) {
+    S.drawer = S.drawer === name && arguments[1] ? null : name;
+    qa(".s-drawer").forEach(function (d) { d.hidden = d.getAttribute("data-drawer") !== S.drawer; });
+    qa(".s-rail button[data-drawer]").forEach(function (b) { b.setAttribute("aria-pressed", b.getAttribute("data-drawer") === S.drawer ? "true" : "false"); });
+    if (S.drawer === "chat") renderChat(); if (S.drawer === "tasks") renderTasks(); if (S.drawer === "notify") renderNotes();
+  }
+  function toggleMenu(force) { var m = $("s-menu"); m.hidden = force === undefined ? !m.hidden : !force; $("s-gear").setAttribute("aria-expanded", m.hidden ? "false" : "true"); }
+  function applyLooks() {
+    root.classList.toggle("is-day", S.theme === "day"); root.classList.toggle("is-quiet", S.quiet); root.classList.toggle("no-idle", !S.idle); root.classList.toggle("is-full", S.full);
+    qa(".s-menu button").forEach(function (b) { var a = b.getAttribute("data-action"); if (a === "theme") b.setAttribute("aria-checked", S.theme === "day"); if (a === "quiet") b.setAttribute("aria-checked", S.quiet); if (a === "idle") b.setAttribute("aria-checked", S.idle); });
+  }
+
+  /* ───── 合併核准 ───── */
+  function openMerge() {
+    var m = $("s-merge"); m.hidden = false; S.scrolled = false; $("s-phrase").value = ""; $("s-phrase").classList.remove("ok");
+    $("s-diff").scrollTop = 0; renderMergeGate(); startTtl();
+  }
+  function startTtl() { clearInterval(ttlT); ttlT = setInterval(function () { if ($("s-merge").hidden) return clearInterval(ttlT); S.ttl = Math.max(0, S.ttl - 1); $("s-ttl").textContent = String(Math.floor(S.ttl / 60)).padStart(2, "0") + ":" + String(S.ttl % 60).padStart(2, "0"); if (S.ttl === 0 && S.blockers.indexOf("ttl") < 0) { S.blockers.push("ttl"); renderMergeGate(); } }, 1000); }
+  function blockerText(k) { return k === "head" ? "草稿版 HEAD 在預覽之後改變，已拒絕；請重新產生預覽。" : "核准視窗已逾時，必須重新產生預覽再問一次；main 沒有被修改。"; }
+  function renderMergeGate() {
+    var input = $("s-phrase"), btn = $("s-approve"), fb = $("s-feedback"), hint = $("s-scroll-hint");
+    var blockers = S.blockers, list = $("s-blockers"); list.replaceChildren(); blockers.forEach(function (k) { list.appendChild(el("li", "", blockerText(k))); });
+    $("s-blocking").hidden = blockers.length === 0; $("s-blocker-count").textContent = "阻擋項目 · " + blockers.length;
+    if (S.mergeDone) { input.disabled = true; btn.disabled = true; hint.textContent = "這筆核准已經被使用過，single-use 不可重放；main 沒有被再次修改。"; return; }
+    var phraseOk = input.value === PHRASE;
+    input.disabled = !S.scrolled; input.classList.toggle("ok", phraseOk);
+    if (!S.scrolled) { hint.textContent = "請把審閱區捲到底，確認輸入框才會開放。"; fb.textContent = ""; fb.className = "s-feedback"; btn.disabled = true; return; }
+    hint.textContent = blockers.length ? "阻擋區還有項目：「核准併入 main」不可提交；輸入框仍可修改。" : "已捲到底。逐字輸入確認語即可核准。";
+    if (!input.value) { fb.textContent = ""; fb.className = "s-feedback"; }
+    else if (phraseOk && blockers.length) { fb.textContent = "✓ 確認短語正確，但阻擋項目尚未排除；「核准併入 main」仍停用，尚未 Merge。"; fb.className = "s-feedback bad"; }
+    else if (phraseOk) { fb.textContent = "✓ 確認短語正確。按下「核准併入 main」即等於你說出這句話。"; fb.className = "s-feedback ok"; }
+    else { fb.textContent = "✗ 確認短語不相符，必須完全等於 " + PHRASE + "；main 沒有被修改。"; fb.className = "s-feedback bad"; }
+    btn.disabled = !(phraseOk && blockers.length === 0);
+  }
+  function approveMerge() {
+    if ($("s-approve").disabled) return;
+    S.mergeDone = true; S.pending = 0;
+    S.history.merged.unshift({ t: "task c1f94338 · examples/plane-shooter", s: "main e0304b3c → 748f3f82 · 觀察到授權 merge commit · 剛剛" });
+    S.history.reopen = [];
+    post("system", "Owner 逐字確認 MERGE INTO MAIN：草稿版 c1f94338 併入 main（e0304b3c → 748f3f82），還原點 refs/orchestratory/recovery/c1f94338", "system");
+    $("s-feedback").textContent = "✓ 已併入。main HEAD 748f3f82；還原點保留。這筆核准已使用，不可重放。"; $("s-feedback").className = "s-feedback ok";
+    renderMergeGate(); renderAll(); toast("已併入 main。頂欄「⑂ 待核准」歸零。");
+  }
+  function renderHistory() {
+    var host = $("s-buckets"); host.replaceChildren();
+    var mk = function (cls, title, sub, items) {
+      var b = el("section", "s-bucket " + cls); var h = el("header"); var sp = el("span"); sp.append(el("b", "", title), el("small", "", sub)); h.append(sp, el("strong", "", items.length)); b.appendChild(h);
+      var ul = el("ul"); if (!items.length) ul.appendChild(el("li", "none", "（空）")); items.forEach(function (i) { var li = el("li"); li.append(document.createTextNode(i.t), el("small", "", i.s)); ul.appendChild(li); }); b.appendChild(ul); return b;
+    };
+    host.append(mk("green", "已併入", "已驗證的 main 事實", S.history.merged), mk("amber", "需要檢查", "重新讀取或核對還原點；絕不重複 apply", S.history.review), mk("blue", "未進入併入 · 可重新發起", "草稿版仍在等併入；重新發起會依 live main 重算預覽", S.history.reopen), mk("grey", "未進入併入 · 不能重新發起", "每一筆都寫明理由；這裡沒有按鈕是刻意的", S.history.blocked));
+  }
+
+  /* ───── 緊急停止 ───── */
+  function stopAll() {
+    S.stopped = true; S.seats.forEach(function (s) { s.busy = false; }); $("s-confirmstop").hidden = true;
+    post("system", "■ 緊急停止：所有執行中的工作流已停止；未回覆的交辦標成已取消", "system"); toast("已停止全部。按「重置模擬」可以恢復。"); renderAll();
+  }
+
+  /* ───── 全部重繪 ───── */
+  function renderAll() { renderTop(); renderRec(); renderSeats(); renderNotes(); renderTasks(); renderChat(); renderLedger(); applyLooks(); }
+
+  /* ───── 事件 ───── */
+  qa(".s-switch button").forEach(function (b) { b.addEventListener("click", function () { S.view = b.getAttribute("data-view"); renderTop(); }); });
+  qa(".s-chips button").forEach(function (b) { b.addEventListener("click", function () { openDrawer("tasks"); renderTasks(b.getAttribute("data-group")); }); });
+  qa(".s-rail button[data-drawer]").forEach(function (b) { b.addEventListener("click", function () { openDrawer(b.getAttribute("data-drawer"), true); }); });
+  qa(".s-drawer [data-close]").forEach(function (b) { b.addEventListener("click", function () { S.drawer = null; openDrawer(null); }); });
+  $("s-gear").addEventListener("click", function () { toggleMenu(); });
+  qa(".s-menu button").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var a = b.getAttribute("data-action");
+      if (a === "theme") { S.theme = S.theme === "day" ? "night" : "day"; toast(S.theme === "day" ? "☀ 日間場景" : "☾ 夜間場景"); }
+      else if (a === "quiet") { S.quiet = !S.quiet; toast(S.quiet ? "🔕 已隱藏休息區（沙發、盆栽、寵物）與休閒泡泡" : "休息區顯示"); }
+      else if (a === "idle") { S.idle = !S.idle; toast(S.idle ? "🧘 休閒活動開" : "休閒活動關：席位不再打盹、喝咖啡"); }
+      else if (a === "layout") { S.seats.sort(function (x, y) { return (y.joined - x.joined) || (x.managed - y.managed) || x.id - y.id; }); toast("⇄ 已重新排列所有工位"); }
+      else if (a === "full") { S.full = !S.full; toast(S.full ? "⛶ 全螢幕（再按一次或 Esc 離開）" : "已離開全螢幕"); }
+      else if (a === "rec") { S.rec = !S.rec; post("system", S.rec ? "收錄已恢復" : "收錄已暫停：終端對話暫時不進帳本", "system"); toast(S.rec ? "● 恢復收錄" : "⏸ 已暫停收錄"); }
+      else if (a === "disclaimer") { $("s-disclaimer").hidden = false; }
+      toggleMenu(false); renderAll();
+    });
+  });
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape" && S.full) { S.full = false; applyLooks(); } });
+  $("s-rec").addEventListener("click", function () { S.rec = !S.rec; post("system", S.rec ? "收錄已恢復" : "收錄已暫停：終端對話暫時不進帳本", "system"); renderAll(); });
+  $("s-stop").addEventListener("click", function () { $("s-confirmstop").hidden = false; });
+  $("s-stop-yes").addEventListener("click", stopAll);
+  $("s-pending").addEventListener("click", openMerge);
+  $("s-history").addEventListener("click", function () { renderHistory(); $("s-hist").hidden = false; });
+  $("s-room").addEventListener("click", function () { toast("專案／房間選單：切換房間、搜尋帳本、載入更早紀錄、摘要這個房間、連線狀態（模擬未展開）"); });
+  $("s-joinsettings").addEventListener("click", function () { openDrawer("notify"); toast("待核准加入的終端在這裡取名、選協作模式；核准前不會記錄它的內容。"); });
+  $("s-writer-demo").addEventListener("click", function () { post("system", "Writer Lease 交接：epoch 7 → 8，持有者 codex（DEX test）；舊 Writer 與其子 Agent capability 立即失效", "system"); toast("已記一行帳本（模擬）"); renderAll(); });
+  qa(".s-modal [data-close]").forEach(function (b) { b.addEventListener("click", function () { b.closest(".s-modal").hidden = true; }); });
+  qa(".s-modal").forEach(function (m) { m.addEventListener("click", function (e) { if (e.target === m) m.hidden = true; }); });
+  $("s-diff").addEventListener("scroll", function () { var d = $("s-diff"); if (d.scrollTop + d.clientHeight >= d.scrollHeight - 6 && !S.scrolled) { S.scrolled = true; renderMergeGate(); $("s-phrase").focus(); } });
+  $("s-phrase").addEventListener("input", renderMergeGate);
+  $("s-phrase").addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); approveMerge(); } });
+  $("s-approve").addEventListener("click", approveMerge);
+  $("s-reject").addEventListener("click", function () { S.pending = 0; S.history.blocked.unshift({ t: "task c1f94338 · examples/plane-shooter", s: "Owner 拒絕並保留草稿版；草稿版仍在，可重新產生預覽再問一次" }); S.history.reopen = []; post("system", "Owner 拒絕併入 c1f94338；草稿版保留，main 沒有被修改", "system"); $("s-merge").hidden = true; toast("已拒絕，草稿版保留。"); renderAll(); });
+  $("s-demo-blocker").addEventListener("click", function () { if (S.blockers.indexOf("head") < 0) S.blockers.push("head"); renderMergeGate(); toast("綁定值已改變：這份核准只適用於它綁定的那個 snapshot。"); });
+  $("s-repreview").addEventListener("click", function () { S.blockers = []; S.ttl = 600; S.scrolled = false; $("s-diff").scrollTop = 0; $("s-phrase").value = ""; renderMergeGate(); toast("↻ 已重新產生預覽：綁定新快照，請重新捲到底再輸入確認語。"); });
+  $("s-copy").addEventListener("click", function () { toast("已複製：git update-ref refs/heads/main e0304b3c（模擬，未寫入剪貼簿）"); });
+  $("s-replay").addEventListener("click", newRequest);
+  $("s-reset").addEventListener("click", function () { S = initialState(); openDrawer("tasks"); renderAll(); showBanner(S.notes[0]); toast("已重置模擬"); });
+  qa(".s-composer").forEach(bindComposer);
+
+  S = initialState(); openDrawer("tasks"); renderAll(); showBanner(S.notes[0]);
+})();
+</script>
+
+
+  <div class="legend">
+    <div><b>頂欄左：專案／房間選單</b><small>切換房間、搜尋帳本、載入更早紀錄、摘要這個房間、連線狀態。</small></div>
+    <div><b>頂欄：辦公室 ／ 帳本</b><small>主畫面二選一。辦公室看席位狀態、用抽屜調整進度；帳本是整份編號對話與發言框。</small></div>
+    <div><b>頂欄：終端 · 子 Agent · 任務</b><small>三顆計數晶片，點了直接開任務清單的對應分組。</small></div>
+    <div><b>頂欄：⑂ 待核准 N</b><small><strong>常駐、放大</strong>，0 件時也在。有草稿版等你併入時轉紅顯示件數；點進去是整個舞台的核准畫面（見 05）。</small></div>
+    <div><b>頂欄：▤ 併入紀錄</b><small>常駐。durable 稽核檔案，不是待辦；有東西需要人工看時旁邊出現「需檢查」。</small></div>
+    <div><b>頂欄右：收錄 · ■ 緊急停止</b><small>暫停／恢復把終端對話收進帳本；紅色方塊停止所有執行中的工作流。</small></div>
+    <div><b>右欄 icon rail：💬 📋 🔔 ✎</b><small>一次只開一個抽屜，點同一顆收回。訊息、任務、通知、編輯都從這裡進。</small></div>
+    <div><b>右欄底部：⚙ 設定選單</b><small>舞台的顯示選項都在這裡：☀ 日間場景、🔕 安靜（隱藏休息區）、🧘 休閒活動、⇄ 整理工位、⛶ 全螢幕、⏸ 暫停收錄、ⓘ 免責與說明。</small></div>
+    <div><b>🔔 通知抽屜</b><small>加入申請與待命申請<strong>直接帶核准／拒絕鈕</strong>，在「要你動手」分組裡。回覆內容不進通知，那是帳本的事。</small></div>
+    <div><b>舞台頂部的紅色提示條</b><small>申請一到就跳出來：一件申請、核准／拒絕兩顆鈕、加一顆「稍後」。20 秒後自己收起，申請仍留在 🔔 裡；<strong>整個申請只活 2 分鐘</strong>，逾時消失，要請那個終端重送。</small></div>
+    <div><b>席位就地更名</b><small>Owner 點任務列或工位名牌上的名字就能改，<kbd>Enter</kbd> 送出、<kbd>Esc</kbd> 取消。還沒加入的席位不能改；手上有交辦在跑的席位要等它回覆或取消交辦後才能改。</small></div>
+    <div><b>拒絕加入申請</b><small>通知抽屜與提示條都有「拒絕」鈕，不必等申請逾時：按下後申請消失、帳本記一行、那個終端還在線，可以再申請。</small></div>
+    <div><b>帳本：機器紀錄預設收合</b><small>鏡射進來的機器內容會摺成一行摘要，點開才看原文，搜尋仍能命中。摘要有四種，都以 ⚙ 開頭：「⚙ 系統紀錄 · task-notification · 任務 id · 狀態」、「⚙ 跨 session 訊息 · 來自 某席位」、「⚙ 機器紀錄 · JSON · 內容摘要」、「⚙ 機器紀錄 · N 行 · 內容摘要」。判定：以 <code>&lt;task-notification</code> 或 <code>&lt;cross-session-message</code> 開頭、可解析的 JSON、或超過 12 行且六成以上像程式碼的內容；條列、編號清單與標題不算。整則會變淡，滑過或展開才回到全亮。</small></div>
+    <div><b>帳本：點作者名插 @tag</b><small>每則訊息的作者名是按鈕（<code>you</code> 與 <code>system</code> 除外），可用 <kbd>Tab</kbd> 聚焦、<kbd>Enter</kbd> 觸發。點一下把「@名字 」插進發言框的游標處，前面沒有空白會先補一個；同一個完整 tag 已在框裡就只聚焦、不重複插。含括號的完整席位名（例 claude（CCBOSS））會整個插入。</small></div>
+    <div><b>帳本：雙 Enter 送出</b><small>連按兩次 <kbd>Enter</kbd> 送出。用注音等輸入法時，<strong>選字的那一下 Enter 只結束組字，不算第一下</strong>，之後還要再兩次不在組字中的 Enter 才送；Chrome、Safari、Windows 三種輸入法事件都處理。<kbd>⌘Enter</kbd> 立即送出；<kbd>Shift Enter</kbd> 與 <kbd>Option Enter</kbd> 換行。</small></div>
+    <div><b>帳本：投遞狀態列</b><small>交辦被回覆後，狀態列顯示「已回覆 → #N · 席位」，點了跳到那則回覆。狀態字是「投遞了幾次」與「現在在哪一步」，不是進度條。</small></div>
+  </div>
+
+  <div class="note">
+    <span class="k">取名與協作模式在哪裡改</span>
+    <p>
+      提示條上的「核准」是<strong>預設全程帳本協作＋終端對話同步</strong>直接放行。要先取名或改協作模式，
+      去 📋 任務清單底部的「⚙ 終端加入設定 · ＋ 受控即時 Agent」；核准前不會記錄它的內容。
+    </p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<section>
+  <h2><span class="n">03</span>一個席位的一生</h2>
+  <p class="lede">
+    席位（seat）＝一個活著的終端機程序。它不是帳號、不是模型名稱，
+    是「那一個正在跑的 Codex／Claude Code 程序」。點下面任一階段，看那個當下是什麼狀況。
+  </p>
+
+  <div class="panel">
+    <div class="bar"><span>席位狀態機</span><span id="lampSeat" class="lamp idle">未申請</span></div>
+    <div class="body">
+      <div class="diagram">
+        <svg viewBox="0 0 760 160" role="img" aria-labelledby="stTitle stDesc">
+          <title id="stTitle">席位狀態流程圖</title>
+          <desc id="stDesc">從未申請到回覆後的七個階段。目前選中的階段會亮起來；只有「待命中」與「工作中」時，交辦才叫得動這個席位。</desc>
+          <defs>
+            <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M0,1 L9,5 L0,9 z" fill="context-stroke"></path>
+            </marker>
+          </defs>
+          <g class="ok">
+            <text class="dg-k" x="535" y="20" text-anchor="middle">聽得見交辦的區間</text>
+            <path class="dg-line" d="M436,30 H634"></path>
+            <path class="dg-line" d="M436,30 V38 M634,30 V38"></path>
+          </g>
+          <g id="stNodes"></g>
+          <g id="stEdges"></g>
+        </svg>
+      </div>
+      <div class="track" role="tablist" aria-label="席位階段"></div>
+      <dl class="facets" id="facets"></dl>
+    </div>
+  </div>
+
+  <div class="note">
+    <span class="k">最容易被跳過的一步</span>
+    <p>
+      「可以進來」和「可以被指派工作」是<strong>兩個不同的授權</strong>。
+      只做完 <code>room_join_request</code> 的席位會安靜地什麼都等不到——它在房間裡，但線路沒接上。
+    </p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<section>
+  <h2><span class="n">04</span>沒人在聽的時候</h2>
+  <p class="lede">
+    這是整個系統最反直覺的一件事，也是最值得先弄懂的。
+    MCP 是<strong>一問一答</strong>的協定：伺服器只能回答客戶端正在問的問題，
+    <strong>沒辦法主動推東西給一個閒著的 agent</strong>。
+    所以一個席位只有在它自己開著 <code>room_wait</code> 的那段時間裡才叫得動。
+  </p>
+
+  <div class="note warn">
+    <span class="k">待命規則：room_wait 回來就要再叫一次</span>
+    <p>
+      不帶 <code>timeoutMs</code> 呼叫 <code>room_wait</code>，<strong>待命沒有時間上限</strong>：它會一直開著，直到某個可觀察的事件結束它——
+      stdio 關閉、你自己取消、Owner 撤銷待命、或心跳停止導致席位失效。這種情況下「掛著就好」是對的。<br><br>
+      傳 <code>timeoutMs</code> 才是有界等待，上限 4 小時。<br><br>
+      <strong>一個實際會踩到的坑：</strong>伺服器端確實沒有上限，但 <strong>Claude Code 的 MCP 工具閒置逾時是 1800 秒（30 分鐘）</strong>。
+      不帶 <code>timeoutMs</code> 的 <code>room_wait</code> 會在 30 分鐘被客戶端中止（錯誤訊息含 <code>CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT</code>），
+      你以為它一直在待命，實際上 30 分鐘後就掉線了。實務做法：傳 <code>timeoutMs: 1500000</code>（25 分鐘）讓它乾淨返回，然後立刻再呼叫。
+      Codex／Grok 的客戶端上限依各家 CLI 而定，請自己量一次。<br><br>
+      不論哪一種，<strong>每次 <code>room_wait</code> 回來都要再叫一次</strong>才算持續待命：收到交辦回覆完、你傳的 timeoutMs 到了、
+      或是回 <code>ROOM_WAIT_LEASE_LOST</code>。同一個席位開新的 <code>room_wait</code> 會頂掉舊的，舊的回 <code>ROOM_WAIT_LEASE_LOST</code>，
+      這是預期行為不是失敗，繼續用新的那個就好。<br><br>
+      掉線的常見原因：終端回合結束、程序關閉，或自己傳了 <code>timeoutMs</code> 卻沒再叫。掉線之後席位就從「可交辦」掉回「不可即時喚醒」，
+      之後送來的工作沒有人接。
+    </p>
+  </div>
+
+  <div class="note">
+    <span class="k">交辦的 lease 規則（待推修正 675182b，推上去才成真）</span>
+    <p>
+      交辦送到席位、席位還沒回應之前有 60 秒；席位一旦回報「我收到了／我在做」（<code>room_ack(read)</code>／<code>room_ack(working)</code>），
+      就沒有時間限制，做多久都可以。席位真的離開時，它手上的工作會自動回到佇列。<br><br>
+      為什麼這樣分：因為「送到了」是系統知道的事，「我在做」是 agent 自己說的，而它必須真的在執行才說得出口。<br><br>
+      lease token 原本同時是「所有權」與「期限」。修正後 ack 之後只拿掉期限，<strong>所有權仍在</strong>：token 仍證明這件工作是誰的，
+      別的席位拿不走，回覆也仍要帶它。不是「什麼都不管了」。<br><br>
+      誠實的代價：<strong>ack 過但永遠不回覆的交辦，現在沒有任何計時器會收回它</strong>，只剩席位被移除時才處理。
+      看到一筆 working 停很久，先去問那個終端，不要等系統替你判。
+    </p>
+  </div>
+
+  <div class="panel">
+    <div class="bar">
+      <span>交辦模擬</span>
+      <span id="lampWait" class="lamp on">room_wait 開著</span>
+    </div>
+    <div class="body">
+      <div class="diagram">
+        <svg viewBox="0 0 760 230" role="img" aria-labelledby="mqTitle mqDesc">
+          <title id="mqTitle">為什麼「沒人在聽」會發生</title>
+          <desc id="mqDesc">MCP 是一問一答。左邊席位開著 room_wait，等於有一個問題掛在那裡，伺服器可以沿著它回話。右邊席位閒著，伺服器手上沒有任何可以回話的通道，交辦只能留在佇列。</desc>
+          <defs>
+            <marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,1 L9,5 L0,9 z" fill="context-stroke"></path>
+            </marker>
+          </defs>
+          <g class="ok">
+            <text class="dg-k" x="20" y="20">開著 ROOM_WAIT</text>
+            <rect class="dg-box" x="20" y="34" width="112" height="76" rx="3"></rect>
+            <text class="dg-t" x="34" y="78">席位</text>
+            <rect class="dg-box" x="240" y="34" width="112" height="76" rx="3"></rect>
+            <text class="dg-t" x="254" y="78">伺服器</text>
+            <text class="dg-lab" x="186" y="52" text-anchor="middle">「有事嗎？」</text>
+            <path class="dg-line" marker-end="url(#ah3)" d="M132,64 H236"></path>
+            <path class="dg-line" marker-end="url(#ah3)" d="M240,88 H136"></path>
+            <text class="dg-lab" x="186" y="106" text-anchor="middle">沿著同一個呼叫回話</text>
+            <text class="dg-t" x="20" y="146">→ delivered，席位收到了</text>
+          </g>
+          <path class="dg-line" d="M380,10 V200" stroke-dasharray="3 4"></path>
+          <g class="no">
+            <text class="dg-k" x="420" y="20">沒有 ROOM_WAIT（回來後沒再叫）</text>
+            <rect class="dg-box" x="420" y="34" width="112" height="76" rx="3"></rect>
+            <text class="dg-t" x="434" y="78">席位（閒著）</text>
+            <rect class="dg-box" x="628" y="34" width="112" height="76" rx="3"></rect>
+            <text class="dg-t" x="642" y="78">伺服器</text>
+            <text class="dg-lab" x="600" y="52" text-anchor="middle">推不過去</text>
+            <path class="dg-line" marker-end="url(#ah3)" d="M628,72 H596" stroke-dasharray="4 4"></path>
+            <path class="dg-line" d="M566,64 L582,80 M582,64 L566,80"></path>
+            <text class="dg-t" x="420" y="146">→ 停在 queued，GUI 標示不可喚醒</text>
+          </g>
+          <text class="dg-s" x="20" y="184">伺服器只能回答客戶端正在問的問題。席位閒著時，那裡沒有任何一個「問題」可以被回答——</text>
+          <text class="dg-s" x="20" y="204">所以這不是權限不足，是通道不存在。訊息不會消失，它等下一次 room_wait。</text>
+        </svg>
+      </div>
+      <div class="row" style="margin-bottom:1rem">
+        <label class="toggle">
+          <input type="checkbox" id="waitOpen" checked>
+          <span>這個席位開著 <code>room_wait</code></span>
+        </label>
+        <button id="dispatch" class="act">Owner 交辦一件事</button>
+        <button id="tick">模擬：席位回合結束</button>
+        <button id="resetSim">重來</button>
+      </div>
+      <div class="sim">
+        <div class="stage">
+          <h4>收件匣</h4>
+          <div class="in"><ul class="feed" id="feedInbox"></ul></div>
+        </div>
+        <div class="stage">
+          <h4>Owner 的 GUI</h4>
+          <div class="in"><ul class="feed" id="feedGui"></ul></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="note">
+    <span class="k">誠實的邊界</span>
+    <p>
+      交辦不會消失，它會停在 <code>queued</code>，而 GUI 會誠實標成<strong>不可即時喚醒</strong>——
+      因為系統知道自己叫不動它。要收回席位，讓那個終端機再叫一次 <code>room_wait</code>：
+      <strong>後到的接手</strong>，舊的以 <code>ROOM_WAIT_LEASE_LOST</code> 結束。這不是失敗，是換手。
+      Owner 從 GUI <strong>沒辦法</strong>叫醒一個沒在等的席位，通知抽屜會直說這件事。
+    </p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<section>
+  <h2><span class="n">05</span>寫進你專案的那道閘門</h2>
+  <p class="lede">
+    Agent 在獨立的草稿版（candidate）工作區做事，不直接動你的專案。
+    要併進去，它只能<strong>登記一個問題</strong>——<code>main_merge_request</code>
+    不帶任何 agent 用得到的 token。真正解鎖的是下面這些動作，你得親手做。
+  </p>
+
+  <div class="panel">
+    <div class="bar">
+      <span>Merge 核准</span>
+      <span id="lampGate" class="lamp off">未解鎖</span>
+    </div>
+    <div class="body">
+      <p style="font-size:.86rem;color:var(--muted);margin-bottom:.6rem">
+        要寫回的變更（請捲到底）
+      </p>
+      <div class="diff" id="diffBox" tabindex="0" aria-label="變更內容，請捲動到底部"></div>
+
+      <ul class="checks" id="gateChecks">
+        <li data-k="scroll">把變更捲到底</li>
+        <li data-k="phrase">逐字輸入 <code>MERGE INTO MAIN</code></li>
+        <li data-k="fresh">快照仍與預覽時一致，且沒有阻擋項目</li>
+      </ul>
+
+      <div style="margin-top:.9rem;display:flex;flex-direction:column;gap:.55rem">
+        <input class="gate-in" id="phraseIn" placeholder="捲到底之後這裡才會解鎖" disabled
+               autocomplete="off" spellcheck="false" aria-label="確認語">
+        <div class="row">
+          <button id="approve" class="act" disabled>核准併入 main</button>
+          <button id="drift">模擬：草稿版又動了一次</button>
+          <button id="resetGate">重來</button>
+        </div>
+      </div>
+      <p id="gateMsg" style="margin:.9rem 0 0;font-size:.86rem;color:var(--muted)"></p>
+    </div>
+  </div>
+
+  <h3>核准畫面上還有什麼</h3>
+  <div class="legend">
+    <div><b>來源 → 目標、風險、還原點</b><small>左欄。還原點給你一段可直接貼上的還原指令，Orchestratory 不會替你執行它。</small></div>
+    <div><b>核准視窗剩餘</b><small>倒數。到期就得按「↻ 重新產生預覽」再問一次；逾時的核准不能復活。</small></div>
+    <div><b>無法核准（阻擋項目）</b><small>預覽被截斷、模擬 merge 有衝突、草稿區有未提交變更、草稿版 HEAD 變了、找不到還原點——任一項存在，核准鈕保持停用。</small></div>
+    <div><b>拒絕並保留草稿版 ／ 取消</b><small>拒絕不等於刪除：草稿版和它的紀錄都留著，之後可從併入紀錄重新發起。</small></div>
+    <div><b>這筆核准已結案，但可以安全重試</b><small>系統不會重用舊授權；按「建立新的預覽與核准」會重新讀 live main、建一筆新的 snapshot-bound 核准，不會自動併入。</small></div>
+    <div><b>草稿區的邊界寫在同一頁</b><small>草稿區保證的是看得到、可退回、有紀錄，不是作業系統層級的隔離保證。同一個帳號下的 full-trust agent 技術上仍可繞過應用層邊界。</small></div>
+  </div>
+
+  <h3>▤ 併入紀錄：四個區、四種顏色</h3>
+  <div class="zones">
+    <div class="zone g"><b>已併入</b><small>綠。只有 <code>applied</code>、觀察到授權的 merge commit、而且讀到 main HEAD after，才進這一區。這是「已驗證的 main 事實」。</small></div>
+    <div class="zone a"><b>需要檢查</b><small>琥珀。重新讀取或核對還原點；<strong>絕不重複 apply</strong>。頂欄「▤ 併入紀錄」旁的「需檢查」就是指這裡有東西。</small></div>
+    <div class="zone b"><b>未進入併入 · 可重新發起</b><small>藍。草稿版仍在等併入；可以勾選多筆「↻ 重新發起選取的核准」，會依 live main 重算預覽。同一個草稿版一次只能有一筆待答。</small></div>
+    <div class="zone x"><b>未進入併入 · 不能重新發起</b><small>灰。每一筆都寫明理由；這裡沒有按鈕是刻意的。</small></div>
+  </div>
+
+  <div class="note">
+    <span class="k">兩個新的人工確認</span>
+    <p>
+      <strong>無法親自證實的紀錄。</strong>服務重新啟動過之後，它無法分辨一筆 promotion 是自己完成的、還是別的程式寫的，
+      因為紀錄、trace 與稽核檔都是同帳號可改寫的位元。這時「需要檢查」會出現一顆
+      「<strong>確認已檢查：我已自行檢查這個專案，沒有更早的併入還在執行</strong>」——在你按下之前，這個專案不會開始新的併入。
+      按下去不修復任何紀錄、不寫入 main，只記錄「你看過了」，而且重新啟動後會再問一次。<br><br>
+      <strong>釋放這筆等待。</strong>有些紀錄卡在「正在等某個程序結束」。「釋放」不會終止程序、不寫入 main、不代表併入已結束，
+      只表示你自己查看過那些編號；確認語逐字顯示在按鈕上方，按下即等於你說出那句話。
+    </p>
+  </div>
+
+  <div class="note">
+    <span class="k">一次性且綁死快照</span>
+    <p>
+      按上面那顆<strong>「草稿版又動了一次」</strong>看看：核准立刻失效。
+      草稿版 HEAD、你的專案 HEAD、路徑、預覽摘要——任何一個變了，就得重新預覽、重新問。
+      系統不會請你為你沒看過的內容簽名。
+    </p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<section>
+  <h2><span class="n">06</span>工具是怎麼分類的</h2>
+  <p class="lede">
+    27 個 MCP 工具，真正該記的不是名字，是<strong>它屬於哪一類</strong>——
+    因為「會不會啟動一件新工作」決定了它要不要先回答進場的分岔問題。
+  </p>
+
+  <div class="panel">
+    <div class="bar"><span>工具分類</span><span id="toolCount" class="lamp idle">27 個</span></div>
+    <div class="body">
+      <div class="filters" id="filters"></div>
+      <div class="tools" id="tools"></div>
+    </div>
+  </div>
+
+  <div class="note">
+    <span class="k">為什麼要分類</span>
+    <p>
+      進場時系統會問你：<strong>接續房裡既有的工作，還是開始新任務？</strong>
+      沒回答就直接用「起手類」工具動手，帳本會留一行 ⚠。那不是懲罰——
+      房間裡可能已經有別人做到一半的事，這一行是讓後來讀紀錄的人不會把兩條線讀成一條。
+    </p>
+  </div>
+</section>
+
+<footer>
+  <p>
+    這份手冊描述的是 <code>agent/native-full-trust-vnext</code> 於 2026-09-05 的實際行為，
+    每一條規則都對照 <code>public/room.html</code>、<code>public/room.js</code>、<code>src/mcp/collab-server.ts</code>
+    與 <code>docs/</code> 查證過。深入的逐項行為見 <code>docs/RUNTIME_REFERENCE.md</code>，威脅模型見 <code>docs/THREAT_MODEL.md</code>。
+  </p>
+  <p style="margin-top:.8rem">
+    <strong>草稿版不是作業系統層級的隔離保證。</strong>同一個帳號下的 full-trust agent 技術上仍可繞過應用層邊界。
+    它提供的是可追溯、可復原、有紀錄。需要強制的邊界請用容器或另一個帳號。
+  </p>
+  <p style="margin-top:.8rem">
+    <strong>授權：PolyForm Noncommercial 1.0.0。</strong>原始碼公開，任何人都可以檢視、稽核、重現建置；
+    個人、研究、教育、非營利與政府用途自由使用與修改。<strong>商業使用權由版權人保留</strong>，另洽授權。
+  </p>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+
+  /* ═════ hero：權限關係圖 ═════ */
+  (function () {
+    var WHO = {
+      term: { name: "你的終端機", role: "你本人。整個系統裡唯一可以決定「什麼可以碰」的人。", lvl: 4,
+        duty: ["安裝、啟動 Orchestratory", "決定哪些資料夾可以被協作（workspaces allow，親手打 ALLOW）", "把 Orchestratory 登記進各家 agent CLI"],
+        can: ["建立房間、關掉服務、隨時緊急停止", "所有需要人類的確認，最後都回到你手上"],
+        no: ["沒有任何一步會替你自動做決定；沒按就不會發生"] },
+      gui: { name: "GUI 控制台", role: "你的操作面板，只有這台電腦自己連得到（127.0.0.1）。", lvl: 4,
+        duty: ["核准或拒絕 agent 的加入申請與待命申請", "併入 main 的閘門：攤開 diff、衝突、測試、復原點，要你逐字打確認語", "看帳本、交辦、更名席位、緊急停止"],
+        can: ["你在這裡按的每一下都會記進帳本", "核准綁定當下的快照，內容一變核准就失效"],
+        no: ["不對外開放，沒有帳號、沒有雲端、沒有 telemetry", "agent 拿不到這裡的任何按鈕"] },
+      orch: { name: "Orchestratory 本機服務", role: "中間人。負責登記、傳遞、執行，但不做任何決定。", lvl: 2,
+        duty: ["管理房間與席位、把交辦送到對的席位", "把每一則發言與事件追加進帳本、啟動時驗證雜湊鏈", "替每個修改任務開獨立的 candidate 工作區，預覽併入結果"],
+        can: ["只在你逐字確認後，才把 candidate 的結果寫進你的專案", "只用你已登入的官方 CLI，不保管任何金鑰"],
+        no: ["不能自己核准任何寫入", "不升權也不降權：agent 進了房間，它原本的權限一樣", "不連任何雲端端點（原始碼裡的 host 是 null）"] },
+      agent: { name: "Agent 席位", role: "員工。Codex、Claude Code、Grok 各自以一個席位加入，身分由啟動指令的 --actor 寫死。", lvl: 1,
+        duty: ["申請加入、待命、接交辦、回覆", "在自己的 candidate 工作區裡改程式、跑測試", "做完了呼叫 main_merge_request：這只是登記一個問題，等你來答"],
+        can: ["互相看見、直接傳訊、等待對方回覆", "讀帳本、讀房間摘要"],
+        no: ["不能直接寫進你的專案，也拿不到任何可以自己核准的 token", "不能改自己的身分、不能冒名另一家回答", "不能替你按 GUI 上的任何一顆鈕"] },
+      proj: { name: "你的專案資料夾", role: "被保護的對象。白名單預設是空的，什麼都不准碰。", lvl: 0,
+        duty: ["只有你在終端機親手打 ALLOW 過的資料夾才會出現在白名單"],
+        can: ["你未提交的修改原地保留，不被複製、清除或 stash", "每次併入都先留復原點"],
+        no: ["agent 不能直接寫入，Orchestratory 也不能自己寫入", "沒有你的逐字確認，這裡不會多一個字"] },
+      outside: { name: "外部網路 · 雲端", role: "這個產品沒有這一層。畫在這裡是為了說明：沒有東西進得來，也沒有東西出得去。", lvl: 0,
+        duty: ["沒有任何角色"],
+        can: ["什麼都不能：GUI 只綁 127.0.0.1，外面連不進來", "原始碼裡的 telemetry host 是 null，服務不往外送任何東西"],
+        no: ["不存在帳號、雲端後端、分析服務", "API 模式預設關閉，開了也只送到 provider 官方端點，不接受自訂網址"] },
+      ledger: { name: "Room 帳本", role: "共用手冊。每個新加入的 agent 都拿到同一本，不必有人重新交代。", lvl: 0,
+        duty: ["記錄誰、在什麼依據下、做了什麼：發言、交辦、核准、拒絕、併入"],
+        can: ["所有席位與你都讀得到：新加入的 agent 讀完帳本就知道進度、決定與原因，不必有人重講一次", "每則帶雜湊、鏈式串接，啟動時驗證，竄改可被偵測"],
+        no: ["只能往後追加，沒有人能改寫已經發生的事"] }
+    };
+    var hero = document.getElementById("hero");
+    if (!hero) return;
+    var who = document.getElementById("heroWho");
+    var nodes = Array.prototype.slice.call(hero.querySelectorAll(".hn"));
+    var edges = Array.prototype.slice.call(hero.querySelectorAll(".he"));
+    function list(cls, k, items) {
+      var d = document.createElement("div"); d.className = cls;
+      var kk = document.createElement("span"); kk.className = "k"; kk.textContent = k;
+      var ul = document.createElement("ul");
+      items.forEach(function (t) { var li = document.createElement("li"); li.textContent = t; ul.appendChild(li); });
+      d.append(kk, ul); return d;
+    }
+    function select(id) {
+      var w = WHO[id];
+      nodes.forEach(function (n) {
+        var me = n.getAttribute("data-id") === id;
+        var near = edges.some(function (e) { var ns = e.getAttribute("data-n").split(" "); return ns.indexOf(id) >= 0 && ns.indexOf(n.getAttribute("data-id")) >= 0; });
+        n.classList.toggle("lit", me);
+        n.classList.toggle("near", !me && near);
+        n.classList.toggle("dim", !me && !near);
+        n.setAttribute("aria-pressed", me ? "true" : "false");
+      });
+      edges.forEach(function (e) {
+        var hit = e.getAttribute("data-n").split(" ").indexOf(id) >= 0;
+        e.classList.toggle("lit", hit);
+        e.classList.toggle("dim", !hit);
+      });
+      var h = document.createElement("h3"); h.textContent = w.name;
+      var r = document.createElement("p"); r.className = "role"; r.textContent = w.role;
+      var lv = document.createElement("div"); lv.className = "lvl";
+      var lt = document.createElement("span"); lt.textContent = "決定權";
+      lv.appendChild(lt);
+      for (var i = 0; i < 4; i++) { var b = document.createElement("b"); if (i < w.lvl) b.className = "on"; lv.appendChild(b); }
+      var lw = document.createElement("span"); lw.textContent = ["沒有（被保護／只被記錄）", "最低（提案）", "中（執行，不決定）", "高", "最高（唯一能核准）"][w.lvl];
+      lv.appendChild(lw);
+      var hint = document.createElement("p"); hint.className = "hint"; hint.textContent = "亮起來的線是它有參與的路；變淡的是它碰不到的。";
+      who.replaceChildren(h, r, lv, list("duty", "負責", w.duty), list("can", "可以", w.can), list("no", "不可以", w.no), hint);
+    }
+    var BLOCKS = [
+      { n: ["agent", "proj"],   t: "agent 直接寫進你的專案", why: "agent 只能在自己的 candidate 工作區改東西。要進 main 得經過預覽與你逐字確認。" },
+      { n: ["agent", "gui"],    t: "agent 按 GUI 的核准鈕", why: "main_merge_request 只是登記一個問題；核准 token 不會發給任何 agent。" },
+      { n: ["orch", "proj"],    t: "Orchestratory 自己寫進你的專案", why: "服務負責攤開 diff、衝突、測試與復原點，但寫入那一下只能由你在 GUI 逐字打確認語。" },
+      { n: ["agent", "proj"],   t: "碰白名單以外的資料夾", why: "白名單預設是空的；沒有你在實體終端機親手打 ALLOW 的資料夾，一律拒絕。" },
+      { n: ["outside", "gui"],  t: "從外面連進 GUI", why: "GUI 只綁 127.0.0.1，沒有帳號系統，也沒有對外開放的選項。" },
+      { n: ["orch", "outside"], t: "服務往雲端送資料", why: "沒有 telemetry 端點、不保管金鑰、不連任何後端。API 模式預設關閉。" },
+      { n: ["agent", "agent"],  t: "agent 改自己的身分或冒名", why: "席位身分由啟動指令的 --actor 寫死；不會 fallback 到另一家冒名回答。" },
+      { n: ["agent", "ledger"], t: "改寫帳本裡已經發生的事", why: "帳本只能往後追加，每則帶雜湊鏈式串接，啟動時驗證；竄改可被偵測。" },
+      { n: ["orch", "agent"],   t: "靠加入房間升權或降權", why: "agent 的 sandbox、工具、shell、網路由它自己的 host 決定；Orchestratory 不改變它。" }
+    ];
+    var chipsEl = hero.querySelector("#heroBlocks .chips");
+    var chips = [];
+    function showBlock(k) {
+      var b = BLOCKS[k];
+      chips.forEach(function (c, j) { c.setAttribute("aria-pressed", j === k ? "true" : "false"); });
+      nodes.forEach(function (n) {
+        var hit = b.n.indexOf(n.getAttribute("data-id")) >= 0;
+        n.classList.remove("lit", "near");
+        n.classList.toggle("no", hit);
+        n.classList.toggle("dim", !hit);
+        n.setAttribute("aria-pressed", "false");
+      });
+      edges.forEach(function (e) {
+        var ns = e.getAttribute("data-n").split(" ");
+        var hit = e.classList.contains("hx") && ns.indexOf(b.n[0]) >= 0 && ns.indexOf(b.n[1]) >= 0;
+        e.classList.toggle("lit", hit);
+        e.classList.toggle("dim", !hit);
+      });
+      var h = document.createElement("h3"); h.textContent = "被擋住：" + b.t;
+      var blk = document.createElement("div"); blk.className = "blk";
+      var p1 = document.createElement("p"); p1.textContent = b.why;
+      blk.appendChild(p1);
+      var hint = document.createElement("p"); hint.className = "hint"; hint.textContent = "紅色的方塊是這條路的兩端。點任一個方塊回到角色說明。";
+      who.replaceChildren(h, blk, hint);
+    }
+    BLOCKS.forEach(function (b, k) {
+      var c = document.createElement("button");
+      c.type = "button"; c.textContent = "✗ " + b.t; c.setAttribute("aria-pressed", "false");
+      c.addEventListener("click", function () { showBlock(k); });
+      chipsEl.appendChild(c); chips.push(c);
+    });
+    var selectBase = select;
+    select = function (id) {
+      chips.forEach(function (c) { c.setAttribute("aria-pressed", "false"); });
+      nodes.forEach(function (n) { n.classList.remove("no"); });
+      selectBase(id);
+    };
+    nodes.forEach(function (n) {
+      n.addEventListener("click", function () { select(n.getAttribute("data-id")); });
+      n.addEventListener("keydown", function (ev) { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); select(n.getAttribute("data-id")); } });
+    });
+    select("term");
+  })();
+
+  /* ═════ 01 第一次安裝 ═════ */
+  var VENDORS = [
+    ["Claude Code", "claude mcp add --scope user orchestrator -- orchestrator mcp --actor claude"],
+    ["Codex",       "codex mcp add orchestrator -- orchestrator mcp --actor codex"],
+    ["Grok",        "grok mcp add orchestrator -- orchestrator mcp --actor grok"]
+  ];
+
+  var STEPS = [
+    {
+      t: "你有終端機嗎？",
+      why: "終端機（Terminal）是一個只有文字的視窗：你打一行字，按 Enter，電腦照做，然後把結果印給你。後面每一步都在這個視窗裡完成。macOS 內建就有一個，不用下載。",
+      why2: "打開方式：按 ⌘ + 空白鍵，打「終端機」（或 Terminal），按 Enter。想要更好用的可以裝 Ghostty（https://ghostty.org）、iTerm2 或 Warp，任何一款都行——它們做的事一模一樣。",
+      term: true,
+      good: "跳出一個深色或白色的視窗，最後一行是你的電腦名稱加一個 % 或 $ 符號，游標在閃。這就對了。",
+      bad: "跳出的是「文字編輯」或別的 App → 關掉，重新搜尋「終端機」。看到視窗但沒有 % 或 $ → 等一兩秒，它在載入。"
+    },
+    {
+      t: "確認有 Node.js，版本 22.20 以上",
+      why: "Node.js 是跑這個程式的引擎，也是唯一的前置條件。先確認再往下，比裝到一半才發現好。把下面這行貼進終端機、按 Enter（貼上用 ⌘V）。",
+      cmd: "node --version",
+      good: "印出 v22.20.0 或更高（例如 v22.21.1、v24.x）。",
+      bad: "印出 command not found → 電腦裡沒有 Node.js。到 https://nodejs.org 下載「LTS」版安裝，關掉終端機重開，再打一次。版本低於 22.20 → 一樣去官網裝新版。"
+    },
+    {
+      t: "取得專案",
+      why: "把程式碼下載到你的電腦，然後「走進」那個資料夾。第一行下載，第二行進資料夾；之後所有指令都在這個資料夾裡打。",
+      cmd: "git clone https://github.com/gn01226919/orchestratory.git\ncd orchestratory",
+      good: "印出 Cloning into 'orchestratory'... 然後一堆百分比，最後回到提示符號。",
+      bad: "git: command not found → macOS 會跳出視窗問要不要安裝「命令列開發者工具」，按安裝，裝完重打。repository not found → 若原始碼還沒公開，改用你拿到的資料夾：cd 加上那個資料夾的路徑。"
+    },
+    {
+      t: "安裝並驗證",
+      why: "只用 repository 既有的 package-lock，並停用套件的安裝腳本。npm run check 會跑完整套閘門——型別檢查、全套測試、覆蓋率、fuzz、SBOM、密鑰掃描。第一次會花約 20 分鐘，那是正常的，去倒杯水。",
+      cmd: "npm ci --ignore-scripts\nnpm run check",
+      good: "最後印出 exit 0 或回到提示符號，中間沒有紅色的 not ok / FAIL。",
+      bad: "任何一步失敗就停下來回報，不要繞過。這一步的存在意義就是攔住問題。"
+    },
+    {
+      t: "建立你自己的指令連結，做健康檢查",
+      why: "裝在你自己的家目錄底下。不要用 sudo，也不要放寬系統目錄權限——這不是龜毛，是這個產品的安全前提。doctor 只檢查各家 CLI 版本，不呼叫任何模型、不花額度。",
+      cmd: "npm_config_ignore_scripts=true npm_config_prefix=\"$HOME/.local\" npm link\n\"$HOME/.local/bin/orchestrator\" --help\n\"$HOME/.local/bin/orchestrator\" doctor",
+      good: "--help 印出指令清單；doctor 印出 codex / claude / grok 各自有沒有裝、版本多少。",
+      bad: "直接打 orchestrator 說找不到指令 → 先用上面的完整路徑就好，那是 PATH 的問題不是安裝的問題。要不要把 ~/.local/bin 加進 PATH 由你決定。"
+    },
+    {
+      t: "告訴它哪個資料夾可以碰，然後啟動",
+      why: "白名單預設是空的，沒有這一步後面全部會失敗。allow 這個指令只接受實體終端機的輸入——agent 沒辦法代替你按。把 /path/to/your-project 換成你要讓 agent 協作的專案資料夾。",
+      cmd: "orchestrator workspaces allow /path/to/your-project --label my-project\norchestrator\norchestrator room init",
+      good: "allow 印出正規化後的完整路徑，要你親手打 ALLOW 確認。orchestrator 啟動終端對話與 GUI（http://127.0.0.1:4317）。room init 建立這個專案的房間，重複執行會回同一間。",
+      bad: "沒有要求你打 ALLOW 就通過了 → 檢查指令打對了沒。埠被占用 → orchestrator gui --port 換一個號碼。"
+    },
+    {
+      t: "打開 GUI，第一次會看到什麼",
+      why: "在瀏覽器打開 http://127.0.0.1:4317。這是你的控制台，後面所有「核准」都在這裡按，不在終端機。它只有這台電腦自己連得到。",
+      cmd: "open http://127.0.0.1:4317",
+      good: "頂欄左邊是「Room 控制室 ▾」、中間「辦公室／帳本」切換、右邊「⑂ 待核准 0」「▤ 併入紀錄」。主畫面是像素辦公室，還沒有任何席位。右邊一排圖示 💬 📋 🔔 ✎ ⚙。詳見 02 章。",
+      bad: "頁面打不開 → 回終端機看 orchestrator 還在跑嗎（它會佔住那個視窗，這是正常的）。看到白頁 → 重新整理一次。"
+    },
+    {
+      t: "把 Orchestratory 掛給你的 coding CLI，讓第一個 agent 入座",
+      why: "這一步只做一件事：把 Orchestratory 登記進你的 agent，讓它知道有這個房間。登記一次就好。下面兩條路挑一條走，看你現在人在哪裡。",
+      paths: [
+        { title: "如果你用終端機", items: [
+          "第 5 步那個正在跑 orchestrator 的視窗不要關。",
+          "再開一個新的終端機視窗。",
+          "選你要用的那家，把這一行貼進去，按 Enter：",
+          { vendor: true },
+          "看到一行 Added … orchestrator 就登記成功了。這行以後不用再打。",
+          "在同一個視窗打 claude（Codex 打 codex，Grok 打 grok），按 Enter。畫面會變成對話框，代表你現在是在跟 agent 講話。",
+          "把這句話貼給它，按 Enter：",
+          { say: true },
+          "切到瀏覽器的 GUI，按「核准」。"
+        ] },
+        { title: "如果你已經在 agent 的對話視窗裡", items: [
+          "把這句話貼給它，它會替你登記。用 Codex 或 Grok 的話，把句子裡的指令換成上面那條路第 3 步對應的那一行：",
+          { cmd: "請幫我執行這行指令，然後告訴我結果：claude mcp add --scope user orchestrator -- orchestrator mcp --actor claude" },
+          "它回報 Added … orchestrator 之後，結束這個對話，重新打開 agent。登記要重開才會生效。",
+          "重開後把這句話貼給它，按 Enter：",
+          { say: true },
+          "切到瀏覽器的 GUI，按「核准」。"
+        ] }
+      ],
+      say: "請呼叫 room_join_request 加入這個專案的房間。加入後把房間摘要讀給我聽，呼叫 room_start 說明你是接續現有工作還是開始新任務，然後呼叫 room_wait 開始待命；每次 room_wait 回來都要再呼叫一次，才算持續待命。",
+      sayInline: true,
+      good: "GUI 舞台頂部跳出紅色提示條「終端加入申請」，🔔 上出現數字。你按「核准」（或去 📋 底部「⚙ 終端加入設定」先取名再核准）。接著它會再申請一次「待命」，同樣在 🔔 裡核准。兩次都按完，辦公室裡多了一個席位，狀態是「可交辦」。",
+      bad: "GUI 什麼都沒跳 → 那個終端沒有真的呼叫 room_join_request（它可能跑了 shell 指令），或它連的是別的專案的房間。提示條不見了 → 申請還在 🔔 裡，2 分鐘內都能核准；超過就請它重送。"
+    }
+  ];
+
+  var dotsEl = document.getElementById("dots");
+  var stageEl = document.getElementById("cardStage");
+  var progBar = document.getElementById("progBar");
+  var progText = document.getElementById("progText");
+  var vendorIndex = 0;
+  var current = 0;
+  var done = STEPS.map(function () { return false; });
+
+  function cmdBlock(text) {
+    var wrap = document.createElement("div");
+    wrap.className = "cmd";
+    var pre = document.createElement("pre");
+    pre.textContent = text;
+    var copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "copy";
+    copy.textContent = "複製";
+    copy.addEventListener("click", function () {
+      var ok = function () {
+        copy.textContent = "已複製"; copy.classList.add("ok");
+        setTimeout(function () { copy.textContent = "複製"; copy.classList.remove("ok"); }, 1400);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(pre.textContent).then(ok, select);
+      } else {
+        select();
+      }
+      function select() {
+        var r = document.createRange(); r.selectNodeContents(pre);
+        var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+        copy.textContent = "已選取 ⌘C";
+        setTimeout(function () { copy.textContent = "複製"; }, 2200);
+      }
+    });
+    wrap.append(pre, copy);
+    return wrap;
+  }
+
+  function termShot() {
+    var box = document.createElement("div");
+    box.className = "termshot";
+    box.setAttribute("role", "img");
+    box.setAttribute("aria-label", "終端機打開後的樣子：一個深色視窗，最後一行是電腦名稱加百分號，游標在閃");
+    box.innerHTML =
+      '<div class="tb"><i></i><i></i><i></i></div>' +
+      'Last login: Fri Sep  5 09:12:44 on ttys001<br>' +
+      'MacBook-Pro ~ % <span class="cur"></span>';
+    return box;
+  }
+
+  function expect(kind, label, text) {
+    var li = document.createElement("li");
+    li.className = "expect " + kind;
+    var b = document.createElement("b"); b.textContent = label;
+    var span = document.createElement("span"); span.textContent = text;
+    li.append(b, span);
+    return li;
+  }
+
+  var LIT = [
+    ["g-term"],
+    ["g-term"],
+    ["g-term", "g-orch", "a-inst"],
+    ["g-term", "g-orch", "a-inst"],
+    ["g-term", "g-orch", "a-inst"],
+    ["g-orch", "g-proj", "g-gui", "g-room", "a-proj", "a-gui", "a-room"],
+    ["g-gui", "g-orch", "a-gui"],
+    ["g-cli", "g-orch", "g-gui", "g-room", "a-join", "a-appr", "a-cli"]
+  ];
+
+  function paintMap() {
+    var on = LIT[current] || [];
+    document.querySelectorAll(".dg-g, .dg-a").forEach(function (node) {
+      var hot = on.indexOf(node.id) >= 0;
+      node.classList.toggle("lit", hot);
+      node.classList.toggle("dim", !hot);
+    });
+  }
+
+  function paintDots() {
+    Array.prototype.forEach.call(dotsEl.querySelectorAll("button"), function (b, i) {
+      b.classList.toggle("done", done[i]);
+      b.textContent = done[i] ? "✓" : String(i);
+      if (i === current) b.setAttribute("aria-current", "step");
+      else b.removeAttribute("aria-current");
+    });
+    var n = done.filter(Boolean).length;
+    progText.textContent = n + " / " + STEPS.length;
+    progBar.style.width = Math.round((n / STEPS.length) * 100) + "%";
+  }
+
+  function renderCard() {
+    var step = STEPS[current];
+    var card = document.createElement("article");
+    card.className = "card";
+
+    var num = document.createElement("div");
+    num.className = "num";
+    num.textContent = String(current).padStart(2, "0");
+
+    var h = document.createElement("h3");
+    h.textContent = step.t;
+
+    var why = document.createElement("p");
+    why.className = "why";
+    why.textContent = step.why;
+    card.append(num, h, why);
+
+    if (step.why2) {
+      var why2 = document.createElement("p");
+      why2.className = "why";
+      why2.textContent = step.why2;
+      card.append(why2);
+    }
+    if (step.term) card.append(termShot());
+
+    function vendorBlock() {
+      var wrap = document.createElement("div");
+      var tabs = document.createElement("div");
+      tabs.className = "vendors";
+      var holder = document.createElement("div");
+      var paint = function () { holder.replaceChildren(cmdBlock(VENDORS[vendorIndex][1])); };
+      VENDORS.forEach(function (v, k) {
+        var b = document.createElement("button");
+        b.type = "button";
+        b.textContent = v[0];
+        b.setAttribute("aria-pressed", k === vendorIndex ? "true" : "false");
+        b.addEventListener("click", function () {
+          vendorIndex = k;
+          Array.prototype.forEach.call(tabs.children, function (o, j) {
+            o.setAttribute("aria-pressed", j === k ? "true" : "false");
+          });
+          paint();
+        });
+        tabs.appendChild(b);
+      });
+      paint();
+      wrap.append(tabs, holder);
+      return wrap;
+    }
+    function sayBlock() {
+      var say = document.createElement("div");
+      say.className = "say";
+      var b2 = document.createElement("b"); b2.textContent = "直接對你的 agent 說";
+      var t2 = document.createElement("span"); t2.textContent = step.say;
+      say.append(b2, t2);
+      var wrap = document.createElement("div");
+      wrap.append(say, cmdBlock(step.say));
+      return wrap;
+    }
+    if (step.vendor) card.append(vendorBlock());
+    if (step.paths) {
+      step.paths.forEach(function (pth) {
+        var box = document.createElement("div");
+        box.className = "path";
+        var h4 = document.createElement("h4");
+        h4.textContent = pth.title;
+        var ol = document.createElement("ol");
+        pth.items.forEach(function (it) {
+          if (typeof it === "string") {
+            var li = document.createElement("li");
+            li.textContent = it;
+            ol.appendChild(li);
+          } else {
+            var host = ol.lastElementChild || ol;
+            if (it.vendor) host.appendChild(vendorBlock());
+            else if (it.say) host.appendChild(sayBlock());
+            else if (it.cmd) host.appendChild(cmdBlock(it.cmd));
+          }
+        });
+        box.append(h4, ol);
+        card.appendChild(box);
+      });
+    }
+    if (step.cmd) card.append(cmdBlock(step.cmd));
+    if (step.say && !step.sayInline) card.append(sayBlock());
+
+    var checks = document.createElement("ul");
+    checks.className = "expects";
+    checks.append(expect("good", "會看到", step.good), expect("bad", "沒看到", step.bad));
+    card.append(checks);
+
+    var foot = document.createElement("div");
+    foot.className = "foot";
+    var mark = document.createElement("label");
+    mark.className = "markdone";
+    var box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = done[current];
+    box.addEventListener("change", function () {
+      done[current] = box.checked;
+      paintDots();
+      if (box.checked && current < STEPS.length - 1) go(current + 1);
+    });
+    var markText = document.createElement("span");
+    markText.textContent = "這一步做完了";
+    mark.append(box, markText);
+    var spacer = document.createElement("span");
+    spacer.className = "spacer";
+    var prev = document.createElement("button");
+    prev.type = "button";
+    prev.textContent = "← 上一步";
+    prev.disabled = current === 0;
+    prev.addEventListener("click", function () { go(current - 1); });
+    var next = document.createElement("button");
+    next.type = "button";
+    next.className = "act";
+    next.textContent = current === STEPS.length - 1 ? "接下來讀 02 →" : "下一步 →";
+    next.addEventListener("click", function () {
+      if (current === STEPS.length - 1) {
+        document.querySelectorAll("section")[1].scrollIntoView({ behavior: "smooth", block: "start" });
+      } else {
+        go(current + 1);
+      }
+    });
+    foot.append(mark, spacer, prev, next);
+    card.append(foot);
+    stageEl.replaceChildren(card);
+    paintDots();
+    paintMap();
+  }
+
+  function go(i) {
+    current = Math.max(0, Math.min(STEPS.length - 1, i));
+    renderCard();
+  }
+
+  STEPS.forEach(function (step, i) {
+    if (i > 0) {
+      var rail = document.createElement("span");
+      rail.className = "rail";
+      dotsEl.appendChild(rail);
+    }
+    var b = document.createElement("button");
+    b.type = "button";
+    b.setAttribute("role", "tab");
+    b.textContent = String(i);
+    b.title = step.t;
+    b.setAttribute("aria-label", "第 " + i + " 步：" + step.t);
+    b.addEventListener("click", function () { go(i); });
+    dotsEl.appendChild(b);
+  });
+
+  document.addEventListener("keydown", function (event) {
+    var tag = (document.activeElement && document.activeElement.tagName) || "";
+    if (tag === "INPUT" || tag === "TEXTAREA") return;
+    if (event.key === "ArrowRight") go(current + 1);
+    else if (event.key === "ArrowLeft") go(current - 1);
+  });
+
+  renderCard();
+
+  /* ═════ 03 席位狀態機 ═════ */
+  var STATES = [
+    { i: "S0", n: "未申請", lamp: "idle",
+      can: "什麼都還沒有。這個終端機開著、也裝了 MCP，但房間不知道它存在。",
+      gui: "GUI 上看不到它。沒有申請的終端不會出現。",
+      dispatch: "無法交辦——沒有這個席位。" },
+    { i: "S1", n: "待核准", lamp: "wait",
+      can: "已呼叫 <code>room_join_request</code>，正在等你。預設等 30 秒，上限 120 秒。",
+      gui: "舞台頂部跳紅色提示條，🔔 通知的「要你動手」裡有核准／拒絕鈕。整個申請只活 2 分鐘。",
+      dispatch: "無法交辦——還沒進來。" },
+    { i: "S2", n: "已加入", lamp: "wait",
+      can: "拿到了房間摘要：最近 50 則、依日期分組、帶總筆數當分母。<strong>還不能被指派工作。</strong>",
+      gui: "分配到 <code>codex1</code> 之類不回收的身分，辦公室多一個工位與名牌。Owner 現在可以點名字更名。",
+      dispatch: "會 fail closed——待命尚未核准。" },
+    { i: "S3", n: "已宣告", lamp: "wait",
+      can: "呼叫 <code>room_start</code> 回答了分岔：<code>continue</code> 接續，或 <code>new-task</code> 另起。帳本留下一條分界線。",
+      gui: "帳本上看得到這條線，之後的訊息屬於哪一段工作有跡可循。",
+      dispatch: "仍需先開 <code>room_wait</code>。" },
+    { i: "S4", n: "待命中", lamp: "on",
+      can: "<code>room_wait</code> 開著，正在收件等待。<strong>不帶 <code>timeoutMs</code> 就沒有時間上限</strong>，會一直開著，直到 stdio 關閉、你取消、Owner 撤銷或心跳停止。傳 <code>timeoutMs</code> 才是有界等待（上限 4 小時）。",
+      gui: "任務列標成「可交辦」。這是唯一叫得動它的狀態。",
+      dispatch: "立刻送達 → <code>delivered</code>。" },
+    { i: "S5", n: "工作中", lamp: "on",
+      can: "收到交辦後用私有 lease token 呼叫 <code>room_ack(read)</code> → <code>room_ack(working)</code> → 做事 → <code>room_reply</code> 或 <code>room_fail</code>。",
+      gui: "依序呈現 queued → delivered → read → working → replied。",
+      dispatch: "會排隊等它處理完。" },
+    { i: "S6", n: "回覆後／逾時後", lamp: "off",
+      can: "<strong><code>room_wait</code> 不是一勞永逸的。</strong>回覆完、或你自己傳的 timeoutMs 到了、或被新呼叫頂掉（<code>ROOM_WAIT_LEASE_LOST</code>），都要再叫一次，否則線路是斷的。不帶 timeoutMs 的待命不會自己到期。",
+      gui: "改回不可即時喚醒；通知抽屜會直說「它要自己呼叫 room_wait 才收得到，沒辦法從這裡叫醒它」。",
+      dispatch: "停在 <code>queued</code>，12 小時未認領會轉 <code>expired</code>（狀態改變，紀錄保留）。" }
+  ];
+
+  var track = document.querySelector(".track");
+  var facets = document.getElementById("facets");
+  var lampSeat = document.getElementById("lampSeat");
+
+  STATES.forEach(function (s, k) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.setAttribute("role", "tab");
+    b.setAttribute("aria-selected", k === 0 ? "true" : "false");
+    b.innerHTML = '<span class="s-i">' + s.i + '</span><span class="s-n">' + s.n + "</span>";
+    b.addEventListener("click", function () { pick(k); });
+    track.appendChild(b);
+  });
+
+  var stNodes = document.getElementById("stNodes");
+  var stEdges = document.getElementById("stEdges");
+  var ST_W = 92, ST_GAP = 14, ST_X0 = 12, ST_Y = 48, ST_H = 46;
+
+  STATES.forEach(function (st, k) {
+    var x = ST_X0 + k * (ST_W + ST_GAP);
+    var g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    g.setAttribute("class", "dg-g");
+    g.id = "st-" + k;
+    var rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    rect.setAttribute("class", "dg-box");
+    rect.setAttribute("x", x); rect.setAttribute("y", ST_Y);
+    rect.setAttribute("width", ST_W); rect.setAttribute("height", ST_H);
+    rect.setAttribute("rx", "3");
+    var kk = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    kk.setAttribute("class", "dg-k"); kk.setAttribute("x", x + 10); kk.setAttribute("y", ST_Y + 18);
+    kk.textContent = st.i;
+    var tt = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    tt.setAttribute("class", "dg-t"); tt.setAttribute("x", x + 10); tt.setAttribute("y", ST_Y + 36);
+    tt.textContent = st.n.split("／")[0];
+    g.append(rect, kk, tt);
+    stNodes.appendChild(g);
+    if (k > 0) {
+      var e = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      e.setAttribute("class", "dg-line");
+      e.setAttribute("marker-end", "url(#ah2)");
+      e.setAttribute("d", "M" + (x - ST_GAP) + "," + (ST_Y + ST_H / 2) + " H" + (x - 3));
+      stEdges.appendChild(e);
+    }
+  });
+
+  var loop = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  loop.setAttribute("class", "dg-line");
+  loop.setAttribute("marker-end", "url(#ah2)");
+  var xs6 = ST_X0 + 6 * (ST_W + ST_GAP), xs4 = ST_X0 + 4 * (ST_W + ST_GAP);
+  loop.setAttribute("d", "M" + (xs6 + ST_W / 2) + "," + (ST_Y + ST_H) + " V" + (ST_Y + ST_H + 16) +
+                         " H" + (xs4 + ST_W / 2) + " V" + (ST_Y + ST_H + 3));
+  stEdges.appendChild(loop);
+  var loopLab = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  loopLab.setAttribute("class", "dg-lab");
+  loopLab.setAttribute("x", (xs4 + xs6) / 2 + ST_W / 2);
+  loopLab.setAttribute("y", ST_Y + ST_H + 30);
+  loopLab.setAttribute("text-anchor", "middle");
+  loopLab.textContent = "回來後再叫一次 room_wait";
+  stEdges.appendChild(loopLab);
+
+  function paintStateMap(k) {
+    STATES.forEach(function (_, i) {
+      var g = document.getElementById("st-" + i);
+      if (!g) return;
+      g.classList.toggle("lit", i === k);
+      g.classList.toggle("dim", i !== k);
+    });
+  }
+
+  function pick(k) {
+    var s = STATES[k];
+    Array.prototype.forEach.call(track.children, function (b, j) {
+      b.setAttribute("aria-selected", j === k ? "true" : "false");
+    });
+    lampSeat.className = "lamp " + s.lamp;
+    lampSeat.textContent = s.n;
+    paintStateMap(k);
+    facets.innerHTML =
+      '<div class="facet"><dt>這個席位能做什麼</dt><dd>' + s.can + "</dd></div>" +
+      '<div class="facet"><dt>Owner 在 GUI 看到</dt><dd>' + s.gui + "</dd></div>" +
+      '<div class="facet"><dt>這時交辦過去</dt><dd>' + s.dispatch + "</dd></div>";
+  }
+  pick(0);
+
+  /* ═════ 04 沒人在聽 ═════ */
+  var waitOpen = document.getElementById("waitOpen");
+  var lampWait = document.getElementById("lampWait");
+  var feedInbox = document.getElementById("feedInbox");
+  var feedGui = document.getElementById("feedGui");
+  var n = 0;
+
+  function clock() {
+    var t = new Date(2026, 8, 5, 14, 3, 0);
+    t.setSeconds(t.getSeconds() + n * 7);
+    return String(t.getHours()).padStart(2, "0") + ":" +
+           String(t.getMinutes()).padStart(2, "0") + ":" +
+           String(t.getSeconds()).padStart(2, "0");
+  }
+  function line(feed, cls, text) {
+    var li = document.createElement("li");
+    li.className = cls;
+    li.innerHTML = '<span class="t">' + clock() + "</span>  " + text;
+    feed.appendChild(li);
+    feed.parentElement.scrollTop = feed.parentElement.scrollHeight;
+  }
+  function paintWait() {
+    var open = waitOpen.checked;
+    lampWait.className = "lamp " + (open ? "on" : "off");
+    lampWait.textContent = open ? "room_wait 開著" : "沒有 room_wait";
+  }
+  waitOpen.addEventListener("change", function () {
+    paintWait();
+    n += 1;
+    if (waitOpen.checked) {
+      line(feedInbox, "d", "room_wait 開啟，開始收件（不帶 timeoutMs 就一直開著）");
+      line(feedGui, "o", "席位狀態 → 可交辦");
+    } else {
+      line(feedInbox, "q", "room_wait 結束");
+      line(feedGui, "o", "席位狀態 → 不可即時喚醒");
+    }
+  });
+  document.getElementById("dispatch").addEventListener("click", function () {
+    n += 1;
+    if (waitOpen.checked) {
+      line(feedInbox, "d", "delivered → 席位收到了");
+      line(feedGui, "o", "已送達，等待回覆");
+    } else {
+      line(feedInbox, "q", "queued → 沒有人在收");
+      line(feedGui, "o", "⚠ 這個席位目前無法即時喚醒");
+    }
+  });
+  document.getElementById("tick").addEventListener("click", function () {
+    n += 6;
+    if (waitOpen.checked) {
+      line(feedInbox, "q", "終端回合結束 → 這次 room_wait 跟著結束");
+      line(feedInbox, "q", "（沒再叫）→ 席位不再有人在聽");
+      waitOpen.checked = false; paintWait();
+      line(feedGui, "o", "席位狀態 → 不可即時喚醒");
+    } else {
+      line(feedInbox, "q", "本來就沒有 room_wait，什麼都不會發生");
+    }
+  });
+  document.getElementById("resetSim").addEventListener("click", function () {
+    n = 0; feedInbox.innerHTML = ""; feedGui.innerHTML = "";
+    waitOpen.checked = true; paintWait();
+  });
+
+  /* ═════ 05 核准閘門 ═════ */
+  var PHRASE = "MERGE INTO MAIN";
+  var diffBox = document.getElementById("diffBox");
+  var phraseIn = document.getElementById("phraseIn");
+  var approve = document.getElementById("approve");
+  var lampGate = document.getElementById("lampGate");
+  var gateMsg = document.getElementById("gateMsg");
+  var checks = document.getElementById("gateChecks");
+
+  var DIFF = [
+    "src/mcp/collab-server.ts",
+    '<span class="del">- /* standby: timeoutMs optional, no documentation of what omitting it means */</span>',
+    '<span class="add">+ /* There is no default: omitting timeoutMs keeps standby open until an observable event ends it. */</span>',
+    '<span class="add">+ const effectiveWaitMs = timeoutMs === undefined ? undefined : Number(timeoutMs);</span>',
+    "",
+    "public/room.js",
+    '<span class="del">- sidebar.render(sessions)</span>',
+    '<span class="add">+ renderSeatBanner(request)   /* 舞台頂部紅色提示條 */</span>',
+    '<span class="add">+ renderBellDrawer(requests)  /* 🔔 帶核准／拒絕鈕 */</span>',
+    "",
+    "test/collab-mcp.test.ts",
+    '<span class="add">+ test("room_wait without timeoutMs stays open until stdio closes", …)</span>',
+    "",
+    "— 變更結束 —"
+  ].join("\n");
+  diffBox.innerHTML = DIFF;
+
+  var state = { scrolled: false, phrase: false, fresh: true };
+
+  function mark(k, ok) {
+    var li = checks.querySelector('[data-k="' + k + '"]');
+    if (li) li.classList.toggle("ok", ok);
+  }
+  function paintGate() {
+    mark("scroll", state.scrolled);
+    mark("phrase", state.phrase);
+    mark("fresh", state.fresh);
+    phraseIn.disabled = !state.scrolled || !state.fresh;
+    if (!phraseIn.disabled && phraseIn.placeholder !== "逐字輸入確認語") {
+      phraseIn.placeholder = "逐字輸入確認語";
+    }
+    var ready = state.scrolled && state.phrase && state.fresh;
+    approve.disabled = !ready;
+    lampGate.className = "lamp " + (ready ? "on" : "off");
+    lampGate.textContent = ready ? "可核准" : state.fresh ? "未解鎖" : "核准已失效";
+  }
+  diffBox.addEventListener("scroll", function () {
+    if (diffBox.scrollTop + diffBox.clientHeight >= diffBox.scrollHeight - 4) {
+      if (!state.scrolled) {
+        state.scrolled = true;
+        gateMsg.textContent = "變更已捲到底。現在可以輸入確認語。";
+        paintGate();
+      }
+    }
+  });
+  phraseIn.addEventListener("input", function () {
+    state.phrase = phraseIn.value === PHRASE;
+    paintGate();
+  });
+  approve.addEventListener("click", function () {
+    gateMsg.innerHTML = "<strong>已寫入。</strong>這份核准只能用一次，現在已經用掉了。結果進「▤ 併入紀錄」的綠色區。沒有自動 push、publish、deploy、delete 或 cleanup。";
+    state.phrase = false; phraseIn.value = ""; approve.disabled = true;
+    lampGate.className = "lamp idle"; lampGate.textContent = "已用掉";
+  });
+  document.getElementById("drift").addEventListener("click", function () {
+    state.fresh = false; state.phrase = false; phraseIn.value = "";
+    phraseIn.placeholder = "快照已變，必須重新預覽";
+    gateMsg.innerHTML = "草稿版 HEAD 變了 → <strong>核准立刻失效</strong>，「無法核准」區列出阻擋項目。" +
+      "按「↻ 重新產生預覽」，再問一次。";
+    paintGate();
+  });
+  document.getElementById("resetGate").addEventListener("click", function () {
+    state = { scrolled: false, phrase: false, fresh: true };
+    phraseIn.value = ""; phraseIn.placeholder = "捲到底之後這裡才會解鎖";
+    diffBox.scrollTop = 0; gateMsg.textContent = "";
+    paintGate();
+  });
+  paintGate();
+
+  /* ═════ 06 工具分類 ═════ */
+  var TOOLS = [
+    ["起手", "ask_codex", "叫一個唯讀 worker 回答問題——會花額度"],
+    ["起手", "ask_claude", "同上，換一個 provider"],
+    ["起手", "ask_grok", "同上，換一個 provider"],
+    ["起手", "compare_agents", "同一個問題並排比稿，最多 3 個模型"],
+    ["起手", "room_post", "在帳本寫一則訊息"],
+    ["起手", "room_mention", "點名某個 provider 回應，走完整生命週期"],
+    ["起手", "room_send", "直接對另一個活著的席位派工"],
+    ["起手", "request_coding_workflow", "把提案排進 owner 的佇列，不會啟動任何東西"],
+    ["起手", "candidate_start", "開一個獨立分支與工作區（草稿版）"],
+    ["回應", "room_ack", "我收到了（read）／我開始做了（working）"],
+    ["回應", "room_reply", "這是結果"],
+    ["回應", "room_fail", "我做不到，原因是"],
+    ["唯讀", "list_agents", "誰在這個房間裡"],
+    ["唯讀", "room_status", "房間現在的狀態"],
+    ["唯讀", "room_read", "從某一則之後往下讀"],
+    ["唯讀", "room_get", "讀某一則"],
+    ["唯讀", "room_search", "找訊息"],
+    ["唯讀", "candidate_status", "重試之前先問清楚真實狀態"],
+    ["唯讀", "main_merge_preview", "攤開 diff、衝突、測試、風險、復原點"],
+    ["等待", "room_wait", "開著這個才叫得動你；不帶 timeoutMs 就沒有時間上限，回來就再叫一次"],
+    ["等待", "room_await_reply", "等你已經派出去的工作回話"],
+    ["進場", "room_init", "取得（或開啟）這個工作區的房間"],
+    ["進場", "room_join_request", "請 Owner 讓你進來，並拿到房間摘要"],
+    ["進場", "room_start", "回答分岔：接續，還是新任務"],
+    ["後續", "candidate_checkpoint", "存一個可復原的乾淨快照"],
+    ["後續", "candidate_complete", "任務做完了"],
+    ["後續", "main_merge_request", "登記一個問題——不是核准"]
+  ];
+  var KINDS = {
+    "起手": ["var(--brass)", "會啟動一件新工作，所以要先回答分岔"],
+    "回應": ["var(--live)", "回答已經交到你手上的工作"],
+    "唯讀": ["var(--muted)", "只看，不改"],
+    "等待": ["var(--live)", "被交辦不等於自己動手"],
+    "進場": ["var(--muted)", "進來與宣告"],
+    "後續": ["var(--brass)", "接在 candidate_start 之後，起點只可能是它"]
+  };
+
+  var toolsEl = document.getElementById("tools");
+  var filtersEl = document.getElementById("filters");
+  var countEl = document.getElementById("toolCount");
+  var active = "全部";
+
+  function renderTools() {
+    var list = TOOLS.filter(function (t) { return active === "全部" || t[0] === active; });
+    countEl.textContent = list.length + " 個";
+    toolsEl.innerHTML = list.map(function (t) {
+      return '<div class="tool"><div><code>' + t[1] + "</code> " +
+        '<span class="kind" style="color:' + KINDS[t[0]][0] + '">' + t[0] + "</span></div>" +
+        '<div class="why">' + t[2] + "</div></div>";
+    }).join("");
+  }
+  ["全部"].concat(Object.keys(KINDS)).forEach(function (k) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.textContent = k;
+    b.title = k === "全部" ? "全部 27 個" : KINDS[k][1];
+    b.setAttribute("aria-pressed", k === "全部" ? "true" : "false");
+    b.addEventListener("click", function () {
+      active = k;
+      Array.prototype.forEach.call(filtersEl.children, function (o) {
+        o.setAttribute("aria-pressed", o.textContent === k ? "true" : "false");
+      });
+      renderTools();
+    });
+    filtersEl.appendChild(b);
+  });
+  renderTools();
+})();
+</script>
+
+</body>
+</html>
