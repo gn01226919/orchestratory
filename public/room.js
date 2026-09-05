@@ -1365,7 +1365,23 @@ function presenceRemovalLock(session) {
 }
 
 function managedAgentRemovalLock(agent) {
-  return seatRemovalLock({ displayName: agent?.displayName }, { leases: state.writers?.leases, deliveries: state.deliveries });
+  /*
+   * The id goes in here too, and leaving it out was not a smaller version of the same call.
+   *
+   * A managed agent's lease carries `actorId = agent.id` (`#resolveWriter`), and the server refuses
+   * removal by comparing that id -- both for the lease and for held deliveries. When this passed a
+   * name and no id, `seatRemovalLock` took its actorId branch anyway (every real lease carries one)
+   * and compared it against "", and the delivery check is guarded on a truthy id, so BOTH locks
+   * were silently false for every managed agent: the button offered removal, the server refused it.
+   *
+   * That is the same defect this function's sibling had just been repaired for, moved one call over
+   * by the repair itself. The fixture it is tested with carried no `actorId`, so the tests exercised
+   * the fallback and never the path that was changed -- which is why nothing went red.
+   */
+  return seatRemovalLock(
+    { displayName: agent?.displayName, presenceId: agent?.id },
+    { leases: state.writers?.leases, deliveries: state.deliveries },
+  );
 }
 
 /* Grey a remove button and say why beside it. Returns the note to place after the button, or null.
@@ -1844,7 +1860,10 @@ async function refreshPresence(force = false) {
     state.managedAgents = nextManagedAgents;
     state.deliveries = nextDeliveries;
     state.writers = {
-      leases: Array.isArray(writerValue.leases) ? writerValue.leases : [],
+      /* The snapshot carries each lease's name as it stood at grant time, so a seat renamed while it
+         held the lease arrives wearing its old name on every poll. Relabelled here, once, instead of
+         at each of the surfaces that read it. */
+      leases: writerSeatNames(writerValue.leases, state.presences),
       delegations: Array.isArray(writerValue.delegations) ? writerValue.delegations : [],
       candidates: Array.isArray(writerValue.candidates) ? writerValue.candidates : [],
       busyLeaseIds: Array.isArray(writerValue.busyLeaseIds) ? writerValue.busyLeaseIds : [],
@@ -2986,6 +3005,45 @@ function seatRenameLabel(session) {
   return wrapped ? wrapped[1] : "";
 }
 
+/* @pure-start writer-seat-names */
+/*
+ * Label a lease with the name its seat answers to now, rather than the name it was granted under.
+ *
+ * A lease row stores `display_name` once, when the lease is granted, and the rename path never
+ * revisits it -- `renameExternal` writes the presence store and nothing else. So every surface whose
+ * label comes from the lease keeps reading the old name after a seat is renamed while holding the
+ * Writer lease, and it keeps reading it after the next poll too, because the server sends the same
+ * stored name back. The match is on `writer.actorId`, which for an external seat is its presence id:
+ * the key the server itself matches leases on when it decides whether a seat can be removed.
+ *
+ * A lease whose actor is not in `presences` -- a managed agent, a seat that has since left -- keeps
+ * the name it was granted under. That is the only name still known for it.
+ *
+ * This is about labels. No request body carries a lease's `displayName`.
+ */
+function writerSeatNames(leases, presences, renamed) {
+  const current = new Map();
+  for (const session of Array.isArray(presences) ? presences : []) {
+    if (typeof session?.id === "string" && typeof session?.displayName === "string" && session.displayName) {
+      current.set(session.id, session.displayName);
+    }
+  }
+  /* A row written before `actorId` was recorded carries no id to match on, so the rename in hand is
+     the only thing that can point at it, and only by the name it is losing. Offered just for the
+     rename that is happening right now; a poll passes no hint and leaves such rows alone. */
+  const from = typeof renamed?.from === "string" ? renamed.from : "";
+  const to = typeof renamed?.to === "string" ? renamed.to : "";
+  return (Array.isArray(leases) ? leases : []).map((lease) => {
+    const writer = lease?.writer;
+    if (!writer) return lease;
+    const name = writer.actorId
+      ? current.get(writer.actorId) || ""
+      : (from && to && writer.displayName === from ? to : "");
+    return name && name !== writer.displayName ? { ...lease, writer: { ...writer, displayName: name } } : lease;
+  });
+}
+/* @pure-end writer-seat-names */
+
 /* The server answered: adopt the session in place, carry the desk's position and selection over to
    the new name (desks are keyed by name), and repaint the two surfaces that show it. */
 function applySeatRename(previous, value) {
@@ -3001,6 +3059,11 @@ function applySeatRename(previous, value) {
       saveOfficePositions();
     }
     if (state.selectedAgent === oldName) state.selectedAgent = newName;
+    /* Before the repaints below, because the draft-room desk placement reads the Writer's name off
+       the lease and looks it up in a desk list that is keyed by the CURRENT seat names. */
+    if (state.writers) {
+      state.writers.leases = writerSeatNames(state.writers.leases, state.presences, { from: oldName, to: newName });
+    }
   }
   syncOfficeDesks();
   renderTaskCenter(true);
@@ -3297,7 +3360,19 @@ function officeSeatRows() {
   return (state.presences || []).map((session, index) => {
     const listening = seatListeningState(session);
     const tag = seatTag(session.id);
-    const isWriter = activeLeases.some((lease) => lease.writer?.displayName === session.displayName);
+    /*
+     * Asked by presence id, the key the lease records as `actorId` and the key the server matches a
+     * lease on. Asked by name, this row's Writer badge answers to whoever holds the name at the
+     * moment rather than to the seat that holds the lease -- a name is released when a seat is
+     * renamed or removed and can be taken by another seat afterwards.
+     *
+     * `displayName` stays as a fallback for a lease written before `actorId` was recorded: without
+     * it that row's badge would simply vanish, and a missing badge on a seat that IS the Writer is
+     * the worse of the two readings.
+     */
+    const isWriter = activeLeases.some((lease) => (lease.writer?.actorId
+      ? lease.writer.actorId === session.id
+      : Boolean(session.displayName) && lease.writer?.displayName === session.displayName));
     const details = [["席位", seatIdentityText(session)]];
     const actions = [];
     if (session.joined) {

@@ -2827,6 +2827,34 @@ test("the acknowledgement offer is narrow, and says what it is not", async () =>
   assert.doesNotMatch(body, /merge-approvals\/approve|promoteMainMerge|reset --hard/u);
 });
 
+test("both removal locks are asked with the id the server refuses by", async () => {
+  /*
+   * Asserted on the source rather than by calling them, because both wrappers read module state
+   * (`state.writers`, `state.deliveries`) and so cannot run in the sandbox the pure blocks use.
+   * A weaker check than behaviour, and written down as such -- but it is the check that was
+   * missing when `seatRemovalLock` moved to matching on `actorId`: the seat wrapper was updated,
+   * the managed wrapper was not, and because every real lease carries an `actorId` the shared
+   * function compared it against "" and BOTH of the managed agent's locks went quietly false.
+   * The server refuses by id in both cases (`#assertRemovable`), so a wrapper that cannot supply
+   * one is offering an action that will be refused.
+   */
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const wrapper = (name: string): string => {
+    const start = source.indexOf(`function ${name}(`);
+    assert.ok(start >= 0, `${name} is not in room.js`);
+    const end = source.indexOf("\n}", start);
+    assert.ok(end > start, `${name} has no end`);
+    return source.slice(start, end);
+  };
+  for (const name of ["presenceRemovalLock", "managedAgentRemovalLock"]) {
+    assert.match(
+      wrapper(name),
+      /presenceId:/u,
+      `${name} must pass presenceId: the server refuses by id, so a lock without one cannot agree with it`,
+    );
+  }
+});
+
 test("Merge pending badge accepts only active unexpired requested approvals", async () => {
   const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
   const start = source.indexOf("/* @pure-start merge-approval-pending */");
@@ -4533,7 +4561,14 @@ test("one removal lock, greyed at every entrance and re-checked at the click", a
   ) as { seatRemovalLock: (subject: unknown, snapshot: unknown) => { locked: boolean; reason: string } };
   // Spread into this realm: a vm object carries the other context's prototype, which strict deepEqual rejects.
   const lockOf = (subject: unknown, snapshot: unknown) => ({ ...lock.seatRemovalLock(subject, snapshot) });
-  const leases = [{ state: "active", writer: { displayName: "claude2" } }, { state: "ended", writer: { displayName: "codex1" } }];
+  /* Two shapes on purpose. Every lease the server actually sends carries `actorId`
+     (`/api/rooms/writers` → `writer-lease.ts`), and a fixture that omits it exercises only the
+     pre-actorId fallback -- which is how a change to the id path shipped with the tests green.
+     The `ended` lease keeps the old shape so the fallback stays covered too. */
+  const leases = [
+    { state: "active", writer: { actorId: "p-9", displayName: "claude2" } },
+    { state: "ended", writer: { displayName: "codex1" } },
+  ];
   const deliveries = [
     { targetPresenceId: "p-1", state: "delivered", ledgerSeq: 1101, sourceDisplayName: "codex（backend）" },
     { targetPresenceId: "p-1", state: "working", ledgerSeq: 1099, sourceDisplayName: "codex（backend）" },
@@ -4667,4 +4702,94 @@ test("the leave and archive routes refuse a seat that is Writer or mid-delivery,
   assert.equal(complete.status, 200, JSON.stringify(await complete.clone().json()));
   const archive = await post("/api/rooms/managed-agents/archive", { room: "remove-room", agentId });
   assert.equal(archive.status, 200, JSON.stringify(await archive.clone().json()));
+});
+
+/*
+ * A lease keeps the name it was granted under: `writer.display_name` is written once at grant and
+ * `renameExternal` only touches the presence store, so the server sends the grant-time name back on
+ * every poll. Renaming a seat that is holding the Writer lease therefore left the Writer's own name
+ * frozen everywhere the label came from the lease -- the running-task row, the draft-room desk, the
+ * status strip, the hand-off drawer. This asserts the label follows the seat, that it is resolved
+ * through the presence id rather than through the name, and that the two places which could put a
+ * stale name back -- the rename itself and the next snapshot -- both go through the same resolver.
+ */
+test("a Writer lease is labelled with the name its seat answers to now, matched by presence id", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const start = source.indexOf("/* @pure-start writer-seat-names");
+  const end = source.indexOf("/* @pure-end writer-seat-names */");
+  assert.ok(start > 0 && end > start, "room.js must expose the DOM-free lease relabelling");
+  const block = source.slice(start, end);
+  assert.doesNotMatch(
+    block,
+    /(?:\b(?:document|window|navigator|localStorage|state)\s*\.|\b(?:fetch|byId|api|setInterval|setTimeout|require|import)\s*\()/u,
+  );
+  const mod = runInNewContext(
+    `${block}\n({ writerSeatNames });`,
+    Object.create(null) as object,
+    { timeout: 2_000 },
+  ) as {
+    writerSeatNames: (
+      leases: unknown,
+      presences: unknown,
+      renamed?: { from?: string; to?: string },
+    ) => Array<{ id?: string; writer?: { actorId?: string; displayName?: string; provider?: string } }>;
+  };
+  const namesOf = (leases: unknown, presences: unknown, renamed?: { from?: string; to?: string }) =>
+    mod.writerSeatNames(leases, presences, renamed).map((lease) => lease?.writer?.displayName);
+
+  const presences = [
+    { id: "p-1", displayName: "codex（後端）" },
+    { id: "p-2", displayName: "codex（前端）" },
+  ];
+  const held = { id: "lease-1", writer: { origin: "external", provider: "codex", actorId: "p-1", displayName: "codex（database）" } };
+
+  assert.deepEqual(namesOf([held], presences), ["codex（後端）"], "the lease is shown under the seat's current name");
+  // The id decides, not the name: p-1's lease was granted under a name that p-2 does NOT hold either,
+  // and swapping in a seat that DOES hold the stored name must not capture the lease.
+  assert.deepEqual(
+    namesOf([held], [{ id: "p-2", displayName: "codex（database）" }, ...presences]),
+    ["codex（後端）"],
+    "a different seat wearing the stored name does not decide the label",
+  );
+  // A managed agent, or a seat that has left: the granted name is the only name still known for it.
+  assert.deepEqual(
+    namesOf([{ writer: { actorId: "agent-9", displayName: "claude（審查）" } }], presences),
+    ["claude（審查）"],
+    "an actor that is not a present seat keeps the name it was granted under",
+  );
+  // The row is only rebuilt when the label actually changes, so anything keyed on lease identity is undisturbed.
+  const unchanged = mod.writerSeatNames([held], [{ id: "p-1", displayName: "codex（database）" }]);
+  assert.equal(unchanged[0], held, "an unchanged label returns the same lease object");
+
+  // Pre-actorId rows: the rename in hand is the only thing that can identify them, and only then.
+  const legacy = [{ writer: { provider: "codex", displayName: "codex（database）" } }];
+  assert.deepEqual(namesOf(legacy, presences, { from: "codex（database）", to: "codex（後端）" }), ["codex（後端）"]);
+  assert.deepEqual(namesOf(legacy, presences), ["codex（database）"], "a poll passes no rename and leaves such a row alone");
+  assert.deepEqual(namesOf(legacy, presences, { from: "codex（別人）", to: "codex（後端）" }), ["codex（database）"]);
+  assert.deepEqual(namesOf([{ id: "no-writer" }, null], presences), [undefined, undefined], "a lease with no writer is passed through");
+  // Spread into this realm: an array the vm built carries the other context's prototype, which strict deepEqual rejects.
+  assert.deepEqual([...mod.writerSeatNames(undefined, undefined)], [], "and a missing snapshot is an empty list");
+
+  // Both doors into state.writers.leases go through the resolver, or the label goes stale again on
+  // the next poll -- the server has no record of the new name.
+  const rename = /^function applySeatRename\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.notEqual(rename, "", "room.js keeps applySeatRename");
+  assert.match(
+    rename,
+    /state\.writers\.leases = writerSeatNames\(state\.writers\.leases, state\.presences, \{ from: oldName, to: newName \}\)/u,
+  );
+  assert.ok(
+    rename.indexOf("writerSeatNames") < rename.indexOf("syncOfficeDesks()"),
+    "the lease is relabelled before the repaint that reads the Writer's name off it",
+  );
+  assert.match(source, /leases: writerSeatNames\(writerValue\.leases, state\.presences\),/u, "the poll relabels too");
+
+  // And the seat row's Writer badge is decided by the same id the server decides removal by.
+  const seats = /^function officeSeatRows\(\) \{[\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.notEqual(seats, "", "room.js keeps officeSeatRows");
+  assert.match(
+    seats,
+    /const isWriter = activeLeases\.some\(\(lease\) => \(lease\.writer\?\.actorId\s*\?\s*lease\.writer\.actorId === session\.id/u,
+    "the Writer badge is matched on the presence id, with the name only as the pre-actorId fallback",
+  );
 });
