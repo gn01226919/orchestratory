@@ -4223,3 +4223,57 @@ test("machine records in the ledger fold to a one-line summary; conversation nev
   const css = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
   assert.match(css, /^\.msg\.is-log \{ opacity: 0\.72; \}$/mu);
 });
+
+test("an author name in the ledger is a button that tags that seat in the composer", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const render = /^function renderMessage\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(render, /tagButton\.className = "msg-author"/u);
+  assert.match(render, /tagButton\.type = "button"/u);
+  // Only seats get a control; the owner and the system line are not someone to tag.
+  assert.match(render, /author !== "you" && author !== "system"/u);
+  assert.match(render, /insertMentionIntoComposer\(author\)/u);
+
+  const insert = /^function insertMentionIntoComposer\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.notEqual(insert, "");
+  // A tiny textarea double: value, selection, focus, and the input event the composer hints listen to.
+  const makeInput = (value: string, start = value.length, end = start) => {
+    const input = {
+      value, selectionStart: start, selectionEnd: end, focused: false, events: 0,
+      setSelectionRange(s: number, e: number) { input.selectionStart = s; input.selectionEnd = e; },
+      dispatchEvent() { input.events += 1; return true; },
+      focus() { input.focused = true; },
+    };
+    return input;
+  };
+  const run = (input: ReturnType<typeof makeInput>, name: string): boolean => runInNewContext(
+    `${insert}\ninsertMentionIntoComposer(${JSON.stringify(name)});`,
+    { visibleComposer: () => input, Event: class { type: string; constructor(type: string) { this.type = type; } } },
+    { timeout: 2_000 },
+  ) as boolean;
+
+  // Into an empty box: the tag, a space, focus, caret after it.
+  const empty = makeInput("");
+  assert.equal(run(empty, "claude（CCUI）"), true);
+  assert.equal(empty.value, "@claude（CCUI） ");
+  assert.equal(empty.selectionStart, empty.value.length);
+  assert.ok(empty.focused && empty.events === 1);
+  // At the caret, not at the end, with a separating space when the text before it needs one.
+  const middle = makeInput("請 幫我看 P0-3", 2, 2);
+  run(middle, "codex1");
+  assert.equal(middle.value, "請 @codex1 幫我看 P0-3");
+  const glued = makeInput("請幫我看", 1, 1);
+  run(glued, "codex1");
+  assert.equal(glued.value, "請 @codex1 幫我看");
+  // Never twice -- the click only returns focus. A longer name that merely starts the same is not a hit.
+  const tagged = makeInput("@codex1 幫我看 P0-3");
+  assert.equal(run(tagged, "codex1"), false);
+  assert.equal(tagged.value, "@codex1 幫我看 P0-3");
+  assert.ok(tagged.focused && tagged.events === 0);
+  const longer = makeInput("@codex12 幫我看");
+  assert.equal(run(longer, "codex1"), true);
+  assert.equal(longer.value, "@codex12 幫我看 @codex1 ");
+
+  const css = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
+  assert.match(css, /^\.msg-author \{ appearance: none; background: none; border: 0;/mu);
+  assert.match(css, /^\.msg-author:focus-visible \{/mu);
+});

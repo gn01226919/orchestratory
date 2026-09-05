@@ -408,6 +408,44 @@ function ledgerLogKind(text) {
 }
 /* @pure-end ledger-log-kind */
 
+/* The composer the reader is looking at: the ledger's own while that view is up, the office
+   drawer's otherwise. A mention inserted into a hidden box is a mention nobody sees. */
+function visibleComposer() {
+  const ledgerComposer = byId("post-input");
+  if (ledgerComposer && !byId("post-form")?.hidden) return ledgerComposer;
+  return byId("office-chat-input") || ledgerComposer;
+}
+
+/*
+ * Clicking an author name tags that seat. The tag goes in at the caret rather than at the end,
+ * so a half-written sentence can be pointed at someone without retyping, and it uses the same
+ * `@name ` form the router already reads (joinedPresenceMention / managedAgentMention), full seat
+ * names with their bracketed label included. A name already tagged in the box is not tagged
+ * twice: the click then only brings the caret back to the composer.
+ */
+function insertMentionIntoComposer(name) {
+  const input = visibleComposer();
+  if (!input || !name) return false;
+  const tag = `@${name}`;
+  const value = input.value || "";
+  const escaped = tag.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  const already = new RegExp(`(?:^|\\s)${escaped}(?=\\s|$)`, "u").test(value);
+  if (!already) {
+    const start = Number.isInteger(input.selectionStart) ? input.selectionStart : value.length;
+    const end = Number.isInteger(input.selectionEnd) ? input.selectionEnd : start;
+    const before = value.slice(0, start);
+    const after = value.slice(end);
+    const lead = before && !/\s$/u.test(before) ? " " : "";
+    const inserted = `${lead}${tag} `;
+    input.value = `${before}${inserted}${after}`;
+    const caret = before.length + inserted.length;
+    input.setSelectionRange(caret, caret);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  input.focus();
+  return !already;
+}
+
 function renderMessage(message) {
   const item = document.createElement("article");
   item.className = "msg";
@@ -417,8 +455,23 @@ function renderMessage(message) {
   avatar.textContent = `#${message.seq}`;
   const body = document.createElement("div");
   const label = document.createElement("small");
-  label.textContent = `${message.author} · ${message.at.slice(11, 19)}`;
-  label.style.color = authorColor(message.author);
+  const author = String(message.author || "");
+  /* A seat's name is a control: clicking it tags that seat in the composer. "you" and "system"
+     are not seats and stay plain text. */
+  if (author && author !== "you" && author !== "system") {
+    const tagButton = document.createElement("button");
+    tagButton.type = "button";
+    tagButton.className = "msg-author";
+    tagButton.textContent = author;
+    tagButton.title = `在發言框加入 @${author}`;
+    tagButton.setAttribute("aria-label", `標記 ${author}`);
+    tagButton.style.color = authorColor(author);
+    tagButton.addEventListener("click", () => insertMentionIntoComposer(author));
+    label.append(tagButton, ` · ${message.at.slice(11, 19)}`);
+  } else {
+    label.textContent = `${author} · ${message.at.slice(11, 19)}`;
+  }
+  label.style.color = authorColor(author);
   const content = document.createElement("p");
   if (message.kind === "system") content.style.color = "#5f636b";
   renderTextWithRefs(content, message.text);
