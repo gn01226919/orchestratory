@@ -671,7 +671,7 @@ function wakeClock(at) {
  * cannot drift.
  */
 /*
- * One vocabulary for every surface: the sidebar badge, the office desk label, the task rows and
+ * One vocabulary for every surface: the terminal-panel badge, the office desk label, the task rows and
  * the chips all read `text` (可交辦 / 排隊中 / 等你核准 / 不可交辦), so the pixel floor and the
  * drawers cannot drift from the row the way the earlier hand-written copies did.
  */
@@ -760,7 +760,7 @@ function seatListeningState(session) {
  * id and the workspace directory. The host pid is deliberately not shown -- the presence API
  * withholds it from the browser and test/web.test.ts pins that. A terminal can read its own id
  * from list_agents and say "I am 68589d86", which is the whole point of showing it here. Only
- * the last path segment is shown, anywhere: the sidebar is 248px wide, and a full path under a
+ * the last path segment is shown, anywhere: the drawers are narrow, and a full path under a
  * home directory is a name that does not belong in the DOM.
  */
 function workspaceLabel(workspace) {
@@ -1143,9 +1143,9 @@ function seatWakeNotice(session, listening) {
 }
 
 /*
- * The three buttons a seat row can carry, built once for both the sidebar row and the office task
- * drawer. The text, ordering and demotion rules are the ones the sidebar row settled on; the drawer
- * must not get a second hand-written copy of them.
+ * The three buttons a seat row can carry, built once for both the terminal panel's row (⚙ 終端加入設定,
+ * behind the task list) and the office task drawer. The text, ordering and demotion rules are the
+ * ones the panel row settled on; the drawer must not get a second hand-written copy of them.
  */
 function seatActionButtons(session, listening) {
   const actions = document.createElement("div");

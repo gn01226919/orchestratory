@@ -3868,3 +3868,16 @@ test("a new seat request puts a red banner on the stage, and the bell keeps coun
   assert.match(css, /\.office-rail-button\.has-seat-request \{ animation: office-bell-pulse/u);
   assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\s*\.office-seat-banner \{ animation: none; \}\s*\.office-rail-button\.has-seat-request \{ animation: none;/u);
 });
+
+test("no room copy points the owner at the sidebar that was removed", async () => {
+  const html = await readFile(new URL("../public/room.html", import.meta.url), "utf8");
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  /* Only quoted strings and markup text are copy; a comment that mentions a sidebar is history. */
+  const strings = source.match(/(["'`])(?:(?!\1)[^\\]|\\.)*\1/gu) ?? [];
+  for (const literal of strings) {
+    assert.doesNotMatch(literal, /左側|側欄|新增 Agents|左邊/u, `stale copy in room.js: ${literal}`);
+  }
+  assert.doesNotMatch(html.replace(/<!--[\s\S]*?-->/gu, ""), /左側|側欄|新增 Agents|左邊/u);
+  /* The one place a join request is explained in the task drawer names the panel it means. */
+  assert.match(source, /要取名或改協作模式，用下方「終端加入設定」/u);
+});
