@@ -198,6 +198,60 @@ test("owner can name a joined desk while invalid or duplicate labels fail closed
   assert.equal(presence.join(second.id, "demo", "/tmp/project", ROOM_FIRST).displayName, "codex1");
 });
 
+test("owner can rename a joined seat in place while the ledger records old and new names", async (t) => {
+  const { presence, ledger } = await fixture(t);
+  ledger.createRoom("demo", "/tmp/project");
+  const named = presence.register({ provider: "codex", workspace: "/tmp/project", hostPid: 231 });
+  const numbered = presence.register({ provider: "codex", workspace: "/tmp/project", hostPid: 232 });
+  const waiting = presence.register({ provider: "codex", workspace: "/tmp/project", hostPid: 233 });
+  presence.requestJoin(named.id, "demo", "/tmp/project");
+  presence.requestJoin(numbered.id, "demo", "/tmp/project");
+  presence.requestJoin(waiting.id, "demo", "/tmp/project");
+  presence.join(named.id, "demo", "/tmp/project", { ...ROOM_FIRST, label: "前端 2" });
+  assert.equal(presence.join(numbered.id, "demo", "/tmp/project", ROOM_FIRST).displayName, "codex1");
+  presence.requestStandby(numbered.id, "demo");
+  presence.approveStandby(numbered.id, "demo");
+  const before = ledger.getRoom("demo")?.messages ?? 0;
+
+  // Only a joined seat has a name to change; a pending request or the wrong room fails closed.
+  assert.throws(() => presence.rename(ledger, waiting.id, "demo", "資料庫"), /PRESENCE_NOT_JOINED/u);
+  assert.throws(() => presence.rename(ledger, numbered.id, "other", "資料庫"), /PRESENCE_NOT_JOINED/u);
+  assert.throws(() => presence.rename(ledger, "missing", "demo", "資料庫"), /PRESENCE_NOT_FOUND/u);
+  // Same room, same name space as join: another seat's name is taken.
+  assert.throws(() => presence.rename(ledger, numbered.id, "demo", "前端 2"), /PRESENCE_NAME_TAKEN/u);
+  assert.throws(() => presence.rename(ledger, numbered.id, "demo", " 前端 2 "), /PRESENCE_NAME_TAKEN/u);
+  // Trimmed length 1–24, never whitespace only, same character set as the join label.
+  for (const bad of ["", "   ", "x".repeat(25), "<script>", 42]) {
+    assert.throws(() => presence.rename(ledger, numbered.id, "demo", bad), /PRESENCE_NAME_INVALID/u);
+  }
+  assert.equal(ledger.getRoom("demo")?.messages, before, "a refused rename leaves no ledger line");
+  assert.equal(presence.get(numbered.id)?.displayName, "codex1");
+
+  const renamed = presence.rename(ledger, numbered.id, "demo", "  資料庫 ");
+  assert.equal(renamed.previousDisplayName, "codex1");
+  assert.equal(renamed.displayName, "codex（資料庫）");
+  assert.equal(renamed.session.displayName, "codex（資料庫）");
+  assert.equal(renamed.session.id, numbered.id, "the seat keeps its id");
+  assert.equal(renamed.session.standbyApproved, true, "standby approval survives the rename");
+  assert.equal(renamed.session.collaborationMode, "room-first");
+  assert.equal(presence.list("/tmp/project", "demo").find((s) => s.id === numbered.id)?.displayName, "codex（資料庫）");
+  assert.equal(presence.actorFor(numbered.id, "demo"), "codex（資料庫）");
+  const lines = ledger.listAfter("demo", before);
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0]?.author, "system");
+  assert.equal(lines[0]?.text, `席位 ${numbered.id.slice(0, 8)} 更名：codex1 → codex（資料庫）`);
+  assert.equal("x".repeat(24).length, 24);
+  assert.equal(presence.rename(ledger, numbered.id, "demo", "x".repeat(24)).displayName, `codex（${"x".repeat(24)}）`);
+
+  // Renaming to the name it already has is a no-op: no second ledger line.
+  const settled = ledger.getRoom("demo")?.messages ?? 0;
+  const same = presence.rename(ledger, numbered.id, "demo", "x".repeat(24));
+  assert.equal(same.previousDisplayName, same.displayName);
+  assert.equal(ledger.getRoom("demo")?.messages, settled);
+  // The old name is free again for someone else.
+  assert.equal(presence.rename(ledger, named.id, "demo", "資料庫").displayName, "codex（資料庫）");
+});
+
 test("a live MCP terminal stays invisible to a room until it explicitly requests entry", async (t) => {
   const { presence } = await fixture(t);
   const session = presence.register({ provider: "codex", workspace: "/tmp/project", hostPid: 211 });

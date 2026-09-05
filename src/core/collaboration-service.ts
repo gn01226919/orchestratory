@@ -9,6 +9,7 @@ import {
 } from "./managed-room-agent.ts";
 import {
   RoomPresenceStore,
+  externalSeatDisplayName,
   type PresenceCollaborationMode,
   type PresenceHookInput,
   type PresenceInfo,
@@ -592,6 +593,37 @@ export class CollaborationService {
       this.ledger.appendSystem(roomId, `${revoked.displayName ?? revoked.provider} 的 room-wait 待命已撤銷`);
     }
     return revoked;
+  }
+
+  /*
+   * Owner renames a joined external seat so the floor reads as "which terminal is which" instead of
+   * codex1 / codex2. Two things the store cannot see are checked here. Managed agents live in another
+   * store and share the same `provider（label）` name space, so a name one of them holds is taken.
+   * And an in-flight delivery is bound to the target's display name (see #reconcileUnavailableDeliveries):
+   * renaming under it would make that delivery fail as "target unavailable" on the next reconcile, so a
+   * seat with queued or open work keeps its name until that work is replied to or cancelled.
+   */
+  renameExternal(input: { presenceId: string; roomId: string; workspace: string; label: unknown }): {
+    session: PresenceInfo;
+    previousDisplayName: string;
+    displayName: string;
+  } {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    const current = this.presence.get(input.presenceId);
+    if (!current || current.workspace !== input.workspace) throw new Error("PRESENCE_NOT_FOUND");
+    if (!current.joined || current.roomId !== input.roomId) throw new Error("PRESENCE_NOT_JOINED");
+    const desired = externalSeatDisplayName(current.provider, input.label);
+    if (desired !== current.displayName) {
+      if (this.managedAgents.list(input.roomId).some((agent) => agent.displayName === desired)) {
+        throw new Error("PRESENCE_NAME_TAKEN");
+      }
+      const busy = this.inbox.list(input.roomId).some((delivery) =>
+        delivery.targetPresenceId === input.presenceId &&
+        ["queued", "delivered", "read", "working"].includes(delivery.state),
+      );
+      if (busy) throw new Error("PRESENCE_RENAME_BUSY");
+    }
+    return this.presence.rename(this.ledger, input.presenceId, input.roomId, input.label);
   }
 
   approveExternalJoin(input: {

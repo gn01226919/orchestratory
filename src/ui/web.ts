@@ -981,6 +981,38 @@ export async function startWebServer(
           json(response, 200, { session });
           return;
         }
+        if (url.pathname === "/api/rooms/presence/rename") {
+          /* Owner-only like every presence route (cookie + CSRF checked above). The seat keeps its id
+             and approvals; only the label after the provider changes, and the ledger records it. */
+          if (typeof body !== "object" || body === null || Array.isArray(body)) {
+            throw new Error("INVALID_PRESENCE_RENAME_REQUEST");
+          }
+          const value = body as Record<string, unknown>;
+          if (
+            Object.keys(value).some((key) => !["room", "presenceId", "label"].includes(key)) ||
+            typeof value.room !== "string" || typeof value.presenceId !== "string" ||
+            typeof value.label !== "string"
+          ) throw new Error("INVALID_PRESENCE_RENAME_REQUEST");
+          const info = ledger.getRoom(value.room);
+          if (!info) throw new Error("ROOM_NOT_FOUND");
+          const workspace = await app.workspaces.assertAllowed(info.workspace);
+          const renamed = collaboration.renameExternal({
+            presenceId: value.presenceId,
+            roomId: value.room,
+            workspace,
+            label: value.label,
+          });
+          const session = collaboration.roomView(value.room, workspace).sessions.find(
+            (candidate) => candidate.id === value.presenceId,
+          );
+          if (!session) throw new Error("PRESENCE_NOT_FOUND");
+          json(response, 200, {
+            session,
+            previousDisplayName: renamed.previousDisplayName,
+            displayName: renamed.displayName,
+          });
+          return;
+        }
         if (url.pathname === "/api/rooms/presence/nudge") {
           /*
            * Records that the owner wanted this seat. It cannot wake anything -- see

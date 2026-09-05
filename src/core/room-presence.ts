@@ -132,6 +132,19 @@ function validOwnerLabel(value: unknown): string | undefined {
   return label;
 }
 
+/**
+ * The display name an external seat carries after the owner renames it. The provider stays in front
+ * of the label on purpose: the name is what the owner reads on the floor to tell terminals apart, and
+ * "which model is this" is half of that. It is also the same shape join() gives a labelled seat, so
+ * every mention pattern and colour lookup that already understands `codex（前端 2）` keeps working.
+ */
+export function externalSeatDisplayName(provider: PresenceProvider, value: unknown): string {
+  if (typeof value !== "string") throw new Error("PRESENCE_NAME_INVALID");
+  const label = value.trim();
+  if (label.length === 0 || !OWNER_LABEL_PATTERN.test(label)) throw new Error("PRESENCE_NAME_INVALID");
+  return `${provider}（${label}）`;
+}
+
 function validJoinApproval(value: unknown): PresenceJoinApproval {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error("INVALID_PRESENCE_JOIN_APPROVAL");
@@ -687,6 +700,47 @@ export class RoomPresenceStore {
       .prepare("UPDATE agent_presence SET room_id = NULL, display_name = NULL, collaboration_mode = NULL, sync_turns = 0, standby_requested_at_ms = NULL, standby_approved = 0, session_hash = NULL, requested_room_id = NULL, requested_at_ms = NULL, open_turn_key = NULL WHERE id = ?")
       .run(id);
     return publicInfo(this.#row(id)!, roomId);
+  }
+
+  /**
+   * Owner renames a joined seat in place. Only the label changes; the seat keeps its id, room,
+   * collaboration mode, standby state and open turn, so nothing that is bound to the seat by id has
+   * to be re-approved. The ledger line is written inside the same transaction as the update: a name
+   * that changed without a line saying so would leave earlier ledger entries pointing at a name
+   * nobody can find on the floor any more.
+   */
+  rename(
+    ledger: RoomLedger,
+    id: string,
+    roomId: string,
+    label: unknown,
+  ): { session: PresenceInfo; previousDisplayName: string; displayName: string } {
+    validRoom(roomId);
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      this.#prune();
+      const row = this.#row(id);
+      if (!row) throw new Error("PRESENCE_NOT_FOUND");
+      if (row.room_id !== roomId || row.display_name === null) throw new Error("PRESENCE_NOT_JOINED");
+      const previousDisplayName = row.display_name;
+      const displayName = externalSeatDisplayName(row.provider, label);
+      if (displayName === previousDisplayName) {
+        this.#db.exec("COMMIT");
+        return { session: publicInfo(row, roomId), previousDisplayName, displayName };
+      }
+      const duplicate = this.#db
+        .prepare("SELECT 1 AS found FROM agent_presence WHERE room_id = ? AND display_name = ? AND id <> ?")
+        .get(roomId, displayName, id) as { found: number } | undefined;
+      if (duplicate) throw new Error("PRESENCE_NAME_TAKEN");
+      this.#db.prepare("UPDATE agent_presence SET display_name = ? WHERE id = ?").run(displayName, id);
+      ledger.appendSystem(roomId, `席位 ${id.slice(0, 8)} 更名：${previousDisplayName} → ${displayName}`);
+      const renamed = this.#row(id)!;
+      this.#db.exec("COMMIT");
+      return { session: publicInfo(renamed, roomId), previousDisplayName, displayName };
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   recordHook(

@@ -2886,6 +2886,147 @@ test("Merge records shows nonnumeric attention only for outcomes requiring revie
   assert.doesNotMatch(source, /merge-records-attention[\s\S]{0,500}textContent\s*=\s*String/u);
 });
 
+/*
+ * H. The owner renames a joined terminal seat from the GUI so the floor reads "which terminal is
+ * which" instead of codex1 / codex2. Owner-only like every presence route (401 without the session
+ * cookie, 403 without CSRF); the seat keeps its id and standby approval; the ledger records old and
+ * new names in one system line; a seat with an in-flight delivery keeps its name, because that
+ * delivery is bound to the target's display name and would otherwise fail on the next reconcile.
+ */
+test("Web dashboard lets the owner rename a joined seat in place", async (t) => {
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-web-rename-data-"));
+  const workspace = await realpath(await repository());
+  await writeFile(
+    join(data, "workspace-roots.json"),
+    `${JSON.stringify([{ id: "rename-root", label: "Rename root", path: workspace }])}\n`,
+    { encoding: "utf8", mode: 0o600 },
+  );
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+  t.after(async () => await rm(workspace, { recursive: true, force: true }));
+
+  const app = await createAppContext(data);
+  t.after(() => app.close());
+  const ledger = new RoomLedger(app.store.dataDirectory);
+  ledger.createRoom("rename-room", workspace);
+  ledger.close();
+  const presenceStore = new RoomPresenceStore(app.store.dataDirectory);
+  t.after(() => presenceStore.close());
+  const codexSeat = presenceStore.register({ provider: "codex", workspace, hostPid: 98771, client: "Codex CLI" });
+  const claudeSeat = presenceStore.register({ provider: "claude", workspace, hostPid: 98772, client: "Claude Code" });
+  const pendingSeat = presenceStore.register({ provider: "grok", workspace, hostPid: 98773 });
+  for (const seat of [codexSeat, claudeSeat, pendingSeat]) presenceStore.requestJoin(seat.id, "rename-room", workspace);
+  presenceStore.join(codexSeat.id, "rename-room", workspace, { collaborationMode: "room-first", syncTurns: true, label: "前端 2" });
+  presenceStore.join(claudeSeat.id, "rename-room", workspace, { collaborationMode: "seat-only", syncTurns: false });
+  presenceStore.requestStandby(codexSeat.id, "rename-room");
+  presenceStore.approveStandby(codexSeat.id, "rename-room");
+
+  const server = await startWebServer(app, 0);
+  t.after(async () => await server.close());
+  const index = await fetch(server.url);
+  const cookie = (index.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+  const bootstrap = await fetch(`${server.url}/api/bootstrap`, { headers: { Cookie: cookie } });
+  const { csrf } = (await bootstrap.json()) as { csrf: string };
+  const headers = { Cookie: cookie, Origin: server.url, "X-CSRF-Token": csrf, "Content-Type": "application/json" };
+  const rename = (body: Record<string, unknown>, overrides: Record<string, string> = headers) =>
+    fetch(`${server.url}/api/rooms/presence/rename`, { method: "POST", headers: overrides, body: JSON.stringify(body) });
+  const ledgerTail = async (after: number) => ((await (await fetch(
+    `${server.url}/api/rooms/messages?room=rename-room&after=${after}`,
+    { headers: { Cookie: cookie } },
+  )).json()) as { messages: { seq: number; author: string; text: string }[] }).messages;
+
+  // Not the owner: no session cookie is 401, a session without the CSRF token is 403.
+  const withoutCookie = await rename(
+    { room: "rename-room", presenceId: codexSeat.id, label: "前端組長" },
+    { Origin: server.url, "X-CSRF-Token": csrf, "Content-Type": "application/json" },
+  );
+  assert.equal(withoutCookie.status, 401);
+  const withoutCsrf = await rename(
+    { room: "rename-room", presenceId: codexSeat.id, label: "前端組長" },
+    { Cookie: cookie, Origin: server.url, "Content-Type": "application/json" },
+  );
+  assert.equal(withoutCsrf.status, 403);
+  assert.equal(presenceStore.get(codexSeat.id)?.displayName, "codex（前端 2）");
+
+  // Shape: exactly room + presenceId + label, all strings.
+  const wrongField = await rename({ room: "rename-room", presenceId: codexSeat.id, displayName: "前端組長" });
+  assert.equal(wrongField.status, 400);
+  assert.deepEqual(await wrongField.json(), { error: "INVALID_PRESENCE_RENAME_REQUEST" });
+  for (const bad of ["   ", "x".repeat(25), "<script>"]) {
+    const response = await rename({ room: "rename-room", presenceId: codexSeat.id, label: bad });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { error: "PRESENCE_NAME_INVALID" });
+  }
+  const notJoined = await rename({ room: "rename-room", presenceId: pendingSeat.id, label: "前端組長" });
+  assert.equal(notJoined.status, 400);
+  assert.deepEqual(await notJoined.json(), { error: "PRESENCE_NOT_JOINED" });
+  const unknownSeat = await rename({ room: "rename-room", presenceId: "missing", label: "前端組長" });
+  assert.equal(unknownSeat.status, 400);
+  assert.deepEqual(await unknownSeat.json(), { error: "PRESENCE_NOT_FOUND" });
+
+  // Taken: another terminal seat, or a managed agent, already holds that exact name.
+  const takenBySeat = await rename({ room: "rename-room", presenceId: claudeSeat.id, label: "前端 2" });
+  assert.equal(takenBySeat.status, 200, "different provider prefix, so claude（前端 2） is a different name");
+  const managed = await fetch(`${server.url}/api/rooms/managed-agents`, {
+    method: "POST", headers, body: JSON.stringify({ room: "rename-room", provider: "codex", label: "即時審查" }),
+  });
+  assert.equal(managed.status, 201);
+  const takenByManaged = await rename({ room: "rename-room", presenceId: codexSeat.id, label: "即時審查" });
+  assert.equal(takenByManaged.status, 400);
+  assert.deepEqual(await takenByManaged.json(), { error: "PRESENCE_NAME_TAKEN" });
+  const codexTwin = presenceStore.register({ provider: "codex", workspace, hostPid: 98774 });
+  presenceStore.requestJoin(codexTwin.id, "rename-room", workspace);
+  presenceStore.join(codexTwin.id, "rename-room", workspace, { collaborationMode: "seat-only", syncTurns: false });
+  const takenByTwin = await rename({ room: "rename-room", presenceId: codexTwin.id, label: " 前端 2 " });
+  assert.equal(takenByTwin.status, 400);
+  assert.deepEqual(await takenByTwin.json(), { error: "PRESENCE_NAME_TAKEN" });
+
+  // Success: label trimmed, provider kept in front, id and standby approval untouched, one ledger line.
+  const before = (await ledgerTail(0)).at(-1)?.seq ?? 0;
+  const renamed = await rename({ room: "rename-room", presenceId: codexSeat.id, label: " 前端組長 " });
+  assert.equal(renamed.status, 200);
+  const renamedBody = (await renamed.json()) as {
+    session: { id: string; displayName: string; standbyApproved: boolean; collaborationMode: string };
+    previousDisplayName: string;
+    displayName: string;
+  };
+  assert.equal(renamedBody.previousDisplayName, "codex（前端 2）");
+  assert.equal(renamedBody.displayName, "codex（前端組長）");
+  assert.equal(renamedBody.session.id, codexSeat.id);
+  assert.equal(renamedBody.session.displayName, "codex（前端組長）");
+  assert.equal(renamedBody.session.standbyApproved, true);
+  assert.equal(renamedBody.session.collaborationMode, "room-first");
+  const lines = await ledgerTail(before);
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0]?.author, "system");
+  assert.equal(lines[0]?.text, `席位 ${codexSeat.id.slice(0, 8)} 更名：codex（前端 2） → codex（前端組長）`);
+  const listed = (await (await fetch(`${server.url}/api/rooms/presence?room=rename-room`, { headers: { Cookie: cookie } })).json()) as {
+    sessions: Array<{ id: string; displayName?: string }>;
+  };
+  assert.equal(listed.sessions.find((session) => session.id === codexSeat.id)?.displayName, "codex（前端組長）");
+  // Same name again is a no-op: 200, no second ledger line.
+  const unchanged = await rename({ room: "rename-room", presenceId: codexSeat.id, label: "前端組長" });
+  assert.equal(unchanged.status, 200);
+  assert.equal((await ledgerTail(before)).length, 1);
+
+  // In-flight work pins the name; once that delivery is cancelled the rename goes through.
+  const posted = await fetch(`${server.url}/api/rooms/presence/post`, {
+    method: "POST", headers, body: JSON.stringify({ room: "rename-room", presenceId: codexSeat.id, text: "先看一下前端" }),
+  });
+  assert.equal(posted.status, 202);
+  const delivery = ((await posted.json()) as { delivery: { id: string } }).delivery;
+  const busy = await rename({ room: "rename-room", presenceId: codexSeat.id, label: "前端 2" });
+  assert.equal(busy.status, 400);
+  assert.deepEqual(await busy.json(), { error: "PRESENCE_RENAME_BUSY" });
+  assert.equal(presenceStore.get(codexSeat.id)?.displayName, "codex（前端組長）");
+  const cancelled = await fetch(`${server.url}/api/rooms/deliveries/cancel`, {
+    method: "POST", headers, body: JSON.stringify({ room: "rename-room", deliveryId: delivery.id }),
+  });
+  assert.equal(cancelled.status, 200);
+  const afterCancel = await rename({ room: "rename-room", presenceId: codexSeat.id, label: "前端 2" });
+  assert.equal(afterCancel.status, 200);
+  assert.equal(((await afterCancel.json()) as { displayName: string }).displayName, "codex（前端 2）");
+});
+
 test("Web dashboard cancels only the exact active Writer run", async (t) => {
   const data = await mkdtemp(join(tmpdir(), "orchestratory-web-cancel-data-"));
   const workspace = await repository();
