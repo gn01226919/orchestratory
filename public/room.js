@@ -1325,7 +1325,24 @@ function seatRemovalLock(subject, snapshot) {
   const presenceId = typeof subject?.presenceId === "string" ? subject.presenceId : "";
   const leases = Array.isArray(snapshot?.leases) ? snapshot.leases : [];
   const deliveries = Array.isArray(snapshot?.deliveries) ? snapshot.deliveries : [];
-  if (name && leases.some((lease) => lease?.state === "active" && lease?.writer?.displayName === name)) {
+  /*
+   * Matched on the id the server matches on.
+   *
+   * This asked whether any active lease carried the seat's NAME, one line above the delivery check
+   * that asks by `targetPresenceId` -- and `#assertRemovable` refuses by `actorId`. So a seat that
+   * held the Writer lease and was then renamed passed the client's check (the lease still stores
+   * the name it was taken under), the button offered removal, and the server refused it. Nothing
+   * was misidentified; one of two checks in the same function was keyed on the wrong thing.
+   *
+   * `displayName` stays as a fallback for a lease written before `actorId` was recorded: dropping
+   * it would turn a stale row from "locked for a reason" into "removable", which is the direction
+   * that costs something.
+   */
+  const holdsWriter = leases.some((lease) => lease?.state === "active"
+    && (lease?.writer?.actorId
+      ? lease.writer.actorId === presenceId
+      : Boolean(name) && lease?.writer?.displayName === name));
+  if (holdsWriter) {
     return { locked: true, reason: SEAT_REMOVAL_WRITER_REASON };
   }
   const held = presenceId
