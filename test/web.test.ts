@@ -3894,3 +3894,16 @@ test("a request card that lapsed or was answered goes grey and says which, with 
   assert.match(css, /\.office-notification\.is-expired \{ opacity: \.55; \}/u);
   assert.match(css, /\.office-notification\.is-expired::before \{ display: none; \}/u);
 });
+
+test("the terminal panel states that turns mirror into the ledger, with a switch that starts on", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const panel = /^function renderPresencePanel\(\) \{[\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(panel, /syncText\.textContent = "此終端的對話會鏡射進帳本（需要宿主 CLI 支援 hook）";/u);
+  assert.match(panel, /syncInput\.setAttribute\("role", "switch"\);/u);
+  /* Default on: only an explicit false stored for this seat turns the switch off. */
+  assert.match(panel, /syncInput\.checked = state\.presenceTurnSync\[session\.id\] !== false;/u);
+  assert.doesNotMatch(panel, /同步此終端的使用者／Assistant 可見對話|可選/u);
+  const css = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
+  assert.match(css, /\.office-presence-row \.presence-sync-input \{[^}]*appearance: none;/u);
+  assert.match(css, /\.office-presence-row \.presence-sync-input:checked::after \{ transform: translateX\(14px\);/u);
+});
