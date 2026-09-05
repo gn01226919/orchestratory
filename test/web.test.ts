@@ -2802,8 +2802,21 @@ test("the acknowledgement offer is narrow, and says what it is not", async () =>
   // The wording the owner reads is part of the control. A button that implied the product had
   // checked something would be the same measured falsehood this round removed, so the copy is
   // asserted rather than left to drift.
-  const offer = source.slice(source.indexOf("function renderUnattestedAcknowledgement"));
-  const body = offer.slice(0, offer.indexOf("\nasync function refreshMergeHistory"));
+  /* The offer lives on the card that names the record now, not in a banner after every card in the
+     group -- the owner scrolled past sixteen of those without reaching the one control that
+     answered them. The copy is asserted across BOTH halves it was split into: the card renderer
+     carries the sentences, `submitUnattestedAcknowledgement` carries the phrase and the route.
+     Each slice is bounded by a function checked to exist, because an indexOf that misses returns
+     -1 and slices from the end -- which is how a deletion here once swallowed two live functions
+     while `node --check` and thirty-seven tests stayed green. */
+  const cut = (from: string, to: string): string => {
+    const a = source.indexOf(from);
+    const b = source.indexOf(to, a);
+    assert.ok(a >= 0 && b > a, `${from} … ${to} is not a range in room.js`);
+    return source.slice(a, b);
+  };
+  const body = cut("function renderPromotionHistoryEntry", "\nfunction historyCopyable")
+    + cut("async function submitUnattestedAcknowledgement", "\nfunction selectMergeHistorySection");
   assert.match(body, /不會修復任何紀錄/u);
   assert.match(body, /不會寫入 main/u);
   assert.match(body, /不代表產品驗證過什麼/u);

@@ -6190,8 +6190,13 @@ function mergeApprovalClosedReason(approval) {
     return `核准送出後 main 或快照已改變${changed ? `（${changed}）` : ""}，這筆核准在執行前作廢，沒有進入併入。沒有人拒絕它。`;
   }
   if (code === "OWNER_REJECTED" && !approval?.refusal?.reason) return "有人拒絕了這筆核准，沒有留下理由。";
-  const stated = approval?.refusal?.reason || code;
-  if (stated) return String(stated);
+  /* A stated reason is a person's words and is shown as written. A bare code is the machine's,
+     and printing it was how a reader met "MAIN_MERGE_APPROVAL_BINDING_CHANGED" with nowhere to
+     look it up: the two known codes are told in words above, and anything else says what IS
+     known -- that it ended, and that the code is the thing to quote when asking about it. */
+  const reason = approval?.refusal?.reason;
+  if (reason) return String(reason);
+  if (code) return `這筆核准被系統結束了，原因碼 ${String(code)}。畫面還沒有這個原因的白話說明；回報時請附上這個碼。`;
   if (approval?.state !== "expired") return "";
   const opened = Date.parse(approval?.createdAt ?? "");
   const closed = Date.parse(approval?.expiresAt ?? "");
@@ -6425,9 +6430,27 @@ function renderPromotionHistoryEntry(host, entry, pairedApproval = null) {
     action.className = "merge-history-action";
     const explain = document.createElement("p");
     explain.textContent = "紀錄本身完整；只是這個服務在併入之後才啟動，沒有第一手記憶，所以不替它背書。"
-      + "你自行檢查專案後，在這裡確認即可。";
-    action.append(explain);
-    if (entry?.holdsProjectExclusiveMarker === true) {
+      + "在你確認已檢查之前，這個專案不會開始新的併入。";
+    /*
+     * The sentences that used to sit in the group-footer banner, moved WITH the button rather than
+     * dropped with it. They are the disclosure, not decoration: a control that let the owner think
+     * the product had checked something would be the measured falsehood this screen exists to
+     * remove, and it is the one thing consolidating two entry points must not lose.
+     */
+    const warn = document.createElement("p");
+    warn.className = "merge-history-action-warn";
+    warn.textContent = "按下這個按鈕不會修復任何紀錄、不會寫入 main、不會結束任何仍在執行的程序，"
+      + "也不代表產品驗證過什麼。它只記錄「你看過了」，而且只對目前這個服務有效，重新啟動後會再問一次。";
+    action.append(explain, warn);
+    /*
+     * Every unattested card carries the button.
+     *
+     * It was gated on `holdsProjectExclusiveMarker`, which `#unattestedClaimView` sets to `true` on
+     * every row it builds -- so the gate excluded nothing, and could only ever START to. A condition
+     * that is always true is not a guard; it is a promise the next server change can break in
+     * silence, on the one screen whose entire purpose is that button.
+     */
+    {
       const confirm = document.createElement("button");
       confirm.type = "button";
       confirm.className = "merge-history-acknowledge";
@@ -6731,7 +6754,14 @@ function renderMergeHistory() {
   if (!counts.review) {
     mergeHistoryEmpty(reviewHost, "目前沒有等你確認的 promotion 或核准。");
   }
-  renderUnattestedAcknowledgement(reviewHost, mergeHistoryUnattested(state.mergeHistory));
+  /*
+   * One entry point for one project-wide decision.
+   *
+   * The confirmation used to render only here, after every card in the group -- which is how
+   * the owner scrolled past sixteen cards reading "this record is incomplete" without ever
+   * reaching the control that answered them. It is on the card now. Keeping this as well
+   * would put one decision behind two controls that look different and do the same thing.
+   */
   if (!counts.closed) {
     mergeHistoryEmpty(closedHost, "目前沒有逾時或被拒絕的核准。");
   }
@@ -6740,39 +6770,6 @@ function renderMergeHistory() {
   }
 }
 
-/*
- * The owner's way of telling THIS daemon that they checked the project themselves.
- *
- * It is rendered here, and only here, because this is the one screen that lists the records it is
- * about.  The wording is deliberately about what the owner is doing rather than about what the
- * product found: the product cannot tell a promotion it finished from one a repository hook wrote,
- * and a button that implied otherwise would be the same measured falsehood this whole round removed.
- */
-function renderUnattestedAcknowledgement(host, unattested) {
-  if (!host || !unattested.length) return;
-  const box = document.createElement("section");
-  box.className = "merge-history-action";
-  const explain = document.createElement("p");
-  explain.textContent = `這個服務重新啟動過，因此 ${unattested.length} 筆紀錄它無法親自證實——`
-    + "紀錄本身、trace 與稽核檔都是同帳號可改寫的位元。在你確認已檢查之前，這個專案不會開始新的併入。";
-  const warn = document.createElement("p");
-  warn.textContent = "按下這個按鈕不會修復任何紀錄、不會寫入 main、不會結束任何仍在執行的程序，"
-    + "也不代表產品驗證過什麼。它只記錄「你看過了」，而且只對目前這個服務有效，重新啟動後會再問一次。";
-  const confirm = document.createElement("button");
-  confirm.type = "button";
-  confirm.className = "merge-history-acknowledge";
-  confirm.textContent = "確認已檢查：我已自行檢查這個專案，沒有更早的併入還在執行";
-  confirm.addEventListener("click", () => submitUnattestedAcknowledgement(confirm, box));
-  box.append(explain, warn, confirm);
-  host.append(box);
-}
-
-/*
- * The one path that sends the owner's declaration, shared by the banner above and the button on
- * each card so the two can never drift into different phrases or different endpoints.  The
- * endpoint is project-wide by design -- it acknowledges every record this daemon cannot vouch for,
- * not one -- which is why the card's button says so.
- */
 async function submitUnattestedAcknowledgement(confirm, box) {
   confirm.disabled = true;
   try {
