@@ -4419,3 +4419,69 @@ test("a replied delivery receipt points at the reply instead of counting attempt
   // Every other state keeps the attempt count: there the ask is still in flight or has stopped.
   assert.match(receipt, /嘗試 \$\{delivery\.attempt\}\/\$\{delivery\.maxAttempts\}/u);
 });
+
+test("a desk on the office floor opens its own task-drawer row, not the composer", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const desk = /^function createOfficeDesk\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.notEqual(desk, "", "room.js keeps createOfficeDesk");
+  // Click, Enter/Space and the figure all land in the task drawer; none of them address the composer.
+  assert.match(desk, /cube\.addEventListener\("keydown", \(event\) => \{\s*if \(event\.key === "Enter" \|\| event\.key === " "\) \{\s*event\.preventDefault\(\);\s*focusOfficeTaskRow\(agent\);/u);
+  assert.match(desk, /if \(!cube\.dataset\.dragMoved\) focusOfficeTaskRow\(agent\);/u);
+  assert.match(desk, /desk\.addEventListener\("click", \(\) => focusOfficeTaskRow\(agent\)\);/u);
+  assert.doesNotMatch(desk, /focusAgentComposer/u);
+  const focus = /^function focusOfficeTaskRow\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.notEqual(focus, "", "room.js keeps focusOfficeTaskRow");
+  // The owner's desk does nothing; a resident gets the card; everyone else gets their expanded row.
+  assert.match(focus, /if \(!agent \|\| agent === "you"\) return "";/u);
+  assert.match(focus, /ROOM_RESIDENT_PROVIDER_IDS\.includes\(agent\)/u);
+  assert.match(focus, /officeTaskExpanded\.add\(key\)/u);
+  assert.match(focus, /openOfficeDrawer\("office-task-center"\)/u);
+  assert.doesNotMatch(focus, /office-drawer-chat|focusAgentComposer/u);
+  const spotlight = /^function spotlightOfficeTaskNode\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(spotlight, /node\.classList\.add\("is-focused"\)/u);
+  assert.match(spotlight, /setTimeout\(\(\) => node\.classList\.remove\("is-focused"\), 1500\)/u);
+  // Rows are found by the keys the row builders use, so the lookup cannot drift from the render.
+  const keyFn = /^function officeTaskRowKeyForAgent\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(keyFn, /return `seat:\$\{session\.id\}`;/u);
+  assert.match(keyFn, /return `child:\$\{managed\.id\}`;/u);
+  // The seat chips still dock the seat above the composer: that path is theirs, not the desk's.
+  const chips = /^function renderSeatChips\(\) \{[\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(chips, /button\.addEventListener\("click", \(\) => focusAgentComposer\(chip\.agent\)\);/u);
+  const css = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
+  assert.match(css, /^\.office-task-row\.is-focused, \.office-resident-card\.is-focused \{/mu);
+});
+
+test("a resident model gets a card above the 終端 group that says it holds no seat and cannot be removed", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const card = /^function renderOfficeResidentCard\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.notEqual(card, "", "room.js keeps renderOfficeResidentCard");
+  assert.match(card, /title\.textContent = `常駐模型 · \$\{provider\}`;/u);
+  assert.match(card, /note\.textContent = `透過 @\$\{provider\} 喚醒，不占席位、不可移除。`;/u);
+  // "@ 帶入" opens the chat drawer first, then inserts through the one shared mention helper.
+  assert.match(card, /officeButton\("@ 帶入", \(\) => \{\s*openOfficeDrawer\("office-drawer-chat"\);\s*insertMentionIntoComposer\(provider\);/u);
+  // No remove button of any kind on the card.
+  assert.doesNotMatch(card, /officeButton\("移|changePresenceMembership|changeManagedAgent|lockRemovalButton/u);
+  const render = /^function renderTaskCenter\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(render, /if \(name === "終端" && officeResidentFocus\) list\.append\(renderOfficeResidentCard\(officeResidentFocus\)\);/u);
+  // The card is part of what the drawer paints, so it is part of the signature that decides a repaint.
+  assert.match(render, /resident: officeResidentFocus,/u);
+});
+
+test("the remove button on a seat row is greyed with its reason while the seat is Writer or mid-task", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const lock = /^function seatRemovalLock\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(lock, /if \(isWriter\) return "正在當 Writer，先交接或結束 Writer 才能移除";/u);
+  assert.match(lock, /if \(working\) return "有交辦執行中，先請求取消或等它回覆";/u);
+  assert.match(lock, /return "";/u);
+  const grey = /^function lockRemovalButton\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(grey, /button\.disabled = true;/u);
+  assert.match(grey, /note\.className = "office-task-lock";/u);
+  const seats = /^function officeSeatRows\(\) \{[\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(seats, /delivery\.targetPresenceId === session\.id && delivery\.state === "working"/u);
+  assert.match(seats, /if \(lock\) lockRemovalButton\(actions, "移出房間", lock\);/u);
+  const children = /^function officeChildRows\(\) \{[\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(children, /if \(lock\) lockRemovalButton\(actions, "移除子 Agent", lock\);/u);
+  // The side panel's own builder is untouched: the greying happens in the drawer's rows only.
+  const panel = /^function seatActionButtons\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.doesNotMatch(panel, /seatRemovalLock|lockRemovalButton/u);
+});

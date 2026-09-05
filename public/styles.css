@@ -2076,8 +2076,19 @@ button.cancel-pending:hover { border-color: var(--warn); }
 .office-drawer-tasks .office-task-list { flex: 1; overflow-y: auto; padding: 2px 10px 10px; scrollbar-width: thin; }
 .office-task-list { display: grid; align-content: start; gap: 5px; }
 .office-task-empty { padding: 4px 6px 8px; color: #736b76; font-size: 10px; line-height: 1.5; }
-.office-task-row { border: 1px solid #2f2833; border-radius: 8px; background: #1a171f; }
+.office-task-row { border: 1px solid #2f2833; border-radius: 8px; background: #1a171f; transition: border-color .6s ease, box-shadow .6s ease; }
 .office-task-row.is-open { border-color: #7a6738; box-shadow: 0 0 0 1px rgb(231 195 122 / 12%); }
+/* The row a desk click landed on: lit for a moment, then back to the open-row border. */
+.office-task-row.is-focused, .office-resident-card.is-focused { border-color: #8ce1b4; box-shadow: 0 0 0 2px rgb(140 225 180 / 35%), 0 0 18px rgb(140 225 180 / 25%); transition: none; }
+.office-task-lock { flex-basis: 100%; color: #8f8291; font-size: 10px; line-height: 1.4; text-align: right; }
+.office-task-row-actions button:disabled { opacity: .45; cursor: not-allowed; }
+.office-resident-card { border: 1px solid #2f2833; border-radius: 8px; background: #1a171f; padding: 8px 10px 10px; transition: border-color .6s ease, box-shadow .6s ease; }
+.office-resident-card header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.office-resident-card header i { width: 8px; height: 8px; border-radius: 50%; box-shadow: 0 0 8px currentColor; }
+.office-resident-card header b { flex: 1; color: #e6dce7; font: 800 11px/1.2 var(--font-mono); }
+.office-resident-close { padding: 0 4px; border: 0; background: transparent; color: #6e6873; font-size: 14px; line-height: 1; cursor: pointer; }
+.office-resident-close:hover { color: #e6dce7; }
+.office-resident-card p { margin: 0 0 8px; color: #cfc5d1; font-size: 10.5px; line-height: 1.5; }
 .office-task-row-head {
   display: grid;
   grid-template-columns: auto auto minmax(0, 1fr) auto;

@@ -3125,12 +3125,37 @@ function officeRunningRows() {
   return rows;
 }
 
+/*
+ * Why a seat cannot be removed right now, or "" when it can. Removing the active Writer would
+ * strand its draft area and every child it delegated to; removing a seat that is mid-task drops
+ * work the owner asked for. The drawer says so beside the greyed button instead of letting the
+ * click fail on the server, and the lock lifts on its own when the lease ends or the reply lands.
+ */
+function seatRemovalLock({ isWriter, working }) {
+  if (isWriter) return "正在當 Writer，先交接或結束 Writer 才能移除";
+  if (working) return "有交辦執行中，先請求取消或等它回覆";
+  return "";
+}
+
+/* Grey the one button that removes this seat and say why, in the row's own action bar. */
+function lockRemovalButton(actions, label, reason) {
+  const button = actions.find((node) => node.tagName === "BUTTON" && node.textContent === label);
+  if (!button) return;
+  button.disabled = true;
+  button.title = reason;
+  const note = document.createElement("small");
+  note.className = "office-task-lock";
+  note.textContent = reason;
+  actions.splice(actions.indexOf(button) + 1, 0, note);
+}
+
 function officeSeatRows() {
   const activeLeases = (state.writers?.leases || []).filter((entry) => entry.state === "active");
   return (state.presences || []).map((session, index) => {
     const listening = seatListeningState(session);
     const tag = seatTag(session.id);
     const isWriter = activeLeases.some((lease) => lease.writer?.displayName === session.displayName);
+    const working = (state.deliveries || []).some((delivery) => delivery.targetPresenceId === session.id && delivery.state === "working");
     const details = [["席位", seatIdentityText(session)]];
     const actions = [];
     if (session.joined) {
@@ -3152,6 +3177,10 @@ function officeSeatRows() {
     const wakeNotice = seatWakeNotice(session, listening);
     if (wakeNotice) details.push(["紀錄", wakeNotice]);
     actions.push(...seatActionButtons(session, listening).children);
+    /* The same "移出房間" button seatActionButtons builds for the side panel; here it is greyed with
+       its reason so the row can say why the seat is staying. */
+    const lock = session.joined ? seatRemovalLock({ isWriter, working }) : "";
+    if (lock) lockRemovalButton(actions, "移出房間", lock);
     return {
       key: `seat:${session.id}`, color: authorColor(session.provider),
       name: session.displayName || (tag ? `${session.provider} · ${tag}` : `${session.provider} 申請 ${index + 1}`),
@@ -3165,15 +3194,24 @@ function officeSeatRows() {
 }
 
 function officeChildRows() {
-  const rows = state.managedAgents.map((agent) => ({
-    key: `child:${agent.id}`, color: authorColor(agent.provider), name: agent.displayName,
-    status: agent.busy ? "回覆中" : "唯讀 · 閒置", statusCls: agent.busy ? "is-busy" : "",
-    details: [["來源", `${agent.provider} · ${agent.model || "—"}`], ["權限", "GUI Managed · 對話唯讀 · Writer 需另行授權"]],
-    actions: [
+  const activeLeases = (state.writers?.leases || []).filter((entry) => entry.state === "active");
+  const rows = state.managedAgents.map((agent) => {
+    const actions = [
       officeButton("交辦", () => focusAgentComposer(agent.displayName)),
       officeButton(agent.busy ? "取消回覆" : "移除子 Agent", (event) => void changeManagedAgent(agent, event.currentTarget), agent.busy ? "cancel" : "leave"),
-    ],
-  }));
+    ];
+    /* A busy child already shows 取消回覆 in place of the remove button; an idle child that holds the
+       Writer lease keeps its remove button, greyed, with the reason. */
+    const isWriter = activeLeases.some((lease) => lease.writer?.displayName === agent.displayName);
+    const lock = agent.busy ? "" : seatRemovalLock({ isWriter, working: false });
+    if (lock) lockRemovalButton(actions, "移除子 Agent", lock);
+    return {
+      key: `child:${agent.id}`, color: authorColor(agent.provider), name: agent.displayName,
+      status: agent.busy ? "回覆中" : "唯讀 · 閒置", statusCls: agent.busy ? "is-busy" : "",
+      details: [["來源", `${agent.provider} · ${agent.model || "—"}`], ["權限", "GUI Managed · 對話唯讀 · Writer 需另行授權"]],
+      actions,
+    };
+  });
   for (const child of (state.writers?.delegations || []).filter((entry) => entry.state === "active")) {
     rows.push({
       key: `delegation:${child.id}`, color: authorColor(child.provider || child.displayName), name: child.displayName,
@@ -3272,6 +3310,7 @@ function renderTaskCenter(force = false) {
       row.actions.map((action) => `${action.tagName}:${action.textContent}:${action.className}:${action.disabled}`),
     ])]),
     approvals: approvals.map((entry) => [entry.approval.id, entry.candidateId]),
+    resident: officeResidentFocus,
   });
   if (!force && signature === officeTaskSignature) return;
   /* A name is being typed in this list: leave it alone. The signature is deliberately not updated,
@@ -3291,6 +3330,8 @@ function renderTaskCenter(force = false) {
     : null;
   list.textContent = "";
   for (const [name, rows] of groups) {
+    /* The resident card sits above the 終端 group: a resident is what a terminal is not. */
+    if (name === "終端" && officeResidentFocus) list.append(renderOfficeResidentCard(officeResidentFocus));
     const head = document.createElement("small");
     head.className = "office-drawer-group";
     head.textContent = `${name} · ${rows.length}`;
@@ -3687,16 +3728,20 @@ function createOfficeDesk(agent) {
     if (agent !== "you") {
       cube.tabIndex = 0;
       cube.setAttribute("role", "button");
-      cube.setAttribute("aria-label", `在對話框選擇 ${agent}`);
+      /* A desk opens the seat's own row in the task drawer -- where its buttons live, including the
+         one that removes it -- not the composer. Addressing a message is what the seat chips are for. */
+      cube.setAttribute("aria-label", ROOM_RESIDENT_PROVIDER_IDS.includes(agent)
+        ? `查看常駐模型 ${agent} 的說明`
+        : `在任務清單查看 ${agent} 的席位資訊`);
       cube.addEventListener("keydown", (event) => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
-          focusAgentComposer(agent);
+          focusOfficeTaskRow(agent);
         }
       });
     }
     cube.addEventListener("click", () => {
-      if (!cube.dataset.dragMoved) focusAgentComposer(agent);
+      if (!cube.dataset.dragMoved) focusOfficeTaskRow(agent);
     });
     /* The tray is part of the band and must stay to the right of the owner's desk. */
     if (owner && byId("office-approval-tray")?.parentElement === floor) floor.insertBefore(cube, byId("office-approval-tray"));
@@ -3720,7 +3765,7 @@ function createOfficeDesk(agent) {
     orbieScale.className = "orbie-scale";
     orbieScale.append(orbie);
     desk.append(orbieScale);
-    desk.addEventListener("click", () => focusAgentComposer(agent));
+    desk.addEventListener("click", () => focusOfficeTaskRow(agent));
     if (owner) {
       desk.classList.add("office-owner-figure");
       desk.style.left = "";
@@ -4232,6 +4277,103 @@ function openOfficeTaskGroup(name) {
   list.scrollTop += head.getBoundingClientRect().top - list.getBoundingClientRect().top;
   head.classList.add("is-target");
   setTimeout(() => head.classList.remove("is-target"), 1400);
+}
+
+/*
+ * A desk on the floor stands for one row in the task drawer: a joined terminal's seat row or a
+ * managed agent's child row. The three resident models and the owner have no row -- a resident is
+ * woken by an @mention, holds no seat and cannot be removed -- so they are named by the resident
+ * card instead (renderOfficeResidentCard). Keyed the way officeSeatRows / officeChildRows key
+ * their rows, so the lookup and the render cannot disagree.
+ */
+function officeTaskRowKeyForAgent(agent) {
+  const session = presenceForAgent(agent);
+  if (session) return `seat:${session.id}`;
+  const managed = state.managedAgents.find((entry) => entry.displayName === agent);
+  if (managed) return `child:${managed.id}`;
+  return "";
+}
+
+/* Which resident the card above the 終端 group names, or "" for no card. Read by renderTaskCenter. */
+let officeResidentFocus = "";
+let officeTaskFocusTimer = null;
+
+/* Light one node in the task list for a moment and bring it into view. The list scrolls, not the
+   page (see openOfficeTaskGroup). One timer: a second click restarts the glow instead of letting the
+   first click's timer put it out early. */
+function spotlightOfficeTaskNode(list, node) {
+  list.scrollTop += node.getBoundingClientRect().top - list.getBoundingClientRect().top - 6;
+  for (const lit of list.querySelectorAll(".is-focused")) lit.classList.remove("is-focused");
+  clearTimeout(officeTaskFocusTimer);
+  /* Reflow between remove and add so a re-click restarts the CSS transition. */
+  void node.offsetWidth;
+  node.classList.add("is-focused");
+  officeTaskFocusTimer = setTimeout(() => node.classList.remove("is-focused"), 1500);
+}
+
+/*
+ * Clicking a desk (or pressing Enter/Space on it) opens the task drawer on that agent's own row,
+ * expanded, so its buttons -- 交辦, 更名, standby, 移出房間 / 移除子 Agent -- are the information
+ * panel. The owner's desk does nothing: there is no row and no card for "you". A resident model
+ * gets the card instead. Returns what was shown: "row", "resident" or "".
+ */
+function focusOfficeTaskRow(agent) {
+  if (!agent || agent === "you") return "";
+  const resident = ROOM_RESIDENT_PROVIDER_IDS.includes(agent);
+  const key = resident ? "" : officeTaskRowKeyForAgent(agent);
+  if (!resident && !key) return "";
+  if (resident) officeResidentFocus = agent;
+  else officeTaskExpanded.add(key);
+  if (byId("office").hidden) switchView("office");
+  /* openOfficeDrawer forces a render, which paints the card and opens the row before the lookup. */
+  openOfficeDrawer("office-task-center");
+  const list = byId("office-task-list");
+  if (!list) return "";
+  const node = resident
+    ? list.querySelector(".office-resident-card")
+    : list.querySelector(`.office-task-row[data-key="${CSS.escape(key)}"]`);
+  if (!node) return "";
+  spotlightOfficeTaskNode(list, node);
+  /* Focus lands on the thing to do next: the row's toggle, or the card's "@ 帶入" (not its ×). */
+  (resident ? node.querySelector(".office-task-row-actions button") : node.querySelector(".office-task-row-head"))?.focus({ preventScroll: true });
+  return resident ? "resident" : "row";
+}
+
+/*
+ * The card that stands in for a resident's row: one line saying how it is reached and that there is
+ * nothing to remove, and a button that puts @name into the composer. The composer lives in the chat
+ * drawer, and only one drawer is open at a time, so the button opens that drawer first; a mention
+ * inserted into a hidden box is a mention nobody sees.
+ */
+function renderOfficeResidentCard(provider) {
+  const card = document.createElement("article");
+  card.className = "office-resident-card";
+  card.dataset.provider = provider;
+  const head = document.createElement("header");
+  const dot = document.createElement("i");
+  dot.style.background = authorColor(provider);
+  const title = document.createElement("b");
+  title.textContent = `常駐模型 · ${provider}`;
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "office-resident-close";
+  close.setAttribute("aria-label", "收起常駐模型說明");
+  close.textContent = "×";
+  close.addEventListener("click", () => {
+    officeResidentFocus = "";
+    renderTaskCenter(true);
+  });
+  head.append(dot, title, close);
+  const note = document.createElement("p");
+  note.textContent = `透過 @${provider} 喚醒，不占席位、不可移除。`;
+  const actions = document.createElement("div");
+  actions.className = "office-task-row-actions";
+  actions.append(officeButton("@ 帶入", () => {
+    openOfficeDrawer("office-drawer-chat");
+    insertMentionIntoComposer(provider);
+  }));
+  card.append(head, note, actions);
+  return card;
 }
 
 function fireWire(from, to) {
