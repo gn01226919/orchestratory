@@ -66,6 +66,10 @@ const state = {
   presenceTurnSync: {},
   presenceViewSignature: "",
   presences: [],
+  /* Join requests the owner chose not to approve. There is no route that tells a waiting terminal
+     "no" -- its request simply lapses at the product's two-minute ceiling -- so "not approving" is a
+     local decision: the row is put away here and the lapse is reported when the seat disappears. */
+  dismissedSeatRequests: new Set(),
   knownExternalNames: new Set(),
   managedAgents: [],
   deliveries: [],
@@ -1310,6 +1314,10 @@ async function changePresenceMembership(session, button) {
       if (state.selectedPresenceId === session.id) state.selectedPresenceId = "";
     }
     renderPresencePanel();
+    /* The bell drawer carries this seat's approve button too. renderPresencePanel has just refreshed
+       the view signature, so the refresh below will usually see "no change" and not repaint the
+       drawer -- leaving a disabled "建立中…" button on a request that is already answered. */
+    renderOfficeNotifications();
     syncOfficeDesks();
     if (!byId("office").hidden) updateOffice(state.recent || []);
     await refreshPresence(true);
@@ -1317,6 +1325,7 @@ async function changePresenceMembership(session, button) {
   } catch (error) {
     showRoomError(error, { prefix: joining ? "核准加入房間失敗" : "移出房間失敗", session });
     renderPresencePanel();
+    renderOfficeNotifications();
   }
 }
 
@@ -1447,6 +1456,7 @@ async function changePresenceStandby(session, action, button) {
   } catch (error) {
     showRoomError(error, { prefix: "room-wait 待命變更失敗" });
     renderPresencePanel();
+    renderOfficeNotifications();
   }
 }
 
@@ -1509,26 +1519,52 @@ async function refreshPresence(force = false) {
       candidates: Array.isArray(writerValue.candidates) ? writerValue.candidates : [],
       busyLeaseIds: Array.isArray(writerValue.busyLeaseIds) ? writerValue.busyLeaseIds : [],
     };
-    if (state.controlInitialized) {
-      for (const session of state.presences) {
-        const before = previous.get(session.id);
-        if (!before && !session.joined) {
-          addOfficeNotification("presence", `${session.provider} 申請加入 Room`, "請在左側「新增 Agents」審核；批准前不會記錄內容。", false);
-        }
-        if (session.joined && session.standbyRequested && !before?.standbyRequested) {
-          addOfficeNotification(
-            "presence",
-            `${session.displayName || session.provider} 申請 room-wait 待命`,
-            "同一個 Agent 的第二步（① 已加入 → ② 待命待核准）。核准只是「允許它收工作」，不代表它隨時在收聽——它要自己呼叫 room_wait 才收得到，而且沒辦法從這裡叫醒它。可直接在這裡核准。",
-            false,
-            { kind: "standby-approve", presenceId: session.id },
-          );
-        }
+    /*
+     * A seat asking to join or to stand by is announced whether or not the control plane has
+     * finished loading, and on the first read of a room as much as on the hundredth: a request that
+     * was already waiting when the page opened is exactly as unanswered as one that arrived later,
+     * and it lapses on the same two-minute clock. Marked unread so the bell shows a number -- an
+     * announcement filed as already-read was how a request sat unnoticed until it expired.
+     */
+    for (const session of state.presences) {
+      const before = previous.get(session.id);
+      if (!before && session.requested && !session.joined) {
+        addOfficeNotification(
+          "presence",
+          `${seatRequestTitle(session)} 申請加入 Room`,
+          "在這裡按核准，或到任務清單底部「⚙ 終端加入設定」取名、改協作模式後核准；核准前不會記錄它的內容。",
+          true,
+          { kind: "join-approve", presenceId: session.id },
+        );
       }
-      for (const [id, before] of previous) {
-        if (before.joined && !state.presences.some((session) => session.id === id)) {
-          addOfficeNotification("presence", `${before.displayName || before.provider} 已離線`, "終端已關閉，人物與辦公桌已自動移除。", false);
-        }
+      if (session.joined && session.standbyRequested && !session.standbyApproved && !before?.standbyRequested) {
+        addOfficeNotification(
+          "presence",
+          `${session.displayName || seatRequestTitle(session)} 申請 room-wait 待命`,
+          "同一個 Agent 的第二步（① 已加入 → ② 待命待核准）。核准只是「允許它收工作」，不代表它隨時在收聽——它要自己呼叫 room_wait 才收得到，而且沒辦法從這裡叫醒它。可直接在這裡核准。",
+          true,
+          { kind: "standby-approve", presenceId: session.id },
+        );
+      }
+    }
+    for (const [id, before] of previous) {
+      if (state.presences.some((session) => session.id === id)) continue;
+      if (before.requested && !before.joined) {
+        /* The server keeps no record of a lapsed request, so the only place the owner can learn
+           that a terminal gave up waiting is here, from the diff. Approving from this page keeps the
+           seat in the list as joined, so a vanished pending seat is a lapse (or a closed terminal),
+           never something the owner did. */
+        const dismissed = state.dismissedSeatRequests.delete(id);
+        addOfficeNotification(
+          "presence",
+          `${seatRequestTitle(before)} 的加入申請已逾時`,
+          dismissed
+            ? "你沒有核准，申請已在產品上限 2 分鐘內過期；它要再進來得自己重送。"
+            : "產品把等待核准鎖在 2 分鐘，逾時就消失（也可能是該終端已關閉），請該終端重送申請。",
+          true,
+        );
+      } else if (before.joined && state.controlInitialized) {
+        addOfficeNotification("presence", `${before.displayName || before.provider} 已離線`, "終端已關閉，人物與辦公桌已自動移除。", false);
       }
     }
     if (presenceChanged) {
@@ -2241,17 +2277,89 @@ function officeNotificationLive(item) {
     const session = (state.presences || []).find((entry) => entry.id === item.action.presenceId);
     return Boolean(session?.joined && session.standbyRequested && !session.standbyApproved);
   }
+  if (item.action?.kind === "join-approve") {
+    const session = (state.presences || []).find((entry) => entry.id === item.action.presenceId);
+    return Boolean(session?.requested && !session.joined && !state.dismissedSeatRequests.has(session.id));
+  }
   if (item.action?.kind === "merge-approval") {
     return mergeApprovalPending((state.mergeApprovals || []).find((entry) => entry.id === item.action.approvalId));
   }
   return false;
 }
 
+/* provider · 席位 tag · directory: the three things that tell two waiting terminals apart. */
+function seatRequestTitle(session) {
+  const tag = seatTag(session?.id);
+  const dir = workspaceLabel(session?.workspace);
+  return [session?.displayName || session?.provider || "終端", tag ? `席位 ${tag}` : "", dir].filter(Boolean).join(" · ");
+}
+
+/*
+ * Every request the owner has not answered, read from the seat list rather than from the
+ * notification log: a request is pending because the server says so, not because a notification
+ * about it happens to survive in a list capped at thirty entries. A join request the owner put away
+ * is left out here and reported once it lapses.
+ */
+function pendingSeatRequests() {
+  const requests = [];
+  for (const session of state.presences || []) {
+    if (session.requested && !session.joined) {
+      if (!state.dismissedSeatRequests.has(session.id)) requests.push({ kind: "join", session });
+    } else if (session.joined && session.standbyRequested && !session.standbyApproved) {
+      requests.push({ kind: "standby", session });
+    }
+  }
+  return requests;
+}
+
+/*
+ * The two buttons for one request, built once for every surface that shows it, so each surface
+ * calls the handler the terminal panel already calls: approving a join is changePresenceMembership,
+ * approving or revoking standby is changePresenceStandby. Nothing about approval is re-implemented
+ * here. The one asymmetry is stated rather than papered over: no route tells a waiting terminal
+ * "no", so not approving a join only puts the request away and lets it lapse on the product's clock.
+ */
+function seatRequestActions(request, onDismiss) {
+  const { kind, session } = request;
+  const actions = document.createElement("div");
+  actions.className = "office-notification-actions seat-request-actions";
+  const approve = document.createElement("button");
+  approve.type = "button";
+  approve.className = "office-notification-action primary";
+  approve.textContent = "核准";
+  const reject = document.createElement("button");
+  reject.type = "button";
+  reject.className = "office-notification-action";
+  if (kind === "join") {
+    approve.title = `核准 ${seatRequestTitle(session)} 加入房間，預設全程帳本協作＋終端對話同步；要取名或改模式，先到任務清單底部「⚙ 終端加入設定」。`;
+    approve.addEventListener("click", () => void changePresenceMembership(session, approve));
+    reject.textContent = "不核准";
+    reject.title = "沒有通道能告訴那個終端「不」：這只會把申請從這裡收起，它的申請會在產品上限 2 分鐘內自行過期。";
+    reject.addEventListener("click", () => {
+      state.dismissedSeatRequests.add(session.id);
+      renderOfficeNotifications();
+      if (typeof onDismiss === "function") onDismiss();
+    });
+  } else {
+    approve.title = `核准 ${session.displayName || session.provider} 的 room-wait 待命：允許它收工作，不代表它隨時在收聽。`;
+    approve.addEventListener("click", () => void changePresenceStandby(session, "approve", approve));
+    reject.textContent = "拒絕";
+    reject.title = "拒絕後只有那個終端能自己再呼叫 room_wait 申請。";
+    reject.addEventListener("click", () => void changePresenceStandby(session, "revoke", reject));
+  }
+  actions.append(approve, reject);
+  return actions;
+}
+
 function renderOfficeNotifications() {
   const list = byId("office-notification-list");
   if (!list) return;
   list.textContent = "";
-  const actionable = state.notifications.filter(officeNotificationLive);
+  /* Seat requests are rows of their own, one per waiting seat, so a live join or standby
+     notification is not drawn a second time: it is represented by the request it announced, and
+     falls into the informational group with its outcome once that request is answered or lapses. */
+  const seatRequests = pendingSeatRequests();
+  const actionable = state.notifications.filter((item) => officeNotificationLive(item) && item.action.kind === "merge-approval");
   const informational = state.notifications.filter((item) => !officeNotificationLive(item));
   const groupHead = (text) => {
     const head = document.createElement("small");
@@ -2270,45 +2378,43 @@ function renderOfficeNotifications() {
     row.append(title, time);
     return row;
   };
-  if (!state.notifications.length) {
+  if (!state.notifications.length && !seatRequests.length) {
     const empty = document.createElement("p");
     empty.className = "office-panel-empty";
     empty.textContent = "目前沒有通知。";
     list.append(empty);
   }
-  if (actionable.length) {
+  if (seatRequests.length || actionable.length) {
     list.append(groupHead("要你動手"));
+    for (const request of seatRequests) {
+      const row = document.createElement("article");
+      row.className = "office-notification is-actionable seat-request";
+      row.dataset.kind = "presence";
+      row.dataset.presenceId = request.session.id;
+      const title = document.createElement("b");
+      title.textContent = seatRequestTitle(request.session);
+      const what = document.createElement("small");
+      what.textContent = request.kind === "join" ? "申請加入" : "申請待命";
+      const detail = document.createElement("p");
+      detail.textContent = request.kind === "join"
+        ? "核准前不會記錄它的內容；申請在產品上限 2 分鐘後自動消失。取名或改協作模式：任務清單底部「⚙ 終端加入設定」。"
+        : "核准只是允許它收工作；它要自己呼叫 room_wait 才收得到，沒辦法從這裡叫醒它。";
+      row.append(title, what, detail, seatRequestActions(request));
+      list.append(row);
+    }
     for (const item of actionable) {
       const row = buildRow(item);
       row.classList.add("is-actionable");
+      row.dataset.kind = "proposal";
       const actions = document.createElement("div");
       actions.className = "office-notification-actions";
-      if (item.action.kind === "standby-approve") {
-        const session = (state.presences || []).find((entry) => entry.id === item.action.presenceId);
-        row.dataset.kind = "presence";
-        const approve = document.createElement("button");
-        approve.type = "button";
-        approve.className = "office-notification-action primary";
-        approve.textContent = "核准";
-        approve.title = `核准 ${session.displayName || session.provider} 的 room-wait 待命：允許它收工作，不代表它隨時在收聽。`;
-        approve.addEventListener("click", () => void changePresenceStandby(session, "approve", approve));
-        const reject = document.createElement("button");
-        reject.type = "button";
-        reject.className = "office-notification-action";
-        reject.textContent = "拒絕";
-        reject.title = "拒絕後只有那個終端能自己再呼叫 room_wait 申請。";
-        reject.addEventListener("click", () => void changePresenceStandby(session, "revoke", reject));
-        actions.append(approve, reject);
-      } else {
-        row.dataset.kind = "proposal";
-        const open = document.createElement("button");
-        open.type = "button";
-        open.className = "office-notification-action primary";
-        open.textContent = "核准併入 ▸";
-        open.title = "打開核准併入的檢視；核准前 main 不會被修改。";
-        open.addEventListener("click", () => openMergeApprovalDialog(item.action.approvalId));
-        actions.append(open);
-      }
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = "office-notification-action primary";
+      open.textContent = "核准併入 ▸";
+      open.title = "打開核准併入的檢視；核准前 main 不會被修改。";
+      open.addEventListener("click", () => openMergeApprovalDialog(item.action.approvalId));
+      actions.append(open);
       row.append(actions);
       list.append(row);
     }
@@ -2341,6 +2447,17 @@ function renderOfficeNotifications() {
             : seatState?.key === "no-standby"
             ? `② 這個申請已經失效，${session.displayName || session.provider} 現在收不到工作。${seatState.fix}`
             : "② 待命已核准";
+        row.append(done);
+      }
+      if (item.action?.kind === "join-approve") {
+        const session = (state.presences || []).find((entry) => entry.id === item.action.presenceId);
+        const done = document.createElement("small");
+        done.className = "office-notification-done";
+        done.textContent = !session
+          ? "這個申請已經不在了：逾時或該終端已關閉。"
+          : session.joined
+            ? "① 已核准加入房間"
+            : "你沒有核准；它的申請會在產品上限 2 分鐘內自行過期。";
         row.append(done);
       }
       if (item.action?.kind === "merge-approval") {

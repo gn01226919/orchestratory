@@ -3824,3 +3824,23 @@ test("the topbar carries an office/ledger switch the owner can use to pick eithe
   assert.match(switchView, /button\.setAttribute\("aria-pressed", String\(active\)\);/u);
   assert.match(switchView, /document\.body\.classList\.toggle\("view-office", office\);/u);
 });
+
+test("the bell drawer lists every waiting seat under 要你動手, wired to the panel's own approve handlers", async () => {
+  const source = await readFile(new URL("../public/room.js", import.meta.url), "utf8");
+  const render = /^function renderOfficeNotifications\(\) \{[\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.notEqual(render, "", "room.js keeps renderOfficeNotifications");
+  /* Rows come from the seat list, not from whichever notifications survived the cap of thirty. */
+  assert.match(render, /const seatRequests = pendingSeatRequests\(\);/u);
+  assert.match(render, /if \(seatRequests\.length \|\| actionable\.length\) \{\s*list\.append\(groupHead\("要你動手"\)\);/u);
+  assert.match(render, /seatRequestActions\(request\)/u);
+  const actions = /^function seatRequestActions\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(actions, /approve\.textContent = "核准";/u);
+  /* Same handlers as the terminal panel: nothing about approval is re-implemented for the drawer. */
+  assert.match(actions, /changePresenceMembership\(session, approve\)/u);
+  assert.match(actions, /changePresenceStandby\(session, "approve", approve\)/u);
+  assert.match(actions, /changePresenceStandby\(session, "revoke", reject\)/u);
+  /* The announcement is unread and says where the button is; a lapse is reported, not swallowed. */
+  assert.match(source, /"在這裡按核准，或到任務清單底部「⚙ 終端加入設定」[^"]*",\s*true,\s*\{ kind: "join-approve", presenceId: session\.id \}/u);
+  assert.match(source, /的加入申請已逾時`/u);
+  assert.doesNotMatch(source, /左側「新增 Agents」/u);
+});
