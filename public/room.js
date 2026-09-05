@@ -6213,10 +6213,32 @@ function mergeHistoryBuckets(promotions, unpromotedApprovals) {
   const retryableApprovals = [];
   const blockedApprovals = [];
   const reviewApprovals = [];
+  /* One event, one card.  A promotion this process cannot vouch for comes back beside the approval
+     that produced it -- the daemon lists that approval as consumed-without-a-row because, to it, the
+     row is unreadable -- and the two used to be two cards in the same group, counted twice, with
+     nothing on screen saying they were the same merge.  They share a taskId, so they are paired here
+     and the approval rides on the promotion's card instead of getting its own.  An attestation with
+     no matching approval, or an approval with no matching attestation, keeps its own card. */
+  const pairedApprovals = new Map();
+  const claimedApprovals = new Set();
+  const openApprovals = (Array.isArray(unpromotedApprovals) ? unpromotedApprovals : [])
+    .filter((approval) => !["rejected", "expired", "invalidated"].includes(approval?.state)
+      && typeof approval?.taskId === "string" && approval.taskId);
   for (const promotion of Array.isArray(promotions) ? promotions : []) {
     (mergeHistorySucceeded(promotion) ? mergedPromotions : reviewPromotions).push(promotion);
+    const unattested = promotion?.state === "unreadable"
+      && promotion?.unreadableReason === "promotion-attestation"
+      && typeof promotion?.taskId === "string" && promotion.taskId;
+    if (!unattested) continue;
+    const match = openApprovals.find((approval) => approval.taskId === promotion.taskId
+      && approval.state === "consumed" && !claimedApprovals.has(approval))
+      || openApprovals.find((approval) => approval.taskId === promotion.taskId && !claimedApprovals.has(approval));
+    if (!match) continue;
+    claimedApprovals.add(match);
+    pairedApprovals.set(promotion, match);
   }
   for (const approval of Array.isArray(unpromotedApprovals) ? unpromotedApprovals : []) {
+    if (claimedApprovals.has(approval)) continue;
     if (["rejected", "expired", "invalidated"].includes(approval?.state)) {
       notStartedApprovals.push(approval);
       /* The record's own state decides the group, not whether a button can follow.  `expired` and
@@ -6240,6 +6262,8 @@ function mergeHistoryBuckets(promotions, unpromotedApprovals) {
     retryableApprovals,
     blockedApprovals,
     reviewApprovals,
+    /** promotion → the consumed approval it absorbed; those approvals are in no other bucket. */
+    pairedApprovals,
     otherCount: reviewPromotions.length + reviewApprovals.length + notStartedApprovals.length,
   };
 }
@@ -6326,7 +6350,7 @@ function mergeHistoryEmpty(host, text) {
   host.append(empty);
 }
 
-function renderPromotionHistoryEntry(host, entry) {
+function renderPromotionHistoryEntry(host, entry, pairedApproval = null) {
   const item = document.createElement("article");
   item.className = "merge-history-entry";
   const header = document.createElement("header");
@@ -6365,6 +6389,10 @@ function renderPromotionHistoryEntry(host, entry) {
     historyFact(facts, "Task", entry?.taskId);
     historyFact(facts, "Promotion", entry?.id);
     historyFact(facts, "紀錄寫的狀態", entry?.storedState);
+    if (pairedApproval) {
+      historyFact(facts, "對應核准",
+        `${String(pairedApproval.id || "").slice(0, 8)} · 狀態 ${String(pairedApproval.state || "unavailable")}`);
+    }
   } else {
     historyFact(facts, "時間", entry?.updatedAt);
     historyFact(facts, "Task", entry?.taskId);
@@ -6690,7 +6718,9 @@ function renderMergeHistory() {
     if (navCount) navCount.textContent = String(counts[key]);
   }
   for (const entry of buckets.mergedPromotions) renderPromotionHistoryEntry(mergedHost, entry);
-  for (const entry of buckets.reviewPromotions) renderPromotionHistoryEntry(reviewHost, entry);
+  for (const entry of buckets.reviewPromotions) {
+    renderPromotionHistoryEntry(reviewHost, entry, buckets.pairedApprovals.get(entry) || null);
+  }
   for (const approval of buckets.reviewApprovals) renderApprovalHistoryEntry(reviewHost, approval, true);
   for (const approval of buckets.closedApprovals) renderApprovalHistoryEntry(closedHost, approval);
   for (const approval of buckets.invalidatedApprovals) renderApprovalHistoryEntry(unpromotedHost, approval);

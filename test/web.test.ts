@@ -2600,7 +2600,7 @@ test("Merge outcome archive counts only verified success as merged", async () =>
     mergeHistoryBuckets: (promotions: unknown, approvals: unknown) => {
       mergedPromotions: unknown[]; reviewPromotions: unknown[];
       notStartedApprovals: unknown[]; closedApprovals: unknown[]; invalidatedApprovals: unknown[];
-      reviewApprovals: unknown[]; otherCount: number;
+      reviewApprovals: unknown[]; pairedApprovals: Map<unknown, unknown>; otherCount: number;
     };
     mergeHistoryGroupCounts: (buckets: unknown) => Record<string, number>;
   };
@@ -2659,6 +2659,28 @@ test("Merge outcome archive counts only verified success as merged", async () =>
   assert.equal(everyRow.length, 10, "the mutually exclusive buckets preserve every input row");
   assert.equal(new Set(everyRow).size, 10, "no row can appear in two outcome buckets");
   assert.equal(buckets.mergedPromotions.length + buckets.otherCount, 10);
+
+  // One restart, one card. The promotion this process cannot vouch for and the approval the daemon
+  // now lists as consumed-without-a-row are the same merge; they share a taskId and are paired,
+  // counted once, and the approval leaves the review bucket. Either one alone keeps its own card.
+  const attested = {
+    id: "p-restart", taskId: "t-restart", state: "unreadable", unreadableReason: "promotion-attestation",
+    storedState: "applied", holdsProjectExclusiveMarker: true,
+  };
+  const consumedTwin = { id: "a-restart", taskId: "t-restart", state: "consumed" };
+  const paired = classifier.mergeHistoryBuckets([attested], [consumedTwin]);
+  assert.equal(paired.reviewPromotions.length, 1);
+  assert.equal(paired.reviewApprovals.length, 0);
+  assert.equal(paired.pairedApprovals.get(paired.reviewPromotions[0]), consumedTwin);
+  assert.equal(classifier.mergeHistoryGroupCounts(paired).review, 1);
+  assert.equal(classifier.mergeHistoryGroupCounts(classifier.mergeHistoryBuckets([attested], [])).review, 1);
+  const alone = classifier.mergeHistoryBuckets([], [consumedTwin]);
+  assert.equal(alone.reviewApprovals.length, 1);
+  assert.equal(classifier.mergeHistoryGroupCounts(alone).review, 1);
+  // A closed approval for the same task is not the twin: it is its own ending, in its own group.
+  const withClosed = classifier.mergeHistoryBuckets([attested], [{ id: "a-old", taskId: "t-restart", state: "expired" }]);
+  assert.equal(withClosed.pairedApprovals.size, 0);
+  assert.equal(withClosed.closedApprovals.length, 1);
 });
 
 test("ending a wait is offered only when the record names both a phrase and its number", async () => {
