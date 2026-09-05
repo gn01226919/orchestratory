@@ -20,6 +20,7 @@ import {
   type ClaimedRoomDelivery,
   type RoomDelivery,
   type RoomDeliveryOutcome,
+  type RoomDeliveryState,
 } from "./room-inbox.ts";
 import { safeSummary } from "../security/redact.ts";
 import { realpathSync } from "node:fs";
@@ -254,6 +255,31 @@ export function describeStoreFailure(store: string, error: unknown): string {
   return `STORE_UNAVAILABLE:${store}:${kind} — ${advice}`;
 }
 
+
+/*
+ * Why a seat cannot be removed right now, decided against the stores at the moment of the call and
+ * on the same synchronous path as the mutation it guards. The GUI greys its remove button from a
+ * five-second-old snapshot; this is the answer that holds when that snapshot is stale. Carries what
+ * the owner needs to act on it: the task for a Writer, the ledger line and its sender for a delivery.
+ */
+export const REMOVAL_BLOCKING_DELIVERY_STATES: readonly RoomDeliveryState[] = Object.freeze(["delivered", "read", "working"]);
+
+export interface SeatRemovalBlockedDetails {
+  taskId?: string;
+  ledgerSeq?: number;
+  deliveryId?: string;
+  sourceDisplayName?: string;
+  deliveryState?: RoomDeliveryState;
+}
+
+export class SeatRemovalBlockedError extends Error {
+  readonly details: SeatRemovalBlockedDetails;
+  constructor(code: string, details: SeatRemovalBlockedDetails) {
+    super(code);
+    this.name = "SeatRemovalBlockedError";
+    this.details = details;
+  }
+}
 
 export class CollaborationService {
   readonly ledger: RoomLedger;
@@ -685,12 +711,56 @@ export class CollaborationService {
     return joined;
   }
 
+  /*
+   * Refuse to remove a seat that is the active Writer or holds a delivery it has taken on. Read from
+   * the stores now, not from a view: the route and the service call this on the same synchronous
+   * path as the mutation, so nothing can slip in between the check and the write. Managed agents are
+   * addressed by their agent id in both stores, so one check serves both kinds.
+   */
+  #assertRemovable(kind: "presence" | "managed", actorId: string, roomId: string): void {
+    const prefix = kind === "presence" ? "PRESENCE_REMOVE" : "MANAGED_AGENT_REMOVE";
+    const lease = this.writerLeases.list(roomId).find(
+      (entry) => entry.state === "active" && entry.writer.actorId === actorId,
+    );
+    if (lease) throw new SeatRemovalBlockedError(`${prefix}_WRITER_ACTIVE`, { taskId: lease.taskId });
+    if (kind === "managed" && !this.inboxAvailable) return;
+    const held = this.inbox.list(roomId)
+      .filter((delivery) => delivery.targetPresenceId === actorId && REMOVAL_BLOCKING_DELIVERY_STATES.includes(delivery.state))
+      /* The one furthest along first: a seat mid-work is the clearest reason, and the one to name. */
+      .sort((a, b) => REMOVAL_BLOCKING_DELIVERY_STATES.indexOf(b.state) - REMOVAL_BLOCKING_DELIVERY_STATES.indexOf(a.state) || a.ledgerSeq - b.ledgerSeq)[0];
+    if (held) {
+      throw new SeatRemovalBlockedError(`${prefix}_DELIVERY_ACTIVE`, {
+        ledgerSeq: held.ledgerSeq,
+        deliveryId: held.id,
+        deliveryState: held.state,
+        ...(held.sourceDisplayName ? { sourceDisplayName: held.sourceDisplayName } : {}),
+      });
+    }
+  }
+
+  assertExternalRemovable(input: { presenceId: string; roomId: string; workspace: string }): void {
+    this.#assertRoomWorkspace(input.roomId, input.workspace);
+    const before = this.presence.get(input.presenceId);
+    if (!before || before.workspace !== input.workspace || before.roomId !== input.roomId) {
+      throw new Error("PRESENCE_NOT_JOINED");
+    }
+    this.#assertRemovable("presence", input.presenceId, input.roomId);
+  }
+
+  assertManagedRemovable(agentId: string, roomId: string, workspace: string): void {
+    this.#assertRoomWorkspace(roomId, workspace);
+    const agent = this.managedAgents.get(agentId);
+    if (!agent || agent.roomId !== roomId || agent.workspace !== workspace) throw new Error("MANAGED_AGENT_NOT_FOUND");
+    this.#assertRemovable("managed", agentId, roomId);
+  }
+
   removeExternal(input: { presenceId: string; roomId: string; workspace: string }): PresenceInfo {
     this.#assertRoomWorkspace(input.roomId, input.workspace);
     const before = this.presence.get(input.presenceId);
     if (!before || before.workspace !== input.workspace || before.roomId !== input.roomId) {
       throw new Error("PRESENCE_NOT_JOINED");
     }
+    this.#assertRemovable("presence", input.presenceId, input.roomId);
     this.#revokeWriterIdentity(input.presenceId, "外接席位已由 Owner 移除");
     const pending = this.inbox.list(input.roomId).filter(
       (delivery) => delivery.targetPresenceId === input.presenceId,
@@ -2054,6 +2124,7 @@ export class CollaborationService {
     this.#assertRoomWorkspace(roomId, workspace);
     const agent = this.managedAgents.get(agentId);
     if (!agent || agent.roomId !== roomId || agent.workspace !== workspace) throw new Error("MANAGED_AGENT_NOT_FOUND");
+    this.#assertRemovable("managed", agentId, roomId);
     this.#revokeWriterIdentity(agentId, "受控即時 Agent 已由 Owner 移除");
     const archived = this.managedAgents.archive(agentId, roomId);
     this.ledger.appendSystem(roomId, `${archived.displayName} 受控即時 Agent 已移除`);

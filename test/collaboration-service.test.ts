@@ -1431,6 +1431,16 @@ test("service grants and switches Writer only to eligible room identities", asyn
     taskId: "task-1", roomId: "other", workspace: source, epoch: 2, checkpoint: "wrong room",
   }), /WRITER_TASK_SCOPE_MISMATCH/u);
 
+  /* The active Writer cannot be archived out from under its task: the owner hands the lease off or
+     ends it first. Refused with the task named, and nothing about the agent or the lease changes. */
+  assert.throws(
+    () => service.archiveManaged(managed.id, "demo", source),
+    (error: unknown) => error instanceof Error && error.message === "MANAGED_AGENT_REMOVE_WRITER_ACTIVE"
+      && (error as { details?: { taskId?: string } }).details?.taskId === "task-1",
+  );
+  assert.equal(service.writerLeases.current("task-1")?.id, switched.lease.id, "the refusal leaves the lease active");
+  assert.ok(service.managedAgents.list("demo").some((agent) => agent.id === managed.id), "and the agent in place");
+  service.completeWriter({ taskId: "task-1", roomId: "demo", workspace: source, epoch: 2, checkpoint: "審查完成" });
   service.archiveManaged(managed.id, "demo", source);
   assert.equal(service.writerLeases.current("task-1"), undefined);
   assert.throws(() => service.assertWriterWrite({
@@ -1862,4 +1872,63 @@ test("a task taken and dropped is said out loud, once per drop", async (t) => {
     0,
     "a second look must not say it again",
   );
+});
+
+/*
+ * The GUI greys its remove button from a snapshot up to five seconds old, so a delivery taken on
+ * after that snapshot -- or a lease granted after it -- must be refused here, on the same synchronous
+ * path as the mutation. The refusal names the ledger line and its sender, because a seat can sit in
+ * `working` for a long time while it waits on someone else down a hand-off chain.
+ */
+test("a seat holding a delivery or the Writer lease is refused removal until it is released", async (t) => {
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-collaboration-"));
+  const gui = collaborationService(data);
+  t.after(() => gui.close());
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+  gui.ledger.createRoom("demo", "/tmp/project");
+  const joinSeat = (hostPid: number, label: string) => {
+    const seat = gui.registerExternal({ provider: "codex", workspace: "/tmp/project", hostPid, model: "gpt-test" });
+    gui.requestExternalJoin(seat.id, "demo", "/tmp/project");
+    const joined = gui.approveExternalJoin({ ...ROOM_FIRST_JOIN, presenceId: seat.id, roomId: "demo", workspace: "/tmp/project", label });
+    return { id: joined.id, displayName: joined.displayName ?? "" };
+  };
+  const target = joinSeat(7301, "frontend");
+  const asker = joinSeat(7302, "backend");
+  const remove = () => gui.removeExternal({ presenceId: target.id, roomId: "demo", workspace: "/tmp/project" });
+  const refused = (code: string, details: Record<string, unknown>) => (error: unknown) =>
+    error instanceof Error && error.message === code
+    && JSON.stringify((error as { details?: unknown }).details) === JSON.stringify(details);
+
+  // Queued work does not hold the seat: removal fails it, as before.
+  const mention = gui.ledger.append("demo", asker.displayName, `@${target.displayName} 請看登入`);
+  const queued = gui.inbox.enqueue({
+    message: mention, targetPresenceId: target.id, targetDisplayName: target.displayName,
+    sourcePresenceId: asker.id, sourceDisplayName: asker.displayName,
+  });
+  assert.equal(queued.state, "queued");
+  gui.assertExternalRemovable({ presenceId: target.id, roomId: "demo", workspace: "/tmp/project" });
+
+  // Taken on: delivered, read and working each hold it, and the refusal points at the line.
+  const claimed = await gui.inbox.wait({ presenceId: target.id, roomId: "demo", timeoutMs: 100, ledger: gui.ledger });
+  assert.ok(claimed);
+  const details = { ledgerSeq: mention.seq, deliveryId: claimed.id, deliveryState: "delivered", sourceDisplayName: asker.displayName };
+  assert.throws(remove, refused("PRESENCE_REMOVE_DELIVERY_ACTIVE", details));
+  gui.inbox.ack({ presenceId: target.id, deliveryId: claimed.id, leaseToken: claimed.leaseToken, phase: "read" });
+  assert.throws(remove, refused("PRESENCE_REMOVE_DELIVERY_ACTIVE", { ...details, deliveryState: "read" }));
+  gui.inbox.ack({ presenceId: target.id, deliveryId: claimed.id, leaseToken: claimed.leaseToken, phase: "working" });
+  assert.throws(remove, refused("PRESENCE_REMOVE_DELIVERY_ACTIVE", { ...details, deliveryState: "working" }));
+  assert.throws(
+    () => gui.assertExternalRemovable({ presenceId: target.id, roomId: "demo", workspace: "/tmp/project" }),
+    /PRESENCE_REMOVE_DELIVERY_ACTIVE/u,
+  );
+  // Nothing moved: still joined, delivery still working.
+  assert.equal(gui.presence.get(target.id)?.roomId, "demo");
+  assert.equal(gui.inbox.get(claimed.id)?.state, "working");
+
+  // Released: the seat can go, and the refusal did not leave anything behind.
+  gui.inbox.fail({ presenceId: target.id, deliveryId: claimed.id, leaseToken: claimed.leaseToken, reason: "給別人接手" });
+  gui.assertExternalRemovable({ presenceId: target.id, roomId: "demo", workspace: "/tmp/project" });
+  remove();
+  assert.equal(gui.presence.get(target.id)?.roomId, undefined);
+  assert.throws(remove, /PRESENCE_NOT_JOINED/u);
 });

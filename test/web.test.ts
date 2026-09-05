@@ -15,6 +15,7 @@ import { ALL_PROVIDER_IDS } from "../src/providers/selection.ts";
 import { WorktreeBroker } from "../src/core/worktree-broker.ts";
 import { RoomPresenceStore } from "../src/core/room-presence.ts";
 import { RoomLedger } from "../src/core/room-ledger.ts";
+import { RoomInboxStore } from "../src/core/room-inbox.ts";
 import { CollaborationService } from "../src/core/collaboration-service.ts";
 import type { ProviderAdapter } from "../src/providers/provider.ts";
 
@@ -4485,13 +4486,31 @@ test("one removal lock, greyed at every entrance and re-checked at the click", a
   // Spread into this realm: a vm object carries the other context's prototype, which strict deepEqual rejects.
   const lockOf = (subject: unknown, snapshot: unknown) => ({ ...lock.seatRemovalLock(subject, snapshot) });
   const leases = [{ state: "active", writer: { displayName: "claude2" } }, { state: "ended", writer: { displayName: "codex1" } }];
-  const deliveries = [{ targetPresenceId: "p-1", state: "working" }, { targetPresenceId: "p-2", state: "read" }];
+  const deliveries = [
+    { targetPresenceId: "p-1", state: "delivered", ledgerSeq: 1101, sourceDisplayName: "codex（backend）" },
+    { targetPresenceId: "p-1", state: "working", ledgerSeq: 1099, sourceDisplayName: "codex（backend）" },
+    { targetPresenceId: "p-2", state: "queued", ledgerSeq: 1102 },
+    { targetPresenceId: "p-3", state: "read", ledgerSeq: 1103 },
+  ];
   assert.deepEqual(lockOf({ displayName: "claude2", presenceId: "p-9" }, { leases, deliveries }), { locked: true, reason: "正在當 Writer，先交接或結束 Writer 才能移除" });
-  assert.deepEqual(lockOf({ displayName: "grok1", presenceId: "p-1" }, { leases, deliveries }), { locked: true, reason: "有交辦執行中，先請求取消或等它回覆" });
-  // An ended lease, a delivery that is merely read, or a seat nobody is addressing: removable.
+  // The line furthest along is the one named, as a ref the reader can click, with who asked.
+  assert.deepEqual(lockOf({ displayName: "grok1", presenceId: "p-1" }, { leases, deliveries }), { locked: true, reason: "有交辦執行中（#1099，來自 codex（backend）），先請求取消或等它回覆", ledgerSeq: 1099 });
+  assert.deepEqual(lockOf({ displayName: "grok2", presenceId: "p-3" }, { leases, deliveries }), { locked: true, reason: "有交辦執行中（#1103），先請求取消或等它回覆", ledgerSeq: 1103 });
+  // An ended lease, a delivery still only queued, or a seat nobody is addressing: removable.
   assert.deepEqual(lockOf({ displayName: "codex1", presenceId: "p-2" }, { leases, deliveries }), { locked: false, reason: "" });
   assert.deepEqual(lockOf({ displayName: "reviewer" }, { leases: [], deliveries }), { locked: false, reason: "" });
   assert.deepEqual(lockOf(undefined, undefined), { locked: false, reason: "" });
+  // The server's refusal codes have plain words, and the delivery one names the line the server sent back.
+  for (const code of ["PRESENCE_REMOVE_WRITER_ACTIVE", "PRESENCE_REMOVE_DELIVERY_ACTIVE", "MANAGED_AGENT_REMOVE_WRITER_ACTIVE", "MANAGED_AGENT_REMOVE_DELIVERY_ACTIVE"]) {
+    assert.match(source, new RegExp(`^  ${code}: "[^"]+",$`, "mu"), `${code} has a human message`);
+  }
+  const human = /^function humanError\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(human, /code\.endsWith\("_REMOVE_DELIVERY_ACTIVE"\) && Number\.isInteger\(error\?\.details\?\.ledgerSeq\)/u);
+  assert.match(human, /removalDeliveryReason\(error\.details\.ledgerSeq, error\.details\.sourceDisplayName\)/u);
+  const apiFn = /^async function api\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(apiFn, /error\.details = value;/u);
+  const shown = /^function showRoomError\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
+  assert.match(shown, /renderTextWithRefs\(text, /u);
   // Every entrance gets the button from one builder, which greys it in place: no text matching anywhere.
   const panel = /^function seatActionButtons\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
   assert.match(panel, /membership\.dataset\.action = session\.joined \? "remove" : "join";/u);
@@ -4515,4 +4534,89 @@ test("one removal lock, greyed at every entrance and re-checked at the click", a
   assert.match(leave, /if \(!joining\) \{\s*const lock = presenceRemovalLock\(session\);\s*if \(lock\.locked\) \{\s*applyRemovalLock\(button, lock\);\s*showRoomError\(lock\.reason, \{ prefix: "移出房間失敗" \}\);\s*return;/u);
   const archive = /^async function changeManagedAgent\([\s\S]*?^\}$/mu.exec(source)?.[0] ?? "";
   assert.match(archive, /if \(!agent\.busy\) \{\s*const lock = managedAgentRemovalLock\(agent\);\s*if \(lock\.locked\) \{\s*applyRemovalLock\(button, lock\);\s*showRoomError\(lock\.reason, \{ prefix: "移除子 Agent 失敗" \}\);\s*return;/u);
+});
+
+/*
+ * The removal routes refuse, before anything is aborted or written, a seat that is the active
+ * Writer or holds a delivery it has taken on -- the server's own state, not the GUI's snapshot. The
+ * body names what is holding the seat so the owner can release it and try again.
+ */
+test("the leave and archive routes refuse a seat that is Writer or mid-delivery, and allow it once released", async (t) => {
+  const data = await mkdtemp(join(tmpdir(), "orchestratory-web-remove-data-"));
+  const workspace = await realpath(await repository());
+  await writeFile(
+    join(data, "workspace-roots.json"),
+    `${JSON.stringify([{ id: "remove-root", label: "Remove root", path: workspace }])}\n`,
+    { encoding: "utf8", mode: 0o600 },
+  );
+  t.after(async () => await rm(data, { recursive: true, force: true }));
+  t.after(async () => await rm(workspace, { recursive: true, force: true }));
+  const app = await createAppContext(data);
+  t.after(() => app.close());
+  const ledger = new RoomLedger(app.store.dataDirectory);
+  t.after(() => ledger.close());
+  ledger.createRoom("remove-room", workspace);
+  const presenceStore = new RoomPresenceStore(app.store.dataDirectory);
+  t.after(() => presenceStore.close());
+  const inbox = new RoomInboxStore(app.store.dataDirectory);
+  t.after(() => inbox.close());
+  const seat = presenceStore.register({ provider: "codex", workspace, hostPid: 98781, client: "Codex CLI" });
+  presenceStore.requestJoin(seat.id, "remove-room", workspace);
+  const joined = presenceStore.join(seat.id, "remove-room", workspace, { collaborationMode: "room-first", syncTurns: true, label: "frontend" });
+  const seatName = joined.displayName ?? "";
+
+  const server = await startWebServer(app, 0);
+  t.after(async () => await server.close());
+  const index = await fetch(server.url);
+  const cookie = (index.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+  const bootstrap = await fetch(`${server.url}/api/bootstrap`, { headers: { Cookie: cookie } });
+  const { csrf } = (await bootstrap.json()) as { csrf: string };
+  const headers = { Cookie: cookie, Origin: server.url, "X-CSRF-Token": csrf, "Content-Type": "application/json" };
+  const post = (path: string, body: Record<string, unknown>) =>
+    fetch(`${server.url}${path}`, { method: "POST", headers, body: JSON.stringify(body) });
+
+  // A delivery the seat has taken on, created after any GUI snapshot could have seen it.
+  const mention = ledger.append("remove-room", "you", `@${seatName} 請看登入`);
+  inbox.enqueue({ message: mention, targetPresenceId: seat.id, targetDisplayName: seatName });
+  const claimed = await inbox.wait({ presenceId: seat.id, roomId: "remove-room", timeoutMs: 100, ledger });
+  assert.ok(claimed);
+  inbox.ack({ presenceId: seat.id, deliveryId: claimed.id, leaseToken: claimed.leaseToken, phase: "read" });
+  inbox.ack({ presenceId: seat.id, deliveryId: claimed.id, leaseToken: claimed.leaseToken, phase: "working" });
+  const refusedLeave = await post("/api/rooms/presence/leave", { room: "remove-room", presenceId: seat.id });
+  assert.equal(refusedLeave.status, 400);
+  assert.deepEqual(await refusedLeave.json(), {
+    error: "PRESENCE_REMOVE_DELIVERY_ACTIVE", ledgerSeq: mention.seq, deliveryId: claimed.id, deliveryState: "working",
+  });
+  assert.equal(presenceStore.get(seat.id)?.roomId, "remove-room", "the refusal leaves the seat in the room");
+  assert.equal(inbox.get(claimed.id)?.state, "working", "and the delivery untouched");
+  inbox.fail({ presenceId: seat.id, deliveryId: claimed.id, leaseToken: claimed.leaseToken, reason: "交給別人" });
+  const leave = await post("/api/rooms/presence/leave", { room: "remove-room", presenceId: seat.id });
+  assert.equal(leave.status, 200, JSON.stringify(await leave.clone().json()));
+
+  // A managed agent that holds the Writer lease cannot be archived until the lease ends.
+  const created = await post("/api/rooms/managed-agents", { room: "remove-room", provider: "claude", label: "審查" });
+  const createdBody = (await created.json()) as { agent?: { id: string }; error?: string };
+  assert.equal(created.status, 201, JSON.stringify(createdBody));
+  const agentId = createdBody.agent?.id ?? "";
+  // A managed agent is handed the lease by a switch, never by a first grant (WRITER_CANDIDATE_WRITE_NOT_ALLOWED).
+  const grant = await post("/api/rooms/writers/grant", {
+    room: "remove-room", taskId: "remove-task", candidate: { origin: "resident", provider: "claude" },
+  });
+  assert.equal(grant.status, 201, JSON.stringify(await grant.clone().json()));
+  const handoff = await post("/api/rooms/writers/switch", {
+    room: "remove-room", taskId: "remove-task", expectedEpoch: 1, checkpoint: "初稿完成",
+    candidate: { origin: "managed", actorId: agentId },
+  });
+  assert.equal(handoff.status, 200, JSON.stringify(await handoff.clone().json()));
+  const refusedArchive = await post("/api/rooms/managed-agents/archive", { room: "remove-room", agentId });
+  assert.equal(refusedArchive.status, 400);
+  assert.deepEqual(await refusedArchive.json(), { error: "MANAGED_AGENT_REMOVE_WRITER_ACTIVE", taskId: "remove-task" });
+  const stillWriter = await fetch(`${server.url}/api/rooms/writers?room=remove-room`, { headers: { Cookie: cookie } });
+  const stillWriterBody = (await stillWriter.json()) as { leases: Array<{ taskId: string; state: string }> };
+  // Epoch 1 was revoked by the hand-off; the epoch the agent holds must still be active.
+  assert.ok(stillWriterBody.leases.some((lease) => lease.taskId === "remove-task" && lease.state === "active"), "the refusal leaves the lease active");
+  const complete = await post("/api/rooms/writers/complete", { room: "remove-room", taskId: "remove-task", epoch: 2, checkpoint: "完成" });
+  assert.equal(complete.status, 200, JSON.stringify(await complete.clone().json()));
+  const archive = await post("/api/rooms/managed-agents/archive", { room: "remove-room", agentId });
+  assert.equal(archive.status, 200, JSON.stringify(await archive.clone().json()));
 });

@@ -26,7 +26,7 @@ import {
   type ManagedAgentProvider,
   type ManagedRoomAgent,
 } from "../core/managed-room-agent.ts";
-import { CollaborationService, type WriterCandidate } from "../core/collaboration-service.ts";
+import { CollaborationService, SeatRemovalBlockedError, type WriterCandidate } from "../core/collaboration-service.ts";
 import {
   MERGE_APPROVAL_CONFIRMATION,
   MERGE_APPROVAL_GRANT,
@@ -942,6 +942,8 @@ export async function startWebServer(
           const info = ledger.getRoom(value.room);
           if (!info) throw new Error("ROOM_NOT_FOUND");
           const workspace = await app.workspaces.assertAllowed(info.workspace);
+          /* Before the abort below touches anything: a refusal must leave the seat exactly as it was. */
+          collaboration.assertExternalRemovable({ presenceId: value.presenceId, roomId: value.room, workspace });
           abortWriterIdentity(value.room, value.presenceId, "EXTERNAL_WRITER_REMOVED");
           const left = collaboration.removeExternal({ presenceId: value.presenceId, roomId: value.room, workspace });
           json(response, 200, {
@@ -1175,6 +1177,8 @@ export async function startWebServer(
           const info = ledger.getRoom(value.room);
           if (!info) throw new Error("ROOM_NOT_FOUND");
           const workspace = await app.workspaces.assertAllowed(info.workspace);
+          /* Before the aborts below touch anything: a refusal must leave the agent exactly as it was. */
+          collaboration.assertManagedRemovable(value.agentId, value.room, workspace);
           managedAgentControllers.get(value.agentId)?.abort(new Error("MANAGED_AGENT_REMOVED"));
           abortWriterIdentity(value.room, value.agentId, "MANAGED_WRITER_REMOVED");
           const agent = collaboration.archiveManaged(value.agentId, value.room, workspace);
@@ -2200,6 +2204,8 @@ export async function startWebServer(
     } catch (error) {
       json(response, 400, {
         error: safeSummary(error instanceof Error ? error.message : "REQUEST_FAILED", 200),
+        /* A refused removal says what is holding the seat, so the owner can go and release it. */
+        ...(error instanceof SeatRemovalBlockedError ? error.details : {}),
       });
     }
   });

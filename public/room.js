@@ -176,7 +176,12 @@ async function api(path, options = {}, recovered = false) {
     return api(path, options, true);
   }
   const value = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(value.error || `HTTP ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(value.error || `HTTP ${response.status}`);
+    /* The body's other fields ride along: a refused removal names the delivery holding the seat. */
+    error.details = value;
+    throw error;
+  }
   return value;
 }
 
@@ -207,6 +212,10 @@ const ROOM_ERROR_MESSAGES = {
   PRESENCE_NAME_INVALID: "名字要 1–24 字，只能用中英數、空格、. _ -，不能只有空白。",
   PRESENCE_NOT_JOINED: "這個席位還沒加入房間，加入後才能更名。",
   PRESENCE_RENAME_BUSY: "這個席位還有交辦在處理中（排隊或進行中），先等它回覆或取消交辦，再更名。",
+  PRESENCE_REMOVE_WRITER_ACTIVE: "這個席位正在當 Writer，先交接或結束 Writer 才能移出房間。",
+  PRESENCE_REMOVE_DELIVERY_ACTIVE: "這個席位有交辦執行中，先請求取消或等它回覆，再移出房間。",
+  MANAGED_AGENT_REMOVE_WRITER_ACTIVE: "這個子 Agent 正在當 Writer，先交接或結束 Writer 才能移除。",
+  MANAGED_AGENT_REMOVE_DELIVERY_ACTIVE: "這個子 Agent 有交辦執行中，先請求取消或等它回覆，再移除。",
   MANAGED_AGENT_REMOVED: "這個受控 Agent 已被移除。",
   EMPTY_AGENT_MESSAGE: "只有 @名稱沒有內容；請在名稱後面加上要交辦的訊息。",
   RATE_LIMITED: "操作太頻繁，請稍等幾秒再試。",
@@ -303,6 +312,11 @@ function humanError(error) {
       .split(",").filter(Boolean).map(bindingFieldLabel);
     return `綁定值已改變，這份核准只適用於它綁定的那個 snapshot，已拒絕（${changed.join("、")}）；main 沒有被修改，請重新產生預覽再問一次。`;
   }
+  /* The server names the delivery it refused over: say which line and who sent it, as a ref the
+     reader can click, instead of the generic sentence. */
+  if (code.endsWith("_REMOVE_DELIVERY_ACTIVE") && Number.isInteger(error?.details?.ledgerSeq)) {
+    return removalDeliveryReason(error.details.ledgerSeq, error.details.sourceDisplayName);
+  }
   return ROOM_ERROR_MESSAGES[code] || code;
 }
 
@@ -320,7 +334,8 @@ function showRoomError(error, options = {}) {
   connection.textContent = "";
   connection.className = "conn error";
   const text = document.createElement("span");
-  text.textContent = options.prefix ? `${options.prefix}：${humanError(error)}` : humanError(error);
+  /* Through the ref renderer, so a "#1099" in the reason is the same clickable quote link a message gets. */
+  renderTextWithRefs(text, options.prefix ? `${options.prefix}：${humanError(error)}` : humanError(error));
   connection.append(text);
   const target = code === "TARGET_AGENT_STANDBY_NOT_APPROVED"
     ? pendingStandbySession(options.session)
@@ -1292,10 +1307,17 @@ function seatWakeNotice(session, listening) {
  * so only the Writer rule can lock them. The lock lifts on its own when the lease ends or the reply
  * lands.
  */
-const SEAT_REMOVAL_REASONS = Object.freeze({
-  writer: "正在當 Writer，先交接或結束 Writer 才能移除",
-  working: "有交辦執行中，先請求取消或等它回覆",
-});
+const SEAT_REMOVAL_WRITER_REASON = "正在當 Writer，先交接或結束 Writer 才能移除";
+/* Same three states the server refuses over (REMOVAL_BLOCKING_DELIVERY_STATES), furthest along first. */
+const SEAT_REMOVAL_DELIVERY_STATES = Object.freeze(["delivered", "read", "working"]);
+
+/* "#1099" is a ledger ref: the same form the message renderer turns into a quote link. A seat can
+   legitimately sit in working for a long time -- waiting on another seat down a hand-off chain --
+   so the reason says which line and who asked, not only that something is running. */
+function removalDeliveryReason(ledgerSeq, sourceDisplayName) {
+  const from = sourceDisplayName ? `，來自 ${sourceDisplayName}` : "";
+  return `有交辦執行中（#${ledgerSeq}${from}），先請求取消或等它回覆`;
+}
 
 function seatRemovalLock(subject, snapshot) {
   const name = typeof subject?.displayName === "string" ? subject.displayName : "";
@@ -1303,10 +1325,15 @@ function seatRemovalLock(subject, snapshot) {
   const leases = Array.isArray(snapshot?.leases) ? snapshot.leases : [];
   const deliveries = Array.isArray(snapshot?.deliveries) ? snapshot.deliveries : [];
   if (name && leases.some((lease) => lease?.state === "active" && lease?.writer?.displayName === name)) {
-    return { locked: true, reason: SEAT_REMOVAL_REASONS.writer };
+    return { locked: true, reason: SEAT_REMOVAL_WRITER_REASON };
   }
-  if (presenceId && deliveries.some((delivery) => delivery?.targetPresenceId === presenceId && delivery?.state === "working")) {
-    return { locked: true, reason: SEAT_REMOVAL_REASONS.working };
+  const held = presenceId
+    ? deliveries
+      .filter((delivery) => delivery?.targetPresenceId === presenceId && SEAT_REMOVAL_DELIVERY_STATES.includes(delivery?.state))
+      .sort((a, b) => SEAT_REMOVAL_DELIVERY_STATES.indexOf(b.state) - SEAT_REMOVAL_DELIVERY_STATES.indexOf(a.state) || Number(a.ledgerSeq) - Number(b.ledgerSeq))[0]
+    : undefined;
+  if (held) {
+    return { locked: true, reason: removalDeliveryReason(held.ledgerSeq, held.sourceDisplayName), ledgerSeq: held.ledgerSeq };
   }
   return { locked: false, reason: "" };
 }
@@ -1334,7 +1361,7 @@ function applyRemovalLock(button, lock) {
   button.title = lock.reason;
   const note = document.createElement("small");
   note.className = "seat-removal-lock";
-  note.textContent = lock.reason;
+  renderTextWithRefs(note, lock.reason);
   return note;
 }
 
