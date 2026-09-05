@@ -1608,6 +1608,23 @@ async function rejectSeatJoin(session, button) {
       body: JSON.stringify({ room: state.room, presenceId: session.id }),
     });
     state.rejectedSeatRequests.add(session.id);
+    /*
+     * Also recorded against the notification this refusal answers.
+     *
+     * The set is keyed by presence id, and the same terminal keeps that id when it asks again --
+     * so a single key has to serve two questions with different answers: "was the seat that just
+     * vanished refused, or did it lapse?" (which is about the LATEST ask, and is what the set is
+     * cleared for) and "why is this card grey?" (which is about the ask the card was raised for,
+     * and must not change when a later one is answered differently). One key cannot hold both:
+     * keeping it relabelled the old card, clearing it let the new answer take the old card over.
+     */
+    for (const item of state.notifications) {
+      if (item.action?.kind === "join-approve" && item.action.presenceId === session.id
+        && item.rejected !== true) {
+        item.rejected = true;
+        break;
+      }
+    }
     state.presences = (state.presences || []).filter((entry) => entry.id !== session.id);
     if (state.selectedPresenceId === session.id) state.selectedPresenceId = "";
     renderPresencePanel();
@@ -2761,7 +2778,7 @@ function renderOfficeNotifications() {
            -- the request cannot be acted on any more, and a live-looking card for a lapsed request is
            what the owner mistook for a task. */
         const session = (state.presences || []).find((entry) => entry.id === item.action.presenceId);
-        const rejected = item.action.kind === "join-approve" && state.rejectedSeatRequests.has(item.action.presenceId);
+        const rejected = item.action.kind === "join-approve" && item.rejected === true;
         const handled = item.action.kind === "join-approve"
           ? Boolean(session?.joined)
           : Boolean(session?.joined && session.standbyApproved);
@@ -2801,7 +2818,7 @@ function renderOfficeNotifications() {
         const session = (state.presences || []).find((entry) => entry.id === item.action.presenceId);
         const done = document.createElement("small");
         done.className = "office-notification-done";
-        done.textContent = state.rejectedSeatRequests.has(item.action.presenceId)
+        done.textContent = item.rejected === true
           ? "你拒絕了這次申請，帳本有紀錄；那個終端還在線，可以再申請。"
           : !session
             ? "這個申請已經不在了：逾時或該終端已關閉。"
@@ -2971,6 +2988,11 @@ function applySeatRename(previous, value) {
   syncOfficeDesks();
   renderTaskCenter(true);
   renderSeatChips();
+  /* The request banner and the bell drawer name the seat too, and a seat can be renamed while its
+     own join or standby request is still waiting -- which is when telling the two apart matters
+     most. They read `state.presences`, which the line above has already updated, so they only
+     needed to be asked again. */
+  renderOfficeNotifications();
   if (state.selectedAgent) renderAgentCard(state.selectedAgent, state.recent || []);
 }
 
