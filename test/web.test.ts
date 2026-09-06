@@ -4822,7 +4822,7 @@ test("the room menu names the allowlisted workspaces that have no room yet", asy
     { id: "b", label: "sports-platform", path: "/Users/example/sports-platform" },
     { id: "c", label: "這什麼意思？專案", path: "/Users/example/這什麼意思？專案" },
     { id: "d", label: "tpebarber", path: "/Users/example/tpebarber" },
-    { id: "e", label: "黑客松demo", path: "/Users/example/黑客松demo" },
+    { id: "e", label: "demo-workspace", path: "/Users/example/demo-workspace" },
   ];
   const rooms = [
     { id: "orchestratory", workspace: "/Users/example/orchestratory協作器" },
@@ -4833,7 +4833,7 @@ test("the room menu names the allowlisted workspaces that have no room yet", asy
   // strict deepEqual rejects.
   assert.deepEqual(
     [...reader.workspacesWithoutRoom(roots, rooms)].map((workspace) => workspace.label),
-    ["sports-platform", "黑客松demo"],
+    ["sports-platform", "demo-workspace"],
   );
 
   // A room opened in a subdirectory still belongs to the root that authorised it, so the root is

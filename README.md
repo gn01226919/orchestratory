@@ -134,14 +134,17 @@ grok   mcp add             orchestrator -- orchestrator mcp --actor grok
 
 **離線可重現驗證**：`npm run repro:smoke` 會從 committed HEAD 建立 `--no-hardlinks` 乾淨 clone、跑完整閘門、產生實際 tgz、離線安裝並驗證 installed bin——**不以未提交的工作目錄代替發布來源**。
 
-## 作品展示
+## 為什麼沒有線上 Demo
 
-- **作品展示網址（選填）**：無。本專案是本機優先的地端工具，刻意不提供線上部署——它會啟動你自己登入的
-  CLI、只綁 loopback、沒有帳號系統，放上公開網址會拆掉它的安全模型而不是展示它。請依上方
-  「安裝與執行」在本機執行，或觀看評選影片。
-- **評選影片**：https://www.youtube.com/watch?v=wS8F4vVaAvA
-  （97 秒，英文旁白、中英雙語字幕；含真實現場遊玩畫面，對應帳本 #858–#876 與
-  `examples/plane-shooter/`）
+**這是本機優先的地端工具，刻意不提供線上部署。**
+
+它啟動的是**你自己登入的 CLI**、只綁 loopback、沒有帳號系統。把它放上公開網址會拆掉它的安全
+模型，而不是展示它——那等於讓一個陌生人的瀏覽器去驅動你機器上有寫入權的 agent。
+
+要看它實際運作，有兩條路：依上方「安裝與執行」在本機跑起來，或看這段
+[**97 秒的操作錄影**](https://www.youtube.com/watch?v=wS8F4vVaAvA)（英文旁白、中英雙語字幕）。
+影片裡的遊玩畫面是真的：那個遊戲由 Codex 產出、Claude 席位審出兩處語法錯誤並修正、人類逐字
+核准後才寫入 main，全程留在帳本 #858–#876，成品在 [`examples/plane-shooter/`](examples/plane-shooter/)。
 
 ## 限制與未來工作
 
@@ -185,17 +188,13 @@ grok   mcp add             orchestrator -- orchestrator mcp --actor grok
 
 **第三方來源**：上表為完整的第三方來源清單；程式碼全部為本團隊撰寫。
 
-## 團隊成員
+## 作者
 
-**隊伍**：TitApeX　|　**主賽道**：AI Agents & Automation（AI Agent 與自動化）
+由 [@gn01226919](https://github.com/gn01226919) 一人開發：產品設計、架構、實作、安全審查與文件。
 
-| 姓名 | 分工 |
-| --- | --- |
-| Daniel Chen（[@gn01226919](https://github.com/gn01226919)） | 全部：產品設計、架構、實作、安全審查、文件 |
-
-單人團隊。開發過程本身即為本專案的使用情境——Claude、Codex、Grok 三家 agent 在同一個 Room
-協作，所有交辦、回覆、核准與拒絕都留在帳本裡（`examples/plane-shooter/` 就是其中一次真實的
-完整閉環：Codex 產出、Claude 席位審出兩處語法錯誤並修正、Owner 逐字核准後才寫入 main）。
+**這個專案用它自己開發。** Claude、Codex、Grok 三家 agent 在同一個 Room 協作，所有交辦、回覆、
+核准與拒絕都留在帳本裡。[`examples/plane-shooter/`](examples/plane-shooter/) 是其中一次完整閉環：
+Codex 產出、Claude 席位審出兩處語法錯誤並修正、人類逐字核准後才寫入 main。
 
 ## License
 
