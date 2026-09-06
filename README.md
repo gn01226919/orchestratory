@@ -1,6 +1,6 @@
 # Orchestratory
 
-**讓 Codex、Claude Code 與 Grok 在同一個房間裡協作，而你保留唯一的核准權。**
+**讓 Codex、Claude Code 與 Grok 在同一個房間裡協作，user保留唯一的核准權。**
 
 ![Orchestratory 的辦公室畫面：codex、claude、grok 三個廠牌的終端席位在同一個房間，右側是任務清單，右下角是各自獨立的草稿區](docs/images/office.png)
 
