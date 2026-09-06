@@ -186,7 +186,7 @@ grok   mcp add             orchestrator -- orchestrator mcp --actor grok
 
 **未使用**：任何雲端後端、任何分析服務、任何第三方 UI 框架、任何字型 CDN。GUI 只綁 loopback，沒有對外請求。
 
-**第三方來源**：上表為完整的第三方來源清單；程式碼全部為本團隊撰寫。
+**第三方來源**：上表為完整的第三方來源清單；其餘程式碼皆為自行撰寫。
 
 ## 作者
 
